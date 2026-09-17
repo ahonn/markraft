@@ -39,7 +39,6 @@ enum Intent {
     AutoHeight,
     Shortcut,
     Reveal,
-    Recover,
     Retry,
     SaveCopy,
     Reload,
@@ -143,8 +142,7 @@ impl NotesApp {
             }
             Intent::Shortcut => self.apply_shortcut(cx),
             Intent::Reveal => cx.reveal_path(&self.path),
-            Intent::Recover => self.recover(true, window, cx),
-            Intent::Retry => self.recover(false, window, cx),
+            Intent::Retry => self.recover(window, cx),
             Intent::SaveCopy => self.save_copy(cx),
             Intent::Reload => self.reload(window, cx),
             Intent::Mark(mark) => {
@@ -809,7 +807,7 @@ impl NotesApp {
                     ))
                     .child(self.row(
                         "show-storage",
-                        "Show Library in Finder",
+                        "Show Notes Folder in Finder",
                         "",
                         Intent::Reveal,
                         cx,
@@ -1294,17 +1292,14 @@ impl Render for NotesApp {
                     ),
             );
         if self.persistence.is_none() {
-            let explanation = "The original file is unchanged. You can retry or restore the \
-                previous valid backup. Restoration keeps a copy of the original file.";
+            let explanation = "Nothing in the folder was changed. Check that it exists and \
+                that no other Markraft is using it, then retry.";
             let actions = div()
                 .mt_4()
                 .flex()
                 .gap_2()
                 .child(self.button("retry-open", "Retry", Intent::Retry, cx))
-                .when(Store::read_backup(&self.path).is_ok(), |s| {
-                    s.child(self.button("recover-backup", "Restore Backup", Intent::Recover, cx))
-                })
-                .child(self.button("reveal-library", "Show File", Intent::Reveal, cx));
+                .child(self.button("reveal-library", "Show Folder", Intent::Reveal, cx));
             let detail = div()
                 .mt_3()
                 .text_size(px(12.))

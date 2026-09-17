@@ -4,7 +4,8 @@ use crate::{
     instance::Instance,
     persistence::Persistence,
     platform::{Platform, PlatformEvent},
-    storage::{Library, Store},
+    storage::Library,
+    vault::Store,
 };
 use gpui::{prelude::*, *};
 use markraft_core::{BlockKind, Document, Mark};
@@ -62,7 +63,9 @@ struct Session {
 pub struct NotesApp {
     library: Library,
     persistence: Option<Persistence>,
+    /// The notes folder.
     path: PathBuf,
+    settings_path: PathBuf,
     platform: Option<Platform>,
     instance: Instance,
     sessions: HashMap<String, Session>,
@@ -108,6 +111,7 @@ impl NotesApp {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         path: PathBuf,
+        settings_path: PathBuf,
         store: Option<Store>,
         library: Library,
         error: Option<String>,
@@ -214,6 +218,7 @@ impl NotesApp {
             library,
             persistence: store.map(Persistence::new),
             path,
+            settings_path,
             platform,
             instance,
             sessions: HashMap::new(),
@@ -797,13 +802,8 @@ impl NotesApp {
         ));
         self.inform("Copied as Markdown", cx);
     }
-    fn recover(&mut self, backup: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let result = if backup {
-            Store::recover_backup(self.path.clone())
-        } else {
-            Store::open(self.path.clone())
-        };
-        match result {
+    fn recover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match Store::open(self.path.clone(), self.settings_path.clone()) {
             Ok((store, library)) => {
                 self.library = library;
                 self.persistence = Some(Persistence::new(store));
@@ -834,10 +834,7 @@ impl NotesApp {
                 return;
             }
         };
-        let prompt = cx.prompt_for_new_path(
-            self.path.parent().unwrap(),
-            Some("Markraft Notes Backup.json"),
-        );
+        let prompt = cx.prompt_for_new_path(&self.path, Some("Markraft Notes Backup.json"));
         let original = self.path.clone();
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = prompt.await {
@@ -925,7 +922,7 @@ impl NotesApp {
         let title = note.title();
         let filename = format!("{}.md", title.replace(['/', ':'], "-"));
         let document = self.editor().read(cx).committed_document().to_markdown();
-        let directory = self.path.parent().unwrap().to_path_buf();
+        let directory = self.path.clone();
         let prompt = cx.prompt_for_new_path(&directory, Some(&filename));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = prompt.await {

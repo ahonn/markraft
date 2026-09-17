@@ -3,21 +3,24 @@ mod instance;
 mod persistence;
 mod platform;
 mod storage;
+mod vault;
 
 use app::{NotesApp, bind_app_keys};
 use gpui::*;
 use instance::{Instance, Launch};
 use platform::Platform;
 use std::{env, path::PathBuf};
-use storage::{Library, Store};
+use storage::{Library, Settings};
+use vault::Store;
 
 const HELP: &str = "\
 Markraft Notes — a floating, local-first notepad.
 
-Usage: markraft-app [--file PATH]
+Usage: markraft-app [--dir PATH] [--settings PATH]
 
-  --file PATH   Use this note library instead of the default:
-                ~/Library/Application Support/Markraft/notes.json
+  --dir PATH        Keep notes as Markdown files in this folder.
+  --settings PATH   Use this settings file instead of the default:
+                    ~/Library/Application Support/Markraft/settings.json
 
 The app stays in the menu bar while its window is hidden. ⌥N toggles the
 window and ⌘K lists every action with its shortcut.
@@ -25,15 +28,18 @@ window and ⌘K lists every action with its shortcut.
 
 fn main() {
     let mut args = env::args().skip(1);
-    let mut path = None;
+    let mut directory = None;
+    let mut settings_path = None;
     while let Some(arg) = args.next() {
+        let mut value = |name: &str| {
+            absolute(PathBuf::from(
+                args.next()
+                    .unwrap_or_else(|| fail(&format!("{name} requires a path"))),
+            ))
+        };
         match arg.as_str() {
-            "--file" => {
-                path = Some(PathBuf::from(
-                    args.next()
-                        .unwrap_or_else(|| fail("--file requires a path")),
-                ))
-            }
+            "--dir" => directory = Some(value("--dir")),
+            "--settings" => settings_path = Some(value("--settings")),
             "--help" | "-h" => {
                 print!("{HELP}");
                 return;
@@ -41,44 +47,29 @@ fn main() {
             _ => fail(&format!("Unknown argument: {arg}. Use --help.")),
         }
     }
-    let path = path.unwrap_or_else(|| {
+    let support = || {
         PathBuf::from(
-            env::var_os("HOME").unwrap_or_else(|| fail("HOME is unavailable; use --file PATH")),
+            env::var_os("HOME").unwrap_or_else(|| fail("HOME is unavailable; use --dir PATH")),
         )
-        .join("Library/Application Support/Markraft/notes.json")
-    });
-    let path = if path.is_absolute() {
-        path
-    } else {
-        env::current_dir().unwrap().join(path)
+        .join("Library/Application Support/Markraft")
     };
-    let instance = match Instance::acquire(&path).unwrap_or_else(|e| fail(&e)) {
+    let settings_path = settings_path.unwrap_or_else(|| support().join("settings.json"));
+    let directory = directory
+        .or_else(|| {
+            Settings::read(&settings_path)
+                .ok()
+                .and_then(|settings| settings.notes_folder)
+        })
+        .unwrap_or_else(|| support().join("notes"));
+    let instance = match Instance::acquire(&directory.join(".markraft/instance"))
+        .unwrap_or_else(|e| fail(&e))
+    {
         Launch::Forwarded => return,
         Launch::Primary(instance) => instance,
     };
-    let (store, library, error) = match Store::open(path.clone()) {
-        Ok((store, mut library)) => {
-            // Import the old default single-note file once, without modifying it.
-            let legacy = path.with_file_name("note.json");
-            if !path.exists()
-                && path.file_name().is_some_and(|n| n == "notes.json")
-                && legacy.exists()
-            {
-                match std::fs::read_to_string(&legacy)
-                    .map_err(|e| e.to_string())
-                    .and_then(|text| {
-                        markraft_core::Document::from_json(&text).map_err(|e| e.to_string())
-                    }) {
-                    Ok(document) => {
-                        let id = library.active_id.clone();
-                        library.set_document(&id, document);
-                    }
-                    Err(error) => eprintln!(
-                        "Legacy note was not imported: {error}. Original: {}",
-                        legacy.display()
-                    ),
-                }
-            }
+    let (store, library, error) = match Store::open(directory.clone(), settings_path.clone()) {
+        Ok((mut store, library)) => {
+            let library = store.import_legacy(library, &support().join("notes.json"));
             (Some(store), library, None)
         }
         Err(error) => (None, Library::default(), Some(error)),
@@ -124,7 +115,17 @@ fn main() {
             },
             move |window, cx| {
                 let app = cx.new(|cx| {
-                    NotesApp::new(path, store, library, error, platform, instance, window, cx)
+                    NotesApp::new(
+                        directory,
+                        settings_path,
+                        store,
+                        library,
+                        error,
+                        platform,
+                        instance,
+                        window,
+                        cx,
+                    )
                 });
                 let weak = app.downgrade();
                 window.on_window_should_close(cx, move |window, cx| {
@@ -150,6 +151,14 @@ fn window_handle_show(app: &WeakEntity<NotesApp>, cx: &mut App) -> Result<(), ()
         })
         .map_err(|_| ())
 }
+fn absolute(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        env::current_dir().unwrap().join(path)
+    }
+}
+
 fn fail(message: &str) -> ! {
     eprintln!("Markraft: {message}");
     std::process::exit(1)

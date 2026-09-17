@@ -1,5 +1,5 @@
 //! One writer preserves save ordering; acknowledgments identify the saved revision.
-use crate::storage::{Library, Store};
+use crate::{storage::Library, vault::Store};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 
 pub struct Saved {
@@ -90,21 +90,40 @@ mod tests {
     use super::*;
     use markraft_core::Document;
 
+    fn open(directory: &std::path::Path) -> (Store, Library) {
+        Store::open(directory.join("notes"), directory.join("settings.json")).unwrap()
+    }
+
+    /// The only Markdown file in the notes folder, and its text.
+    fn only_note(directory: &std::path::Path) -> (std::path::PathBuf, String) {
+        let mut files: Vec<_> = std::fs::read_dir(directory.join("notes"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+            .collect();
+        assert_eq!(files.len(), 1, "{files:?}");
+        let path = files.remove(0);
+        let text = std::fs::read_to_string(&path).unwrap();
+        (path, text)
+    }
+
     #[test]
     fn flush_saves_the_latest_snapshot_after_queued_revisions() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("notes.json");
-        let (store, mut library) = Store::open(path.clone()).unwrap();
+        let (store, mut library) = open(directory.path());
         let persistence = Persistence::new(store);
         let id = library.active_id.clone();
-        library.set_document(&id, Document::from_markdown("First 中文"));
+        library.set_document(&id, Document::from_markdown("Title\nFirst 中文"));
         persistence.save(1, library.clone()).unwrap();
-        library.set_document(&id, Document::from_markdown("Second 👩🏽‍💻"));
+        library.set_document(&id, Document::from_markdown("Title\nSecond 👩🏽‍💻"));
         persistence.save(2, library.clone()).unwrap();
-        library.set_document(&id, Document::from_markdown("Final é"));
+        library.set_document(&id, Document::from_markdown("Title\nFinal é"));
         persistence.flush(library.clone()).unwrap();
-        let saved: Library = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(saved, library);
+        assert!(
+            only_note(directory.path())
+                .1
+                .ends_with("---\nTitle\nFinal é\n")
+        );
         let acknowledgments = persistence.poll();
         assert_eq!(
             acknowledgments
@@ -118,27 +137,31 @@ mod tests {
     }
 
     #[test]
-    fn external_conflicts_propagate_for_saves_and_unchanged_flushes() {
+    fn a_note_changed_by_another_program_is_not_overwritten_but_others_are_saved() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("notes.json");
-        let (store, mut library) = Store::open(path.clone()).unwrap();
+        let (store, mut library) = open(directory.path());
         let persistence = Persistence::new(store);
+        let id = library.active_id.clone();
+        library.set_document(&id, Document::from_markdown("Shared"));
         persistence.save(10, library.clone()).unwrap();
         persistence.flush(library.clone()).unwrap();
+        let (path, _) = only_note(directory.path());
         std::fs::write(&path, b"external content").unwrap();
-        // Even when our local snapshot did not change, a flush must not report that
-        // this snapshot is safely persisted if the file now contains somebody else's data.
-        assert!(persistence.flush(library.clone()).is_err());
+        library.set_document(&id, Document::from_markdown("Shared, edited here"));
         library.new_note(Document::from_markdown("Keep this local work"));
         persistence.save(11, library.clone()).unwrap();
         assert!(persistence.flush(library).is_err());
         let acknowledgments = persistence.poll();
         assert_eq!(acknowledgments.len(), 2);
-        assert_eq!(acknowledgments[0].revision, 10);
         assert!(acknowledgments[0].result.is_ok());
         assert_eq!(acknowledgments[1].revision, 11);
         assert!(acknowledgments[1].result.is_err());
-        assert_eq!(std::fs::read(path).unwrap(), b"external content");
+        assert_eq!(std::fs::read(&path).unwrap(), b"external content");
+        let saved = std::fs::read_dir(directory.path().join("notes"))
+            .unwrap()
+            .filter_map(|entry| std::fs::read_to_string(entry.unwrap().path()).ok())
+            .any(|text| text.ends_with("Keep this local work\n"));
+        assert!(saved);
     }
 
     #[test]
@@ -156,26 +179,35 @@ mod tests {
     #[test]
     fn reload_is_a_barrier_after_conflicts_and_new_edits_can_be_saved() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("notes.json");
-        let (store, mut local) = Store::open(path.clone()).unwrap();
+        let (store, mut local) = open(directory.path());
         let persistence = Persistence::new(store);
+        let id = local.active_id.clone();
+        local.set_document(&id, Document::from_markdown("Original"));
         persistence.flush(local.clone()).unwrap();
-        let mut external = local.clone();
-        external.new_note(Document::from_markdown("External text"));
-        std::fs::write(&path, serde_json::to_vec(&external).unwrap()).unwrap();
-        local.new_note(Document::from_markdown("Discard this after confirmation"));
+        let (path, text) = only_note(directory.path());
+        std::fs::write(&path, text.replace("Original", "External text")).unwrap();
+        local.set_document(
+            &id,
+            Document::from_markdown("Discard this after confirmation"),
+        );
         persistence.save(1, local).unwrap();
         let mut reloaded = persistence.reload().unwrap();
-        assert_eq!(reloaded, external);
+        assert_eq!(
+            reloaded.note(&id).unwrap().document.plain_text(),
+            "External text"
+        );
         let acknowledgments = persistence.poll();
         assert_eq!(acknowledgments.len(), 1);
         assert_eq!(acknowledgments[0].revision, 1);
         assert!(acknowledgments[0].result.is_err());
-        reloaded.new_note(Document::from_markdown("New local note"));
+        reloaded.set_document(&id, Document::from_markdown("External text, continued"));
         persistence.save(2, reloaded.clone()).unwrap();
-        persistence.flush(reloaded.clone()).unwrap();
-        let saved: Library = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(saved, reloaded);
+        persistence.flush(reloaded).unwrap();
         assert!(persistence.poll()[0].result.is_ok());
+        assert!(
+            only_note(directory.path())
+                .1
+                .ends_with("External text, continued\n")
+        );
     }
 }
