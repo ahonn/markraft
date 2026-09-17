@@ -307,6 +307,7 @@ fn unsupported_markdown_stays_literal_and_code_ticks_roundtrip() {
                         code: true,
                         bold: true,
                         italic: true,
+                        ..Marks::default()
                     },
                 }],
             }],
@@ -579,12 +580,14 @@ fn code_only_delimiters_and_adjacent_marks_roundtrip() {
             document.to_markdown()
         );
     }
-    for a in 0..8 {
-        for b in 0..8 {
+    for a in 0..32 {
+        for b in 0..32 {
             let marks = |bits: u8| Marks {
                 bold: bits & 1 != 0,
                 italic: bits & 2 != 0,
                 code: bits & 4 != 0,
+                strikethrough: bits & 8 != 0,
+                underline: bits & 16 != 0,
             };
             let mut document = Document {
                 blocks: vec![Block {
@@ -618,9 +621,11 @@ fn all_adjacent_mark_combinations_roundtrip() {
         bold: bits & 1 != 0,
         italic: bits & 2 != 0,
         code: bits & 4 != 0,
+        strikethrough: bits & 8 != 0,
+        underline: bits & 16 != 0,
     };
-    for left in 0..8 {
-        for right in 0..8 {
+    for left in 0..32 {
+        for right in 0..32 {
             let mut document = Document {
                 blocks: vec![Block {
                     kind: BlockKind::Paragraph,
@@ -668,4 +673,27 @@ fn underscore_input_rules_format_words_but_not_identifiers() {
     editor = Editor::new(Document::default());
     type_chars(&mut editor, "snake_case_name and a__b__");
     assert_eq!(editor.document().plain_text(), "snake_case_name and a__b__");
+}
+
+#[test]
+fn strikethrough_and_underline_round_trip_and_load_from_older_json() {
+    let source = "~~gone~~ and <u>**kept**</u>";
+    let document = Document::from_markdown(source);
+    let spans = &document.blocks[0].spans;
+    assert!(spans[0].marks.strikethrough);
+    assert!(spans[2].marks.underline && spans[2].marks.bold);
+    assert_eq!(document.plain_text(), "gone and kept");
+    assert_eq!(document.to_markdown(), source);
+
+    let mut editor = Editor::new(Document::default());
+    type_chars(&mut editor, "~~done~~");
+    assert_eq!(editor.document().plain_text(), "done");
+    assert!(editor.document().blocks[0].spans[0].marks.strikethrough);
+
+    // Libraries written before these marks existed omit the fields.
+    let older = r#"{"version":1,"document":{"blocks":[{"kind":"Paragraph","spans":[
+        {"text":"a","marks":{"bold":true,"italic":false,"code":false}}]}]}}"#;
+    let document = Document::from_json(older).unwrap();
+    assert!(document.blocks[0].spans[0].marks.bold);
+    assert!(!document.blocks[0].spans[0].marks.underline);
 }

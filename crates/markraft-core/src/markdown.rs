@@ -1,4 +1,4 @@
-use crate::{Block, BlockKind, Document, Marks, Span, push_span};
+use crate::{Block, BlockKind, Document, Mark, Marks, Span, push_span};
 
 impl Document {
     /// Import the supported Markdown subset. Each physical line is one block and blank
@@ -76,6 +76,12 @@ impl Document {
                     if span.marks.bold {
                         text = format!("**{text}**");
                     }
+                    if span.marks.strikethrough {
+                        text = format!("~~{text}~~");
+                    }
+                    if span.marks.underline {
+                        text = format!("<u>{text}</u>");
+                    }
                     line.push_str(&text);
                 }
                 line
@@ -146,30 +152,19 @@ fn parse_inline(source: &str, marks: Marks) -> Vec<Span> {
             }
         }
         let mut parsed = false;
-        for (delimiter, bold, italic) in [
-            ("***", true, true),
-            ("___", true, true),
-            ("**", true, false),
-            ("__", true, false),
-            ("*", false, true),
-            ("_", false, true),
-        ] {
-            if !rest.starts_with(delimiter) {
+        for (open, close, mark) in INLINE_DELIMITERS {
+            if !rest.starts_with(open) {
                 continue;
             }
-            if let Some(close) = find_delimiter(rest, delimiter) {
-                let nested = parse_inline(
-                    &rest[delimiter.len()..close],
-                    Marks {
-                        bold: marks.bold || bold,
-                        italic: marks.italic || italic,
-                        ..marks
-                    },
-                );
-                for span in nested {
+            if let Some(end) = find_delimiter(rest, open.len(), close) {
+                let mut inner = marks;
+                for mark in *mark {
+                    inner.set(*mark, true);
+                }
+                for span in parse_inline(&rest[open.len()..end], inner) {
                     push_span(&mut spans, &span.text, span.marks);
                 }
-                index += close + delimiter.len();
+                index += end + close.len();
                 parsed = true;
                 break;
             }
@@ -184,8 +179,21 @@ fn parse_inline(source: &str, marks: Marks) -> Vec<Span> {
     spans
 }
 
-fn find_delimiter(source: &str, delimiter: &str) -> Option<usize> {
-    let mut index = delimiter.len();
+/// Longer delimiters come first so `***` is not read as `**` followed by `*`.
+/// Underline has no Markdown syntax and round-trips as inline HTML.
+const INLINE_DELIMITERS: &[(&str, &str, &[Mark])] = &[
+    ("***", "***", &[Mark::Bold, Mark::Italic]),
+    ("___", "___", &[Mark::Bold, Mark::Italic]),
+    ("**", "**", &[Mark::Bold]),
+    ("__", "__", &[Mark::Bold]),
+    ("~~", "~~", &[Mark::Strikethrough]),
+    ("<u>", "</u>", &[Mark::Underline]),
+    ("*", "*", &[Mark::Italic]),
+    ("_", "_", &[Mark::Italic]),
+];
+
+fn find_delimiter(source: &str, open_len: usize, delimiter: &str) -> Option<usize> {
+    let mut index = open_len;
     while index < source.len() {
         let rest = &source[index..];
         if rest.starts_with('\\') {
@@ -201,7 +209,7 @@ fn find_delimiter(source: &str, delimiter: &str) -> Option<usize> {
                 index += count;
             }
         } else if rest.starts_with(delimiter) {
-            if index > delimiter.len() {
+            if index > open_len {
                 return Some(index);
             }
             index += delimiter.len();

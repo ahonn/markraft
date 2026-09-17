@@ -352,6 +352,8 @@ impl NotesApp {
             Intent::Mark(Mark::Bold) => Icon::Bold,
             Intent::Mark(Mark::Italic) => Icon::Italic,
             Intent::Mark(Mark::Code) => Icon::Code,
+            Intent::Mark(Mark::Strikethrough) => Icon::Strikethrough,
+            Intent::Mark(Mark::Underline) => Icon::Underline,
             Intent::Block(BlockKind::Heading(_)) => Icon::Heading,
             Intent::Block(BlockKind::Bullet) => Icon::Bullet,
             Intent::Block(BlockKind::Task { .. }) => Icon::Task,
@@ -840,6 +842,18 @@ impl NotesApp {
             ("export-note", "Export Markdown…", "⇧⌘E", Intent::Export),
             ("format-bold", "Bold", "⌘B", Intent::Mark(Mark::Bold)),
             ("format-italic", "Italic", "⌘I", Intent::Mark(Mark::Italic)),
+            (
+                "format-strikethrough",
+                "Strikethrough",
+                "⇧⌘S",
+                Intent::Mark(Mark::Strikethrough),
+            ),
+            (
+                "format-underline",
+                "Underline",
+                "⌘U",
+                Intent::Mark(Mark::Underline),
+            ),
             ("format-code", "Inline Code", "⌘E", Intent::Mark(Mark::Code)),
             (
                 "format-heading",

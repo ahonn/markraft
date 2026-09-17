@@ -81,6 +81,18 @@ impl NotesApp {
             Some(FormatMenu::Inline) => vec![
                 ("Bold", "⌘B", Intent::Mark(Mark::Bold), marks.bold),
                 ("Italic", "⌘I", Intent::Mark(Mark::Italic), marks.italic),
+                (
+                    "Strikethrough",
+                    "⇧⌘S",
+                    Intent::Mark(Mark::Strikethrough),
+                    marks.strikethrough,
+                ),
+                (
+                    "Underline",
+                    "⌘U",
+                    Intent::Mark(Mark::Underline),
+                    marks.underline,
+                ),
                 ("Inline Code", "⌘E", Intent::Mark(Mark::Code), marks.code),
             ],
             Some(FormatMenu::List) => vec![
@@ -271,7 +283,7 @@ impl NotesApp {
                             "Text Formatting",
                             Icon::Italic,
                             Intent::FormatMenu(FormatMenu::Inline),
-                            marks.bold || marks.italic,
+                            marks.bold || marks.italic || marks.strikethrough || marks.underline,
                             cx,
                         ))
                         .child(self.format_button(

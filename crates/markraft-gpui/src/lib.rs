@@ -45,6 +45,8 @@ actions!(
         Bold,
         Italic,
         Code,
+        Strikethrough,
+        Underline,
         Paragraph,
         Heading,
         Heading2,
@@ -81,7 +83,8 @@ pub fn bind_keys(cx: &mut App) {
         "home" => Home, "end" => End, "cmd-a" => SelectAll,
         "cmd-c" => Copy, "cmd-x" => Cut, "cmd-v" => Paste,
         "cmd-z" => Undo, "cmd-shift-z" => Redo, "cmd-b" => Bold,
-        "cmd-i" => Italic, "cmd-e" => Code, "cmd-alt-0" => Paragraph,
+        "cmd-i" => Italic, "cmd-e" => Code,
+        "cmd-shift-s" => Strikethrough, "cmd-u" => Underline, "cmd-alt-0" => Paragraph,
         "cmd-alt-1" => Heading, "cmd-alt-2" => Heading2,
         "cmd-alt-3" => Heading3, "cmd-shift-8" => Bullet,
         "cmd-shift-9" => Task, "cmd-enter" => ToggleTask,
@@ -835,6 +838,12 @@ impl Render for EditorView {
         });
         format_action!(Code, |c| {
             c.toggle_mark(Mark::Code);
+        });
+        format_action!(Strikethrough, |c| {
+            c.toggle_mark(Mark::Strikethrough);
+        });
+        format_action!(Underline, |c| {
+            c.toggle_mark(Mark::Underline);
         });
         format_action!(Paragraph, |c| {
             c.set_block_kind(BlockKind::Paragraph);

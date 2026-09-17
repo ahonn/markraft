@@ -9,10 +9,13 @@ use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Marks {
     pub bold: bool,
     pub italic: bool,
     pub code: bool,
+    pub strikethrough: bool,
+    pub underline: bool,
 }
 
 impl Marks {
@@ -21,14 +24,18 @@ impl Marks {
             Mark::Bold => self.bold = !self.bold,
             Mark::Italic => self.italic = !self.italic,
             Mark::Code => self.code = !self.code,
+            Mark::Strikethrough => self.strikethrough = !self.strikethrough,
+            Mark::Underline => self.underline = !self.underline,
         }
     }
 
-    fn has(self, mark: Mark) -> bool {
+    pub fn has(self, mark: Mark) -> bool {
         match mark {
             Mark::Bold => self.bold,
             Mark::Italic => self.italic,
             Mark::Code => self.code,
+            Mark::Strikethrough => self.strikethrough,
+            Mark::Underline => self.underline,
         }
     }
 
@@ -37,6 +44,8 @@ impl Marks {
             Mark::Bold => self.bold = value,
             Mark::Italic => self.italic = value,
             Mark::Code => self.code = value,
+            Mark::Strikethrough => self.strikethrough = value,
+            Mark::Underline => self.underline = value,
         }
     }
 }
@@ -46,6 +55,8 @@ pub enum Mark {
     Bold,
     Italic,
     Code,
+    Strikethrough,
+    Underline,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1163,6 +1174,7 @@ impl Editor {
             ("__", Mark::Bold),
             ("*", Mark::Italic),
             ("_", Mark::Italic),
+            ("~~", Mark::Strikethrough),
             ("`", Mark::Code),
         ] {
             if before.len() <= delimiter.len() * 2 || !before.ends_with(delimiter) {

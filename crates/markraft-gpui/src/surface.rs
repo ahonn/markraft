@@ -167,8 +167,15 @@ fn shape(
                         font: face,
                         color: text_color,
                         background_color: None,
-                        underline: None,
-                        strikethrough: None,
+                        underline: span.marks.underline.then_some(UnderlineStyle {
+                            thickness: px(1.),
+                            color: Some(text_color),
+                            wavy: false,
+                        }),
+                        strikethrough: span.marks.strikethrough.then_some(StrikethroughStyle {
+                            thickness: px(1.),
+                            color: Some(text_color),
+                        }),
                     }
                 })
                 .collect();

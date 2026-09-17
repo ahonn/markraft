@@ -24,6 +24,8 @@ pub(crate) fn active_marks(editor: &Editor) -> Marks {
                         bold: previous.bold && span.marks.bold,
                         italic: previous.italic && span.marks.italic,
                         code: previous.code && span.marks.code,
+                        strikethrough: previous.strikethrough && span.marks.strikethrough,
+                        underline: previous.underline && span.marks.underline,
                     },
                 });
             }
@@ -78,7 +80,7 @@ mod tests {
             Marks {
                 bold: true,
                 code: true,
-                italic: false
+                ..Marks::default()
             }
         );
         assert_eq!(active_block_kind(&editor), Some(BlockKind::Paragraph));
@@ -96,7 +98,7 @@ mod tests {
                         marks: Marks {
                             bold: true,
                             italic: true,
-                            code: false,
+                            ..Marks::default()
                         },
                     },
                     Span {
