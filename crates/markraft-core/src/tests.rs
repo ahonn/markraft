@@ -646,3 +646,26 @@ fn all_adjacent_mark_combinations_roundtrip() {
         }
     }
 }
+
+fn type_chars(editor: &mut Editor, text: &str) {
+    for c in text.chars() {
+        editor.insert_text(&c.to_string());
+    }
+}
+
+#[test]
+fn underscore_input_rules_format_words_but_not_identifiers() {
+    let mut editor = editor("");
+    type_chars(&mut editor, "__bold__");
+    assert_eq!(editor.document().plain_text(), "bold");
+    assert!(editor.document().blocks[0].spans[0].marks.bold);
+
+    editor = Editor::new(Document::default());
+    type_chars(&mut editor, "an _italic_");
+    assert_eq!(editor.document().plain_text(), "an italic");
+    assert!(editor.document().blocks[0].spans[1].marks.italic);
+
+    editor = Editor::new(Document::default());
+    type_chars(&mut editor, "snake_case_name and a__b__");
+    assert_eq!(editor.document().plain_text(), "snake_case_name and a__b__");
+}

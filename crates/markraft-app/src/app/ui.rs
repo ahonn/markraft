@@ -856,7 +856,7 @@ impl NotesApp {
             (
                 "format-bullet",
                 "Bullet List",
-                "⇧⌘7",
+                "⇧⌘8",
                 Intent::Block(BlockKind::Bullet),
             ),
             (

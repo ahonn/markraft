@@ -64,17 +64,14 @@ impl NotesApp {
                     Intent::Block(BlockKind::Paragraph),
                     kind == Some(BlockKind::Paragraph),
                 )];
-                for (level, label) in [
-                    (1, "Heading 1"),
-                    (2, "Heading 2"),
-                    (3, "Heading 3"),
-                    (4, "Heading 4"),
-                    (5, "Heading 5"),
-                    (6, "Heading 6"),
+                for (level, label, shortcut) in [
+                    (1, "Heading 1", "⌥⌘1"),
+                    (2, "Heading 2", "⌥⌘2"),
+                    (3, "Heading 3", "⌥⌘3"),
                 ] {
                     items.push((
                         label,
-                        if level == 1 { "⌥⌘1" } else { "" },
+                        shortcut,
                         Intent::Block(BlockKind::Heading(level)),
                         kind == Some(BlockKind::Heading(level)),
                     ));
@@ -95,7 +92,7 @@ impl NotesApp {
                 ),
                 (
                     "Bullet List",
-                    "⇧⌘7",
+                    "⇧⌘8",
                     Intent::Block(BlockKind::Bullet),
                     kind == Some(BlockKind::Bullet),
                 ),

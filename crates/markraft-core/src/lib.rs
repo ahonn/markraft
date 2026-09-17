@@ -1158,7 +1158,13 @@ impl Editor {
             self.state.document.blocks[position.block].kind = kind;
             return;
         }
-        for (delimiter, mark) in [("**", Mark::Bold), ("*", Mark::Italic), ("`", Mark::Code)] {
+        for (delimiter, mark) in [
+            ("**", Mark::Bold),
+            ("__", Mark::Bold),
+            ("*", Mark::Italic),
+            ("_", Mark::Italic),
+            ("`", Mark::Code),
+        ] {
             if before.len() <= delimiter.len() * 2 || !before.ends_with(delimiter) {
                 continue;
             }
@@ -1170,9 +1176,18 @@ impl Editor {
             if content_start == content_end || (open > 0 && before.as_bytes()[open - 1] == b'\\') {
                 continue;
             }
-            if delimiter == "*"
-                && (before[..open].ends_with('*')
-                    || before[content_start..content_end].contains('*'))
+            if matches!(delimiter, "*" | "_")
+                && (before[..open].ends_with(delimiter)
+                    || before[content_start..content_end].contains(delimiter))
+            {
+                continue;
+            }
+            // Underscores inside a word are identifiers, not emphasis.
+            if delimiter.starts_with('_')
+                && before[..open]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_alphanumeric)
             {
                 continue;
             }
