@@ -1133,9 +1133,11 @@ impl Render for NotesApp {
                     .opacity(1.),
             );
         let toolbar = div()
-            .h(px(52.))
-            .flex_shrink_0()
-            .relative()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(TOOLBAR_HEIGHT)
             .child(
                 div()
                     .absolute()
@@ -1186,6 +1188,7 @@ impl Render for NotesApp {
                 div()
                     .flex_1()
                     .p_6()
+                    .pt(TOOLBAR_HEIGHT + px(24.))
                     .text_size(px(14.))
                     .child("Your notes could not be opened")
                     .child(detail)
@@ -1201,30 +1204,35 @@ impl Render for NotesApp {
             let n = text.graphemes(true).count();
             format!("{n} {}", if n == 1 { "character" } else { "characters" })
         };
-        // The footer floats over the note. Both fades reach the background color only at
-        // the bottom edge, so no opaque band forms; the short one keeps the count legible.
+        // The toolbar and footer float over the note. Each pair of fades reaches the
+        // background color only at its window edge, so no opaque band forms; the short
+        // one keeps the title or count legible. The top pair is shallower so the first
+        // line is not dimmed while the note rests at its start.
         let mut clear = style.background;
         clear.a = 0.;
-        let fade = |height: Pixels| {
-            div()
-                .absolute()
-                .bottom_0()
-                .left_0()
-                .right_0()
-                .h(height)
-                .bg(linear_gradient(
-                    180.,
-                    linear_color_stop(clear, 0.),
-                    linear_color_stop(style.background, 1.),
-                ))
+        let fade = |height: Pixels, top: bool| {
+            let edge = div().absolute().left_0().right_0().h(height);
+            let (edge, angle) = if top {
+                (edge.top_0(), 0.)
+            } else {
+                (edge.bottom_0(), 180.)
+            };
+            edge.bg(linear_gradient(
+                angle,
+                linear_color_stop(clear, 0.),
+                linear_color_stop(style.background, 1.),
+            ))
         };
         let body = div()
             .flex_1()
             .min_h_0()
             .relative()
             .child(self.editor())
-            .child(fade(px(128.)))
-            .child(fade(px(64.)))
+            .child(fade(px(80.), true))
+            .child(fade(px(56.), true))
+            .child(fade(px(128.), false))
+            .child(fade(px(64.), false))
+            .child(toolbar)
             .child(
                 div()
                     .absolute()
@@ -1233,8 +1241,7 @@ impl Render for NotesApp {
                     .right_0()
                     .child(self.footer(count, cx)),
             );
-        root.child(toolbar)
-            .child(body)
+        root.child(body)
             .when_some(self.platform_error.clone(), |s, error| {
                 s.child(
                     div()

@@ -20,9 +20,10 @@ pub struct EditorStyle {
     pub code_background: Hsla,
     pub code_radius: Pixels,
     pub draw_markers: bool,
-    /// Height of host chrome drawn over the editor's bottom edge. Content gains this
-    /// much extra bottom padding, the caret is revealed above it, and the scrollbar
-    /// track ends before it.
+    /// Heights of host chrome drawn over the editor's top and bottom edges. Content
+    /// gains this much extra padding, the caret is revealed clear of it, and the
+    /// scrollbar track stays between the two.
+    pub top_overlay: Pixels,
     pub bottom_overlay: Pixels,
     pub scrollbar: Hsla,
 }
@@ -46,6 +47,7 @@ impl Default for EditorStyle {
             code_background: rgb(0xedece7).into(),
             code_radius: px(0.),
             draw_markers: false,
+            top_overlay: px(0.),
             bottom_overlay: px(0.),
             scrollbar: rgba(0x00000047).into(),
         }
@@ -72,6 +74,7 @@ impl EditorStyle {
             code_background: rgb(0xdfe0e3).into(),
             code_radius: px(3.),
             draw_markers: true,
+            top_overlay: px(0.),
             bottom_overlay: px(0.),
             scrollbar: rgba(0x00000047).into(),
         }

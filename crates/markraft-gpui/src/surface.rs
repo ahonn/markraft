@@ -370,9 +370,10 @@ impl Element for EditorSurface {
                     let caret = row.caret(head.byte, editor.upstream);
                     let viewport = editor.scroll.bounds();
                     let margin = px(12.);
+                    let top = viewport.top() + editor.style.top_overlay;
                     let bottom = viewport.bottom() - editor.style.bottom_overlay;
-                    let correction = if caret.y < viewport.top() + margin {
-                        viewport.top() + margin - caret.y
+                    let correction = if caret.y < top + margin {
+                        top + margin - caret.y
                     } else if caret.y + row.line_height > bottom - margin {
                         bottom - margin - caret.y - row.line_height
                     } else {

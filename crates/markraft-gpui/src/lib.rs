@@ -191,6 +191,7 @@ impl EditorView {
             self.layout.iter().fold(
                 (if self.single_line { px(0.) } else { px(40.) })
                     + self.style.padding * 2.
+                    + self.style.top_overlay
                     + self.style.bottom_overlay,
                 |height, row| height + row.top_gap + row.height,
             )
@@ -283,13 +284,16 @@ impl EditorView {
         let inset = px(4.);
         let viewport = self.scroll.bounds().size.height;
         let max = self.scroll.max_offset().y;
-        let track = viewport - inset * 2. - self.style.bottom_overlay;
+        let track = viewport - inset * 2. - self.style.top_overlay - self.style.bottom_overlay;
         if self.single_line || max <= px(1.) || track <= px(48.) {
             return None;
         }
         let height = (track * (viewport / (viewport + max))).max(px(28.));
         let progress = (-self.scroll.offset().y / max).clamp(0., 1.);
-        Some((inset + (track - height) * progress, height))
+        Some((
+            self.style.top_overlay + inset + (track - height) * progress,
+            height,
+        ))
     }
     fn reset_caret_blink(&mut self, cx: &mut Context<Self>) {
         // Dropping the previous task cancels its pending timer. Only the focused
@@ -900,6 +904,7 @@ impl Render for EditorView {
             .track_scroll(&self.scroll)
             .on_scroll_wheel(cx.listener(|this, _, _, cx| this.flash_scrollbar(cx)))
             .p(self.style.padding)
+            .pt(self.style.padding + self.style.top_overlay)
             .pb(self.style.padding + self.style.bottom_overlay)
             .bg(self.style.background)
             .text_color(self.style.text)

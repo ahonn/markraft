@@ -409,11 +409,12 @@ impl NotesApp {
                 .display(cx)
                 .map(|d| d.visible_bounds().size.height * 0.8)
                 .unwrap_or(px(720.));
-            // The footer floats over the editor and is already part of its content height.
+            // The toolbar and footer float over the editor and are already part of its
+            // content height; only an error banner adds to it.
             let chrome = if self.error.is_some() {
-                px(116.)
+                px(64.)
             } else {
-                px(52.)
+                px(0.)
             };
             let desired = px(f32::from((height + chrome).max(px(220.)).min(maximum)).round());
             let size = size(window.bounds().size.width, desired);
@@ -889,7 +890,8 @@ impl NotesApp {
         .detach();
     }
 }
-/// Height of the footer controls that float over the bottom of the note.
+/// Heights of the toolbar and footer, which float over the top and bottom of the note.
+const TOOLBAR_HEIGHT: Pixels = px(52.);
 const FOOTER_HEIGHT: Pixels = px(44.);
 fn notes_style(dark: bool) -> EditorStyle {
     let mut style = if dark {
@@ -897,6 +899,7 @@ fn notes_style(dark: bool) -> EditorStyle {
     } else {
         EditorStyle::notes()
     };
+    style.top_overlay = TOOLBAR_HEIGHT;
     style.bottom_overlay = FOOTER_HEIGHT;
     style
 }
@@ -906,6 +909,7 @@ fn query_style(dark: bool) -> EditorStyle {
     style.body_size = px(13.);
     style.padding = px(0.);
     style.paragraph_gap = px(0.);
+    style.top_overlay = px(0.);
     style.bottom_overlay = px(0.);
     style
 }
