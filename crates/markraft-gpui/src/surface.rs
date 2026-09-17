@@ -13,7 +13,17 @@ pub(crate) struct LayoutBlock {
     pub text_len: usize,
     pub(crate) top_gap: Pixels,
     marker: Option<Marker>,
+    decoration: Option<Decoration>,
     code_ranges: Vec<Range<usize>>,
+}
+
+#[derive(Clone, Copy)]
+enum Decoration {
+    /// A bar left of the text. `joined` extends it across the gap to the next quote.
+    Quote {
+        joined: bool,
+    },
+    Divider,
 }
 
 #[derive(Clone)]
@@ -129,12 +139,27 @@ fn shape(
                 BlockKind::Task { checked: true } => Some("☑"),
                 _ => None,
             };
+            let decoration = match block.kind {
+                BlockKind::Quote => Some(Decoration::Quote {
+                    joined: document
+                        .blocks
+                        .get(index + 1)
+                        .is_some_and(|next| next.kind == BlockKind::Quote),
+                }),
+                BlockKind::Divider => Some(Decoration::Divider),
+                _ => None,
+            };
             let indent = if marker.is_some() {
                 style.list_indent
+            } else if block.kind == BlockKind::Quote {
+                style.quote_indent
             } else {
                 px(0.)
             };
-            let text_color = if matches!(block.kind, BlockKind::Task { checked: true }) {
+            let text_color = if matches!(
+                block.kind,
+                BlockKind::Task { checked: true } | BlockKind::Quote
+            ) {
                 style.muted_text
             } else {
                 style.text
@@ -253,6 +278,7 @@ fn shape(
                 width,
                 text_len,
                 marker,
+                decoration,
                 code_ranges,
                 top_gap,
             }
@@ -442,6 +468,33 @@ impl Element for EditorSurface {
                         fill(rect, style.code_background).corner_radii(style.code_radius),
                     );
                 }
+            }
+            match row.decoration {
+                Some(Decoration::Quote { joined }) => {
+                    let height = if joined {
+                        row.height
+                    } else {
+                        row.line.size(row.line_height).height
+                    };
+                    window.paint_quad(
+                        fill(
+                            Bounds::new(
+                                point(row.origin.x - style.quote_indent, row.origin.y),
+                                size(px(3.), height),
+                            ),
+                            style.rule,
+                        )
+                        .corner_radii(px(1.5)),
+                    );
+                }
+                Some(Decoration::Divider) => window.paint_quad(fill(
+                    Bounds::new(
+                        point(row.origin.x, row.origin.y + row.line_height * 0.5),
+                        size(row.width, px(1.)),
+                    ),
+                    style.rule,
+                )),
+                None => {}
             }
             if a != b && i >= a.block && i <= b.block {
                 let start = if i == a.block { a.byte } else { 0 };

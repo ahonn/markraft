@@ -62,6 +62,8 @@ impl Document {
                     BlockKind::Bullet => "- ".to_owned(),
                     BlockKind::Task { checked: false } => "- [ ] ".to_owned(),
                     BlockKind::Task { checked: true } => "- [x] ".to_owned(),
+                    BlockKind::Quote => "> ".to_owned(),
+                    BlockKind::Divider => return "---".to_owned(),
                 };
                 let mut line = prefix;
                 for span in &block.spans {
@@ -102,6 +104,20 @@ fn parse_block(line: &str) -> (BlockKind, &str) {
         if let Some(rest) = line.strip_prefix(prefix) {
             return (BlockKind::Task { checked }, rest);
         }
+    }
+    let rule = line.trim();
+    if rule.len() >= 3
+        && ["-", "*", "_"]
+            .iter()
+            .any(|c| rule.trim_start_matches(c).is_empty())
+    {
+        return (BlockKind::Divider, "");
+    }
+    if let Some(rest) = line.strip_prefix("> ") {
+        return (BlockKind::Quote, rest);
+    }
+    if line == ">" {
+        return (BlockKind::Quote, "");
     }
     for prefix in ["- ", "* ", "+ "] {
         if let Some(rest) = line.strip_prefix(prefix) {

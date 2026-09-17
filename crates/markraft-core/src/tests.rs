@@ -290,11 +290,11 @@ fn document_versions_and_markdown_roundtrip() {
 #[test]
 fn unsupported_markdown_stays_literal_and_code_ticks_roundtrip() {
     let document = Document::from_markdown(
-        "```rust\n# literal\n**literal**\n```\n> quote\n1. ordered\n![alt](image.png)",
+        "```rust\n# literal\n**literal**\n```\n1. ordered\n![alt](image.png)",
     );
     assert_eq!(
         document.plain_text(),
-        "```rust\n# literal\n**literal**\n```\n> quote\n1. ordered\n![alt](image.png)"
+        "```rust\n# literal\n**literal**\n```\n1. ordered\n![alt](image.png)"
     );
     assert_eq!(Document::from_markdown(&document.to_markdown()), document);
     for text in ["`literal`", " a ", "  ", "one``two", "中文 😀"] {
@@ -696,4 +696,61 @@ fn strikethrough_and_underline_round_trip_and_load_from_older_json() {
     let document = Document::from_json(older).unwrap();
     assert!(document.blocks[0].spans[0].marks.bold);
     assert!(!document.blocks[0].spans[0].marks.underline);
+}
+
+#[test]
+fn quotes_continue_on_enter_and_round_trip() {
+    let mut editor = editor("");
+    type_chars(&mut editor, "> first");
+    editor.insert_text("\n");
+    type_chars(&mut editor, "second");
+    editor.insert_text("\n");
+    editor.insert_text("\n");
+    let kinds: Vec<_> = editor.document().blocks.iter().map(|b| &b.kind).collect();
+    assert_eq!(
+        kinds,
+        [&BlockKind::Quote, &BlockKind::Quote, &BlockKind::Paragraph]
+    );
+    assert_eq!(editor.document().to_markdown(), "> first\n> second\n");
+    assert_eq!(
+        Document::from_markdown("> first\n> second\n"),
+        *editor.document()
+    );
+    // A literal marker in a paragraph must not come back as a quote.
+    let literal = Document::from_markdown("\\> not a quote");
+    assert_eq!(literal.blocks[0].kind, BlockKind::Paragraph);
+    assert_eq!(literal.to_markdown(), "\\> not a quote");
+}
+
+#[test]
+fn divider_takes_its_line_and_never_holds_text() {
+    let mut editor = editor("");
+    type_chars(&mut editor, "---");
+    assert_eq!(editor.document().blocks[0].kind, BlockKind::Divider);
+    assert_eq!(editor.selection().head, Position { block: 1, byte: 0 });
+    type_chars(&mut editor, "after");
+    assert_eq!(editor.document().to_markdown(), "---\nafter");
+    assert_eq!(Document::from_markdown("---\nafter"), *editor.document());
+
+    // Enter on the rule opens a line below; typing on it replaces it.
+    editor.set_selection(Selection::caret(Position::default()));
+    editor.insert_text("\n");
+    assert_eq!(editor.document().blocks[0].kind, BlockKind::Divider);
+    assert_eq!(editor.document().blocks.len(), 3);
+    editor.set_selection(Selection::caret(Position::default()));
+    editor.insert_text("x");
+    assert_eq!(editor.document().blocks[0].kind, BlockKind::Paragraph);
+
+    // Backspace from the following line removes the rule.
+    let mut editor = Editor::new(Document::from_markdown("***\nafter"));
+    editor.set_selection(Selection::caret(Position { block: 1, byte: 0 }));
+    editor.backspace();
+    assert_eq!(editor.document().to_markdown(), "after");
+
+    editor.undo();
+    assert_eq!(editor.document().blocks[0].kind, BlockKind::Divider);
+    assert_eq!(
+        Document::from_markdown("\\-\\-\\-").blocks[0].kind,
+        BlockKind::Paragraph
+    );
 }

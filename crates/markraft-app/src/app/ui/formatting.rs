@@ -76,6 +76,12 @@ impl NotesApp {
                         kind == Some(BlockKind::Heading(level)),
                     ));
                 }
+                items.push((
+                    "Quote",
+                    "⇧⌘B",
+                    Intent::Block(BlockKind::Quote),
+                    kind == Some(BlockKind::Quote),
+                ));
                 items
             }
             Some(FormatMenu::Inline) => vec![

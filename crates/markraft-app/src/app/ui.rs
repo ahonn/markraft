@@ -355,6 +355,7 @@ impl NotesApp {
             Intent::Mark(Mark::Strikethrough) => Icon::Strikethrough,
             Intent::Mark(Mark::Underline) => Icon::Underline,
             Intent::Block(BlockKind::Heading(_)) => Icon::Heading,
+            Intent::Block(BlockKind::Quote) => Icon::Quote,
             Intent::Block(BlockKind::Bullet) => Icon::Bullet,
             Intent::Block(BlockKind::Task { .. }) => Icon::Task,
             _ => Icon::Paragraph,
@@ -860,6 +861,12 @@ impl NotesApp {
                 "Heading",
                 "⌥⌘1",
                 Intent::Block(BlockKind::Heading(1)),
+            ),
+            (
+                "format-quote",
+                "Quote",
+                "⇧⌘B",
+                Intent::Block(BlockKind::Quote),
             ),
             (
                 "format-paragraph",

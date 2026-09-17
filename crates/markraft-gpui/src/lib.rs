@@ -51,6 +51,7 @@ actions!(
         Heading,
         Heading2,
         Heading3,
+        Quote,
         Bullet,
         Task,
         ToggleTask,
@@ -86,7 +87,7 @@ pub fn bind_keys(cx: &mut App) {
         "cmd-i" => Italic, "cmd-e" => Code,
         "cmd-shift-s" => Strikethrough, "cmd-u" => Underline, "cmd-alt-0" => Paragraph,
         "cmd-alt-1" => Heading, "cmd-alt-2" => Heading2,
-        "cmd-alt-3" => Heading3, "cmd-shift-8" => Bullet,
+        "cmd-alt-3" => Heading3, "cmd-shift-b" => Quote, "cmd-shift-8" => Bullet,
         "cmd-shift-9" => Task, "cmd-enter" => ToggleTask,
         "ctrl-cmd-space" => CharacterPalette,
         "alt-left" => WordLeft, "alt-right" => WordRight,
@@ -856,6 +857,9 @@ impl Render for EditorView {
         });
         format_action!(Heading3, |c| {
             c.set_block_kind(BlockKind::Heading(3));
+        });
+        format_action!(Quote, |c| {
+            c.set_block_kind(BlockKind::Quote);
         });
         format_action!(Bullet, |c| {
             c.set_block_kind(BlockKind::Bullet);

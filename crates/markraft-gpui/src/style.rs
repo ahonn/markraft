@@ -19,6 +19,9 @@ pub struct EditorStyle {
     pub marker: Hsla,
     pub code_background: Hsla,
     pub code_radius: Pixels,
+    /// Quote bars and horizontal rules.
+    pub rule: Hsla,
+    pub quote_indent: Pixels,
     pub draw_markers: bool,
     /// Heights of host chrome drawn over the editor's top and bottom edges. Content
     /// gains this much extra padding, the caret is revealed clear of it, and the
@@ -46,6 +49,8 @@ impl Default for EditorStyle {
             marker: rgb(0x74766e).into(),
             code_background: rgb(0xedece7).into(),
             code_radius: px(0.),
+            rule: rgb(0xd9d7d0).into(),
+            quote_indent: px(18.),
             draw_markers: false,
             top_overlay: px(0.),
             bottom_overlay: px(0.),
@@ -73,6 +78,8 @@ impl EditorStyle {
             marker: rgb(0x2f7cf6).into(),
             code_background: rgb(0xdfe0e3).into(),
             code_radius: px(3.),
+            rule: rgb(0xcfd0d4).into(),
+            quote_indent: px(14.),
             draw_markers: true,
             top_overlay: px(0.),
             bottom_overlay: px(0.),
@@ -87,6 +94,7 @@ impl EditorStyle {
             muted_text: rgb(0x93979e).into(),
             marker: rgb(0x4c9bff).into(),
             code_background: rgb(0x34363b).into(),
+            rule: rgb(0x46484e).into(),
             scrollbar: rgba(0xffffff4d).into(),
             ..Self::notes()
         }

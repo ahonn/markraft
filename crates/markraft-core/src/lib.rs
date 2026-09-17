@@ -68,6 +68,10 @@ pub enum BlockKind {
     Task {
         checked: bool,
     },
+    Quote,
+    /// A horizontal rule. It never holds text: typing into one turns it back into a
+    /// paragraph, so it stays an ordinary, empty line for selection and navigation.
+    Divider,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +146,7 @@ impl Document {
         for block in std::mem::take(&mut self.blocks) {
             let kind = match block.kind {
                 BlockKind::Heading(level) => BlockKind::Heading(level.clamp(1, 6)),
+                BlockKind::Divider if !block.is_empty() => BlockKind::Paragraph,
                 kind => kind,
             };
             let mut current = Block {
@@ -669,7 +674,9 @@ impl Editor {
             let selection = editor.selection();
             if text == "\n" && selection.is_empty() {
                 let block = &mut editor.state.document.blocks[selection.head.block];
-                if block.is_empty() && block.kind != BlockKind::Paragraph {
+                if block.is_empty()
+                    && !matches!(block.kind, BlockKind::Paragraph | BlockKind::Divider)
+                {
                     block.kind = BlockKind::Paragraph;
                     return;
                 }
@@ -716,6 +723,7 @@ impl Editor {
                 match first.kind {
                     BlockKind::Bullet => BlockKind::Bullet,
                     BlockKind::Task { .. } => BlockKind::Task { checked: false },
+                    BlockKind::Quote => BlockKind::Quote,
                     _ => BlockKind::Paragraph,
                 }
             };
@@ -730,6 +738,11 @@ impl Editor {
                     push_span(&mut spans, &span.text, span.marks);
                 }
             }
+            let kind = if kind == BlockKind::Divider && !spans.is_empty() {
+                BlockKind::Paragraph
+            } else {
+                kind
+            };
             replacement.push(Block { kind, spans });
         }
         let caret_block = start.block + parts.len() - 1;
@@ -1148,6 +1161,8 @@ impl Editor {
             "- " | "* " | "+ " => Some(BlockKind::Bullet),
             "- [ ] " | "[ ] " | "- [] " | "[] " => Some(BlockKind::Task { checked: false }),
             "- [x] " | "- [X] " | "[x] " | "[X] " => Some(BlockKind::Task { checked: true }),
+            "> " => Some(BlockKind::Quote),
+            "---" | "___ " | "*** " => Some(BlockKind::Divider),
             _ => {
                 let hashes = before.trim_end_matches(' ');
                 if before.ends_with(' ')
@@ -1165,7 +1180,13 @@ impl Editor {
                 block: position.block,
                 byte: 0,
             };
-            self.replace_selection("");
+            if kind == BlockKind::Divider {
+                // The rule takes the line; typing continues on a new one below it.
+                self.replace_selection("\n");
+                self.state.document.blocks[position.block + 1].kind = BlockKind::Paragraph;
+            } else {
+                self.replace_selection("");
+            }
             self.state.document.blocks[position.block].kind = kind;
             return;
         }

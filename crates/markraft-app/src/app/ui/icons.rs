@@ -20,6 +20,7 @@ pub(super) enum Icon {
     Strikethrough,
     Underline,
     Heading,
+    Quote,
     Paragraph,
     Bullet,
     Task,
@@ -174,6 +175,12 @@ pub(super) fn icon(kind: Icon, color: Hsla) -> impl IntoElement {
                     line(&mut path, &[(3.5, 2.5), (3.5, 13.5)]);
                     line(&mut path, &[(12.5, 2.5), (12.5, 13.5)]);
                     line(&mut path, &[(3.5, 8.), (12.5, 8.)]);
+                }
+                Icon::Quote => {
+                    line(&mut path, &[(3., 3.), (3., 13.)]);
+                    line(&mut path, &[(6.5, 5.), (13., 5.)]);
+                    line(&mut path, &[(6.5, 8.), (13., 8.)]);
+                    line(&mut path, &[(6.5, 11.), (10.5, 11.)]);
                 }
                 Icon::Paragraph => {
                     path.move_to(point(px(9.), px(8.5)));
