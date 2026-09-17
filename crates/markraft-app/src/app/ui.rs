@@ -356,6 +356,7 @@ impl NotesApp {
             Intent::Mark(Mark::Underline) => Icon::Underline,
             Intent::Block(BlockKind::Heading(_)) => Icon::Heading,
             Intent::Block(BlockKind::Quote) => Icon::Quote,
+            Intent::Block(BlockKind::Ordered) => Icon::Ordered,
             Intent::Block(BlockKind::Bullet) => Icon::Bullet,
             Intent::Block(BlockKind::Task { .. }) => Icon::Task,
             _ => Icon::Paragraph,
@@ -873,6 +874,12 @@ impl NotesApp {
                 "Paragraph",
                 "⌥⌘0",
                 Intent::Block(BlockKind::Paragraph),
+            ),
+            (
+                "format-ordered",
+                "Ordered List",
+                "⇧⌘7",
+                Intent::Block(BlockKind::Ordered),
             ),
             (
                 "format-bullet",

@@ -65,6 +65,9 @@ pub enum BlockKind {
     Paragraph,
     Heading(u8),
     Bullet,
+    /// Numbered from its position in a run of ordered blocks; see
+    /// [`Document::ordinal`].
+    Ordered,
     Task {
         checked: bool,
     },
@@ -137,6 +140,19 @@ impl Document {
             .map(Block::text)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The 1-based number of an ordered block within its run of adjacent ordered
+    /// blocks, or `None` for any other block.
+    pub fn ordinal(&self, block: usize) -> Option<usize> {
+        (self.blocks.get(block)?.kind == BlockKind::Ordered).then(|| {
+            self.blocks[..block]
+                .iter()
+                .rev()
+                .take_while(|block| block.kind == BlockKind::Ordered)
+                .count()
+                + 1
+        })
     }
 
     /// Normalize empty documents, adjacent runs and heading levels. Newlines in supplied
@@ -722,6 +738,7 @@ impl Editor {
             } else {
                 match first.kind {
                     BlockKind::Bullet => BlockKind::Bullet,
+                    BlockKind::Ordered => BlockKind::Ordered,
                     BlockKind::Task { .. } => BlockKind::Task { checked: false },
                     BlockKind::Quote => BlockKind::Quote,
                     _ => BlockKind::Paragraph,
@@ -1163,6 +1180,12 @@ impl Editor {
             "- [x] " | "- [X] " | "[x] " | "[X] " => Some(BlockKind::Task { checked: true }),
             "> " => Some(BlockKind::Quote),
             "---" | "___ " | "*** " => Some(BlockKind::Divider),
+            _ if before.strip_suffix(". ").is_some_and(|digits| {
+                !digits.is_empty() && digits.bytes().all(|c| c.is_ascii_digit())
+            }) =>
+            {
+                Some(BlockKind::Ordered)
+            }
             _ => {
                 let hashes = before.trim_end_matches(' ');
                 if before.ends_with(' ')

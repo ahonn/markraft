@@ -109,6 +109,12 @@ impl NotesApp {
                     kind == Some(BlockKind::Paragraph),
                 ),
                 (
+                    "Ordered List",
+                    "⇧⌘7",
+                    Intent::Block(BlockKind::Ordered),
+                    kind == Some(BlockKind::Ordered),
+                ),
+                (
                     "Bullet List",
                     "⇧⌘8",
                     Intent::Block(BlockKind::Bullet),
@@ -310,13 +316,18 @@ impl NotesApp {
                         .child(self.format_button(
                             "format-list-menu",
                             "Lists",
-                            if matches!(kind, Some(BlockKind::Task { .. })) {
-                                Icon::Task
-                            } else {
-                                Icon::Bullet
+                            match kind {
+                                Some(BlockKind::Task { .. }) => Icon::Task,
+                                Some(BlockKind::Ordered) => Icon::Ordered,
+                                _ => Icon::Bullet,
                             },
                             Intent::FormatMenu(FormatMenu::List),
-                            matches!(kind, Some(BlockKind::Bullet | BlockKind::Task { .. })),
+                            matches!(
+                                kind,
+                                Some(
+                                    BlockKind::Bullet | BlockKind::Ordered | BlockKind::Task { .. }
+                                )
+                            ),
                             cx,
                         )),
                 )

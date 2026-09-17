@@ -53,13 +53,15 @@ impl Document {
     pub fn to_markdown(&self) -> String {
         self.blocks
             .iter()
-            .map(|block| {
+            .enumerate()
+            .map(|(index, block)| {
                 let prefix = match block.kind {
                     BlockKind::Paragraph => String::new(),
                     BlockKind::Heading(level) => {
                         format!("{} ", "#".repeat(usize::from(level.clamp(1, 6))))
                     }
                     BlockKind::Bullet => "- ".to_owned(),
+                    BlockKind::Ordered => format!("{}. ", self.ordinal(index).unwrap_or(1)),
                     BlockKind::Task { checked: false } => "- [ ] ".to_owned(),
                     BlockKind::Task { checked: true } => "- [x] ".to_owned(),
                     BlockKind::Quote => "> ".to_owned(),
@@ -123,6 +125,14 @@ fn parse_block(line: &str) -> (BlockKind, &str) {
         if let Some(rest) = line.strip_prefix(prefix) {
             return (BlockKind::Bullet, rest);
         }
+    }
+    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+    if (1..=9).contains(&digits)
+        && let Some(rest) = line[digits..]
+            .strip_prefix(". ")
+            .or_else(|| line[digits..].strip_prefix(") "))
+    {
+        return (BlockKind::Ordered, rest);
     }
     let hashes = line.bytes().take_while(|b| *b == b'#').count();
     if (1..=6).contains(&hashes) && line.as_bytes().get(hashes) == Some(&b' ') {

@@ -22,6 +22,7 @@ pub(super) enum Icon {
     Heading,
     Quote,
     Paragraph,
+    Ordered,
     Bullet,
     Task,
     Restore,
@@ -181,6 +182,12 @@ pub(super) fn icon(kind: Icon, color: Hsla) -> impl IntoElement {
                     line(&mut path, &[(6.5, 5.), (13., 5.)]);
                     line(&mut path, &[(6.5, 8.), (13., 8.)]);
                     line(&mut path, &[(6.5, 11.), (10.5, 11.)]);
+                }
+                Icon::Ordered => {
+                    line(&mut path, &[(2., 3.5), (3.5, 2.5), (3.5, 6.5)]);
+                    line(&mut path, &[(2., 10.), (4.5, 10.), (2., 13.5), (4.5, 13.5)]);
+                    line(&mut path, &[(7.5, 4.5), (14., 4.5)]);
+                    line(&mut path, &[(7.5, 11.5), (14., 11.5)]);
                 }
                 Icon::Paragraph => {
                     path.move_to(point(px(9.), px(8.5)));

@@ -289,12 +289,11 @@ fn document_versions_and_markdown_roundtrip() {
 
 #[test]
 fn unsupported_markdown_stays_literal_and_code_ticks_roundtrip() {
-    let document = Document::from_markdown(
-        "```rust\n# literal\n**literal**\n```\n1. ordered\n![alt](image.png)",
-    );
+    let document =
+        Document::from_markdown("```rust\n# literal\n**literal**\n```\n![alt](image.png)");
     assert_eq!(
         document.plain_text(),
-        "```rust\n# literal\n**literal**\n```\n1. ordered\n![alt](image.png)"
+        "```rust\n# literal\n**literal**\n```\n![alt](image.png)"
     );
     assert_eq!(Document::from_markdown(&document.to_markdown()), document);
     for text in ["`literal`", " a ", "  ", "one``two", "中文 😀"] {
@@ -753,4 +752,30 @@ fn divider_takes_its_line_and_never_holds_text() {
         Document::from_markdown("\\-\\-\\-").blocks[0].kind,
         BlockKind::Paragraph
     );
+}
+
+#[test]
+fn ordered_lists_number_each_run_and_round_trip() {
+    let mut editor = editor("");
+    type_chars(&mut editor, "1. one");
+    editor.insert_text("\n");
+    type_chars(&mut editor, "two");
+    editor.insert_text("\n");
+    editor.insert_text("\n");
+    type_chars(&mut editor, "break");
+    editor.insert_text("\n");
+    type_chars(&mut editor, "7. again");
+    let document = editor.document();
+    let ordinals: Vec<_> = (0..4).map(|block| document.ordinal(block)).collect();
+    assert_eq!(ordinals, [Some(1), Some(2), None, Some(1)]);
+    assert_eq!(document.to_markdown(), "1. one\n2. two\nbreak\n1. again");
+    assert_eq!(
+        Document::from_markdown("3) one\n9. two\nbreak\n1. again"),
+        *document
+    );
+
+    let literal = Document::from_markdown("1\\. not a list");
+    assert_eq!(literal.blocks[0].kind, BlockKind::Paragraph);
+    assert_eq!(literal.plain_text(), "1. not a list");
+    assert_eq!(literal.to_markdown(), "1\\. not a list");
 }

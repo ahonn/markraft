@@ -17,6 +17,8 @@ pub(crate) struct LayoutBlock {
     code_ranges: Vec<Range<usize>>,
 }
 
+const NUMBER_GAP: Pixels = px(6.);
+
 #[derive(Clone, Copy)]
 enum Decoration {
     /// A bar left of the text. `joined` extends it across the gap to the next quote.
@@ -29,8 +31,12 @@ enum Decoration {
 #[derive(Clone)]
 enum Marker {
     Glyph(std::rc::Rc<ShapedLine>),
+    /// An ordered-list number, right-aligned against the text.
+    Number(std::rc::Rc<ShapedLine>),
     Bullet,
-    Task { checked: bool },
+    Task {
+        checked: bool,
+    },
 }
 
 impl LayoutBlock {
@@ -38,6 +44,7 @@ impl LayoutBlock {
         let marker = self.marker.as_ref()?;
         let (offset, width, height) = match marker {
             Marker::Glyph(line) => (px(26.), line.width, self.line_height),
+            Marker::Number(line) => (line.width + NUMBER_GAP, line.width, self.line_height),
             // Drawn markers share one center, 15px left of the text.
             Marker::Bullet => (px(17.5), px(5.), px(5.)),
             Marker::Task { .. } => (px(22.), px(14.), px(14.)),
@@ -149,7 +156,37 @@ fn shape(
                 BlockKind::Divider => Some(Decoration::Divider),
                 _ => None,
             };
-            let indent = if marker.is_some() {
+            let shape_number = |ordinal: usize| {
+                let text = format!("{ordinal}.");
+                window.text_system().shape_line(
+                    text.clone().into(),
+                    font_size,
+                    &[TextRun {
+                        len: text.len(),
+                        font: font(".SystemUIFont"),
+                        color: style.muted_text,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    None,
+                )
+            };
+            let number = document
+                .ordinal(index)
+                .map(|ordinal| std::rc::Rc::new(shape_number(ordinal)));
+            // Every item of a run shares the indent its widest number needs.
+            let number_width = document.ordinal(index).map(|ordinal| {
+                let last = ordinal
+                    + document.blocks[index + 1..]
+                        .iter()
+                        .take_while(|block| block.kind == BlockKind::Ordered)
+                        .count();
+                shape_number(last).width
+            });
+            let indent = if let Some(width) = number_width {
+                style.list_indent.max(width + NUMBER_GAP)
+            } else if marker.is_some() {
                 style.list_indent
             } else if block.kind == BlockKind::Quote {
                 style.quote_indent
@@ -229,26 +266,28 @@ fn shape(
                 )
                 .expect("valid UTF-8 text can be shaped")
                 .remove(0);
-            let marker = marker.map(|text| {
-                if style.draw_markers {
-                    return match block.kind {
-                        BlockKind::Task { checked } => Marker::Task { checked },
-                        _ => Marker::Bullet,
-                    };
-                }
-                Marker::Glyph(std::rc::Rc::new(window.text_system().shape_line(
-                    text.into(),
-                    px(18.),
-                    &[TextRun {
-                        len: text.len(),
-                        font: font(".SystemUIFont"),
-                        color: style.marker,
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
-                    None,
-                )))
+            let marker = number.map(Marker::Number).or_else(|| {
+                marker.map(|text| {
+                    if style.draw_markers {
+                        return match block.kind {
+                            BlockKind::Task { checked } => Marker::Task { checked },
+                            _ => Marker::Bullet,
+                        };
+                    }
+                    Marker::Glyph(std::rc::Rc::new(window.text_system().shape_line(
+                        text.into(),
+                        px(18.),
+                        &[TextRun {
+                            len: text.len(),
+                            font: font(".SystemUIFont"),
+                            color: style.marker,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                        None,
+                    )))
+                })
             });
             let gap = if single_line {
                 px(0.)
@@ -521,7 +560,7 @@ impl Element for EditorSurface {
             if let Some(marker) = &row.marker {
                 let marker_bounds = row.marker_bounds().expect("marker has bounds");
                 match marker {
-                    Marker::Glyph(line) => {
+                    Marker::Glyph(line) | Marker::Number(line) => {
                         let _ = line.paint(
                             marker_bounds.origin,
                             row.line_height,
