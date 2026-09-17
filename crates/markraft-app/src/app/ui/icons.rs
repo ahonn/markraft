@@ -29,6 +29,7 @@ pub(super) enum Icon {
     Ordered,
     Bullet,
     Task,
+    Divider,
     Restore,
 }
 
@@ -229,6 +230,7 @@ pub(super) fn icon(kind: Icon, color: Hsla) -> impl IntoElement {
                     line(&mut path, &[(6., 5.5), (3.8, 8.), (6., 10.5)]);
                     line(&mut path, &[(10., 5.5), (12.2, 8.), (10., 10.5)]);
                 }
+                Icon::Divider => line(&mut path, &[(2., 8.), (14., 8.)]),
                 Icon::Paragraph => {
                     path.move_to(point(px(9.), px(8.5)));
                     path.line_to(point(px(6.5), px(8.5)));

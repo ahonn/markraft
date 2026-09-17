@@ -2,16 +2,24 @@
 mod accessibility;
 mod caret;
 mod clipboard;
+mod completion;
+mod extension;
 mod format_state;
 mod single_line;
 mod style;
 mod surface;
 mod syntax;
+mod typeahead;
+pub use extension::{
+    ActionHandler, EditorCx, Extension, ExtensionHandle, ExtensionPayload, Overlay, Update,
+};
 pub use style::EditorStyle;
 pub use syntax::code_languages;
+pub use typeahead::{Typeahead, TypeaheadItem, TypeaheadProvider};
 
+use extension::AnchoredOverlay;
 use gpui::{prelude::*, *};
-use markraft_core::{BlockKind, Document, Editor, Mark, Position, Selection};
+use markraft_core::{BlockKind, Change, Document, Editor, Mark, Position, Selection};
 use std::{
     cell::RefCell,
     ops::Range,
@@ -137,6 +145,9 @@ pub fn bind_keys(cx: &mut App) {
         "cmd-shift-up" => SelectDocumentStart, "cmd-shift-down" => SelectDocumentEnd,
         "escape" => CancelComposition,
     }
+    // Last, so that at the same context depth an extension's bindings win while its
+    // identifier is in the editor's key context.
+    typeahead::bind_keys(cx);
 }
 
 #[derive(Clone, Debug)]
@@ -152,10 +163,19 @@ pub enum EditorEvent {
         block: usize,
     },
     CodeCopied,
+    /// An extension asked the host to do something only the host can do. Hosts that
+    /// register no extension never see it.
+    Extension {
+        id: &'static str,
+        payload: ExtensionPayload,
+    },
 }
 
 pub struct EditorView {
     pub(crate) core: Editor,
+    pub(crate) extensions: Vec<extension::Registration>,
+    /// The selection the extensions were last told about.
+    pub(crate) extension_selection: Selection,
     pub(crate) style: EditorStyle,
     pub(crate) placeholder: SharedString,
     pub(crate) single_line: bool,
@@ -173,6 +193,8 @@ pub struct EditorView {
     accessible_text: Rc<RefCell<accessibility::AccessibleText>>,
     focus_subscriptions: Option<[Subscription; 3]>,
     pub(crate) caret_blink: caret::CaretBlink,
+    /// Whether the editor holds the window's focus, regardless of window activation.
+    pub(crate) focused: bool,
     caret_focused: bool,
     caret_blink_task: Option<gpui::Task<()>>,
     // The overlay scrollbar shows while scrolling and fades once scrolling stops.
@@ -191,6 +213,8 @@ impl EditorView {
     pub fn new(document: Document, cx: &mut Context<Self>) -> Self {
         Self {
             core: Editor::new(document),
+            extensions: Vec::new(),
+            extension_selection: Selection::default(),
             style: EditorStyle::default(),
             placeholder: SharedString::default(),
             single_line: false,
@@ -208,6 +232,7 @@ impl EditorView {
             accessible_text: Rc::default(),
             focus_subscriptions: None,
             caret_blink: caret::CaretBlink::default(),
+            focused: false,
             caret_focused: false,
             caret_blink_task: None,
             scrollbar_active: false,
@@ -261,9 +286,7 @@ impl EditorView {
         self.core.is_composing()
     }
     pub fn cancel_composition(&mut self, cx: &mut Context<Self>) {
-        self.edit(cx, |core| {
-            core.cancel_composition();
-        });
+        self.edit_inner(cx, true, |core| core.cancel_composition());
     }
     pub fn document(&self) -> &Document {
         self.core.document()
@@ -289,14 +312,20 @@ impl EditorView {
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.reset_caret_blink(cx);
         self.publish(cx);
+        self.run_extensions(
+            extension::Update {
+                committed: true,
+                replaced: true,
+                ..extension::Update::default()
+            },
+            cx,
+        );
     }
     pub fn toggle_mark(&mut self, mark: Mark, cx: &mut Context<Self>) {
         if self.single_line {
             return;
         }
-        self.edit(cx, |core| {
-            core.toggle_mark(mark);
-        });
+        self.edit(cx, |core| core.toggle_mark(mark));
     }
     /// The link containing the caret, or the one shared by the whole selection.
     pub fn active_link(&self) -> Option<&str> {
@@ -308,9 +337,7 @@ impl EditorView {
         if self.single_line {
             return;
         }
-        self.edit(cx, |core| {
-            core.set_link(url);
-        });
+        self.edit(cx, |core| core.set_link(url));
     }
     /// Window bounds of the first line of the selection, or of the link touching the
     /// caret, for anchoring host popovers. Valid after the editor has painted.
@@ -363,17 +390,13 @@ impl EditorView {
         if self.single_line {
             return;
         }
-        self.edit(cx, |core| {
-            core.set_block_kind(kind);
-        });
+        self.edit(cx, |core| core.set_block_kind(kind));
     }
     pub fn toggle_block_kind(&mut self, kind: BlockKind, cx: &mut Context<Self>) {
         if self.single_line {
             return;
         }
-        self.edit(cx, |core| {
-            core.toggle_block_kind(kind);
-        });
+        self.edit(cx, |core| core.toggle_block_kind(kind));
     }
     pub fn code_language(&self, block: usize) -> Option<&str> {
         match &self.document().blocks.get(block)?.kind {
@@ -389,9 +412,7 @@ impl EditorView {
         if self.single_line || self.code_language(block).is_none() {
             return;
         }
-        self.edit(cx, |core| {
-            core.set_code_language_at(block, language);
-        });
+        self.edit(cx, |core| core.set_code_language_at(block, language));
     }
     fn publish(&mut self, cx: &mut Context<Self>) {
         self.published_revision += 1;
@@ -401,7 +422,8 @@ impl EditorView {
         cx.notify();
     }
     fn sync_caret_focus(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let focused = window.is_window_active() && self.focus.is_focused(window);
+        self.focused = self.focus.is_focused(window);
+        let focused = window.is_window_active() && self.focused;
         if self.caret_focused != focused {
             self.caret_focused = focused;
             self.reset_caret_blink(cx);
@@ -467,11 +489,21 @@ impl EditorView {
             }
         }));
     }
-    fn edit(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Editor)) {
+    fn edit(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Editor) -> Option<Change>) {
+        self.edit_inner(cx, false, f);
+    }
+    /// `discarding` marks an edit that restores the committed text — cancelling a
+    /// composition — so extensions are not told the committed document changed.
+    fn edit_inner(
+        &mut self,
+        cx: &mut Context<Self>,
+        discarding: bool,
+        f: impl FnOnce(&mut Editor) -> Option<Change>,
+    ) {
         self.last_typed_at = None;
         let before = self.core.revision();
         let composing = self.core.is_composing();
-        f(&mut self.core);
+        let change = f(&mut self.core);
         self.upstream = false;
         if self.core.revision() != before || composing != self.core.is_composing() {
             self.publish(cx);
@@ -480,11 +512,20 @@ impl EditorView {
         self.reveal = true;
         self.reset_caret_blink(cx);
         cx.notify();
+        let composing_now = self.core.is_composing();
+        self.run_extensions(
+            extension::Update {
+                committed: !discarding && !composing_now && (change.is_some() || composing),
+                change,
+                ..extension::Update::default()
+            },
+            cx,
+        );
     }
     fn select(&mut self, head: Position, extend: bool, cx: &mut Context<Self>) {
         self.last_typed_at = None;
         let composing = self.core.is_composing();
-        self.core.finish_composition();
+        let committed = self.core.finish_composition();
         let anchor = if extend {
             self.core.selection().anchor
         } else {
@@ -497,6 +538,13 @@ impl EditorView {
         self.reveal = true;
         self.reset_caret_blink(cx);
         cx.notify();
+        self.run_extensions(
+            extension::Update {
+                committed,
+                ..extension::Update::default()
+            },
+            cx,
+        );
     }
     fn range(&self) -> Range<usize> {
         let s = self.core.selection();
@@ -556,9 +604,7 @@ impl EditorView {
                 BlockKind::Code { .. }
             )
         {
-            self.edit(cx, |core| {
-                core.exit_code_block();
-            });
+            self.edit(cx, |core| core.exit_code_block());
             return;
         }
         let head = self.core.selection().head;
@@ -630,13 +676,15 @@ impl EditorView {
         let single_line = self.single_line;
         self.edit(cx, |core| {
             if literal {
-                core.insert_text_plain(&single_line::text(text, single_line));
+                core.insert_text_plain(&single_line::text(text, single_line))
             } else if is_web_url(text.trim())
                 && (!core.selection().is_empty() || core.active_link().is_none())
             {
-                core.set_link(Some(text.trim()));
+                core.set_link(Some(text.trim()))
             } else if let Some(fragment) = fragment {
-                core.insert_fragment(fragment);
+                core.insert_fragment(fragment)
+            } else {
+                None
             }
         });
     }
@@ -705,6 +753,8 @@ impl EditorView {
         }
         self.reset_caret_blink(cx);
         cx.notify();
+        // A double or triple click sets the selection outside `select`.
+        self.run_extensions(extension::Update::default(), cx);
     }
     fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.selecting {
@@ -758,6 +808,7 @@ impl EntityInputHandler for EditorView {
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.edit(cx, |c| {
             c.finish_composition();
+            None
         });
     }
     fn replace_text_in_range(
@@ -785,18 +836,18 @@ impl EntityInputHandler for EditorView {
             let group = self.typing_group;
             self.edit(cx, |core| {
                 if single_line {
-                    core.insert_text_plain_grouped(text, group);
+                    core.insert_text_plain_grouped(text, group)
                 } else {
-                    core.insert_text_grouped(text, group);
+                    core.insert_text_grouped(text, group)
                 }
             });
             self.last_typed_at = Some(now);
         } else {
             self.edit(cx, |core| {
                 if single_line {
-                    core.commit_composition_plain(range, text);
+                    core.commit_composition_plain(range, text)
                 } else {
-                    core.commit_composition(range, text);
+                    core.commit_composition(range, text)
                 }
             });
         }
@@ -815,9 +866,7 @@ impl EntityInputHandler for EditorView {
             selected
         };
         let text = single_line::text(text, self.single_line);
-        self.edit(cx, |c| {
-            c.set_composition(range, &text, selected);
-        });
+        self.edit(cx, |c| c.set_composition(range, &text, selected));
     }
     fn bounds_for_range(
         &mut self,
@@ -858,6 +907,7 @@ impl Render for EditorView {
             self.focus_subscriptions = Some([
                 cx.on_focus(&self.focus, window, |this, window, cx| {
                     this.sync_caret_focus(window, cx);
+                    this.run_extensions(extension::Update::default(), cx);
                 }),
                 cx.on_blur(&self.focus, window, |this, window, cx| {
                     this.last_typed_at = None;
@@ -865,6 +915,7 @@ impl Render for EditorView {
                     this.sync_caret_focus(window, cx);
                     // The input method owns commit/unmark ordering. A host that
                     // dismisses an editor can explicitly cancel composition.
+                    this.run_extensions(extension::Update::default(), cx);
                 }),
                 cx.observe_window_activation(window, |this, window, cx| {
                     this.last_typed_at = None;
@@ -873,6 +924,9 @@ impl Render for EditorView {
             ]);
         }
         self.sync_caret_focus(window, cx);
+        self.prune_extensions();
+        let key_context = self.extension_key_context();
+        let overlay = self.extension_overlay(window, cx);
         let accessible_text = self.accessible_text.clone();
         let selection_editor = cx.entity();
         let replacement_editor = cx.entity();
@@ -895,7 +949,10 @@ impl Render for EditorView {
                             let selection = this.accessible_text.borrow().selection(selection);
                             if let Some(selection) = selection {
                                 window.focus(&this.focus, cx);
-                                this.edit(cx, |core| core.set_selection(selection));
+                                this.edit(cx, |core| {
+                                    core.set_selection(selection);
+                                    None
+                                });
                             }
                         });
                     }
@@ -911,9 +968,9 @@ impl Render for EditorView {
                             let value = single_line::text(value, single_line);
                             this.edit(cx, |core| {
                                 if single_line {
-                                    core.commit_composition_plain(None, &value);
+                                    core.commit_composition_plain(None, &value)
                                 } else {
-                                    core.commit_composition(None, &value);
+                                    core.commit_composition(None, &value)
                                 }
                             });
                         });
@@ -932,22 +989,32 @@ impl Render for EditorView {
                                 head: core.utf16_to_position(usize::MAX),
                             });
                             if single_line {
-                                core.insert_text_plain(&value);
+                                core.insert_text_plain(&value)
                             } else {
-                                core.insert_text(&value);
+                                core.insert_text(&value)
                             }
                         });
                     });
                 }
             })
             .size_full()
-            .key_context("Markraft")
+            .key_context(key_context)
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up));
+        // Extension listeners run from window dispatch, so they may update the editor.
+        for (id, handler) in self.extension_actions() {
+            let run = handler.run.clone();
+            root = root.on_boxed_action(
+                &*handler.action,
+                cx.listener(move |this, _: &dyn Action, _, cx| {
+                    this.run_extension_action(id, &run, cx);
+                }),
+            );
+        }
         macro_rules! edit_action {
             ($action:ty, $call:expr) => {
                 root = root.on_action(cx.listener(|this, _: &$action, _, cx| {
@@ -955,19 +1022,13 @@ impl Render for EditorView {
                 }));
             };
         }
-        edit_action!(Backspace, |c| {
-            c.backspace();
-        });
-        edit_action!(Delete, |c| {
-            c.delete_forward();
-        });
+        edit_action!(Backspace, |c| c.backspace());
+        edit_action!(Delete, |c| c.delete_forward());
         root = root.on_action(cx.listener(|this, _: &Enter, _, cx| {
             if this.single_line {
                 cx.propagate();
             } else {
-                this.edit(cx, |core| {
-                    core.insert_text("\n");
-                });
+                this.edit(cx, |core| core.insert_text("\n"));
             }
         }));
         root = root
@@ -980,15 +1041,13 @@ impl Render for EditorView {
                 if matches!(kind, BlockKind::Code { .. }) {
                     this.edit(cx, |core| {
                         if core.selection().is_empty() {
-                            core.insert_text_plain("\t");
+                            core.insert_text_plain("\t")
                         } else {
-                            core.indent();
+                            core.indent()
                         }
                     });
                 } else if kind.is_list() || *kind == BlockKind::Quote {
-                    this.edit(cx, |core| {
-                        core.indent();
-                    });
+                    this.edit(cx, |core| core.indent());
                 } else {
                     cx.propagate();
                 }
@@ -1000,42 +1059,44 @@ impl Render for EditorView {
                 }
                 let kind = &this.document().blocks[this.core.selection().head.block].kind;
                 if kind.is_list() || matches!(kind, BlockKind::Quote | BlockKind::Code { .. }) {
-                    this.edit(cx, |core| {
-                        core.outdent();
-                    });
+                    this.edit(cx, |core| core.outdent());
                 } else {
                     cx.propagate();
                 }
             }));
         edit_action!(WordLeft, |c| {
             c.move_word_left(false);
+            None
         });
         edit_action!(WordRight, |c| {
             c.move_word_right(false);
+            None
         });
         edit_action!(SelectWordLeft, |c| {
             c.move_word_left(true);
+            None
         });
         edit_action!(SelectWordRight, |c| {
             c.move_word_right(true);
+            None
         });
-        edit_action!(DeleteWordBackward, |c| {
-            c.delete_word_backward();
-        });
-        edit_action!(DeleteWordForward, |c| {
-            c.delete_word_forward();
-        });
+        edit_action!(DeleteWordBackward, |c| c.delete_word_backward());
+        edit_action!(DeleteWordForward, |c| c.delete_word_forward());
         edit_action!(DocumentStart, |c| {
             c.move_document_start(false);
+            None
         });
         edit_action!(DocumentEnd, |c| {
             c.move_document_end(false);
+            None
         });
         edit_action!(SelectDocumentStart, |c| {
             c.move_document_start(true);
+            None
         });
         edit_action!(SelectDocumentEnd, |c| {
             c.move_document_end(true);
+            None
         });
         root = root.on_action(cx.listener(|this, _: &CancelComposition, _, cx| {
             if this.is_composing() {
@@ -1046,22 +1107,22 @@ impl Render for EditorView {
         }));
         edit_action!(Left, |c| {
             c.move_left(false);
+            None
         });
         edit_action!(Right, |c| {
             c.move_right(false);
+            None
         });
         edit_action!(SelectLeft, |c| {
             c.move_left(true);
+            None
         });
         edit_action!(SelectRight, |c| {
             c.move_right(true);
+            None
         });
-        edit_action!(Undo, |c| {
-            c.undo();
-        });
-        edit_action!(Redo, |c| {
-            c.redo();
-        });
+        edit_action!(Undo, |c| c.undo());
+        edit_action!(Redo, |c| c.redo());
         macro_rules! format_action {
             ($action:ty, $call:expr) => {
                 root = root.on_action(cx.listener(|this, _: &$action, _, cx| {
@@ -1071,50 +1132,23 @@ impl Render for EditorView {
                 }));
             };
         }
-        format_action!(Bold, |c| {
-            c.toggle_mark(Mark::Bold);
-        });
-        format_action!(Italic, |c| {
-            c.toggle_mark(Mark::Italic);
-        });
-        format_action!(Code, |c| {
-            c.toggle_mark(Mark::Code);
-        });
-        format_action!(Strikethrough, |c| {
-            c.toggle_mark(Mark::Strikethrough);
-        });
-        format_action!(Underline, |c| {
-            c.toggle_mark(Mark::Underline);
-        });
-        format_action!(Paragraph, |c| {
-            c.toggle_block_kind(BlockKind::Paragraph);
-        });
-        format_action!(Heading, |c| {
-            c.toggle_block_kind(BlockKind::Heading(1));
-        });
-        format_action!(Heading2, |c| {
-            c.toggle_block_kind(BlockKind::Heading(2));
-        });
-        format_action!(Heading3, |c| {
-            c.toggle_block_kind(BlockKind::Heading(3));
-        });
-        format_action!(Quote, |c| {
-            c.toggle_block_kind(BlockKind::Quote);
-        });
-        format_action!(CodeBlock, |c| {
-            c.toggle_block_kind(BlockKind::Code {
-                language: String::new(),
-            });
-        });
-        format_action!(Ordered, |c| {
-            c.toggle_block_kind(BlockKind::Ordered);
-        });
-        format_action!(Bullet, |c| {
-            c.toggle_block_kind(BlockKind::Bullet);
-        });
-        format_action!(Task, |c| {
-            c.toggle_block_kind(BlockKind::Task { checked: false });
-        });
+        format_action!(Bold, |c| c.toggle_mark(Mark::Bold));
+        format_action!(Italic, |c| c.toggle_mark(Mark::Italic));
+        format_action!(Code, |c| c.toggle_mark(Mark::Code));
+        format_action!(Strikethrough, |c| c.toggle_mark(Mark::Strikethrough));
+        format_action!(Underline, |c| c.toggle_mark(Mark::Underline));
+        format_action!(Paragraph, |c| c.toggle_block_kind(BlockKind::Paragraph));
+        format_action!(Heading, |c| c.toggle_block_kind(BlockKind::Heading(1)));
+        format_action!(Heading2, |c| c.toggle_block_kind(BlockKind::Heading(2)));
+        format_action!(Heading3, |c| c.toggle_block_kind(BlockKind::Heading(3)));
+        format_action!(Quote, |c| c.toggle_block_kind(BlockKind::Quote));
+        format_action!(CodeBlock, |c| c.toggle_block_kind(BlockKind::Code {
+            language: String::new(),
+        }));
+        format_action!(Ordered, |c| c.toggle_block_kind(BlockKind::Ordered));
+        format_action!(Bullet, |c| c.toggle_block_kind(BlockKind::Bullet));
+        format_action!(Task, |c| c
+            .toggle_block_kind(BlockKind::Task { checked: false }));
         let root = root
             .on_action(cx.listener(|this, _: &Up, _, cx| this.vertical(-1., false, cx)))
             .on_action(cx.listener(|this, _: &Down, _, cx| this.vertical(1., false, cx)))
@@ -1142,7 +1176,7 @@ impl Render for EditorView {
                         };
                         if core.selection().ordered() != selection.ordered() {
                             core.set_selection(selection);
-                            return;
+                            return None;
                         }
                     }
                     let head = core.utf16_to_position(usize::MAX);
@@ -1150,6 +1184,7 @@ impl Render for EditorView {
                         anchor: Position { block: 0, byte: 0 },
                         head,
                     });
+                    None
                 });
             }))
             .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
@@ -1158,9 +1193,9 @@ impl Render for EditorView {
                 let single_line = this.single_line;
                 this.edit(cx, |c| {
                     if single_line {
-                        c.insert_text_plain("");
+                        c.insert_text_plain("")
                     } else {
-                        c.insert_text("");
+                        c.insert_text("")
                     }
                 });
             }))
@@ -1183,9 +1218,7 @@ impl Render for EditorView {
                     this.document().blocks[head.block].kind,
                     BlockKind::Code { .. }
                 ) {
-                    this.edit(cx, |core| {
-                        core.exit_code_block();
-                    });
+                    this.edit(cx, |core| core.exit_code_block());
                 }
             }))
             .on_action(
@@ -1209,9 +1242,12 @@ impl Render for EditorView {
         // scroll with the content. It is an indicator only and takes no pointer input.
         let active = self.scrollbar_active;
         let color = self.style.scrollbar;
-        div().size_full().relative().child(root).when_some(
-            self.scrollbar_thumb(),
-            |this, (top, height)| {
+        let editor = cx.entity();
+        div()
+            .size_full()
+            .relative()
+            .child(root)
+            .when_some(self.scrollbar_thumb(), |this, (top, height)| {
                 this.child(
                     div()
                         .absolute()
@@ -1227,8 +1263,17 @@ impl Render for EditorView {
                             |s, phase| s.opacity(phase.interpolate_clamped(0., 1.)),
                         ),
                 )
-            },
-        )
+            })
+            // Deferred so it draws over the note and is positioned after the surface has
+            // published this frame's rows.
+            .when_some(overlay, |this, overlay: Overlay| {
+                this.child(deferred(AnchoredOverlay {
+                    editor,
+                    anchor: overlay.anchor,
+                    gap: overlay.gap,
+                    child: overlay.element,
+                }))
+            })
     }
 }
 

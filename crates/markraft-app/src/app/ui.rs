@@ -2,9 +2,11 @@ mod code;
 mod formatting;
 mod icons;
 mod link;
+pub(in crate::app) mod slash;
 
 use super::*;
 use icons::{Icon, icon};
+use slash::{Command, SlashEffect};
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone)]
@@ -47,6 +49,32 @@ enum Intent {
     Mark(Mark),
     Block(BlockKind),
 }
+/// The icon a command shows in the ⌘K panel and in the `/` menu.
+fn intent_icon(intent: &Intent) -> Icon {
+    match intent {
+        Intent::New => Icon::Plus,
+        Intent::Browse => Icon::Notes,
+        Intent::Pin => Icon::Pin,
+        Intent::Delete => Icon::Trash,
+        Intent::Copy | Intent::SaveCopy => Icon::Copy,
+        Intent::Export | Intent::Import => Icon::Export,
+        Intent::Settings => Icon::Settings,
+        Intent::Mark(Mark::Bold) => Icon::Bold,
+        Intent::Mark(Mark::Italic) => Icon::Italic,
+        Intent::Mark(Mark::Code) => Icon::Code,
+        Intent::Mark(Mark::Strikethrough) => Icon::Strikethrough,
+        Intent::Mark(Mark::Underline) => Icon::Underline,
+        Intent::Link => Icon::Link,
+        Intent::Block(BlockKind::Heading(_)) => Icon::Heading,
+        Intent::Block(BlockKind::Quote) => Icon::Quote,
+        Intent::Block(BlockKind::Code { .. }) => Icon::CodeBlock,
+        Intent::Block(BlockKind::Ordered) => Icon::Ordered,
+        Intent::Block(BlockKind::Bullet) => Icon::Bullet,
+        Intent::Block(BlockKind::Task { .. }) => Icon::Task,
+        _ => Icon::Paragraph,
+    }
+}
+
 impl NotesApp {
     fn intent(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
         match intent {
@@ -102,7 +130,7 @@ impl NotesApp {
             Intent::PinNote(id) => self.toggle_pin(&id, cx),
             Intent::TrashNote(id) => self.trash_note(&id, window, cx),
             Intent::Select(id) => self.select_note(&id, window, cx),
-            Intent::Restore(id) => self.restore_note(&id, cx),
+            Intent::Restore(id) => self.restore_note(&id, window, cx),
             Intent::Copy => {
                 self.copy_markdown(cx);
                 self.intent(Intent::Back, window, cx);
@@ -396,28 +424,7 @@ impl NotesApp {
         intent: Intent,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let kind = match &intent {
-            Intent::New => Icon::Plus,
-            Intent::Browse => Icon::Notes,
-            Intent::Pin => Icon::Pin,
-            Intent::Delete => Icon::Trash,
-            Intent::Copy | Intent::SaveCopy => Icon::Copy,
-            Intent::Export | Intent::Import => Icon::Export,
-            Intent::Settings => Icon::Settings,
-            Intent::Mark(Mark::Bold) => Icon::Bold,
-            Intent::Mark(Mark::Italic) => Icon::Italic,
-            Intent::Mark(Mark::Code) => Icon::Code,
-            Intent::Mark(Mark::Strikethrough) => Icon::Strikethrough,
-            Intent::Mark(Mark::Underline) => Icon::Underline,
-            Intent::Link => Icon::Link,
-            Intent::Block(BlockKind::Heading(_)) => Icon::Heading,
-            Intent::Block(BlockKind::Quote) => Icon::Quote,
-            Intent::Block(BlockKind::Code { .. }) => Icon::CodeBlock,
-            Intent::Block(BlockKind::Ordered) => Icon::Ordered,
-            Intent::Block(BlockKind::Bullet) => Icon::Bullet,
-            Intent::Block(BlockKind::Task { .. }) => Icon::Task,
-            _ => Icon::Paragraph,
-        };
+        let kind = intent_icon(&intent);
         div()
             .id(id)
             .role(Role::Button)
@@ -898,8 +905,8 @@ impl NotesApp {
                 "up" => self.selected = self.selected.saturating_sub(1),
                 "down" => self.selected = (self.selected + 1).min(items.len().saturating_sub(1)),
                 "enter" => {
-                    if let Some((_, _, _, intent)) = items.get(self.selected) {
-                        self.intent(intent.clone(), window, cx);
+                    if let Some(intent) = items.get(self.selected).and_then(|c| c.intent.clone()) {
+                        self.intent(intent, window, cx);
                     }
                 }
                 _ => return false,
@@ -915,7 +922,7 @@ impl NotesApp {
                     if let Some(note) = notes.get(self.selected) {
                         let id = note.id.clone();
                         if self.panel == Panel::Trash {
-                            self.restore_note(&id, cx);
+                            self.restore_note(&id, window, cx);
                         } else {
                             self.select_note(&id, window, cx);
                         }
@@ -928,11 +935,14 @@ impl NotesApp {
         cx.notify();
         true
     }
-    fn action_items(&self) -> Vec<(&'static str, &'static str, &'static str, Intent)> {
+    /// Every command the app offers, once: the ⌘K panel lists the ones with an intent
+    /// and the editor's `/` menu the ones with a slash effect, so both keep the same
+    /// labels and shortcut hints.
+    fn action_items(&self) -> Vec<Command> {
         vec![
-            ("new-action", "New Note", "⌘N", Intent::New),
-            ("browse-action", "Browse Notes", "⌘P", Intent::Browse),
-            (
+            Command::new("new-action", "New Note", "⌘N", Intent::New),
+            Command::new("browse-action", "Browse Notes", "⌘P", Intent::Browse),
+            Command::new(
                 "pin-note",
                 if self.library.active_note().pinned {
                     "Unpin Note"
@@ -942,93 +952,118 @@ impl NotesApp {
                 "",
                 Intent::Pin,
             ),
-            ("copy-markdown", "Copy as Markdown", "⇧⌘C", Intent::Copy),
-            (
+            Command::new("copy-markdown", "Copy as Markdown", "⇧⌘C", Intent::Copy),
+            Command::new(
                 "paste-plain",
                 "Paste as Plain Text",
                 "⇧⌘V",
                 Intent::PastePlain,
             ),
-            (
+            Command::new(
                 "paste-markdown",
                 "Paste as Markdown",
                 "⌥⇧⌘V",
                 Intent::PasteMarkdown,
             ),
-            ("export-note", "Export Markdown…", "⇧⌘E", Intent::Export),
-            ("format-bold", "Bold", "⌘B", Intent::Mark(Mark::Bold)),
-            ("format-italic", "Italic", "⌘I", Intent::Mark(Mark::Italic)),
-            (
+            Command::new("export-note", "Export Markdown…", "⇧⌘E", Intent::Export),
+            Command::new("format-bold", "Bold", "⌘B", Intent::Mark(Mark::Bold)),
+            Command::new("format-italic", "Italic", "⌘I", Intent::Mark(Mark::Italic)),
+            Command::new(
                 "format-strikethrough",
                 "Strikethrough",
                 "⇧⌘S",
                 Intent::Mark(Mark::Strikethrough),
             ),
-            (
+            Command::new(
                 "format-underline",
                 "Underline",
                 "⌘U",
                 Intent::Mark(Mark::Underline),
             ),
-            ("format-code", "Inline Code", "⌘E", Intent::Mark(Mark::Code)),
-            ("format-link", "Link", "⌘L", Intent::Link),
-            (
+            Command::new("format-code", "Inline Code", "⌘E", Intent::Mark(Mark::Code)),
+            Command::new("format-link", "Link", "⌘L", Intent::Link).slash(10, SlashEffect::Host),
+            Command::new(
                 "format-heading",
-                "Heading",
+                "Heading 1",
                 "⌥⌘1",
                 Intent::Block(BlockKind::Heading(1)),
-            ),
-            (
+            )
+            .slash(1, SlashEffect::Block(BlockKind::Heading(1))),
+            Command::new(
+                "format-heading-2",
+                "Heading 2",
+                "⌥⌘2",
+                Intent::Block(BlockKind::Heading(2)),
+            )
+            .slash(2, SlashEffect::Block(BlockKind::Heading(2))),
+            Command::new(
+                "format-heading-3",
+                "Heading 3",
+                "⌥⌘3",
+                Intent::Block(BlockKind::Heading(3)),
+            )
+            .slash(3, SlashEffect::Block(BlockKind::Heading(3))),
+            Command::new(
                 "format-quote",
                 "Quote",
                 "⇧⌘B",
                 Intent::Block(BlockKind::Quote),
-            ),
-            (
+            )
+            .slash(7, SlashEffect::Block(BlockKind::Quote)),
+            Command::new(
                 "format-code-block",
                 "Code Block",
                 "⌥⌘C",
                 Intent::Block(BlockKind::Code {
                     language: String::new(),
                 }),
+            )
+            .slash(
+                8,
+                SlashEffect::Block(BlockKind::Code {
+                    language: String::new(),
+                }),
             ),
-            (
+            Command::new(
                 "format-paragraph",
                 "Paragraph",
                 "⌥⌘0",
                 Intent::Block(BlockKind::Paragraph),
-            ),
-            (
+            )
+            .slash(0, SlashEffect::Block(BlockKind::Paragraph)),
+            Command::new(
                 "format-ordered",
                 "Ordered List",
                 "⇧⌘7",
                 Intent::Block(BlockKind::Ordered),
-            ),
-            (
+            )
+            .slash(5, SlashEffect::Block(BlockKind::Ordered)),
+            Command::new(
                 "format-bullet",
                 "Bullet List",
                 "⇧⌘8",
                 Intent::Block(BlockKind::Bullet),
-            ),
-            (
+            )
+            .slash(4, SlashEffect::Block(BlockKind::Bullet)),
+            Command::new(
                 "format-task",
                 "Task List",
                 "⇧⌘9",
                 Intent::Block(BlockKind::Task { checked: false }),
-            ),
-            (
+            )
+            .slash(6, SlashEffect::Block(BlockKind::Task { checked: false })),
+            // A rule replaces the line it is on, so only the `/` menu offers it.
+            Command::editor("insert-divider", "Divider", 9, SlashEffect::Divider),
+            Command::new(
                 "delete-note",
                 "Move to Recently Deleted",
                 "",
                 Intent::Delete,
             ),
-            ("open-settings", "Settings…", "⌘,", Intent::Settings),
+            Command::new("open-settings", "Settings…", "⌘,", Intent::Settings),
         ]
     }
-    fn filtered_actions(
-        &self,
-        cx: &App,
-    ) -> Vec<(&'static str, &'static str, &'static str, Intent)> {
+    fn filtered_actions(&self, cx: &App) -> Vec<Command> {
         let query = self
             .query
             .read(cx)
@@ -1038,7 +1073,9 @@ impl NotesApp {
             .to_lowercase();
         self.action_items()
             .into_iter()
-            .filter(|(_, label, _, _)| label.to_lowercase().contains(&query))
+            .filter(|command| {
+                command.intent.is_some() && command.label.to_lowercase().contains(&query)
+            })
             .collect()
     }
     fn actions_panel(&self, cx: &mut Context<Self>) -> Div {
@@ -1061,7 +1098,15 @@ impl NotesApp {
                     .child("No matching actions"),
             );
         }
-        for (index, (id, label, hint, intent)) in items.into_iter().enumerate() {
+        for (index, command) in items.into_iter().enumerate() {
+            let Command {
+                id,
+                label,
+                shortcut,
+                intent,
+                ..
+            } = command;
+            let Some(intent) = intent else { continue };
             let separator = index > 0 && matches!(id, "format-bold" | "delete-note");
             list = list.child(
                 div()
@@ -1075,7 +1120,7 @@ impl NotesApp {
                         )
                     })
                     .child(
-                        self.row(id, label, hint, intent, cx)
+                        self.row(id, label, shortcut, intent, cx)
                             .aria_selected(index == self.selected)
                             .when(index == self.selected, |s| s.bg(self.selected_color()))
                             .on_mouse_move(cx.listener(move |this, _, _, cx| {
@@ -1126,8 +1171,8 @@ impl NotesApp {
                 let separators = items
                     .iter()
                     .enumerate()
-                    .filter(|(index, (id, _, _, _))| {
-                        *index > 0 && matches!(*id, "format-bold" | "delete-note")
+                    .filter(|(index, command)| {
+                        *index > 0 && matches!(command.id, "format-bold" | "delete-note")
                     })
                     .count();
                 if count == 0 {

@@ -9,7 +9,7 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use markraft_core::{BlockKind, Document, Mark};
-use markraft_gpui::{EditorEvent, EditorStyle, EditorView};
+use markraft_gpui::{EditorEvent, EditorStyle, EditorView, ExtensionHandle};
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
@@ -59,6 +59,8 @@ struct Session {
     editor: Entity<EditorView>,
     _changes: Subscription,
     _format_changes: Subscription,
+    /// Unregisters the note's `/` menu when the session is evicted.
+    _slash_menu: ExtensionHandle,
 }
 pub struct NotesApp {
     library: Library,
@@ -259,7 +261,7 @@ impl NotesApp {
             _activation: activation,
             _quit: quit,
         };
-        app.ensure_session(cx);
+        app.ensure_session(window, cx);
         if app.persistence.is_some() {
             app.focus_editor(window, cx);
         } else {
@@ -272,7 +274,7 @@ impl NotesApp {
     fn editor(&self) -> Entity<EditorView> {
         self.sessions[&self.library.active_id].editor.clone()
     }
-    fn ensure_session(&mut self, cx: &mut Context<Self>) {
+    fn ensure_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.code_language_block = None;
         let id = self.library.active_id.clone();
         self.session_order.retain(|entry| entry != &id);
@@ -292,38 +294,51 @@ impl NotesApp {
                 .with_style(style)
                 .with_placeholder("Start writing…")
         });
+        // Only note editors get the `/` menu; the host's query field gets no extension.
+        let menu = self.slash_menu();
+        let slash_menu = editor.update(cx, |editor, cx| editor.add_extension(menu, cx));
         let note_id = id.clone();
-        let changes = cx.subscribe(&editor, move |this, editor, event: &EditorEvent, cx| {
-            if matches!(event, EditorEvent::CodeCopied) {
+        let changes = cx.subscribe_in(
+            &editor,
+            window,
+            move |this, editor, event: &EditorEvent, window, cx| {
+                if let EditorEvent::Extension { id, payload } = event {
+                    if *id == ui::slash::SLASH_MENU && this.library.active_id == note_id {
+                        this.slash_effect(payload, window, cx);
+                    }
+                    return;
+                }
+                if matches!(event, EditorEvent::CodeCopied) {
+                    if this.library.active_id == note_id {
+                        this.inform("Code copied", cx);
+                    }
+                    return;
+                }
+                if let EditorEvent::CodeLanguageRequested { block } = event {
+                    if this.library.active_id == note_id && this.panel == Panel::Editor {
+                        this.open_code_language(*block, cx);
+                    }
+                    return;
+                }
+                if matches!(event, EditorEvent::LinkClicked) {
+                    if this.library.active_id == note_id && this.panel == Panel::Editor {
+                        this.code_language_block = None;
+                        this.link_popover = Some(LinkPopover::View);
+                        cx.notify();
+                    }
+                    return;
+                }
                 if this.library.active_id == note_id {
-                    this.inform("Code copied", cx);
-                }
-                return;
-            }
-            if let EditorEvent::CodeLanguageRequested { block } = event {
-                if this.library.active_id == note_id && this.panel == Panel::Editor {
-                    this.open_code_language(*block, cx);
-                }
-                return;
-            }
-            if matches!(event, EditorEvent::LinkClicked) {
-                if this.library.active_id == note_id && this.panel == Panel::Editor {
+                    this.link_popover = None;
                     this.code_language_block = None;
-                    this.link_popover = Some(LinkPopover::View);
-                    cx.notify();
                 }
-                return;
-            }
-            if this.library.active_id == note_id {
-                this.link_popover = None;
-                this.code_language_block = None;
-            }
-            let document = editor.read(cx).committed_document().clone();
-            if this.library.set_document(&note_id, document) {
-                this.changed(cx);
-            }
-            cx.notify();
-        });
+                let document = editor.read(cx).committed_document().clone();
+                if this.library.set_document(&note_id, document) {
+                    this.changed(cx);
+                }
+                cx.notify();
+            },
+        );
         let format_note_id = id.clone();
         let format_changes = cx.observe(&editor, move |this, editor, cx| {
             if this.format_toolbar && this.library.active_id == format_note_id {
@@ -341,6 +356,7 @@ impl NotesApp {
                 editor,
                 _changes: changes,
                 _format_changes: format_changes,
+                _slash_menu: slash_menu,
             },
         );
     }
@@ -352,7 +368,12 @@ impl NotesApp {
     }
     /// Take over what other programs changed in the notes folder. Edits made here that
     /// had not reached the disk are never dropped: they continue as a separate note.
-    fn apply_external(&mut self, changes: Vec<External>, cx: &mut Context<Self>) {
+    fn apply_external(
+        &mut self,
+        changes: Vec<External>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.sync_documents(cx);
         let mut ids = Vec::new();
         let mut kept = 0;
@@ -385,7 +406,7 @@ impl NotesApp {
             self.session_order.retain(|entry| entry != &id);
             ids.push(id);
         }
-        self.ensure_session(cx);
+        self.ensure_session(window, cx);
         if let Some(persistence) = &self.persistence {
             persistence.acknowledge(ids);
         }
@@ -489,7 +510,7 @@ impl NotesApp {
                     cx.notify();
                 }
                 Event::Saved(_) => {}
-                Event::External(changes) => self.apply_external(changes, cx),
+                Event::External(changes) => self.apply_external(changes, window, cx),
             }
         }
         if self.save_at.is_some_and(|at| Instant::now() >= at) {
@@ -628,7 +649,7 @@ impl NotesApp {
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
         self.sync_documents(cx);
         self.library.new_note(Document::default());
-        self.ensure_session(cx);
+        self.ensure_session(window, cx);
         self.panel = Panel::Editor;
         self.focus_editor(window, cx);
         self.changed(cx);
@@ -641,7 +662,7 @@ impl NotesApp {
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
         self.sync_documents(cx);
         if self.library.select(id) {
-            self.ensure_session(cx);
+            self.ensure_session(window, cx);
             self.panel = Panel::Editor;
             self.focus_editor(window, cx);
             self.changed(cx);
@@ -708,7 +729,7 @@ impl NotesApp {
         self.sync_documents(cx);
         if self.library.delete(id) {
             self.sessions.remove(id);
-            self.ensure_session(cx);
+            self.ensure_session(window, cx);
             let query = self.query.read(cx).document().plain_text();
             self.selected = self.selected.min(
                 self.library
@@ -727,16 +748,16 @@ impl NotesApp {
         self.sync_documents(cx);
         if self.library.delete(&id) {
             self.sessions.remove(&id);
-            self.ensure_session(cx);
+            self.ensure_session(window, cx);
             self.panel = Panel::Editor;
             self.focus_editor(window, cx);
             self.changed(cx);
             self.inform("Moved to Recently Deleted", cx);
         }
     }
-    fn restore_note(&mut self, id: &str, cx: &mut Context<Self>) {
+    fn restore_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.library.restore(id) {
-            self.ensure_session(cx);
+            self.ensure_session(window, cx);
             self.changed(cx);
             self.selected = self.selected.min(
                 self.library
@@ -913,7 +934,7 @@ impl NotesApp {
                 self.persistence = Some(Persistence::new(store));
                 self.sessions.clear();
                 self.session_order.clear();
-                self.ensure_session(cx);
+                self.ensure_session(window, cx);
                 self.error = None;
                 self.panel = Panel::Editor;
                 self.focus_editor(window, cx);
@@ -1002,7 +1023,7 @@ impl NotesApp {
                                 this.library = library;
                                 this.sessions.clear();
                                 this.session_order.clear();
-                                this.ensure_session(cx);
+                                this.ensure_session(window, cx);
                                 this.panel = Panel::Editor;
                                 this.dirty = false;
                                 this.error = None;
@@ -1087,7 +1108,7 @@ impl NotesApp {
                             for doc in documents {
                                 this.library.new_note(doc);
                             }
-                            this.ensure_session(cx);
+                            this.ensure_session(window, cx);
                             this.panel = Panel::Editor;
                             this.focus_editor(window, cx);
                             this.changed(cx);

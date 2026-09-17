@@ -34,6 +34,10 @@ pub struct EditorStyle {
     pub top_overlay: Pixels,
     pub bottom_overlay: Pixels,
     pub scrollbar: Hsla,
+    /// Popups an extension anchors in the text, such as a typeahead menu.
+    pub popup_background: Hsla,
+    pub popup_border: Hsla,
+    pub popup_selected: Hsla,
 }
 
 impl Default for EditorStyle {
@@ -63,6 +67,9 @@ impl Default for EditorStyle {
             top_overlay: px(0.),
             bottom_overlay: px(0.),
             scrollbar: rgba(0x00000047).into(),
+            popup_background: rgb(0xfcfbf8).into(),
+            popup_border: rgb(0xd9d7d0).into(),
+            popup_selected: rgb(0xedece7).into(),
         }
     }
 }
@@ -95,6 +102,10 @@ impl EditorStyle {
             top_overlay: px(0.),
             bottom_overlay: px(0.),
             scrollbar: rgba(0x00000047).into(),
+            // The host's popover palette, so an in-editor popup matches its pickers.
+            popup_background: rgb(0xf8f8f8).into(),
+            popup_border: rgb(0xdcdcdc).into(),
+            popup_selected: rgb(0xe2e2e2).into(),
         }
     }
 
@@ -110,6 +121,9 @@ impl EditorStyle {
             inline_code_text: rgb(0xb9bcc2).into(),
             rule: rgb(0x46484e).into(),
             scrollbar: rgba(0xffffff4d).into(),
+            popup_background: rgb(0x2e2f33).into(),
+            popup_border: rgb(0x383a40).into(),
+            popup_selected: rgb(0x414246).into(),
             ..Self::notes()
         }
     }
