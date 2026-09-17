@@ -6,6 +6,7 @@ members = ["crates/markraft-core", "crates/markraft-gpui", "crates/markraft-app"
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "MIT"
 repository = "https://github.com/ahonn/markraft"
 
 [workspace.dependencies]

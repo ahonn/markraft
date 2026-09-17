@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 description = "Platform-independent structured rich-text editing core"
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

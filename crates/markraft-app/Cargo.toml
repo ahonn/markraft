@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 description = "Floating macOS notepad built on the Markraft editor"
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 gpui.workspace = true
