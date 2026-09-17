@@ -39,6 +39,8 @@ enum Intent {
     AutoHeight,
     Shortcut,
     Reveal,
+    ChooseFolder,
+    DefaultFolder,
     Retry,
     SaveCopy,
     Reload,
@@ -141,7 +143,17 @@ impl NotesApp {
                 self.changed(cx);
             }
             Intent::Shortcut => self.apply_shortcut(cx),
-            Intent::Reveal => cx.reveal_path(&self.path),
+            Intent::Reveal => {
+                if let Some(path) = &self.path {
+                    cx.reveal_path(path);
+                }
+            }
+            Intent::ChooseFolder => self.choose_folder(window, cx),
+            Intent::DefaultFolder => {
+                if let Some(directory) = Self::default_folder() {
+                    self.open_folder(directory, window, cx);
+                }
+            }
             Intent::Retry => self.recover(window, cx),
             Intent::SaveCopy => self.save_copy(cx),
             Intent::Reload => self.reload(window, cx),
@@ -761,6 +773,38 @@ impl NotesApp {
                     .border_color(self.border_color())
                     .text_size(px(11.))
                     .text_color(self.muted())
+                    .child("Notes Folder"),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .w_0()
+                            .truncate()
+                            .text_size(px(12.))
+                            .child(
+                                self.path
+                                    .as_ref()
+                                    .map(|path| path.display().to_string())
+                                    .unwrap_or_default(),
+                            ),
+                    )
+                    .child(self.button("change-folder", "Change…", Intent::ChooseFolder, cx)),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(self.border_color())
+                    .text_size(px(11.))
+                    .text_color(self.muted())
                     .child("Global Shortcut"),
             )
             .child(
@@ -1292,14 +1336,41 @@ impl Render for NotesApp {
                     ),
             );
         if self.persistence.is_none() {
-            let explanation = "Nothing in the folder was changed. Check that it exists and \
-                that no other Markraft is using it, then retry.";
+            // Either no folder has been chosen yet, or the chosen one could not be opened.
+            let first_launch = self.path.is_none();
+            let (title, explanation) = if first_launch {
+                (
+                    "Choose where to keep your notes",
+                    "Each note is a Markdown file in this folder, so other apps can read, \
+                     sync and back them up. You can change the folder later in Settings.",
+                )
+            } else {
+                (
+                    "Your notes could not be opened",
+                    "Nothing in the folder was changed. Check that it exists and that no \
+                     other Markraft is using it, then retry or choose another folder.",
+                )
+            };
             let actions = div()
                 .mt_4()
                 .flex()
+                .flex_wrap()
                 .gap_2()
-                .child(self.button("retry-open", "Retry", Intent::Retry, cx))
-                .child(self.button("reveal-library", "Show Folder", Intent::Reveal, cx));
+                .when(!first_launch, |s| {
+                    s.child(self.button("retry-open", "Retry", Intent::Retry, cx))
+                })
+                .child(self.button("choose-folder", "Choose Folder…", Intent::ChooseFolder, cx))
+                .when(first_launch && Self::default_folder().is_some(), |s| {
+                    s.child(self.button(
+                        "default-folder",
+                        "Use Documents/Markraft",
+                        Intent::DefaultFolder,
+                        cx,
+                    ))
+                })
+                .when(!first_launch, |s| {
+                    s.child(self.button("reveal-library", "Show Folder", Intent::Reveal, cx))
+                });
             let detail = div()
                 .mt_3()
                 .text_size(px(12.))
@@ -1311,8 +1382,8 @@ impl Render for NotesApp {
                     .p_6()
                     .pt(TOOLBAR_HEIGHT + px(24.))
                     .text_size(px(14.))
-                    .child("Your notes could not be opened")
-                    .child(detail)
+                    .child(title)
+                    .when(self.error.is_some(), |s| s.child(detail))
                     .child(div().mt_4().text_size(px(12.)).child(explanation))
                     .child(actions),
             );

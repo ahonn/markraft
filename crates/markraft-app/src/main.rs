@@ -18,7 +18,8 @@ Markraft Notes — a floating, local-first notepad.
 
 Usage: markraft-app [--dir PATH] [--settings PATH]
 
-  --dir PATH        Keep notes as Markdown files in this folder.
+  --dir PATH        Keep notes as Markdown files in this folder for this run,
+                    instead of the one chosen in the app.
   --settings PATH   Use this settings file instead of the default:
                     ~/Library/Application Support/Markraft/settings.json
 
@@ -54,25 +55,26 @@ fn main() {
         .join("Library/Application Support/Markraft")
     };
     let settings_path = settings_path.unwrap_or_else(|| support().join("settings.json"));
-    let directory = directory
-        .or_else(|| {
-            Settings::read(&settings_path)
-                .ok()
-                .and_then(|settings| settings.notes_folder)
-        })
-        .unwrap_or_else(|| support().join("notes"));
-    let instance = match Instance::acquire(&directory.join(".markraft/instance"))
-        .unwrap_or_else(|e| fail(&e))
-    {
+    // Until a folder has been chosen the app opens on that question.
+    let directory = directory.or_else(|| {
+        Settings::read(&settings_path)
+            .ok()
+            .and_then(|settings| settings.notes_folder)
+    });
+    let instance = match Instance::acquire(&settings_path).unwrap_or_else(|e| fail(&e)) {
         Launch::Forwarded => return,
         Launch::Primary(instance) => instance,
     };
-    let (store, library, error) = match Store::open(directory.clone(), settings_path.clone()) {
-        Ok((mut store, library)) => {
-            let library = store.import_legacy(library, &support().join("notes.json"));
+    let opened = directory
+        .clone()
+        .map(|directory| Store::open(directory, settings_path.clone()));
+    let (store, library, error) = match opened {
+        Some(Ok((mut store, library))) => {
+            let library = store.import_legacy(library, &app::legacy_library(&settings_path));
             (Some(store), library, None)
         }
-        Err(error) => (None, Library::default(), Some(error)),
+        Some(Err(error)) => (None, Library::default(), Some(error)),
+        None => (None, Library::default(), None),
     };
     let application = gpui_platform::application();
     application.on_reopen(|cx| {

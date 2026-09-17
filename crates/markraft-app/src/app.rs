@@ -63,8 +63,8 @@ struct Session {
 pub struct NotesApp {
     library: Library,
     persistence: Option<Persistence>,
-    /// The notes folder.
-    path: PathBuf,
+    /// The notes folder, once one has been chosen.
+    path: Option<PathBuf>,
     settings_path: PathBuf,
     platform: Option<Platform>,
     instance: Instance,
@@ -110,7 +110,7 @@ pub struct NotesApp {
 impl NotesApp {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        path: PathBuf,
+        path: Option<PathBuf>,
         settings_path: PathBuf,
         store: Option<Store>,
         library: Library,
@@ -803,14 +803,64 @@ impl NotesApp {
         self.inform("Copied as Markdown", cx);
     }
     fn recover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match Store::open(self.path.clone(), self.settings_path.clone()) {
-            Ok((store, library)) => {
+        if let Some(directory) = self.path.clone() {
+            self.open_folder(directory, window, cx);
+        }
+    }
+    pub(super) fn default_folder() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Documents/Markraft"))
+    }
+    fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Use Folder".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(mut paths))) = prompt.await
+                && let Some(directory) = paths.pop()
+            {
+                let _ = cx.update(|window, cx| {
+                    this.update(cx, |this, cx| this.open_folder(directory, window, cx))
+                });
+            }
+        })
+        .detach();
+    }
+    /// Open `directory` as the notes folder and remember the choice. The folder in use
+    /// stays open when the new one cannot be.
+    fn open_folder(&mut self, directory: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let reopening = self.persistence.is_none();
+        if !reopening
+            && (self.path.as_ref().is_some_and(|current| {
+                current.canonicalize().ok() == directory.canonicalize().ok()
+            }) || !self.flush(cx))
+        {
+            return;
+        }
+        let opened = Store::open(directory.clone(), self.settings_path.clone()).and_then(
+            |(mut store, library)| {
+                store
+                    .update_settings(|settings| settings.notes_folder = Some(directory.clone()))?;
+                let library = store.import_legacy(library, &legacy_library(&self.settings_path));
+                Ok((store, library))
+            },
+        );
+        match opened {
+            Ok((store, mut library)) => {
+                // Preferences belong to this Mac, not to the folder.
+                if !reopening {
+                    library.preferences = self.library.preferences.clone();
+                }
+                self.path = Some(directory);
                 self.library = library;
                 self.persistence = Some(Persistence::new(store));
                 self.sessions.clear();
                 self.session_order.clear();
                 self.ensure_session(cx);
                 self.error = None;
+                self.panel = Panel::Editor;
                 self.focus_editor(window, cx);
                 self.apply_theme(window, cx);
                 self.platform_error = self
@@ -834,8 +884,11 @@ impl NotesApp {
                 return;
             }
         };
-        let prompt = cx.prompt_for_new_path(&self.path, Some("Markraft Notes Backup.json"));
-        let original = self.path.clone();
+        let Some(folder) = self.path.clone() else {
+            return;
+        };
+        let prompt = cx.prompt_for_new_path(&folder, Some("Markraft Notes Backup.json"));
+        let original = folder;
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = prompt.await {
                 let result = cx
@@ -922,7 +975,7 @@ impl NotesApp {
         let title = note.title();
         let filename = format!("{}.md", title.replace(['/', ':'], "-"));
         let document = self.editor().read(cx).committed_document().to_markdown();
-        let directory = self.path.clone();
+        let directory = self.path.clone().unwrap_or_default();
         let prompt = cx.prompt_for_new_path(&directory, Some(&filename));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = prompt.await {
@@ -1019,6 +1072,11 @@ fn query_style(dark: bool) -> EditorStyle {
     style.bottom_overlay = px(0.);
     style
 }
+/// The single-file library of earlier versions, next to the settings file.
+pub fn legacy_library(settings_path: &std::path::Path) -> PathBuf {
+    settings_path.with_file_name("notes.json")
+}
+
 pub fn bind_app_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("up", markraft_gpui::Up, Some("MarkraftApp")),
