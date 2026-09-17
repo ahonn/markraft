@@ -1,13 +1,21 @@
 //! Structured clipboard operations share the editor's normal transaction and history.
 use crate::{
-    BlockKind, Change, Document, Editor, Position, Replacement, Selection, ceil_grapheme,
+    BlockKind, Change, Document, Editor, Origin, Position, Replacement, Selection, ceil_grapheme,
     slice_spans,
 };
+use std::ops::Range;
 
 impl Editor {
     /// A selection expressed in document coordinates, with partial edge blocks sliced.
     pub fn selection_fragment(&self) -> Document {
         let (start, end) = self.selection().ordered();
+        self.fragment_in(start..end)
+    }
+
+    /// The rich text of a range, with partial edge blocks sliced. The range is ordered
+    /// and clamped.
+    pub fn fragment_in(&self, range: Range<Position>) -> Document {
+        let (start, end) = self.ordered_range(range);
         let mut blocks = self.document().blocks[start.block..=end.block].to_vec();
         for (offset, block) in blocks.iter_mut().enumerate() {
             let index = start.block + offset;
@@ -34,7 +42,7 @@ impl Editor {
     /// surrounding text; structural blocks keep their own lines. Code accepts literals.
     pub fn insert_fragment(&mut self, mut fragment: Document) -> Option<Change> {
         fragment.normalize();
-        self.transaction(|editor| {
+        self.transaction(Origin::Paste, |editor| {
             let (start, end) = editor.selection().ordered();
             if matches!(
                 editor.document().blocks[start.block].kind,

@@ -354,24 +354,6 @@ impl Document {
             .sum::<usize>()
             + position.byte
     }
-
-    fn position_at_global_byte(&self, offset: usize) -> Position {
-        let mut remaining = offset;
-        for (index, block) in self.blocks.iter().enumerate() {
-            if remaining <= block.len() {
-                return self.clamp_position(Position {
-                    block: index,
-                    byte: remaining,
-                });
-            }
-            remaining -= block.len() + 1;
-        }
-        let block = self.blocks.len().saturating_sub(1);
-        Position {
-            block,
-            byte: self.blocks.get(block).map_or(0, Block::len),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -409,12 +391,61 @@ pub enum Affinity {
     After,
 }
 
+/// One side of a [`PositionMap`]: the prefix sums of `block.len() + 1`, enough to convert
+/// between a [`Position`] and a global byte offset without retaining the text. A
+/// normalized document always holds at least one block, so `starts` holds at least two
+/// entries.
+#[derive(Clone, Debug)]
+struct BlockOffsets {
+    /// The global start offset of every block, plus a terminator past the last one.
+    starts: Vec<usize>,
+}
+
+impl BlockOffsets {
+    fn of(document: &Document) -> Self {
+        let mut starts = Vec::with_capacity(document.blocks.len() + 1);
+        let mut offset = 0;
+        for block in &document.blocks {
+            starts.push(offset);
+            offset += block.len() + 1;
+        }
+        starts.push(offset);
+        Self { starts }
+    }
+
+    fn blocks(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    fn block_len(&self, block: usize) -> usize {
+        self.starts[block + 1] - self.starts[block] - 1
+    }
+
+    /// Clamp `position` into range and convert it to a global byte offset.
+    fn global_byte(&self, position: Position) -> usize {
+        let block = position.block.min(self.blocks() - 1);
+        self.starts[block] + position.byte.min(self.block_len(block))
+    }
+
+    fn position(&self, offset: usize) -> Position {
+        let block = self
+            .starts
+            .partition_point(|start| *start <= offset)
+            .saturating_sub(1)
+            .min(self.blocks() - 1);
+        Position {
+            block,
+            byte: (offset - self.starts[block]).min(self.block_len(block)),
+        }
+    }
+}
+
 /// A replacement map in logical document coordinates. Formatting-only changes preserve
-/// all positions. Positions inside removed text map to the requested replacement edge.
+/// all positions.
 #[derive(Clone, Debug)]
 pub struct PositionMap {
-    before: Document,
-    after: Document,
+    before: BlockOffsets,
+    after: BlockOffsets,
     steps: Vec<Replacement>,
 }
 
@@ -424,26 +455,70 @@ struct Replacement {
     inserted_len: usize,
 }
 
-impl PositionMap {
-    pub fn map(&self, position: Position, affinity: Affinity) -> Position {
-        let mut offset = self.before.global_byte(position);
-        for step in &self.steps {
-            offset = if offset < step.range.start {
-                offset
-            } else if offset > step.range.end {
-                offset - step.range.len() + step.inserted_len
-            } else {
-                step.range.start
-                    + if affinity == Affinity::After {
-                        step.inserted_len
-                    } else {
-                        0
-                    }
-            };
+impl Replacement {
+    fn map(&self, offset: usize, affinity: Affinity) -> usize {
+        let Range { start, end } = self.range;
+        if offset < start {
+            offset
+        } else if offset > end {
+            offset - (end - start) + self.inserted_len
+        } else if offset == start && (start != end || affinity == Affinity::Before) {
+            start
+        } else if offset == end {
+            start + self.inserted_len
+        } else {
+            start
+                + if affinity == Affinity::After {
+                    self.inserted_len
+                } else {
+                    0
+                }
         }
-        self.after.position_at_global_byte(offset)
     }
 
+    /// Whether `offset` sits strictly inside the replaced text, so the content on both
+    /// sides of it is gone.
+    fn deletes(&self, offset: usize) -> bool {
+        self.range.start < offset && offset < self.range.end
+    }
+}
+
+impl PositionMap {
+    /// Map a position from the old document into the new one. A position at the start of
+    /// a replaced range stays at the start of the replacement and one at its end moves to
+    /// the end of the inserted text; only a position strictly inside collapses to the edge
+    /// `affinity` picks. A pure insertion at the position moves it with
+    /// [`Affinity::After`] and leaves it alone with [`Affinity::Before`].
+    ///
+    /// The map works in raw bytes: the result is clamped into the new document but is not
+    /// snapped onto a grapheme boundary, so callers placing a caret or selection pass it
+    /// through [`Document::clamp_position`] against the document the change produced.
+    pub fn map(&self, position: Position, affinity: Affinity) -> Position {
+        let offset = self
+            .steps
+            .iter()
+            .fold(self.before.global_byte(position), |offset, step| {
+                step.map(offset, affinity)
+            });
+        self.after.position(offset)
+    }
+
+    /// [`Self::map`], but `None` once the content at `position` has been deleted: some
+    /// step replaced a non-empty range that the position lay strictly inside. A position
+    /// exactly at either edge of a replaced range survives, because the deleted text is
+    /// then wholly on one side of it.
+    pub fn map_tracked(&self, position: Position, affinity: Affinity) -> Option<Position> {
+        let mut offset = self.before.global_byte(position);
+        for step in &self.steps {
+            if step.deletes(offset) {
+                return None;
+            }
+            offset = step.map(offset, affinity);
+        }
+        Some(self.after.position(offset))
+    }
+
+    /// Both ends take [`Affinity::After`], so a caret follows text typed at it.
     pub fn map_selection(&self, selection: Selection) -> Selection {
         Selection {
             anchor: self.map(selection.anchor, Affinity::After),
@@ -466,12 +541,41 @@ impl PositionMap {
                 .collect(),
         }
     }
+
+    fn retained_bytes(&self) -> usize {
+        (self.before.starts.capacity() + self.after.starts.capacity())
+            * std::mem::size_of::<usize>()
+            + self.steps.capacity() * std::mem::size_of::<Replacement>()
+    }
+}
+
+/// What produced a change. Hosts use it to tell their own edits apart from the
+/// user's; `Command` is the generic provenance of a programmatic edit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Origin {
+    Typed,
+    Composition,
+    Paste,
+    #[default]
+    Command,
+    History,
+    Extension(&'static str),
 }
 
 #[derive(Clone, Debug)]
 pub struct Change {
     pub revision: u64,
     pub mapping: PositionMap,
+    pub origin: Origin,
+}
+
+/// Options for [`Editor::transact`]. `group` has the same meaning as the typing group
+/// of [`Editor::insert_text_grouped`]: it may merge into the previous undo entry, but
+/// never across a change of block count or block kind.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TransactionOptions {
+    pub group: Option<u64>,
+    pub origin: Origin,
 }
 
 #[derive(Clone, Debug)]
@@ -511,40 +615,30 @@ impl Default for HistoryLimits {
     }
 }
 
-impl HistoryEntry {
-    fn retained_bytes(&self) -> usize {
-        fn document_bytes(document: &Document) -> usize {
-            document.blocks.capacity() * std::mem::size_of::<Block>()
-                + document
-                    .blocks
-                    .iter()
-                    .map(|block| {
-                        block.spans.capacity() * std::mem::size_of::<Span>()
-                            + block
-                                .spans
-                                .iter()
-                                .map(|span| span.text.capacity())
-                                .sum::<usize>()
-                    })
-                    .sum::<usize>()
-        }
-        std::mem::size_of::<Self>()
-            + document_bytes(&self.state.document)
-            + document_bytes(&self.mapping.before)
-            + document_bytes(&self.mapping.after)
-            + self.mapping.steps.capacity() * std::mem::size_of::<Replacement>()
-    }
+/// The heap a document holds, for the byte-based history limit.
+fn document_bytes(document: &Document) -> usize {
+    document.blocks.capacity() * std::mem::size_of::<Block>()
+        + document
+            .blocks
+            .iter()
+            .map(|block| {
+                block.spans.capacity() * std::mem::size_of::<Span>()
+                    + block
+                        .spans
+                        .iter()
+                        .map(|span| span.text.capacity())
+                        .sum::<usize>()
+            })
+            .sum::<usize>()
 }
 
-#[derive(Clone, Debug)]
-pub enum Command {
-    InsertText(String),
-    Backspace,
-    DeleteForward,
-    ToggleMark(Mark),
-    SetBlockKind(BlockKind),
-    Undo,
-    Redo,
+impl HistoryEntry {
+    /// An entry retains one document, its snapshot; the mapping only holds block lengths.
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + document_bytes(&self.state.document)
+            + self.mapping.retained_bytes()
+    }
 }
 
 /// Each edit command is an atomic history transaction. Composition candidate changes
@@ -651,33 +745,94 @@ impl Editor {
     }
 
     fn select(&mut self, selection: Selection) {
-        self.state.selection = Selection {
-            anchor: self.document().clamp_position(selection.anchor),
-            head: self.document().clamp_position(selection.head),
-        };
+        self.state.selection = selection;
+        self.clamp_selection();
         let head = self.state.selection.head;
         self.state.typing_marks = self.document().blocks[head.block].marks_at(head.byte);
     }
 
+    /// Bring both ends back into the document and onto grapheme boundaries, leaving
+    /// the typing marks alone.
+    fn clamp_selection(&mut self) {
+        let selection = self.state.selection;
+        self.state.selection = Selection {
+            anchor: self.document().clamp_position(selection.anchor),
+            head: self.document().clamp_position(selection.head),
+        };
+    }
+
     pub fn selection_text(&self) -> String {
         let (start, end) = self.selection().ordered();
-        let plain = self.document().plain_text();
-        plain[self.document().global_byte(start)..self.document().global_byte(end)].to_owned()
+        self.text_in(start..end)
     }
 
-    pub fn apply(&mut self, command: Command) -> Option<Change> {
-        match command {
-            Command::InsertText(text) => self.insert_text(&text),
-            Command::Backspace => self.backspace(),
-            Command::DeleteForward => self.delete_forward(),
-            Command::ToggleMark(mark) => self.toggle_mark(mark),
-            Command::SetBlockKind(kind) => self.set_block_kind(kind),
-            Command::Undo => self.undo(),
-            Command::Redo => self.redo(),
+    /// The plain text of a range, walking only the blocks it covers. The range is ordered
+    /// and clamped.
+    pub fn text_in(&self, range: Range<Position>) -> String {
+        let (start, end) = self.ordered_range(range);
+        let last = end.block - start.block;
+        let mut text = String::new();
+        for (offset, block) in self.document().blocks[start.block..=end.block]
+            .iter()
+            .enumerate()
+        {
+            if offset > 0 {
+                text.push('\n');
+            }
+            let from = if offset == 0 { start.byte } else { 0 };
+            let to = if offset == last {
+                end.byte
+            } else {
+                block.len()
+            };
+            push_span_text(&mut text, &block.spans, from..to);
         }
+        text
     }
 
-    fn publish(&mut self, before: &Document) -> Option<Change> {
+    /// Order a range and clamp both ends into the document.
+    fn ordered_range(&self, range: Range<Position>) -> (Position, Position) {
+        let document = self.document();
+        (
+            document.clamp_position(range.start.min(range.end)),
+            document.clamp_position(range.start.max(range.end)),
+        )
+    }
+
+    /// Order a range onto grapheme boundaries. An empty range is an insertion point and
+    /// stays empty; a non-empty one widens, so an edit neither splits a cluster nor
+    /// silently collapses into a no-op.
+    fn edit_range(&self, range: Range<Position>) -> (Position, Position) {
+        let start = self.document().clamp_position(range.start.min(range.end));
+        if range.start == range.end {
+            return (start, start);
+        }
+        let end = range.start.max(range.end);
+        let blocks = &self.document().blocks;
+        let block = end.block.min(blocks.len() - 1);
+        let text = blocks[block].text();
+        let end = Position {
+            block,
+            byte: ceil_grapheme(&text, end.byte.min(text.len())),
+        };
+        (start, end)
+    }
+
+    /// Run several edits as one undo entry and one [`Change`]. An active composition is
+    /// committed first; a transaction that leaves the document untouched publishes
+    /// nothing and leaves the history, including redo, alone.
+    pub fn transact(
+        &mut self,
+        options: TransactionOptions,
+        action: impl FnOnce(&mut Transaction<'_>),
+    ) -> Option<Change> {
+        self.transaction_in_group(options.group, options.origin, |editor| {
+            action(&mut Transaction { editor });
+            editor.clamp_selection();
+        })
+    }
+
+    fn publish(&mut self, before: &Document, origin: Origin) -> Option<Change> {
         let steps = std::mem::take(&mut self.pending_steps);
         if before == self.document() {
             return None;
@@ -686,20 +841,22 @@ impl Editor {
         Some(Change {
             revision: self.revision,
             mapping: PositionMap {
-                before: before.clone(),
-                after: self.document().clone(),
+                before: BlockOffsets::of(before),
+                after: BlockOffsets::of(self.document()),
                 steps,
             },
+            origin,
         })
     }
 
-    fn transaction(&mut self, action: impl FnOnce(&mut Self)) -> Option<Change> {
-        self.transaction_in_group(None, action)
+    fn transaction(&mut self, origin: Origin, action: impl FnOnce(&mut Self)) -> Option<Change> {
+        self.transaction_in_group(None, origin, action)
     }
 
     fn transaction_in_group(
         &mut self,
         group: Option<u64>,
+        origin: Origin,
         action: impl FnOnce(&mut Self),
     ) -> Option<Change> {
         self.finish_composition();
@@ -710,7 +867,7 @@ impl Editor {
         self.input_group = None;
         let before = self.state.clone();
         action(self);
-        let change = self.publish(&before.document);
+        let change = self.publish(&before.document, origin);
         if let Some(change) = &change {
             // Input-rule conversions own an undo boundary, so undoing a heading
             // or list conversion restores its literal marker before earlier typing.
@@ -757,21 +914,23 @@ impl Editor {
 
     /// Insert literal text without Markdown input rules or list-enter behavior.
     pub fn insert_text_plain(&mut self, text: &str) -> Option<Change> {
-        self.transaction(|editor| editor.replace_selection(text))
+        self.transaction(Origin::Typed, |editor| editor.replace_selection(text))
     }
 
     pub fn insert_text_plain_grouped(&mut self, text: &str, group: u64) -> Option<Change> {
         let group =
             (!text.is_empty() && !text.contains(['\n', '\r']) && self.selection().is_empty())
                 .then_some(group);
-        self.transaction_in_group(group, |editor| editor.replace_selection(text))
+        self.transaction_in_group(group, Origin::Typed, |editor| {
+            editor.replace_selection(text)
+        })
     }
 
     fn insert_text_in_group(&mut self, text: &str, group: Option<u64>) -> Option<Change> {
         let group = group.filter(|_| {
             !text.contains(['\n', '\r']) && self.selection().is_empty() && !text.is_empty()
         });
-        self.transaction_in_group(group, |editor| {
+        self.transaction_in_group(group, Origin::Typed, |editor| {
             let selection = editor.selection();
             if text == "\n" && selection.is_empty() {
                 let index = selection.head.block;
@@ -810,13 +969,37 @@ impl Editor {
     }
 
     pub fn replace_utf16(&mut self, range: Range<usize>, text: &str) -> Option<Change> {
-        self.transaction(|editor| {
+        self.transaction(Origin::Typed, |editor| {
             editor.state.selection = Selection {
                 anchor: editor.utf16_to_position(range.start),
                 head: editor.utf16_to_position(range.end),
             };
             editor.replace_selection(text);
         })
+    }
+
+    /// Replace an arbitrary range, which may span blocks, with literal text and no
+    /// Markdown input rules. The range is ordered and snapped onto grapheme boundaries;
+    /// the inserted text takes the formatting at the range start and the caret lands at
+    /// its end, as it does when replacing a selection.
+    pub fn replace_range(&mut self, range: Range<Position>, text: &str) -> Option<Change> {
+        self.transaction(Origin::Command, |editor| {
+            editor.apply_replace_range(range, text)
+        })
+    }
+
+    pub fn delete_range(&mut self, range: Range<Position>) -> Option<Change> {
+        self.replace_range(range, "")
+    }
+
+    fn apply_replace_range(&mut self, range: Range<Position>, text: &str) {
+        let (start, end) = self.edit_range(range);
+        self.state.selection = Selection {
+            anchor: start,
+            head: end,
+        };
+        self.state.typing_marks = self.document().blocks[start.block].marks_at(start.byte);
+        self.replace_selection(text);
     }
 
     fn replace_selection(&mut self, text: &str) {
@@ -907,7 +1090,7 @@ impl Editor {
     }
 
     pub fn backspace(&mut self) -> Option<Change> {
-        self.transaction(|editor| {
+        self.transaction(Origin::Typed, |editor| {
             let selection = editor.selection();
             if selection.is_empty() {
                 let head = selection.head;
@@ -944,7 +1127,7 @@ impl Editor {
     }
 
     pub fn delete_forward(&mut self) -> Option<Change> {
-        self.transaction(|editor| {
+        self.transaction(Origin::Typed, |editor| {
             if editor.selection().is_empty() {
                 editor.state.selection.head = editor.next_position(editor.selection().head);
             }
@@ -953,7 +1136,7 @@ impl Editor {
     }
 
     pub fn delete_word_backward(&mut self) -> Option<Change> {
-        self.transaction(|editor| {
+        self.transaction(Origin::Typed, |editor| {
             if editor.selection().is_empty() {
                 editor.state.selection.anchor =
                     editor.previous_word_position(editor.selection().head);
@@ -963,7 +1146,7 @@ impl Editor {
     }
 
     pub fn delete_word_forward(&mut self) -> Option<Change> {
-        self.transaction(|editor| {
+        self.transaction(Origin::Typed, |editor| {
             if editor.selection().is_empty() {
                 editor.state.selection.head = editor.next_word_position(editor.selection().head);
             }
@@ -972,73 +1155,96 @@ impl Editor {
     }
 
     pub fn toggle_mark(&mut self, mark: Mark) -> Option<Change> {
-        self.transaction(|editor| {
-            if editor.selection().is_empty() {
-                editor.state.typing_marks.toggle(mark);
-                return;
+        self.transaction(Origin::Command, |editor| editor.apply_toggle_mark(mark))
+    }
+
+    fn apply_toggle_mark(&mut self, mark: Mark) {
+        if self.selection().is_empty() {
+            self.state.typing_marks.toggle(mark);
+            return;
+        }
+        let (start, end) = self.selection().ordered();
+        let mut all_enabled = true;
+        for index in start.block..=end.block {
+            let block = &self.document().blocks[index];
+            let range = if index == start.block { start.byte } else { 0 }..if index == end.block {
+                end.byte
+            } else {
+                block.len()
+            };
+            for span in slice_spans(&block.spans, range) {
+                all_enabled &= span.marks.has(mark);
             }
-            let (start, end) = editor.selection().ordered();
-            let mut all_enabled = true;
-            for index in start.block..=end.block {
-                let block = &editor.document().blocks[index];
-                let range = if index == start.block { start.byte } else { 0 }
-                    ..if index == end.block {
-                        end.byte
-                    } else {
-                        block.len()
-                    };
-                for span in slice_spans(&block.spans, range) {
-                    all_enabled &= span.marks.has(mark);
-                }
+        }
+        for index in start.block..=end.block {
+            let block = &mut self.state.document.blocks[index];
+            let start_byte = if index == start.block { start.byte } else { 0 };
+            let end_byte = if index == end.block {
+                end.byte
+            } else {
+                block.len()
+            };
+            let mut spans = slice_spans(&block.spans, 0..start_byte);
+            for mut span in slice_spans(&block.spans, start_byte..end_byte) {
+                span.marks.set(mark, !all_enabled);
+                push_like(&mut spans, &span.text, &span);
             }
-            for index in start.block..=end.block {
-                let block = &mut editor.state.document.blocks[index];
-                let start_byte = if index == start.block { start.byte } else { 0 };
-                let end_byte = if index == end.block {
-                    end.byte
-                } else {
-                    block.len()
-                };
-                let mut spans = slice_spans(&block.spans, 0..start_byte);
-                for mut span in slice_spans(&block.spans, start_byte..end_byte) {
-                    span.marks.set(mark, !all_enabled);
-                    push_like(&mut spans, &span.text, &span);
-                }
-                for span in slice_spans(&block.spans, end_byte..block.len()) {
-                    push_like(&mut spans, &span.text, &span);
-                }
-                block.spans = spans;
+            for span in slice_spans(&block.spans, end_byte..block.len()) {
+                push_like(&mut spans, &span.text, &span);
             }
-            editor.state.typing_marks.set(mark, !all_enabled);
-            // Code lines drop the mark again.
-            editor.state.document.normalize();
-        })
+            block.spans = spans;
+        }
+        self.state.typing_marks.set(mark, !all_enabled);
+        // Code lines drop the mark again.
+        self.state.document.normalize();
     }
 
     pub fn set_block_kind(&mut self, kind: BlockKind) -> Option<Change> {
-        self.transaction(|editor| {
-            let (start, end) = editor.selection().ordered();
-            let last = if end.byte == 0 && end.block > start.block {
-                end.block - 1
-            } else {
-                end.block
-            };
-            for block in &mut editor.state.document.blocks[start.block..=last] {
-                if !(block.kind.is_list() && kind.is_list()
-                    || block.kind == BlockKind::Quote && kind == BlockKind::Quote)
-                {
-                    block.depth = 0;
-                }
-                block.kind = kind.clone();
-            }
-            editor.state.document.normalize();
+        self.transaction(Origin::Command, |editor| editor.apply_set_block_kind(kind))
+    }
+
+    /// Set one block's kind without moving the selection. An out-of-range index is a
+    /// no-op.
+    pub fn set_block_kind_at(&mut self, block: usize, kind: BlockKind) -> Option<Change> {
+        self.transaction(Origin::Command, |editor| {
+            editor.apply_set_block_kind_at(block, kind)
         })
+    }
+
+    fn apply_set_block_kind(&mut self, kind: BlockKind) {
+        let (start, end) = self.selection().ordered();
+        let last = if end.byte == 0 && end.block > start.block {
+            end.block - 1
+        } else {
+            end.block
+        };
+        self.set_kind_in(start.block..last + 1, kind);
+    }
+
+    fn apply_set_block_kind_at(&mut self, block: usize, kind: BlockKind) {
+        if block < self.document().blocks.len() {
+            self.set_kind_in(block..block + 1, kind);
+        }
+    }
+
+    /// Re-kind a block range, dropping the depth of kinds that do not carry one and
+    /// normalizing what the new kind forbids (marks and links in code, text in a divider).
+    fn set_kind_in(&mut self, range: Range<usize>, kind: BlockKind) {
+        for block in &mut self.state.document.blocks[range] {
+            if !(block.kind.is_list() && kind.is_list()
+                || block.kind == BlockKind::Quote && kind == BlockKind::Quote)
+            {
+                block.depth = 0;
+            }
+            block.kind = kind.clone();
+        }
+        self.state.document.normalize();
     }
 
     /// Toggle matching selected block formats off; task state and code language
     /// are attributes, so they do not distinguish the format being toggled.
     pub fn toggle_block_kind(&mut self, kind: BlockKind) -> Option<Change> {
-        self.transaction(|editor| {
+        self.transaction(Origin::Command, |editor| {
             let mut range = editor.selected_blocks();
             let matches = |current: &BlockKind| {
                 *current == kind
@@ -1064,22 +1270,14 @@ impl Editor {
                     .end;
             }
             let target = if clear { BlockKind::Paragraph } else { kind };
-            for block in &mut editor.state.document.blocks[range] {
-                if !(block.kind.is_list() && target.is_list()
-                    || block.kind == BlockKind::Quote && target == BlockKind::Quote)
-                {
-                    block.depth = 0;
-                }
-                block.kind = target.clone();
-            }
-            editor.state.document.normalize();
+            editor.set_kind_in(range, target);
         })
     }
 
     /// Move to an ordinary paragraph after the current code block, creating one
     /// if necessary. The insertion is a single undoable document transaction.
     pub fn exit_code_block(&mut self) -> Option<Change> {
-        self.transaction(|editor| {
+        self.transaction(Origin::Command, |editor| {
             let Some(range) = editor
                 .document()
                 .code_block_range(editor.selection().head.block)
@@ -1116,7 +1314,7 @@ impl Editor {
 
     /// Indent selected list items (including their children), or selected quotes.
     pub fn indent(&mut self) -> Option<Change> {
-        self.transaction(|editor| {
+        self.transaction(Origin::Command, |editor| {
             let range = editor.selected_blocks();
             editor.indent_code_lines(range.clone(), true);
             editor.change_nesting(range, true);
@@ -1125,7 +1323,7 @@ impl Editor {
 
     /// Outdent one level. Top-level items become ordinary paragraphs.
     pub fn outdent(&mut self) -> Option<Change> {
-        self.transaction(|editor| {
+        self.transaction(Origin::Command, |editor| {
             let range = editor.selected_blocks();
             editor.indent_code_lines(range.clone(), false);
             editor.change_nesting(range, false);
@@ -1249,7 +1447,7 @@ impl Editor {
     /// Update a code block without changing the caret or its undo selection.
     pub fn set_code_language_at(&mut self, block: usize, language: &str) -> Option<Change> {
         let language = language.split_whitespace().next().unwrap_or("").to_owned();
-        self.transaction(|editor| {
+        self.transaction(Origin::Command, |editor| {
             if let Some(range) = editor.document().code_block_range(block) {
                 for block in &mut editor.state.document.blocks[range] {
                     block.kind = BlockKind::Code {
@@ -1282,6 +1480,7 @@ impl Editor {
         let change = Change {
             revision: self.revision,
             mapping: previous.mapping.reversed(),
+            origin: Origin::History,
         };
         self.redo.push(HistoryEntry {
             state: current,
@@ -1300,6 +1499,7 @@ impl Editor {
         let change = Change {
             revision: self.revision,
             mapping: next.mapping.clone(),
+            origin: Origin::History,
         };
         self.undo.push(HistoryEntry {
             state: current,
@@ -1491,7 +1691,7 @@ impl Editor {
             .unwrap()
             .steps
             .extend(self.pending_steps.iter().cloned());
-        self.publish(&before_document)
+        self.publish(&before_document, Origin::Composition)
     }
 
     pub fn commit_composition(
@@ -1526,30 +1726,35 @@ impl Editor {
         }
     }
 
-    /// Commit existing marked text without replacing it (platform unmarkText).
-    pub fn finish_composition(&mut self) {
-        if let Some(composition) = self.composition.take()
-            && composition.before.document != self.state.document
-        {
-            let mapping = PositionMap {
-                before: composition.before.document.clone(),
-                after: self.document().clone(),
-                steps: composition.steps,
-            };
-            self.undo.push(HistoryEntry {
-                state: composition.before,
-                mapping,
-            });
-            self.redo.clear();
-            self.trim_history();
+    /// Commit existing marked text without replacing it (platform unmarkText). Returns
+    /// whether a live composition became an undo entry, that is whether
+    /// [`Self::committed_document`] just changed. It publishes no [`Change`].
+    pub fn finish_composition(&mut self) -> bool {
+        let Some(composition) = self.composition.take() else {
+            return false;
+        };
+        if composition.before.document == self.state.document {
+            return false;
         }
+        let mapping = PositionMap {
+            before: BlockOffsets::of(&composition.before.document),
+            after: BlockOffsets::of(self.document()),
+            steps: composition.steps,
+        };
+        self.undo.push(HistoryEntry {
+            state: composition.before,
+            mapping,
+        });
+        self.redo.clear();
+        self.trim_history();
+        true
     }
 
     pub fn cancel_composition(&mut self) -> Option<Change> {
         let composition = self.composition.take()?;
         let mapping = PositionMap {
-            before: composition.before.document.clone(),
-            after: self.document().clone(),
+            before: BlockOffsets::of(&composition.before.document),
+            after: BlockOffsets::of(self.document()),
             steps: composition.steps,
         }
         .reversed();
@@ -1561,6 +1766,7 @@ impl Editor {
         Some(Change {
             revision: self.revision,
             mapping,
+            origin: Origin::Composition,
         })
     }
 
@@ -1769,7 +1975,7 @@ impl Editor {
     /// Link the selection to `url`, or unlink it with `None`. A caret edits the link
     /// it touches; elsewhere it inserts the URL itself as linked text.
     pub fn set_link(&mut self, url: Option<&str>) -> Option<Change> {
-        self.transaction(|editor| {
+        self.transaction(Origin::Command, |editor| {
             let selection = editor.selection();
             let (mut start, mut end) = selection.ordered();
             if start == end {
@@ -1802,6 +2008,57 @@ impl Editor {
             // Code lines drop the link again.
             editor.state.document.normalize();
         })
+    }
+}
+
+/// The edits available while composing one undo entry inside [`Editor::transact`].
+/// History, composition and nested transactions are deliberately out of reach.
+pub struct Transaction<'a> {
+    editor: &'a mut Editor,
+}
+
+impl Transaction<'_> {
+    pub fn document(&self) -> &Document {
+        self.editor.document()
+    }
+
+    pub fn selection(&self) -> Selection {
+        self.editor.selection()
+    }
+
+    pub fn text_in(&self, range: Range<Position>) -> String {
+        self.editor.text_in(range)
+    }
+
+    pub fn set_selection(&mut self, selection: Selection) {
+        self.editor.select(selection);
+    }
+
+    /// Insert literal text over the selection, without Markdown input rules.
+    pub fn insert_text(&mut self, text: &str) {
+        self.editor.replace_selection(text);
+    }
+
+    /// See [`Editor::replace_range`].
+    pub fn replace_range(&mut self, range: Range<Position>, text: &str) {
+        self.editor.apply_replace_range(range, text);
+    }
+
+    pub fn delete_range(&mut self, range: Range<Position>) {
+        self.replace_range(range, "");
+    }
+
+    pub fn toggle_mark(&mut self, mark: Mark) {
+        self.editor.apply_toggle_mark(mark);
+    }
+
+    pub fn set_block_kind(&mut self, kind: BlockKind) {
+        self.editor.apply_set_block_kind(kind);
+    }
+
+    /// See [`Editor::set_block_kind_at`].
+    pub fn set_block_kind_at(&mut self, block: usize, kind: BlockKind) {
+        self.editor.apply_set_block_kind_at(block, kind);
     }
 }
 
@@ -1847,6 +2104,17 @@ fn push_linked_span(spans: &mut Vec<Span>, text: &str, marks: Marks, link: Optio
 /// Append a copy of `span`'s formatting over `text`.
 fn push_like(spans: &mut Vec<Span>, text: &str, span: &Span) {
     push_linked_span(spans, text, span.marks, span.link.as_deref());
+}
+
+/// Append the `range` of the text `spans` concatenate, without slicing them.
+fn push_span_text(out: &mut String, spans: &[Span], range: Range<usize>) {
+    let mut offset = 0;
+    for span in spans {
+        let start = range.start.saturating_sub(offset).min(span.text.len());
+        let end = range.end.saturating_sub(offset).min(span.text.len());
+        out.push_str(&span.text[start..end]);
+        offset += span.text.len();
+    }
 }
 
 fn slice_spans(spans: &[Span], range: Range<usize>) -> Vec<Span> {

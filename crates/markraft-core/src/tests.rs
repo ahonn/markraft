@@ -1277,3 +1277,588 @@ fn backspace_only_clears_a_wholly_empty_code_block() {
         BlockKind::Code { .. }
     ));
 }
+
+fn at(block: usize, byte: usize) -> Position {
+    Position { block, byte }
+}
+
+#[test]
+fn a_transaction_composes_edits_into_one_undo_step() {
+    let mut editor = editor("# Title\nbody text");
+    caret(&mut editor, 1, 4);
+    let selection = editor.selection();
+    let change = editor
+        .transact(TransactionOptions::default(), |tx| {
+            tx.delete_range(at(1, 0)..at(1, 5));
+            tx.set_block_kind_at(1, BlockKind::Quote);
+        })
+        .unwrap();
+    assert_eq!(change.origin, Origin::Command);
+    assert_eq!(editor.document().plain_text(), "Title\ntext");
+    assert_eq!(editor.document().blocks[1].kind, BlockKind::Quote);
+    editor.undo();
+    assert_eq!(editor.document().plain_text(), "Title\nbody text");
+    assert_eq!(editor.document().blocks[1].kind, BlockKind::Paragraph);
+    assert_eq!(editor.selection(), selection);
+    assert!(!editor.can_undo());
+    editor.redo();
+    assert_eq!(editor.document().plain_text(), "Title\ntext");
+    assert_eq!(editor.document().blocks[1].kind, BlockKind::Quote);
+}
+
+#[test]
+fn an_empty_transaction_publishes_nothing_and_keeps_redo() {
+    let mut editor = editor("text");
+    editor.move_document_end(false);
+    editor.insert_text("!");
+    editor.undo();
+    assert!(editor.can_redo() && !editor.can_undo());
+    let revision = editor.revision();
+    assert!(
+        editor
+            .transact(TransactionOptions::default(), |_| {})
+            .is_none()
+    );
+    assert!(
+        editor
+            .transact(TransactionOptions::default(), |tx| {
+                tx.delete_range(at(0, 2)..at(0, 2));
+                tx.set_block_kind_at(9, BlockKind::Quote);
+            })
+            .is_none()
+    );
+    assert_eq!(editor.revision(), revision);
+    assert!(editor.can_redo() && !editor.can_undo());
+    editor.redo();
+    assert_eq!(editor.document().plain_text(), "text!");
+}
+
+#[test]
+fn replace_range_edits_within_and_across_blocks_in_either_order() {
+    let mut editor = editor("abcdef");
+    assert_eq!(
+        editor
+            .replace_range(at(0, 1)..at(0, 3), "XYZ")
+            .unwrap()
+            .origin,
+        Origin::Command
+    );
+    assert_eq!(editor.document().plain_text(), "aXYZdef");
+    assert_eq!(editor.selection(), Selection::caret(at(0, 4)));
+    editor.undo();
+    assert_eq!(editor.document().plain_text(), "abcdef");
+
+    for range in [at(0, 3)..at(2, 2), at(2, 2)..at(0, 3)] {
+        let mut editor = Editor::new(Document::from_markdown("first\nsecond\nthird"));
+        editor.replace_range(range, "X");
+        assert_eq!(editor.document().plain_text(), "firXird");
+        assert_eq!(editor.selection(), Selection::caret(at(0, 4)));
+    }
+
+    let mut editor = Editor::new(Document::from_markdown("one\ntwo"));
+    editor.delete_range(at(0, 3)..at(1, 0));
+    assert_eq!(editor.document().plain_text(), "onetwo");
+}
+
+#[test]
+fn replace_range_snaps_partial_grapheme_clusters() {
+    let family = "👨‍👩‍👧‍👦";
+    let mut editor = editor(&format!("a{family}b"));
+    let inside = 1 + "👨".len();
+    editor.replace_range(at(0, inside)..at(0, inside + 1), "z");
+    assert_eq!(editor.document().plain_text(), "azb");
+    assert_eq!(editor.selection(), Selection::caret(at(0, 2)));
+
+    // An empty range stays an insertion point, floored onto the cluster it sits in.
+    let mut editor = Editor::new(Document::from_markdown("e\u{301}x"));
+    editor.replace_range(at(0, 1)..at(0, 1), "!");
+    assert_eq!(editor.document().plain_text(), "!e\u{301}x");
+    // A non-empty range covering part of a cluster takes all of it.
+    editor.replace_range(at(0, 2)..at(0, 3), "");
+    assert_eq!(editor.document().plain_text(), "!x");
+}
+
+#[test]
+fn replace_range_maps_positions_around_the_replacement() {
+    let mut editor = editor("abcdef");
+    let change = editor.replace_range(at(0, 1)..at(0, 3), "XYZ").unwrap();
+    for affinity in [Affinity::Before, Affinity::After] {
+        assert_eq!(change.mapping.map(at(0, 0), affinity), at(0, 0));
+        assert_eq!(change.mapping.map(at(0, 4), affinity), at(0, 5));
+    }
+    assert_eq!(change.mapping.map(at(0, 2), Affinity::Before), at(0, 1));
+    assert_eq!(change.mapping.map(at(0, 2), Affinity::After), at(0, 4));
+
+    let mut editor = Editor::new(Document::from_markdown("first\nsecond\nthird"));
+    let change = editor.replace_range(at(0, 3)..at(2, 2), "X").unwrap();
+    for affinity in [Affinity::Before, Affinity::After] {
+        assert_eq!(change.mapping.map(at(0, 1), affinity), at(0, 1));
+        assert_eq!(change.mapping.map(at(2, 4), affinity), at(0, 6));
+    }
+    assert_eq!(change.mapping.map(at(1, 3), Affinity::Before), at(0, 3));
+    assert_eq!(change.mapping.map(at(1, 3), Affinity::After), at(0, 4));
+}
+
+#[test]
+fn replace_range_follows_link_edges_and_strips_code_formatting() {
+    let url = "https://example.com";
+    let mut editor = editor(&format!("see [the docs]({url}) end"));
+    // Strictly inside the link the replacement joins it.
+    editor.replace_range(at(0, 5)..at(0, 7), "HE");
+    assert_eq!(editor.document().plain_text(), "see tHE docs end");
+    assert_eq!(editor.link_at(at(0, 6)), Some((4..12, url)));
+    // Ending at the link's edge, it does not.
+    editor.replace_range(at(0, 8)..at(0, 12), "guide");
+    assert_eq!(editor.document().plain_text(), "see tHE guide end");
+    assert_eq!(editor.link_at(at(0, 6)), Some((4..8, url)));
+    assert_eq!(editor.link_at(at(0, 10)), None);
+
+    let mut editor = Editor::new(Document::from_markdown("```rust\nlet x = 1;\n```"));
+    editor.replace_range(at(0, 4)..at(0, 5), "**y**");
+    assert_eq!(editor.document().blocks[0].text(), "let **y** = 1;");
+    assert!(
+        editor.document().blocks[0]
+            .spans
+            .iter()
+            .all(|span| span.marks == Marks::default() && span.link.is_none())
+    );
+}
+
+#[test]
+fn set_block_kind_at_keeps_the_selection_and_enforces_block_invariants() {
+    let mut editor = editor("- root\n  - child\nparagraph");
+    let selection = Selection {
+        anchor: at(2, 1),
+        head: at(2, 5),
+    };
+    editor.set_selection(selection);
+    editor.set_block_kind_at(1, BlockKind::Heading(2));
+    assert_eq!(editor.selection(), selection);
+    assert_eq!(editor.document().blocks[1].kind, BlockKind::Heading(2));
+    assert_eq!(editor.document().blocks[1].depth, 0);
+    assert!(editor.set_block_kind_at(9, BlockKind::Quote).is_none());
+    editor.undo();
+    assert_eq!(editor.document().blocks[1].depth, 1);
+    assert_eq!(editor.selection(), selection);
+
+    let mut editor = Editor::new(Document::from_markdown(
+        "**bold** [link](https://example.com)",
+    ));
+    editor.set_block_kind_at(
+        0,
+        BlockKind::Code {
+            language: "rust".into(),
+        },
+    );
+    assert!(
+        editor.document().blocks[0]
+            .spans
+            .iter()
+            .all(|span| span.marks == Marks::default() && span.link.is_none())
+    );
+
+    // A divider never holds text, so it only takes on an empty block.
+    let mut editor = Editor::new(Document::from_markdown("text"));
+    assert!(editor.set_block_kind_at(0, BlockKind::Divider).is_none());
+    assert_eq!(editor.document().blocks[0].kind, BlockKind::Paragraph);
+    let mut editor = Editor::new(Document::default());
+    assert!(editor.set_block_kind_at(0, BlockKind::Divider).is_some());
+    assert_eq!(editor.document().blocks[0].kind, BlockKind::Divider);
+}
+
+#[test]
+fn range_reads_agree_with_the_selection_based_readers() {
+    let mut editor = editor("# a **bold** tail\n- item\n中文");
+    for (anchor, head) in [
+        (at(0, 2), at(0, 6)),
+        (at(0, 4), at(2, 3)),
+        (at(2, 6), at(1, 2)),
+    ] {
+        editor.set_selection(Selection { anchor, head });
+        let (start, end) = editor.selection().ordered();
+        for range in [start..end, end..start] {
+            assert_eq!(editor.text_in(range.clone()), editor.selection_text());
+            assert_eq!(editor.fragment_in(range), editor.selection_fragment());
+        }
+    }
+}
+
+#[test]
+fn every_change_reports_its_origin() {
+    let mut editor = editor("text");
+    assert_eq!(editor.insert_text("a").unwrap().origin, Origin::Typed);
+    assert_eq!(
+        editor.insert_text_grouped("b", 1).unwrap().origin,
+        Origin::Typed
+    );
+    assert_eq!(editor.insert_text_plain("c").unwrap().origin, Origin::Typed);
+    assert_eq!(editor.delete_forward().unwrap().origin, Origin::Typed);
+    assert_eq!(editor.backspace().unwrap().origin, Origin::Typed);
+    assert_eq!(editor.delete_word_backward().unwrap().origin, Origin::Typed);
+    assert_eq!(editor.delete_word_forward().unwrap().origin, Origin::Typed);
+    assert_eq!(
+        editor.replace_utf16(0..0, "hello").unwrap().origin,
+        Origin::Typed
+    );
+
+    editor.set_selection(Selection {
+        anchor: at(0, 0),
+        head: at(0, 5),
+    });
+    assert_eq!(
+        editor.toggle_mark(Mark::Bold).unwrap().origin,
+        Origin::Command
+    );
+    assert_eq!(
+        editor.set_link(Some("https://example.com")).unwrap().origin,
+        Origin::Command
+    );
+    assert_eq!(
+        editor.set_block_kind(BlockKind::Quote).unwrap().origin,
+        Origin::Command
+    );
+    assert_eq!(editor.indent().unwrap().origin, Origin::Command);
+    assert_eq!(editor.outdent().unwrap().origin, Origin::Command);
+    assert_eq!(
+        editor.toggle_block_kind(BlockKind::Quote).unwrap().origin,
+        Origin::Command
+    );
+    assert_eq!(
+        editor
+            .replace_range(at(0, 0)..at(0, 1), "H")
+            .unwrap()
+            .origin,
+        Origin::Command
+    );
+    assert_eq!(
+        editor
+            .set_block_kind_at(0, BlockKind::Heading(1))
+            .unwrap()
+            .origin,
+        Origin::Command
+    );
+
+    assert_eq!(
+        editor
+            .insert_fragment(Document::from_markdown("**paste**"))
+            .unwrap()
+            .origin,
+        Origin::Paste
+    );
+    assert_eq!(
+        editor.set_composition(None, "候", None).unwrap().origin,
+        Origin::Composition
+    );
+    assert_eq!(
+        editor.commit_composition(None, "候选").unwrap().origin,
+        Origin::Composition
+    );
+    assert_eq!(
+        editor.set_composition(None, "临时", None).unwrap().origin,
+        Origin::Composition
+    );
+    assert_eq!(
+        editor.cancel_composition().unwrap().origin,
+        Origin::Composition
+    );
+    assert_eq!(editor.undo().unwrap().origin, Origin::History);
+    assert_eq!(editor.redo().unwrap().origin, Origin::History);
+    assert_eq!(
+        editor
+            .transact(
+                TransactionOptions {
+                    origin: Origin::Extension("slash-menu"),
+                    ..TransactionOptions::default()
+                },
+                |tx| tx.insert_text("!"),
+            )
+            .unwrap()
+            .origin,
+        Origin::Extension("slash-menu")
+    );
+}
+
+#[test]
+fn a_grouped_transaction_merges_typing_but_not_a_block_kind_change() {
+    let group = TransactionOptions {
+        group: Some(7),
+        origin: Origin::Extension("test"),
+    };
+    let mut editor = editor("");
+    editor.transact(group, |tx| tx.insert_text("a"));
+    editor.transact(group, |tx| tx.insert_text("b"));
+    editor.undo();
+    assert_eq!(editor.document().plain_text(), "");
+    assert!(!editor.can_undo());
+    editor.redo();
+    assert_eq!(editor.document().plain_text(), "ab");
+
+    editor.transact(group, |tx| {
+        tx.insert_text("c");
+        tx.set_block_kind(BlockKind::Quote);
+    });
+    editor.transact(group, |tx| tx.insert_text("d"));
+    assert_eq!(editor.document().plain_text(), "abcd");
+    editor.undo();
+    assert_eq!(editor.document().plain_text(), "abc");
+    assert_eq!(editor.document().blocks[0].kind, BlockKind::Quote);
+    editor.undo();
+    assert_eq!(editor.document().plain_text(), "ab");
+    assert_eq!(editor.document().blocks[0].kind, BlockKind::Paragraph);
+}
+
+#[test]
+fn mapping_keeps_the_edges_of_a_replaced_range_and_collapses_only_its_interior() {
+    let mut editor = editor("abcdef");
+    let change = editor.replace_range(at(0, 1)..at(0, 3), "XYZ").unwrap();
+    assert_eq!(editor.document().plain_text(), "aXYZdef");
+    for affinity in [Affinity::Before, Affinity::After] {
+        assert_eq!(change.mapping.map(at(0, 0), affinity), at(0, 0));
+        assert_eq!(change.mapping.map(at(0, 1), affinity), at(0, 1));
+        assert_eq!(change.mapping.map(at(0, 3), affinity), at(0, 4));
+        assert_eq!(change.mapping.map(at(0, 4), affinity), at(0, 5));
+        assert_eq!(change.mapping.map(at(0, 6), affinity), at(0, 7));
+    }
+    assert_eq!(change.mapping.map(at(0, 2), Affinity::Before), at(0, 1));
+    assert_eq!(change.mapping.map(at(0, 2), Affinity::After), at(0, 4));
+}
+
+#[test]
+fn mapping_moves_a_position_at_a_pure_insertion_only_with_after_affinity() {
+    let mut editor = editor("abcdef");
+    let change = editor.replace_range(at(0, 2)..at(0, 2), "XY").unwrap();
+    assert_eq!(editor.document().plain_text(), "abXYcdef");
+    assert_eq!(change.mapping.map(at(0, 2), Affinity::Before), at(0, 2));
+    assert_eq!(change.mapping.map(at(0, 2), Affinity::After), at(0, 4));
+    for affinity in [Affinity::Before, Affinity::After] {
+        assert_eq!(change.mapping.map(at(0, 1), affinity), at(0, 1));
+        assert_eq!(change.mapping.map(at(0, 3), affinity), at(0, 5));
+        assert_eq!(
+            change.mapping.map_tracked(at(0, 2), affinity),
+            Some(change.mapping.map(at(0, 2), affinity))
+        );
+    }
+}
+
+#[test]
+fn mapping_follows_block_splits_and_joins() {
+    let mut editor = editor("ab");
+    caret(&mut editor, 0, 1);
+    let split = editor.insert_text("\n").unwrap();
+    assert_eq!(editor.document().plain_text(), "a\nb");
+    assert_eq!(split.mapping.map(at(0, 1), Affinity::Before), at(0, 1));
+    assert_eq!(split.mapping.map(at(0, 1), Affinity::After), at(1, 0));
+    for affinity in [Affinity::Before, Affinity::After] {
+        assert_eq!(split.mapping.map(at(0, 0), affinity), at(0, 0));
+        assert_eq!(split.mapping.map(at(0, 2), affinity), at(1, 1));
+    }
+
+    let mut editor = Editor::new(Document::from_markdown("a\nb"));
+    let join = editor.delete_range(at(0, 1)..at(1, 0)).unwrap();
+    assert_eq!(editor.document().plain_text(), "ab");
+    for affinity in [Affinity::Before, Affinity::After] {
+        // The removed newline is a non-empty range, so both of its edges survive.
+        assert_eq!(join.mapping.map(at(0, 1), affinity), at(0, 1));
+        assert_eq!(join.mapping.map(at(1, 0), affinity), at(0, 1));
+        assert_eq!(join.mapping.map(at(1, 1), affinity), at(0, 2));
+        assert_eq!(join.mapping.map_tracked(at(0, 1), affinity), Some(at(0, 1)));
+        assert_eq!(join.mapping.map_tracked(at(1, 0), affinity), Some(at(0, 1)));
+    }
+}
+
+#[test]
+fn tracked_mapping_drops_positions_inside_deleted_text() {
+    let mut editor = editor("abcdef");
+    let change = editor.replace_range(at(0, 1)..at(0, 3), "XYZ").unwrap();
+    for affinity in [Affinity::Before, Affinity::After] {
+        assert_eq!(
+            change.mapping.map_tracked(at(0, 0), affinity),
+            Some(at(0, 0))
+        );
+        assert_eq!(
+            change.mapping.map_tracked(at(0, 1), affinity),
+            Some(at(0, 1))
+        );
+        assert_eq!(change.mapping.map_tracked(at(0, 2), affinity), None);
+        assert_eq!(
+            change.mapping.map_tracked(at(0, 3), affinity),
+            Some(at(0, 4))
+        );
+        assert_eq!(
+            change.mapping.map_tracked(at(0, 4), affinity),
+            Some(at(0, 5))
+        );
+    }
+
+    let mut editor = Editor::new(Document::from_markdown("abcdef"));
+    let change = editor
+        .transact(TransactionOptions::default(), |tx| {
+            tx.delete_range(at(0, 4)..at(0, 6));
+            tx.delete_range(at(0, 0)..at(0, 2));
+        })
+        .unwrap();
+    assert_eq!(editor.document().plain_text(), "cd");
+    for affinity in [Affinity::Before, Affinity::After] {
+        assert_eq!(change.mapping.map_tracked(at(0, 1), affinity), None);
+        assert_eq!(change.mapping.map_tracked(at(0, 5), affinity), None);
+        assert_eq!(
+            change.mapping.map_tracked(at(0, 3), affinity),
+            Some(at(0, 1))
+        );
+        assert_eq!(
+            change.mapping.map_tracked(at(0, 4), affinity),
+            Some(at(0, 2))
+        );
+        assert_eq!(
+            change.mapping.map_tracked(at(0, 6), affinity),
+            Some(at(0, 2))
+        );
+    }
+}
+
+#[test]
+fn undo_and_redo_mappings_round_trip_positions_outside_the_replacement() {
+    let mut editor = editor("abcdef");
+    let forward = editor.replace_range(at(0, 1)..at(0, 3), "XYZ").unwrap();
+    let backward = editor.undo().unwrap();
+    assert_eq!(editor.document().plain_text(), "abcdef");
+    for byte in [0, 1, 3, 4, 6] {
+        for affinity in [Affinity::Before, Affinity::After] {
+            let mapped = forward.mapping.map(at(0, byte), affinity);
+            assert_eq!(backward.mapping.map(mapped, affinity), at(0, byte));
+        }
+    }
+}
+
+#[test]
+fn a_merged_typing_group_maps_positions_across_every_keystroke() {
+    let mut editor = editor("xz");
+    caret(&mut editor, 0, 1);
+    for text in ["a", "b", "c"] {
+        editor.insert_text_grouped(text, 1);
+    }
+    assert_eq!(editor.document().plain_text(), "xabcz");
+    let undo = editor.undo().unwrap();
+    assert_eq!(editor.document().plain_text(), "xz");
+    assert_eq!(undo.mapping.map(at(0, 4), Affinity::After), at(0, 1));
+    assert_eq!(undo.mapping.map(at(0, 5), Affinity::After), at(0, 2));
+    let redo = editor.redo().unwrap();
+    // The caret still ends up after the whole merged insertion.
+    assert_eq!(redo.mapping.map(at(0, 1), Affinity::After), at(0, 4));
+    assert_eq!(redo.mapping.map(at(0, 1), Affinity::Before), at(0, 1));
+    assert_eq!(
+        redo.mapping.map_tracked(at(0, 1), Affinity::After),
+        Some(at(0, 4))
+    );
+}
+
+#[test]
+fn undo_and_redo_restore_the_caret_around_typed_text() {
+    let mut editor = editor("xz");
+    caret(&mut editor, 0, 1);
+    editor.insert_text("abc");
+    assert_eq!(editor.selection(), Selection::caret(at(0, 4)));
+    editor.undo();
+    assert_eq!(editor.selection(), Selection::caret(at(0, 1)));
+    editor.redo();
+    assert_eq!(editor.selection(), Selection::caret(at(0, 4)));
+}
+
+#[test]
+fn mapping_clamps_out_of_range_and_mid_grapheme_positions() {
+    let family = "👨‍👩‍👧‍👦";
+    let mut editor = editor(&format!("a{family}\nb"));
+    let change = editor.replace_range(at(0, 0)..at(0, 1), "Z").unwrap();
+    for affinity in [Affinity::Before, Affinity::After] {
+        assert_eq!(change.mapping.map(at(9, usize::MAX), affinity), at(1, 1));
+        assert_eq!(
+            change.mapping.map_tracked(at(9, usize::MAX), affinity),
+            Some(at(1, 1))
+        );
+        // Raw bytes: a position inside a cluster maps by byte and never panics.
+        assert_eq!(change.mapping.map(at(0, 3), affinity), at(0, 3));
+        assert_eq!(editor.document().clamp_position(at(0, 3)), at(0, "Z".len()));
+    }
+}
+
+#[test]
+fn text_in_slices_across_blocks_like_the_whole_document() {
+    let editor = editor("# a **bold** tail\n- item\n中文\n```\n\ncode\n```\nlast");
+    let document = editor.document();
+    let plain = document.plain_text();
+    let positions: Vec<Position> = document
+        .blocks
+        .iter()
+        .enumerate()
+        .flat_map(|(block, content)| {
+            let text = content.text();
+            let mut bytes: Vec<usize> = text.grapheme_indices(true).map(|(i, _)| i).collect();
+            bytes.push(text.len());
+            bytes.into_iter().map(move |byte| Position { block, byte })
+        })
+        .collect();
+    assert!(document.blocks.len() > 4);
+    for &start in &positions {
+        for &end in &positions {
+            let (low, high) = (start.min(end), start.max(end));
+            let expected = &plain[document.global_byte(low)..document.global_byte(high)];
+            assert_eq!(editor.text_in(start..end), expected, "{start:?}..{end:?}");
+        }
+    }
+}
+
+#[test]
+fn finish_composition_reports_whether_it_committed() {
+    let mut editor = editor("ab");
+    assert!(!editor.finish_composition());
+    caret(&mut editor, 0, 1);
+    editor.set_composition(None, "候", None);
+    let revision = editor.revision();
+    assert!(editor.finish_composition());
+    assert_eq!(editor.revision(), revision);
+    assert_eq!(editor.committed_document().plain_text(), "a候b");
+    assert!(!editor.finish_composition());
+
+    // A composition that never changed the document has nothing to commit.
+    editor.set_composition(None, "", None);
+    assert!(editor.is_composing());
+    assert!(!editor.finish_composition());
+    assert!(!editor.is_composing());
+    editor.undo();
+    assert_eq!(editor.document().plain_text(), "ab");
+    assert!(!editor.can_undo());
+}
+
+#[test]
+fn a_history_entry_retains_one_document_and_a_compact_mapping() {
+    let text = "x".repeat(64 * 1024);
+    let mut editor = editor(&text);
+    editor.move_document_end(false);
+    editor.insert_text("!");
+    assert_eq!(editor.undo.len(), 1);
+    let entry = editor.undo.last().unwrap();
+    let snapshot = document_bytes(&entry.state.document);
+    assert!(snapshot >= text.len());
+    let overhead = entry.retained_bytes() - snapshot;
+    assert!(overhead < 1024, "mapping retained {overhead} bytes");
+}
+
+#[test]
+fn a_transaction_commits_an_active_composition_exactly_once() {
+    let mut editor = editor("ab");
+    caret(&mut editor, 0, 1);
+    editor.set_composition(None, "候选", None);
+    assert!(editor.is_composing());
+    assert_eq!(editor.committed_document().plain_text(), "ab");
+    editor
+        .transact(TransactionOptions::default(), |tx| tx.insert_text("!"))
+        .unwrap();
+    assert!(!editor.is_composing());
+    assert_eq!(editor.document().plain_text(), "a候选!b");
+    assert_eq!(editor.committed_document().plain_text(), "a候选!b");
+    editor.undo();
+    assert_eq!(editor.document().plain_text(), "a候选b");
+    editor.undo();
+    assert_eq!(editor.document().plain_text(), "ab");
+    assert!(!editor.can_undo());
+}
