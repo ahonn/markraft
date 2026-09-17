@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/markraft-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+repository = "https://github.com/ahonn/markraft"
+
+[workspace.dependencies]
+markraft-core = { path = "crates/markraft-core" }
+
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = 0
