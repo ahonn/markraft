@@ -147,8 +147,21 @@ pub(crate) fn trigger_match(
     })
 }
 
+/// The trigger run at `caret` this instance opens on: a [`trigger_match`] whose query is
+/// at least `min_query` grapheme clusters long. `None` keeps the instance closed, which
+/// is what also makes it deaf to the typeahead actions.
+pub(crate) fn open_match(
+    document: &Document,
+    caret: Position,
+    triggers: &[char],
+    min_query: usize,
+) -> Option<TriggerMatch> {
+    let found = trigger_match(document, caret, triggers)?;
+    (found.query.graphemes(true).count() >= min_query).then_some(found)
+}
+
 /// A trigger is one whole grapheme, so a character carrying a combining mark is text.
-fn is_trigger(grapheme: &str, triggers: &[char]) -> bool {
+pub(crate) fn is_trigger(grapheme: &str, triggers: &[char]) -> bool {
     let mut chars = grapheme.chars();
     chars
         .next()
@@ -183,6 +196,37 @@ struct State {
     dismissed: Option<Range<Position>>,
 }
 
+/// What each of the four actions does, so that "an action a closed instance receives is
+/// a no-op" is one decision taken in one place rather than four early returns.
+impl State {
+    /// The row an arrow key moves to. Clamped rather than wrapping, like the app's
+    /// other pickers.
+    fn stepped(&self, delta: isize) -> Option<usize> {
+        let last = self.open.as_ref()?.items.len() - 1;
+        Some(self.selected.saturating_add_signed(delta).min(last))
+    }
+    /// Where the accepting transaction starts, and the item it applies there.
+    fn accepting(&self) -> Option<(Position, TypeaheadItem)> {
+        let open = self.open.as_ref()?;
+        Some((open.trigger.start, open.items.get(self.selected)?.clone()))
+    }
+    /// Close the menu and remember its trigger, so escape leaves it shut.
+    fn dismiss(&mut self) -> bool {
+        let Some(open) = self.open.take() else {
+            return false;
+        };
+        self.dismissed = Some(open.trigger);
+        self.selected = 0;
+        true
+    }
+    /// Close the menu for good: the item is applied, so its trigger text is gone.
+    fn accepted(&mut self) {
+        self.open = None;
+        self.dismissed = None;
+        self.selected = 0;
+    }
+}
+
 struct Open {
     trigger: Range<Position>,
     query: String,
@@ -191,9 +235,16 @@ struct Open {
 
 /// A typeahead over `triggers`. Several instances may share one editor; each owns its
 /// trigger set, its provider and its own `Origin::Extension(id)`.
+///
+/// One caret, one menu: an instance opens only while the trigger run at the caret begins
+/// with one of *its* triggers, so instances whose trigger sets are disjoint are never
+/// open together. The key context carries the one `typeahead` identifier while any of
+/// them is open, which means all of them receive the four actions; each is a strict
+/// no-op for every instance but the open one.
 pub struct Typeahead {
     id: &'static str,
     triggers: Vec<char>,
+    min_query: usize,
     provider: Rc<dyn TypeaheadProvider>,
     state: Rc<RefCell<State>>,
     scroll: ScrollHandle,
@@ -206,10 +257,18 @@ impl Typeahead {
         Self {
             id,
             triggers,
+            min_query: 0,
             provider: Rc::new(provider),
             state: Rc::default(),
             scroll: ScrollHandle::new(),
         }
+    }
+    /// Keep the menu shut until the query is `graphemes` long, so that the keys it would
+    /// take — Return above all — keep their usual meaning for a run too short to mean a
+    /// menu. The default, 0, opens on the bare trigger.
+    pub fn min_query(mut self, graphemes: usize) -> Self {
+        self.min_query = graphemes;
+        self
     }
 }
 
@@ -237,7 +296,14 @@ impl Extension for Typeahead {
             .map(|open| (open.trigger.clone(), open.query.clone()));
         state.open = None;
         let found = (cx.is_focused() && !cx.is_composing() && cx.selection().is_empty())
-            .then(|| trigger_match(cx.committed_document(), cx.selection().head, &self.triggers))
+            .then(|| {
+                open_match(
+                    cx.committed_document(),
+                    cx.selection().head,
+                    &self.triggers,
+                    self.min_query,
+                )
+            })
             .flatten();
         if let Some(found) = found {
             if state.dismissed.as_ref() == Some(&found.trigger) {
@@ -272,12 +338,11 @@ impl Extension for Typeahead {
             let scroll = self.scroll.clone();
             move |cx: &mut EditorCx<'_>| {
                 let mut state = state.borrow_mut();
-                let Some(last) = state.open.as_ref().map(|open| open.items.len() - 1) else {
+                let Some(selected) = state.stepped(delta) else {
                     return;
                 };
-                // Clamped rather than wrapping, like the app's other pickers.
-                state.selected = state.selected.saturating_add_signed(delta).min(last);
-                scroll.scroll_to_item(state.selected);
+                state.selected = selected;
+                scroll.scroll_to_item(selected);
                 drop(state);
                 cx.notify();
             }
@@ -292,10 +357,7 @@ impl Extension for Typeahead {
                 accept(&accepting, &provider, cx);
             }),
             ActionHandler::new(TypeaheadDismiss, move |cx: &mut EditorCx<'_>| {
-                let mut state = dismissing.borrow_mut();
-                if let Some(open) = state.open.take() {
-                    state.dismissed = Some(open.trigger);
-                    state.selected = 0;
+                if dismissing.borrow_mut().dismiss() {
                     cx.notify();
                 }
             }),
@@ -342,15 +404,8 @@ impl Extension for Typeahead {
 /// One transaction: the literal trigger text goes, then the provider applies the item,
 /// so a single undo brings the typed `/query` back.
 fn accept(state: &Rc<RefCell<State>>, provider: &Rc<dyn TypeaheadProvider>, cx: &mut EditorCx<'_>) {
-    let selected = {
-        let state = state.borrow();
-        state.open.as_ref().and_then(|open| {
-            open.items
-                .get(state.selected)
-                .map(|item| (open.trigger.start, item.clone()))
-        })
-    };
-    let Some((start, item)) = selected else {
+    let accepting = state.borrow().accepting();
+    let Some((start, item)) = accepting else {
         return;
     };
     let caret = cx.selection().head;
@@ -367,15 +422,14 @@ fn accept(state: &Rc<RefCell<State>>, provider: &Rc<dyn TypeaheadProvider>, cx: 
     if let Some(payload) = payload {
         cx.emit(payload);
     }
-    let mut state = state.borrow_mut();
-    state.open = None;
-    state.dismissed = None;
-    state.selected = 0;
+    state.borrow_mut().accepted();
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TriggerMatch, track_dismissed, trigger_match};
+    use super::{
+        Open, State, TriggerMatch, TypeaheadItem, open_match, track_dismissed, trigger_match,
+    };
     use markraft_core::{
         BlockKind, Document, Editor, Origin, Position, Selection, TransactionOptions,
     };
@@ -594,6 +648,65 @@ mod tests {
         // The entry before it is the typing itself, so exactly one step was added.
         editor.undo();
         assert_eq!(editor.document().plain_text(), "");
+    }
+
+    #[test]
+    fn a_minimum_query_keeps_the_menu_shut_for_a_short_run() {
+        let document = doc(&[(BlockKind::Paragraph, "/ab")]);
+        let at = |byte, min| open_match(&document, position(byte), &SLASH, min).map(|f| f.query);
+        // The default opens on the bare trigger.
+        assert_eq!(at(1, 0).as_deref(), Some(""));
+        assert_eq!(at(1, 2), None);
+        assert_eq!(at(2, 2), None);
+        assert_eq!(at(3, 2).as_deref(), Some("ab"));
+        // Grapheme clusters, not bytes or code points: one family is one.
+        let document = doc(&[(BlockKind::Paragraph, "/👩‍👩‍👧x")]);
+        let at = |byte, min| open_match(&document, position(byte), &SLASH, min).map(|f| f.query);
+        assert_eq!(at("/👩‍👩‍👧".len(), 2), None);
+        assert_eq!(at("/👩‍👩‍👧x".len(), 2).as_deref(), Some("👩‍👩‍👧x"));
+    }
+
+    fn open(rows: usize) -> State {
+        State {
+            open: Some(Open {
+                trigger: position(0)..position(1),
+                query: String::new(),
+                items: (0..rows)
+                    .map(|row| TypeaheadItem::new(row.to_string(), row.to_string()))
+                    .collect(),
+            }),
+            selected: 0,
+            dismissed: None,
+        }
+    }
+
+    /// Every instance receives the four actions while any of them is open, so a closed
+    /// one must do nothing at all.
+    #[test]
+    fn a_closed_typeahead_takes_no_action() {
+        let mut state = State::default();
+        assert_eq!(state.stepped(1), None);
+        assert_eq!(state.stepped(-1), None);
+        assert_eq!(state.accepting(), None);
+        assert!(!state.dismiss());
+        assert_eq!(state.dismissed, None);
+    }
+
+    #[test]
+    fn an_open_typeahead_steps_clamped_accepts_its_row_and_remembers_a_dismissal() {
+        let mut state = open(3);
+        assert_eq!(state.stepped(-1), Some(0));
+        assert_eq!(state.stepped(1), Some(1));
+        state.selected = 2;
+        assert_eq!(state.stepped(1), Some(2));
+        let accepting = state.accepting().expect("the selected row");
+        assert_eq!((accepting.0, accepting.1.id.as_ref()), (position(0), "2"));
+        assert!(state.dismiss());
+        assert_eq!(state.dismissed, Some(position(0)..position(1)));
+        // Dismissing closes it, so the next action finds nothing to do.
+        assert_eq!(state.stepped(1), None);
+        assert_eq!(state.accepting(), None);
+        assert!(!state.dismiss());
     }
 
     #[test]

@@ -59,8 +59,8 @@ struct Session {
     editor: Entity<EditorView>,
     _changes: Subscription,
     _format_changes: Subscription,
-    /// Unregisters the note's `/` menu when the session is evicted.
-    _slash_menu: ExtensionHandle,
+    /// Unregisters the note's editor extensions when the session is evicted.
+    _extensions: [ExtensionHandle; 3],
 }
 pub struct NotesApp {
     library: Library,
@@ -294,9 +294,20 @@ impl NotesApp {
                 .with_style(style)
                 .with_placeholder("Start writing…")
         });
-        // Only note editors get the `/` menu; the host's query field gets no extension.
+        // Only note editors get the menus; the host's query field gets no extension.
+        // The `/` menu is registered first: the two typeaheads derive from the same
+        // caret and their triggers are disjoint, so only one is ever open, but were they
+        // ever to overlap the first registered one would own the popup and the commands
+        // matter more than the emoji. Auto-replace goes last so that it sees the menu's
+        // view of a keystroke settled before it edits.
         let menu = self.slash_menu();
-        let slash_menu = editor.update(cx, |editor, cx| editor.add_extension(menu, cx));
+        let extensions = editor.update(cx, |editor, cx| {
+            [
+                editor.add_extension(menu, cx),
+                editor.add_extension(markraft_gpui::emoji_menu(), cx),
+                editor.add_extension(markraft_gpui::EmojiShortcodes, cx),
+            ]
+        });
         let note_id = id.clone();
         let changes = cx.subscribe_in(
             &editor,
@@ -356,7 +367,7 @@ impl NotesApp {
                 editor,
                 _changes: changes,
                 _format_changes: format_changes,
-                _slash_menu: slash_menu,
+                _extensions: extensions,
             },
         );
     }

@@ -3,6 +3,7 @@ mod accessibility;
 mod caret;
 mod clipboard;
 mod completion;
+mod emoji;
 mod extension;
 mod format_state;
 mod single_line;
@@ -10,6 +11,7 @@ mod style;
 mod surface;
 mod syntax;
 mod typeahead;
+pub use emoji::{EmojiShortcodes, emoji_menu};
 pub use extension::{
     ActionHandler, EditorCx, Extension, ExtensionHandle, ExtensionPayload, Overlay, Update,
 };
@@ -1006,12 +1008,26 @@ impl Render for EditorView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up));
         // Extension listeners run from window dispatch, so they may update the editor.
+        // One listener per action: a listener consumes its action, so with one each the
+        // first extension's would starve the others that listen for the same action.
+        let mut listeners: Vec<(Box<dyn Action>, Vec<_>)> = Vec::new();
         for (id, handler) in self.extension_actions() {
-            let run = handler.run.clone();
+            let entry = (id, handler.run);
+            match listeners
+                .iter_mut()
+                .find(|(action, _)| action.partial_eq(&*handler.action))
+            {
+                Some((_, runs)) => runs.push(entry),
+                None => listeners.push((handler.action, vec![entry])),
+            }
+        }
+        for (action, runs) in listeners {
             root = root.on_boxed_action(
-                &*handler.action,
+                &*action,
                 cx.listener(move |this, _: &dyn Action, _, cx| {
-                    this.run_extension_action(id, &run, cx);
+                    for (id, run) in &runs {
+                        this.run_extension_action(id, run, cx);
+                    }
                 }),
             );
         }
