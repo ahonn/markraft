@@ -109,6 +109,48 @@ impl Library {
         id
     }
 
+    /// Add a note without opening it.
+    pub fn keep_copy(&mut self, document: Document) {
+        let active = self.active_id.clone();
+        self.new_note(document);
+        self.active_id = active;
+    }
+
+    /// Take a note as another program left it on disk, replacing any note with its id.
+    pub fn adopt(&mut self, note: Note) {
+        match self
+            .notes
+            .iter_mut()
+            .find(|existing| existing.id == note.id)
+        {
+            Some(existing) => *existing = note,
+            None => self.notes.push(note),
+        }
+        self.ensure_active();
+    }
+
+    pub fn remove(&mut self, id: &str) {
+        self.notes.retain(|note| note.id != id);
+        self.ensure_active();
+    }
+
+    /// The active note must exist outside the trash; otherwise open the most recent
+    /// one, or a new one when none is left.
+    fn ensure_active(&mut self) {
+        if self
+            .note(&self.active_id)
+            .is_some_and(|note| note.deleted_at.is_none())
+        {
+            return;
+        }
+        match self.search("", false).first().map(|note| note.id.clone()) {
+            Some(id) => self.active_id = id,
+            None => {
+                self.new_note(Document::default());
+            }
+        }
+    }
+
     pub fn select(&mut self, id: &str) -> bool {
         if self.note(id).is_some_and(|note| note.deleted_at.is_none()) {
             self.active_id = id.to_owned();

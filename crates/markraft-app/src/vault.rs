@@ -31,6 +31,17 @@ struct Saved {
     note: Note,
 }
 
+/// A change another program made in the notes folder.
+#[derive(Clone, Debug, PartialEq)]
+pub enum External {
+    /// A file appeared or changed. `previous` is what Markraft last knew of the note.
+    Updated {
+        previous: Option<Note>,
+        note: Note,
+    },
+    Removed(Note),
+}
+
 /// A held lock coordinates application instances. All writes should run on one serial
 /// worker. Edits by other programs are detected per note before it is overwritten.
 pub struct Store {
@@ -38,6 +49,9 @@ pub struct Store {
     settings_path: PathBuf,
     _lock: File,
     files: HashMap<String, Saved>,
+    /// Notes changed on disk that the application has not taken over yet. Its snapshots
+    /// may still hold the older text, so they are not written for these notes.
+    pending: HashSet<String>,
     settings: Settings,
     saved_library: Library,
 }
@@ -62,6 +76,7 @@ impl Store {
             settings_path,
             _lock: lock,
             files: HashMap::new(),
+            pending: HashSet::new(),
             settings,
             saved_library: Library::default(),
         };
@@ -87,11 +102,16 @@ impl Store {
         Ok(library)
     }
 
-    /// Read every note. A file is never rejected: text without front matter is a note
-    /// whose metadata comes from the file system.
-    fn scan(&mut self) -> Result<Library, String> {
+    /// Read every note file. A file is never rejected: text without front matter is a
+    /// note whose metadata comes from the file system. Such a file has no stored id, so
+    /// it keeps the one it was given while it stays at the same path.
+    fn read_folder(&self) -> Result<HashMap<String, Saved>, String> {
+        let known: HashMap<&Path, &Saved> = self
+            .files
+            .values()
+            .map(|saved| (saved.path.as_path(), saved))
+            .collect();
         let mut files = HashMap::new();
-        let mut notes = Vec::new();
         for (folder, deleted) in [(PathBuf::new(), false), (PathBuf::from(TRASH), true)] {
             let entries = match fs::read_dir(self.directory.join(&folder)) {
                 Ok(entries) => entries,
@@ -106,13 +126,37 @@ impl Store {
                 .collect();
             paths.sort();
             for path in paths {
-                let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+                let relative = folder.join(path.file_name().expect("listed files have names"));
+                // Another program may remove a file between listing and reading it.
+                let Some(bytes) = read_optional(&path).map_err(|error| error.to_string())? else {
+                    continue;
+                };
+                let previous = known.get(relative.as_path());
+                if let Some(previous) = previous
+                    && previous.bytes == bytes
+                    && !files.contains_key(&previous.note.id)
+                {
+                    files.insert(
+                        previous.note.id.clone(),
+                        Saved {
+                            path: relative,
+                            bytes,
+                            note: previous.note.clone(),
+                        },
+                    );
+                    continue;
+                }
                 let modified = fs::metadata(&path)
                     .and_then(|metadata| metadata.modified())
                     .ok()
                     .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                     .map_or(0, |duration| duration.as_millis() as u64);
                 let mut note = decode(&String::from_utf8_lossy(&bytes), modified);
+                if note.id.is_empty()
+                    && let Some(previous) = previous
+                {
+                    note.id.clone_from(&previous.note.id);
+                }
                 // A copied file carries its original's identity.
                 if note.id.is_empty() || files.contains_key(&note.id) {
                     note.id = Uuid::new_v4().to_string();
@@ -122,18 +166,24 @@ impl Store {
                 } else {
                     note.deleted_at = None;
                 }
-                let relative = folder.join(path.file_name().expect("listed files have names"));
                 files.insert(
                     note.id.clone(),
                     Saved {
                         path: relative,
                         bytes,
-                        note: note.clone(),
+                        note,
                     },
                 );
-                notes.push(note);
             }
         }
+        Ok(files)
+    }
+
+    fn scan(&mut self) -> Result<Library, String> {
+        let files = self.read_folder()?;
+        let mut notes: Vec<_> = files.values().map(|saved| saved.note.clone()).collect();
+        notes.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        self.pending.clear();
         self.files = files;
         let mut library = Library {
             notes,
@@ -158,6 +208,49 @@ impl Store {
         Ok(library)
     }
 
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    /// Notice what other programs changed since the folder was last read or written.
+    /// Markraft's own writes are recognised by their content and are not reported.
+    pub fn refresh(&mut self) -> Result<Vec<External>, String> {
+        let files = self.read_folder()?;
+        let mut changes = Vec::new();
+        for (id, saved) in &files {
+            let previous = self.files.get(id).map(|previous| &previous.note);
+            if previous != Some(&saved.note) {
+                changes.push(External::Updated {
+                    previous: previous.cloned(),
+                    note: saved.note.clone(),
+                });
+            }
+        }
+        for (id, previous) in &self.files {
+            if !files.contains_key(id) {
+                changes.push(External::Removed(previous.note.clone()));
+            }
+        }
+        for change in &changes {
+            let (External::Updated { note, .. } | External::Removed(note)) = change;
+            self.pending.insert(note.id.clone());
+            self.saved_library.notes.retain(|saved| saved.id != note.id);
+            if let External::Updated { note, .. } = change {
+                self.saved_library.notes.push(note.clone());
+            }
+        }
+        self.files = files;
+        Ok(changes)
+    }
+
+    /// The application has taken over these external changes; its snapshots are
+    /// authoritative for the notes again.
+    pub fn acknowledge(&mut self, ids: &[String]) {
+        for id in ids {
+            self.pending.remove(id);
+        }
+    }
+
     /// Write the notes that changed. A note changed by another program is left alone
     /// and reported; the others are still saved.
     pub fn save(&mut self, library: &Library) -> Result<(), String> {
@@ -170,7 +263,7 @@ impl Store {
             .collect();
         for note in &library.notes {
             let saved = self.files.get(&note.id);
-            if saved.is_some_and(|saved| &saved.note == note) {
+            if saved.is_some_and(|saved| &saved.note == note) || self.pending.contains(&note.id) {
                 continue;
             }
             // A blank note that was never written stays in memory only.

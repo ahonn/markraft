@@ -1,31 +1,56 @@
-//! One writer preserves save ordering; acknowledgments identify the saved revision.
-use crate::{storage::Library, vault::Store};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+//! One worker owns the notes folder: it preserves save ordering, and it watches the
+//! folder so that changes made by other programs reach the application.
+use crate::{
+    storage::Library,
+    vault::{External, Store},
+};
+use notify::Watcher;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    },
+    time::Duration,
+};
 
 pub struct Saved {
     pub revision: u64,
     pub result: Result<(), String>,
 }
+pub enum Event {
+    Saved(Saved),
+    /// Other programs changed these notes. Snapshots are not written for them until
+    /// the application calls [`Persistence::acknowledge`].
+    External(Vec<External>),
+}
 enum Request {
     Save(u64, Library),
     Flush(Library, Sender<Result<(), String>>),
     Reload(Sender<Result<Library, String>>),
+    Refresh,
+    Acknowledge(Vec<String>),
 }
 pub struct Persistence {
     requests: Sender<Request>,
-    results: Receiver<Saved>,
+    events: Receiver<Event>,
+    // Dropping the watcher stops it; the worker ends when `requests` is dropped.
+    _watcher: Option<notify::RecommendedWatcher>,
 }
 impl Persistence {
-    pub fn new(mut store: Store) -> Self {
+    pub fn new(store: Store) -> Self {
+        Self::start(store, true)
+    }
+    fn start(mut store: Store, watching: bool) -> Self {
         let (requests, incoming) = mpsc::channel();
-        let (outgoing, results) = mpsc::channel();
+        let (outgoing, events) = mpsc::channel();
+        let watcher = watching.then(|| watch(&store, requests.clone())).flatten();
         std::thread::spawn(move || {
             for request in incoming {
                 match request {
                     Request::Save(revision, library) => {
-                        // Store checks external modifications even for an unchanged snapshot.
                         let result = store.save(&library);
-                        let _ = outgoing.send(Saved { revision, result });
+                        let _ = outgoing.send(Event::Saved(Saved { revision, result }));
                     }
                     Request::Flush(library, response) => {
                         let _ = response.send(store.save(&library));
@@ -33,20 +58,35 @@ impl Persistence {
                     Request::Reload(response) => {
                         let _ = response.send(store.reload());
                     }
+                    Request::Refresh => {
+                        if let Ok(changes) = store.refresh()
+                            && !changes.is_empty()
+                        {
+                            let _ = outgoing.send(Event::External(changes));
+                        }
+                    }
+                    Request::Acknowledge(ids) => store.acknowledge(&ids),
                 }
             }
         });
-        Self { requests, results }
+        Self {
+            requests,
+            events,
+            _watcher: watcher,
+        }
     }
     pub fn save(&self, revision: u64, library: Library) -> Result<(), String> {
         self.requests
             .send(Request::Save(revision, library))
             .map_err(|_| "The save worker stopped. Copy your note before quitting.".into())
     }
-    /// The caller compares revisions with its current document revision. Old successful
-    /// acknowledgments must not clear a newer pending change or its save error.
-    pub fn poll(&self) -> Vec<Saved> {
-        self.results.try_iter().collect()
+    /// The caller compares save revisions with its current document revision. Old
+    /// successful acknowledgments must not clear a newer pending change or its error.
+    pub fn poll(&self) -> Vec<Event> {
+        self.events.try_iter().collect()
+    }
+    pub fn acknowledge(&self, ids: Vec<String>) {
+        let _ = self.requests.send(Request::Acknowledge(ids));
     }
     /// Reload after all earlier save requests finish. The caller must confirm discarding
     /// local changes and invalidate their revision acknowledgments before adopting the result.
@@ -69,7 +109,7 @@ impl Persistence {
             .send(Request::Flush(library, response))
             .map_err(|_| "The save worker stopped.".to_string())?;
         result
-            .recv_timeout(std::time::Duration::from_secs(10))
+            .recv_timeout(Duration::from_secs(10))
             .map_err(|error| {
                 match error {
                     RecvTimeoutError::Timeout => {
@@ -85,10 +125,43 @@ impl Persistence {
     }
 }
 
+/// One refresh request per burst of file events. A program saving a file produces
+/// several, and Markraft's own writes produce them too; the store tells those apart.
+fn watch(store: &Store, requests: Sender<Request>) -> Option<notify::RecommendedWatcher> {
+    let queued = Arc::new(AtomicBool::new(false));
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if event.is_ok() && !queued.swap(true, Ordering::SeqCst) {
+            let queued = queued.clone();
+            let requests = requests.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                queued.store(false, Ordering::SeqCst);
+                let _ = requests.send(Request::Refresh);
+            });
+        }
+    })
+    .ok()?;
+    watcher
+        .watch(store.directory(), notify::RecursiveMode::Recursive)
+        .ok()?;
+    Some(watcher)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use markraft_core::Document;
+
+    fn saves(persistence: &Persistence) -> Vec<Saved> {
+        persistence
+            .poll()
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::Saved(saved) => Some(saved),
+                Event::External(_) => None,
+            })
+            .collect()
+    }
 
     fn open(directory: &std::path::Path) -> (Store, Library) {
         Store::open(directory.join("notes"), directory.join("settings.json")).unwrap()
@@ -111,7 +184,7 @@ mod tests {
     fn flush_saves_the_latest_snapshot_after_queued_revisions() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());
-        let persistence = Persistence::new(store);
+        let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
         library.set_document(&id, Document::from_markdown("Title\nFirst 中文"));
         persistence.save(1, library.clone()).unwrap();
@@ -124,7 +197,7 @@ mod tests {
                 .1
                 .ends_with("---\nTitle\nFinal é\n")
         );
-        let acknowledgments = persistence.poll();
+        let acknowledgments = saves(&persistence);
         assert_eq!(
             acknowledgments
                 .iter()
@@ -140,7 +213,7 @@ mod tests {
     fn a_note_changed_by_another_program_is_not_overwritten_but_others_are_saved() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());
-        let persistence = Persistence::new(store);
+        let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
         library.set_document(&id, Document::from_markdown("Shared"));
         persistence.save(10, library.clone()).unwrap();
@@ -151,7 +224,7 @@ mod tests {
         library.new_note(Document::from_markdown("Keep this local work"));
         persistence.save(11, library.clone()).unwrap();
         assert!(persistence.flush(library).is_err());
-        let acknowledgments = persistence.poll();
+        let acknowledgments = saves(&persistence);
         assert_eq!(acknowledgments.len(), 2);
         assert!(acknowledgments[0].result.is_ok());
         assert_eq!(acknowledgments[1].revision, 11);
@@ -170,7 +243,11 @@ mod tests {
         let (outgoing, results) = mpsc::channel();
         drop(incoming);
         drop(outgoing);
-        let persistence = Persistence { requests, results };
+        let persistence = Persistence {
+            requests,
+            events: results,
+            _watcher: None,
+        };
         assert!(persistence.save(1, Library::default()).is_err());
         assert!(persistence.flush(Library::default()).is_err());
         assert!(persistence.reload().is_err());
@@ -180,7 +257,7 @@ mod tests {
     fn reload_is_a_barrier_after_conflicts_and_new_edits_can_be_saved() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut local) = open(directory.path());
-        let persistence = Persistence::new(store);
+        let persistence = Persistence::start(store, false);
         let id = local.active_id.clone();
         local.set_document(&id, Document::from_markdown("Original"));
         persistence.flush(local.clone()).unwrap();
@@ -196,18 +273,72 @@ mod tests {
             reloaded.note(&id).unwrap().document.plain_text(),
             "External text"
         );
-        let acknowledgments = persistence.poll();
+        let acknowledgments = saves(&persistence);
         assert_eq!(acknowledgments.len(), 1);
         assert_eq!(acknowledgments[0].revision, 1);
         assert!(acknowledgments[0].result.is_err());
         reloaded.set_document(&id, Document::from_markdown("External text, continued"));
         persistence.save(2, reloaded.clone()).unwrap();
         persistence.flush(reloaded).unwrap();
-        assert!(persistence.poll()[0].result.is_ok());
+        assert!(saves(&persistence)[0].result.is_ok());
         assert!(
             only_note(directory.path())
                 .1
                 .ends_with("External text, continued\n")
         );
+    }
+
+    #[test]
+    fn changes_by_other_programs_are_reported_and_held_back_until_acknowledged() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, mut library) = open(directory.path());
+        let persistence = Persistence::new(store);
+        let id = library.active_id.clone();
+        library.set_document(&id, Document::from_markdown("Original"));
+        persistence.flush(library.clone()).unwrap();
+        let (path, text) = only_note(directory.path());
+        std::fs::write(&path, text.replace("Original", "From another editor")).unwrap();
+        std::fs::write(directory.path().join("notes/dropped.md"), "Dropped in").unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut seen = Vec::new();
+        while seen.len() < 2 && std::time::Instant::now() < deadline {
+            for event in persistence.poll() {
+                if let Event::External(changes) = event {
+                    seen.extend(changes);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let texts: Vec<_> = seen
+            .iter()
+            .map(|change| match change {
+                External::Updated { note, .. } => note.document.plain_text(),
+                External::Removed(_) => panic!("nothing was removed"),
+            })
+            .collect();
+        assert!(
+            texts.contains(&"From another editor".to_owned()),
+            "{texts:?}"
+        );
+        assert!(texts.contains(&"Dropped in".to_owned()), "{texts:?}");
+
+        // A snapshot taken before the change must not undo it.
+        library.set_document(&id, Document::from_markdown("Stale local edit"));
+        persistence.flush(library.clone()).unwrap();
+        assert!(folder_text(directory.path()).contains("From another editor"));
+        assert!(!folder_text(directory.path()).contains("Stale local edit"));
+        persistence.acknowledge(vec![id]);
+        persistence.flush(library).unwrap();
+        assert!(folder_text(directory.path()).contains("Stale local edit"));
+        assert!(!folder_text(directory.path()).contains("From another editor"));
+    }
+
+    /// Every note in the folder, concatenated; saving may rename a note's file.
+    fn folder_text(directory: &std::path::Path) -> String {
+        std::fs::read_dir(directory.join("notes"))
+            .unwrap()
+            .filter_map(|entry| std::fs::read_to_string(entry.unwrap().path()).ok())
+            .collect()
     }
 }

@@ -2,10 +2,10 @@ mod ui;
 
 use crate::{
     instance::Instance,
-    persistence::Persistence,
+    persistence::{Event, Persistence},
     platform::{Platform, PlatformEvent},
     storage::Library,
-    vault::Store,
+    vault::{External, Store},
 };
 use gpui::{prelude::*, *};
 use markraft_core::{BlockKind, Document, Mark};
@@ -350,6 +350,54 @@ impl NotesApp {
                 .set_document(id, session.editor.read(cx).committed_document().clone());
         }
     }
+    /// Take over what other programs changed in the notes folder. Edits made here that
+    /// had not reached the disk are never dropped: they continue as a separate note.
+    fn apply_external(&mut self, changes: Vec<External>, cx: &mut Context<Self>) {
+        self.sync_documents(cx);
+        let mut ids = Vec::new();
+        let mut kept = 0;
+        for change in changes {
+            let (External::Updated { note, .. } | External::Removed(note)) = &change;
+            let id = note.id.clone();
+            let local = self.library.note(&id).cloned();
+            match change {
+                External::Updated { previous, note } => {
+                    if let Some(local) = local
+                        && local.deleted_at.is_none()
+                        && local.document != note.document
+                        && previous.is_none_or(|previous| previous.document != local.document)
+                    {
+                        self.library.keep_copy(local.document);
+                        kept += 1;
+                    }
+                    self.library.adopt(note);
+                }
+                // With unsaved edits the note stays, and is written to a new file.
+                External::Removed(note) => {
+                    if local.is_none_or(|local| local.document == note.document) {
+                        self.library.remove(&id);
+                    } else {
+                        kept += 1;
+                    }
+                }
+            }
+            self.sessions.remove(&id);
+            self.session_order.retain(|entry| entry != &id);
+            ids.push(id);
+        }
+        self.ensure_session(cx);
+        if let Some(persistence) = &self.persistence {
+            persistence.acknowledge(ids);
+        }
+        if kept > 0 {
+            self.inform(
+                "Changed on disk — your unsaved edits were kept as a copy",
+                cx,
+            );
+            self.changed(cx);
+        }
+        cx.notify();
+    }
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.revision += 1;
         self.dirty = true;
@@ -423,9 +471,14 @@ impl NotesApp {
                 PlatformEvent::Quit => self.quit(cx),
             }
         }
-        if let Some(persistence) = &self.persistence {
-            for saved in persistence.poll() {
-                if saved.revision == self.revision {
+        let events = self
+            .persistence
+            .as_ref()
+            .map(Persistence::poll)
+            .unwrap_or_default();
+        for event in events {
+            match event {
+                Event::Saved(saved) if saved.revision == self.revision => {
                     match saved.result {
                         Ok(()) => {
                             self.dirty = false;
@@ -435,6 +488,8 @@ impl NotesApp {
                     }
                     cx.notify();
                 }
+                Event::Saved(_) => {}
+                Event::External(changes) => self.apply_external(changes, cx),
             }
         }
         if self.save_at.is_some_and(|at| Instant::now() >= at) {
