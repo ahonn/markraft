@@ -1,0 +1,952 @@
+mod ui;
+
+use crate::{
+    instance::Instance,
+    persistence::Persistence,
+    platform::{Platform, PlatformEvent},
+    storage::{Library, Store},
+};
+use gpui::{prelude::*, *};
+use markraft_core::{BlockKind, Document, Mark};
+use markraft_gpui::{EditorEvent, EditorStyle, EditorView};
+use std::{
+    collections::{HashMap, VecDeque},
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+
+actions!(
+    markraft_app,
+    [
+        Save,
+        CopyMarkdown,
+        Quit,
+        Hide,
+        Show,
+        NewNote,
+        Browse,
+        Actions,
+        Settings,
+        Trash,
+        Export,
+        Import
+    ]
+);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    Editor,
+    Browse,
+    Trash,
+    Actions,
+    Settings,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FormatMenu {
+    Block,
+    Inline,
+    List,
+}
+struct Session {
+    editor: Entity<EditorView>,
+    _changes: Subscription,
+    _format_changes: Subscription,
+}
+pub struct NotesApp {
+    library: Library,
+    persistence: Option<Persistence>,
+    path: PathBuf,
+    platform: Option<Platform>,
+    instance: Instance,
+    sessions: HashMap<String, Session>,
+    session_order: VecDeque<String>,
+    query: Entity<EditorView>,
+    _query_changes: Subscription,
+    panel: Panel,
+    panel_focus: FocusHandle,
+    selected: usize,
+    picker_scroll: ScrollHandle,
+    actions_scroll: ScrollHandle,
+    format_scroll: ScrollHandle,
+    dirty: bool,
+    revision: u64,
+    save_at: Option<Instant>,
+    error: Option<String>,
+    platform_error: Option<String>,
+    notice: Option<(String, Instant)>,
+    show_words: bool,
+    format_toolbar: bool,
+    format_menu: Option<FormatMenu>,
+    format_selected: usize,
+    format_snapshot: Option<(markraft_core::Marks, Option<BlockKind>)>,
+    dark: bool,
+    // The pointer is over the window; toolbar chrome is hidden while it is away.
+    pointer_inside: bool,
+    traffic_lights_visible: bool,
+    window_active: bool,
+    expected_size: Option<Size<Pixels>>,
+    last_size: Size<Pixels>,
+    _poll: Task<()>,
+    _bounds: Subscription,
+    _appearance: Subscription,
+    _activation: Subscription,
+    _quit: Subscription,
+}
+impl NotesApp {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        path: PathBuf,
+        store: Option<Store>,
+        library: Library,
+        error: Option<String>,
+        platform: Result<Platform, String>,
+        instance: Instance,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let dark = library.preferences.dark_mode.unwrap_or(matches!(
+            window.appearance(),
+            WindowAppearance::Dark | WindowAppearance::VibrantDark
+        ));
+        let query = cx.new(|cx| {
+            EditorView::new(Document::default(), cx)
+                .with_single_line()
+                .with_style(query_style(dark))
+                .with_placeholder("Search notes…")
+        });
+        let query_changes = cx.subscribe(&query, |this, _, _: &EditorEvent, cx| {
+            this.selected = 0;
+            this.actions_scroll.scroll_to_item(0);
+            this.picker_scroll.scroll_to_item(0);
+            cx.notify();
+        });
+        let mut platform_error = None;
+        let platform = match platform {
+            Ok(mut p) => {
+                if let Err(e) = p
+                    .configure_window(window)
+                    .and_then(|_| p.set_shortcut(&library.preferences.hotkey))
+                {
+                    platform_error = Some(e);
+                }
+                Some(p)
+            }
+            Err(e) => {
+                platform_error = Some(e);
+                None
+            }
+        };
+        let bounds = cx.observe_window_bounds(window, |this, window, cx| {
+            let bounds = window.bounds();
+            if bounds.size != this.last_size {
+                if this.expected_size.is_some_and(|expected| {
+                    (expected.width - bounds.size.width).abs() <= px(2.)
+                        && (expected.height - bounds.size.height).abs() <= px(2.)
+                }) {
+                    this.expected_size = None;
+                } else {
+                    this.library.preferences.auto_height = false;
+                    this.expected_size = None;
+                }
+                this.last_size = bounds.size;
+            }
+            let next = Some([
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+            ]);
+            if this.library.preferences.window_bounds != next {
+                this.library.preferences.window_bounds = next;
+                this.changed(cx);
+            }
+        });
+        let appearance = cx.observe_window_appearance(window, |this, window, cx| {
+            this.apply_theme(window, cx);
+        });
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            this.window_active = window.is_window_active();
+            cx.notify();
+        });
+        let quit = cx.on_app_quit(|this, cx| {
+            if !this.flush(cx) {
+                eprintln!(
+                    "Markraft: {}",
+                    this.error.as_deref().unwrap_or("Could not save")
+                );
+            }
+            async {}
+        });
+        let poll = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+                if cx
+                    .update(|window, cx| this.update(cx, |this, cx| this.poll(window, cx)))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let mut app = Self {
+            library,
+            persistence: store.map(Persistence::new),
+            path,
+            platform,
+            instance,
+            sessions: HashMap::new(),
+            session_order: VecDeque::new(),
+            query,
+            _query_changes: query_changes,
+            panel: Panel::Editor,
+            panel_focus: cx.focus_handle(),
+            selected: 0,
+            picker_scroll: ScrollHandle::new(),
+            actions_scroll: ScrollHandle::new(),
+            format_scroll: ScrollHandle::new(),
+            dirty: false,
+            revision: 0,
+            save_at: None,
+            error,
+            platform_error,
+            notice: None,
+            show_words: false,
+            format_toolbar: false,
+            format_menu: None,
+            format_selected: 0,
+            format_snapshot: None,
+            dark,
+            pointer_inside: true,
+            traffic_lights_visible: true,
+            window_active: window.is_window_active(),
+            expected_size: None,
+            last_size: window.bounds().size,
+            _poll: poll,
+            _bounds: bounds,
+            _appearance: appearance,
+            _activation: activation,
+            _quit: quit,
+        };
+        app.ensure_session(cx);
+        if app.persistence.is_some() {
+            app.focus_editor(window, cx);
+        } else {
+            window.focus(&app.panel_focus, cx);
+        }
+        // Persist a newly created library and any one-time legacy import.
+        app.changed(cx);
+        app
+    }
+    fn editor(&self) -> Entity<EditorView> {
+        self.sessions[&self.library.active_id].editor.clone()
+    }
+    fn ensure_session(&mut self, cx: &mut Context<Self>) {
+        let id = self.library.active_id.clone();
+        self.session_order.retain(|entry| entry != &id);
+        self.session_order.push_back(id.clone());
+        while self.session_order.len() > 8 {
+            if let Some(expired) = self.session_order.pop_front() {
+                self.sessions.remove(&expired);
+            }
+        }
+        if self.sessions.contains_key(&id) {
+            return;
+        }
+        let document = self.library.active_note().document.clone();
+        let style = notes_style(self.dark);
+        let editor = cx.new(|cx| {
+            EditorView::new(document, cx)
+                .with_style(style)
+                .with_placeholder("Start writing…")
+        });
+        let note_id = id.clone();
+        let changes = cx.subscribe(&editor, move |this, editor, _: &EditorEvent, cx| {
+            let document = editor.read(cx).committed_document().clone();
+            if this.library.set_document(&note_id, document) {
+                this.changed(cx);
+            }
+            cx.notify();
+        });
+        let format_note_id = id.clone();
+        let format_changes = cx.observe(&editor, move |this, editor, cx| {
+            if this.format_toolbar && this.library.active_id == format_note_id {
+                let editor = editor.read(cx);
+                let snapshot = (editor.active_marks(), editor.active_block_kind());
+                if this.format_snapshot.as_ref() != Some(&snapshot) {
+                    this.format_snapshot = Some(snapshot);
+                    cx.notify();
+                }
+            }
+        });
+        self.sessions.insert(
+            id,
+            Session {
+                editor,
+                _changes: changes,
+                _format_changes: format_changes,
+            },
+        );
+    }
+    fn sync_documents(&mut self, cx: &App) {
+        for (id, session) in &self.sessions {
+            self.library
+                .set_document(id, session.editor.read(cx).committed_document().clone());
+        }
+    }
+    fn changed(&mut self, cx: &mut Context<Self>) {
+        self.revision += 1;
+        self.dirty = true;
+        self.save_at = Some(Instant::now() + Duration::from_millis(350));
+        cx.notify();
+    }
+    fn flush(&mut self, cx: &mut Context<Self>) -> bool {
+        self.sync_documents(cx);
+        self.save_at = None;
+        self.revision += 1; // Discard acknowledgments for snapshots preceding this barrier.
+        let result = self
+            .persistence
+            .as_ref()
+            .ok_or_else(|| "Open or recover the library before saving.".to_string())
+            .and_then(|p| p.flush(self.library.clone()));
+        match result {
+            Ok(()) => {
+                self.dirty = false;
+                self.error = None;
+            }
+            Err(e) => {
+                self.dirty = true;
+                self.error = Some(e);
+            }
+        }
+        cx.notify();
+        !self.dirty
+    }
+    /// Window controls, the action capsule and the formatting toggle appear only
+    /// while the pointer is over the window or a keyboard-opened panel needs them.
+    fn chrome_visible(&self) -> bool {
+        self.pointer_inside || self.panel != Panel::Editor || self.format_menu.is_some()
+    }
+    /// Critically damped: chrome fades without overshoot, and a reversal while the
+    /// pointer crosses the window edge continues from the current opacity.
+    pub(super) fn chrome_spring(visible: bool) -> SpringAnimation<bool> {
+        SpringAnimation::new(SpringConfig::new(600., 49., 1.)).to(visible)
+    }
+    fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(platform) = &self.platform {
+            let inside = platform.pointer_inside(window);
+            if inside != self.pointer_inside {
+                self.pointer_inside = inside;
+                cx.notify();
+            }
+            let chrome = self.chrome_visible();
+            if chrome != self.traffic_lights_visible {
+                self.traffic_lights_visible = chrome;
+                platform.set_traffic_lights_visible(window, chrome, !cx.reduce_motion());
+            }
+        }
+        if self.instance.requested_show() {
+            self.show(window, cx);
+        }
+        let events = self
+            .platform
+            .as_ref()
+            .map(|p| p.poll_events())
+            .unwrap_or_default();
+        for event in events {
+            match event {
+                PlatformEvent::Toggle => self.toggle(window, cx),
+                PlatformEvent::NewNote => {
+                    self.show(window, cx);
+                    self.new_note(window, cx);
+                }
+                PlatformEvent::Settings => {
+                    self.show(window, cx);
+                    self.open_panel(Panel::Settings, window, cx);
+                }
+                PlatformEvent::Quit => self.quit(cx),
+            }
+        }
+        if let Some(persistence) = &self.persistence {
+            for saved in persistence.poll() {
+                if saved.revision == self.revision {
+                    match saved.result {
+                        Ok(()) => {
+                            self.dirty = false;
+                            self.error = None;
+                        }
+                        Err(e) => self.error = Some(e),
+                    }
+                    cx.notify();
+                }
+            }
+        }
+        if self.save_at.is_some_and(|at| Instant::now() >= at) {
+            self.save_at = None;
+            if let Some(p) = &self.persistence
+                && let Err(e) = p.save(self.revision, self.library.clone())
+            {
+                self.error = Some(e);
+            }
+        }
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|(_, until)| Instant::now() > *until)
+        {
+            self.notice = None;
+            cx.notify();
+        }
+        if self.panel == Panel::Editor
+            && self.library.preferences.auto_height
+            && self.persistence.is_some()
+        {
+            let Some(height) = self.editor().read(cx).content_height() else {
+                return;
+            };
+            let maximum = window
+                .display(cx)
+                .map(|d| d.visible_bounds().size.height * 0.8)
+                .unwrap_or(px(720.));
+            // The footer floats over the editor and is already part of its content height.
+            let chrome = if self.error.is_some() {
+                px(116.)
+            } else {
+                px(52.)
+            };
+            let desired = px(f32::from((height + chrome).max(px(220.)).min(maximum)).round());
+            let size = size(window.bounds().size.width, desired);
+            if (size.height - window.bounds().size.height).abs() > px(2.)
+                && self.expected_size.is_none()
+            {
+                self.expected_size = Some(size);
+                window.resize(size);
+            }
+        }
+    }
+    fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.editor().focus_handle(cx), cx);
+    }
+    pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(p) = &mut self.platform {
+            if let Err(e) = p.show(window) {
+                self.error = Some(e);
+            }
+        } else {
+            window.activate_window();
+        }
+        if self.persistence.is_none() {
+            window.focus(&self.panel_focus, cx);
+        } else if self.panel == Panel::Browse
+            || self.panel == Panel::Trash
+            || self.panel == Panel::Settings
+            || self.panel == Panel::Actions
+        {
+            window.focus(&self.query.focus_handle(cx), cx);
+        } else {
+            self.focus_editor(window, cx);
+        }
+        cx.notify();
+    }
+    pub fn hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.query.update(cx, |e, cx| e.cancel_composition(cx));
+        self.editor()
+            .update(cx, |editor, cx| editor.cancel_composition(cx));
+        if !self.flush(cx) {
+            return;
+        }
+        if let Some(p) = &mut self.platform {
+            if let Err(e) = p.hide(window) {
+                self.error = Some(e);
+                cx.notify();
+            }
+        } else {
+            cx.hide();
+        }
+    }
+    fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.is_window_active() {
+            self.hide(window, cx);
+        } else {
+            self.show(window, cx);
+        }
+    }
+    fn quit(&mut self, cx: &mut Context<Self>) {
+        if self.persistence.is_none() {
+            cx.quit();
+            return;
+        }
+        self.editor()
+            .update(cx, |editor, cx| editor.cancel_composition(cx));
+        if self.flush(cx) {
+            cx.quit();
+        }
+    }
+    fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.query.read(cx).is_composing() {
+            self.query.update(cx, |e, cx| e.cancel_composition(cx));
+            return;
+        }
+        if self.editor().read(cx).is_composing() {
+            self.editor().update(cx, |e, cx| e.cancel_composition(cx));
+            return;
+        }
+        if self.format_menu.take().is_some() {
+            self.focus_editor(window, cx);
+            cx.notify();
+        } else if self.panel != Panel::Editor {
+            self.panel = Panel::Editor;
+            self.focus_editor(window, cx);
+            cx.notify();
+        } else if self.format_toolbar {
+            self.format_toolbar = false;
+            cx.notify();
+        } else {
+            self.hide(window, cx);
+        }
+    }
+    fn new_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.format_menu = None;
+        self.query.update(cx, |e, cx| e.cancel_composition(cx));
+        if self.persistence.is_none() {
+            return;
+        }
+        self.editor().update(cx, |e, cx| e.cancel_composition(cx));
+        self.sync_documents(cx);
+        self.library.new_note(Document::default());
+        self.ensure_session(cx);
+        self.panel = Panel::Editor;
+        self.focus_editor(window, cx);
+        self.changed(cx);
+    }
+    fn select_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.format_menu = None;
+        self.query.update(cx, |e, cx| e.cancel_composition(cx));
+        self.editor().update(cx, |e, cx| e.cancel_composition(cx));
+        self.sync_documents(cx);
+        if self.library.select(id) {
+            self.ensure_session(cx);
+            self.panel = Panel::Editor;
+            self.focus_editor(window, cx);
+            self.changed(cx);
+        }
+    }
+    fn open_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
+        self.format_menu = None;
+        if self.persistence.is_none() {
+            return;
+        }
+        self.editor().update(cx, |e, cx| e.cancel_composition(cx));
+        self.query.update(cx, |e, cx| e.cancel_composition(cx));
+        self.panel = if self.panel == panel {
+            Panel::Editor
+        } else {
+            panel
+        };
+        self.selected = 0;
+        let query = if self.panel == Panel::Settings {
+            self.library.preferences.hotkey.as_str()
+        } else {
+            ""
+        };
+        self.query.update(cx, |e, cx| {
+            e.replace_document(Document::from_markdown(query), cx);
+            e.set_placeholder(
+                if self.panel == Panel::Actions {
+                    "Search for actions…"
+                } else if self.panel == Panel::Settings {
+                    "Record a shortcut…"
+                } else {
+                    "Search for notes…"
+                },
+                cx,
+            );
+        });
+        if matches!(
+            self.panel,
+            Panel::Browse | Panel::Trash | Panel::Settings | Panel::Actions
+        ) {
+            window.focus(&self.query.focus_handle(cx), cx);
+        } else {
+            self.focus_editor(window, cx);
+        }
+        cx.notify();
+    }
+    fn matching_notes(&self, query: &str, deleted: bool) -> Vec<&crate::storage::Note> {
+        let mut notes = self.library.search(query, deleted);
+        if !deleted {
+            notes.sort_by_key(|note| note.id != self.library.active_id);
+        }
+        notes
+    }
+    fn toggle_pin(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(note) = self
+            .library
+            .notes
+            .iter_mut()
+            .find(|note| note.id == id && note.deleted_at.is_none())
+        {
+            note.pinned = !note.pinned;
+            self.changed(cx);
+        }
+        // Pinning reorders results; keep the same note selected.
+        self.selected = self
+            .matching_notes(self.query.read(cx).document().plain_text().trim(), false)
+            .iter()
+            .position(|note| note.id == id)
+            .unwrap_or(0);
+        self.picker_scroll.scroll_to_item(self.selected);
+    }
+    fn trash_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_documents(cx);
+        if self.library.delete(id) {
+            self.sessions.remove(id);
+            self.ensure_session(cx);
+            let query = self.query.read(cx).document().plain_text();
+            self.selected = self.selected.min(
+                self.library
+                    .search(query.trim(), false)
+                    .len()
+                    .saturating_sub(1),
+            );
+            self.picker_scroll.scroll_to_item(self.selected);
+            window.focus(&self.query.focus_handle(cx), cx);
+            self.changed(cx);
+            self.inform("Moved to Recently Deleted", cx);
+        }
+    }
+    fn delete_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.library.active_id.clone();
+        self.sync_documents(cx);
+        if self.library.delete(&id) {
+            self.sessions.remove(&id);
+            self.ensure_session(cx);
+            self.panel = Panel::Editor;
+            self.focus_editor(window, cx);
+            self.changed(cx);
+            self.inform("Moved to Recently Deleted", cx);
+        }
+    }
+    fn restore_note(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.library.restore(id) {
+            self.ensure_session(cx);
+            self.changed(cx);
+            self.selected = self.selected.min(
+                self.library
+                    .search(&self.query.read(cx).document().plain_text(), true)
+                    .len()
+                    .saturating_sub(1),
+            );
+            self.inform("Note restored", cx);
+        }
+    }
+    fn inform(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.notice = Some((text.into(), Instant::now() + Duration::from_secs(3)));
+        cx.notify();
+    }
+    fn apply_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dark = self.library.preferences.dark_mode.unwrap_or(matches!(
+            window.appearance(),
+            WindowAppearance::Dark | WindowAppearance::VibrantDark
+        ));
+        for session in self.sessions.values() {
+            session
+                .editor
+                .update(cx, |e, cx| e.set_style(notes_style(self.dark), cx));
+        }
+        self.query
+            .update(cx, |e, cx| e.set_style(query_style(self.dark), cx));
+        cx.notify();
+    }
+    fn apply_shortcut(&mut self, cx: &mut Context<Self>) {
+        let text = self
+            .query
+            .read(cx)
+            .committed_document()
+            .plain_text()
+            .trim()
+            .to_string();
+        if let Some(platform) = &mut self.platform {
+            match platform.set_shortcut(&text) {
+                Ok(()) => {
+                    self.library.preferences.hotkey = text;
+                    self.platform_error = None;
+                    self.changed(cx);
+                    self.inform("Shortcut updated", cx);
+                }
+                Err(e) => {
+                    self.platform_error = Some(e);
+                    cx.notify();
+                }
+            }
+        }
+    }
+    fn copy_markdown(&mut self, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            self.editor().read(cx).committed_document().to_markdown(),
+        ));
+        self.inform("Copied as Markdown", cx);
+    }
+    fn recover(&mut self, backup: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let result = if backup {
+            Store::recover_backup(self.path.clone())
+        } else {
+            Store::open(self.path.clone())
+        };
+        match result {
+            Ok((store, library)) => {
+                self.library = library;
+                self.persistence = Some(Persistence::new(store));
+                self.sessions.clear();
+                self.session_order.clear();
+                self.ensure_session(cx);
+                self.error = None;
+                self.focus_editor(window, cx);
+                self.apply_theme(window, cx);
+                self.platform_error = self
+                    .platform
+                    .as_mut()
+                    .and_then(|p| p.set_shortcut(&self.library.preferences.hotkey).err());
+                self.changed(cx);
+            }
+            Err(e) => {
+                self.error = Some(e);
+                cx.notify();
+            }
+        }
+    }
+    fn save_copy(&mut self, cx: &mut Context<Self>) {
+        self.sync_documents(cx);
+        let bytes = match serde_json::to_vec_pretty(&self.library) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.error = Some(e.to_string());
+                return;
+            }
+        };
+        let prompt = cx.prompt_for_new_path(
+            self.path.parent().unwrap(),
+            Some("Markraft Notes Backup.json"),
+        );
+        let original = self.path.clone();
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = prompt.await {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        if path == original
+                            || path
+                                .canonicalize()
+                                .ok()
+                                .zip(original.canonicalize().ok())
+                                .is_some_and(|(a, b)| a == b)
+                        {
+                            return Err(
+                                "Choose a different path to preserve the existing library.".into(),
+                            );
+                        }
+                        std::fs::write(path, bytes).map_err(|e| e.to_string())
+                    })
+                    .await;
+                let _ = this.update(cx, |this, cx| match result {
+                    Ok(()) => this.inform("Library copy saved", cx),
+                    Err(e) => {
+                        this.error = Some(e);
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Reload notes from disk?",
+            Some(
+                "This discards unsaved changes in this app. \
+                 Save a library copy first if you need to keep them.",
+            ),
+            &["Cancel", "Reload"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(1) {
+                let _ = cx.update(|window, cx| {
+                    this.update(cx, |this, cx| {
+                        this.revision += 1;
+                        this.save_at = None;
+                        let result = this
+                            .persistence
+                            .as_ref()
+                            .ok_or_else(|| "The library is not open".to_string())
+                            .and_then(|p| p.reload());
+                        match result {
+                            Ok(library) => {
+                                this.query.update(cx, |e, cx| e.cancel_composition(cx));
+                                this.library = library;
+                                this.sessions.clear();
+                                this.session_order.clear();
+                                this.ensure_session(cx);
+                                this.panel = Panel::Editor;
+                                this.dirty = false;
+                                this.error = None;
+                                this.focus_editor(window, cx);
+                                this.apply_theme(window, cx);
+                                this.platform_error = this.platform.as_mut().and_then(|p| {
+                                    p.set_shortcut(&this.library.preferences.hotkey).err()
+                                });
+                            }
+                            Err(e) => this.error = Some(e),
+                        }
+                        cx.notify();
+                    })
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn export(&mut self, cx: &mut Context<Self>) {
+        if self.persistence.is_none() {
+            return;
+        }
+        let note = self.library.active_note();
+        let title = note.title();
+        let filename = format!("{}.md", title.replace(['/', ':'], "-"));
+        let document = self.editor().read(cx).committed_document().to_markdown();
+        let directory = self.path.parent().unwrap().to_path_buf();
+        let prompt = cx.prompt_for_new_path(&directory, Some(&filename));
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = prompt.await {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { std::fs::write(path, document).map_err(|e| e.to_string()) })
+                    .await;
+                let _ = this.update(cx, |this, cx| match result {
+                    Ok(()) => this.inform("Markdown exported", cx),
+                    Err(e) => {
+                        this.error = Some(e);
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+    fn import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.persistence.is_none() {
+            return;
+        }
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = prompt.await {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        paths
+                            .into_iter()
+                            .map(|path| {
+                                let text = std::fs::read_to_string(&path)
+                                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                                if path.extension().is_some_and(|e| e == "json") {
+                                    Document::from_json(&text).map_err(|e| e.to_string())
+                                } else {
+                                    Ok(Document::from_markdown(&text))
+                                }
+                            })
+                            .collect::<Result<Vec<_>, String>>()
+                    })
+                    .await;
+                let _ = cx.update(|window, cx| {
+                    this.update(cx, |this, cx| match result {
+                        Ok(documents) => {
+                            this.query.update(cx, |e, cx| e.cancel_composition(cx));
+                            this.editor().update(cx, |e, cx| e.cancel_composition(cx));
+                            this.sync_documents(cx);
+                            for doc in documents {
+                                this.library.new_note(doc);
+                            }
+                            this.ensure_session(cx);
+                            this.panel = Panel::Editor;
+                            this.focus_editor(window, cx);
+                            this.changed(cx);
+                        }
+                        Err(e) => {
+                            this.error = Some(e);
+                            cx.notify();
+                        }
+                    })
+                });
+            }
+        })
+        .detach();
+    }
+}
+/// Height of the footer controls that float over the bottom of the note.
+const FOOTER_HEIGHT: Pixels = px(44.);
+fn notes_style(dark: bool) -> EditorStyle {
+    let mut style = if dark {
+        EditorStyle::notes_dark()
+    } else {
+        EditorStyle::notes()
+    };
+    style.bottom_overlay = FOOTER_HEIGHT;
+    style
+}
+fn query_style(dark: bool) -> EditorStyle {
+    let mut style = notes_style(dark);
+    style.background = if dark { rgb(0x2e2f33) } else { rgb(0xf8f8f8) }.into();
+    style.body_size = px(13.);
+    style.padding = px(0.);
+    style.paragraph_gap = px(0.);
+    style.bottom_overlay = px(0.);
+    style
+}
+pub fn bind_app_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("up", markraft_gpui::Up, Some("MarkraftApp")),
+        KeyBinding::new("down", markraft_gpui::Down, Some("MarkraftApp")),
+        KeyBinding::new("enter", markraft_gpui::Enter, Some("MarkraftApp")),
+        KeyBinding::new("cmd-s", Save, Some("MarkraftApp")),
+        KeyBinding::new("cmd-shift-c", CopyMarkdown, Some("MarkraftApp")),
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("escape", Hide, Some("MarkraftApp")),
+        KeyBinding::new("cmd-n", NewNote, Some("MarkraftApp")),
+        KeyBinding::new("cmd-p", Browse, Some("MarkraftApp")),
+        KeyBinding::new("cmd-k", Actions, Some("MarkraftApp")),
+        KeyBinding::new("cmd-,", Settings, Some("MarkraftApp")),
+        KeyBinding::new("cmd-shift-e", Export, Some("MarkraftApp")),
+        KeyBinding::new("cmd-o", Import, Some("MarkraftApp")),
+    ]);
+    cx.set_menus([
+        Menu::new("Markraft Notes").items([
+            MenuItem::action("Show Notes", Show),
+            MenuItem::action("Settings…", Settings),
+            MenuItem::separator(),
+            MenuItem::action("Quit Markraft Notes", Quit),
+        ]),
+        Menu::new("File").items([
+            MenuItem::action("New Note", NewNote),
+            MenuItem::action("Browse Notes", Browse),
+            MenuItem::action("Save Now", Save),
+            MenuItem::action("Import…", Import),
+            MenuItem::action("Export Markdown…", Export),
+        ]),
+        Menu::new("Edit").items([
+            MenuItem::action("Undo", markraft_gpui::Undo),
+            MenuItem::action("Redo", markraft_gpui::Redo),
+            MenuItem::separator(),
+            MenuItem::action("Cut", markraft_gpui::Cut),
+            MenuItem::action("Copy", markraft_gpui::Copy),
+            MenuItem::action("Paste", markraft_gpui::Paste),
+            MenuItem::action("Select All", markraft_gpui::SelectAll),
+        ]),
+    ]);
+}

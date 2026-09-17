@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/markraft-core", "crates/markraft-gpui"]
+members = ["crates/markraft-core", "crates/markraft-gpui", "crates/markraft-app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ repository = "https://github.com/ahonn/markraft"
 
 [workspace.dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.4" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.4", features = ["font-kit", "runtime_shaders"] }
 markraft-core = { path = "crates/markraft-core" }
 markraft-gpui = { path = "crates/markraft-gpui" }
 
