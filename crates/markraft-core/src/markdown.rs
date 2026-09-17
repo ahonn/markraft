@@ -10,6 +10,7 @@ impl Document {
         // The open fence's marker and the index of the first block it produced.
         let mut fence: Option<(String, BlockKind, usize)> = None;
         let mut blocks = Vec::new();
+        let mut list_indents = vec![0usize];
         for line in normalized.split('\n') {
             if let Some((marker, kind, first)) = &fence {
                 let trimmed = line.trim();
@@ -18,6 +19,7 @@ impl Document {
                 {
                     if blocks.len() == *first {
                         blocks.push(Block {
+                            depth: 0,
                             kind: kind.clone(),
                             spans: vec![],
                         });
@@ -28,6 +30,7 @@ impl Document {
                 let mut spans = vec![];
                 push_span(&mut spans, line, Marks::default());
                 blocks.push(Block {
+                    depth: 0,
                     kind: kind.clone(),
                     spans,
                 });
@@ -40,8 +43,42 @@ impl Document {
                 fence = Some((marker.to_owned(), kind, blocks.len()));
                 continue;
             }
-            let (kind, text) = parse_block(line);
+            let indentation = line
+                .chars()
+                .take_while(|c| matches!(c, ' ' | '\t'))
+                .map(|c| if c == '\t' { 4 } else { 1 })
+                .sum::<usize>();
+            let trimmed = line.trim_start_matches([' ', '\t']);
+            let (nested_kind, nested_text) = parse_block(trimmed);
+            let (kind, text) = if nested_kind.is_list() {
+                (nested_kind, nested_text)
+            } else {
+                parse_block(line)
+            };
+            let mut depth: u8 = 0;
+            let text = if kind == BlockKind::Quote {
+                let mut text = text;
+                while let Some(rest) = text.strip_prefix('>') {
+                    depth = depth.saturating_add(1u8);
+                    text = rest.strip_prefix(' ').unwrap_or(rest);
+                }
+                list_indents.truncate(1);
+                text
+            } else if kind.is_list() {
+                while list_indents.len() > 1 && *list_indents.last().unwrap() > indentation {
+                    list_indents.pop();
+                }
+                if indentation > *list_indents.last().unwrap() {
+                    list_indents.push(indentation);
+                }
+                depth = (list_indents.len() - 1).min(usize::from(u8::MAX)) as u8;
+                text
+            } else {
+                list_indents.truncate(1);
+                text
+            };
             blocks.push(Block {
+                depth,
                 kind,
                 spans: parse_inline(text, Marks::default()),
             });
@@ -50,6 +87,7 @@ impl Document {
             && blocks.len() == first
         {
             blocks.push(Block {
+                depth: 0,
                 kind,
                 spans: vec![],
             });
@@ -106,13 +144,17 @@ impl Document {
                 BlockKind::Ordered => format!("{}. ", self.ordinal(index).unwrap_or(1)),
                 BlockKind::Task { checked: false } => "- [ ] ".to_owned(),
                 BlockKind::Task { checked: true } => "- [x] ".to_owned(),
-                BlockKind::Quote => "> ".to_owned(),
+                BlockKind::Quote => "> ".repeat(usize::from(block.depth) + 1),
                 BlockKind::Divider => {
                     lines.push("---".to_owned());
                     continue;
                 }
             };
-            let mut line = prefix;
+            let mut line = if block.kind.is_list() {
+                format!("{}{prefix}", "    ".repeat(usize::from(block.depth)))
+            } else {
+                prefix
+            };
             let mut link: Option<&str> = None;
             for span in &block.spans {
                 if link != span.link.as_deref() {
@@ -187,11 +229,8 @@ fn parse_block(line: &str) -> (BlockKind, &str) {
     {
         return (BlockKind::Divider, "");
     }
-    if let Some(rest) = line.strip_prefix("> ") {
-        return (BlockKind::Quote, rest);
-    }
-    if line == ">" {
-        return (BlockKind::Quote, "");
+    if let Some(rest) = line.strip_prefix('>') {
+        return (BlockKind::Quote, rest.strip_prefix(' ').unwrap_or(rest));
     }
     for prefix in ["- ", "* ", "+ "] {
         if let Some(rest) = line.strip_prefix(prefix) {

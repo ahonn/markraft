@@ -1,11 +1,14 @@
 //! Native editing adapter. The core owns document semantics; the host owns persistence.
 mod accessibility;
 mod caret;
+mod clipboard;
 mod format_state;
 mod single_line;
 mod style;
 mod surface;
+mod syntax;
 pub use style::EditorStyle;
+pub use syntax::code_languages;
 
 use gpui::{prelude::*, *};
 use markraft_core::{BlockKind, Document, Editor, Mark, Position, Selection};
@@ -40,6 +43,10 @@ actions!(
         Copy,
         Cut,
         Paste,
+        PastePlain,
+        PasteMarkdown,
+        Indent,
+        Outdent,
         Undo,
         Redo,
         Bold,
@@ -114,6 +121,8 @@ pub fn bind_keys(cx: &mut App) {
         "cmd-shift-left" => SelectHome, "cmd-shift-right" => SelectEnd,
         "home" => Home, "end" => End, "cmd-a" => SelectAll,
         "cmd-c" => Copy, "cmd-x" => Cut, "cmd-v" => Paste,
+        "cmd-shift-v" => PastePlain, "cmd-alt-shift-v" => PasteMarkdown,
+        "tab" => Indent, "shift-tab" => Outdent,
         "cmd-z" => Undo, "cmd-shift-z" => Redo, "cmd-b" => Bold,
         "cmd-i" => Italic, "cmd-e" => Code,
         "cmd-shift-s" => Strikethrough, "cmd-u" => Underline, "cmd-alt-0" => Paragraph,
@@ -137,6 +146,12 @@ pub enum EditorEvent {
     },
     /// A link was clicked without ⌘; the caret is now inside it.
     LinkClicked,
+    /// The code header was clicked; the host can show a language picker without
+    /// moving the editor's selection.
+    CodeLanguageRequested {
+        block: usize,
+    },
+    CodeCopied,
 }
 
 pub struct EditorView {
@@ -352,6 +367,32 @@ impl EditorView {
             core.set_block_kind(kind);
         });
     }
+    pub fn toggle_block_kind(&mut self, kind: BlockKind, cx: &mut Context<Self>) {
+        if self.single_line {
+            return;
+        }
+        self.edit(cx, |core| {
+            core.toggle_block_kind(kind);
+        });
+    }
+    pub fn code_language(&self, block: usize) -> Option<&str> {
+        match &self.document().blocks.get(block)?.kind {
+            BlockKind::Code { language } => Some(language),
+            _ => None,
+        }
+    }
+    pub fn code_header_bounds(&self, block: usize) -> Option<Bounds<Pixels>> {
+        let start = self.document().code_block_range(block)?.start;
+        self.layout.get(start)?.code_language_bounds()
+    }
+    pub fn set_code_language_at(&mut self, block: usize, language: &str, cx: &mut Context<Self>) {
+        if self.single_line || self.code_language(block).is_none() {
+            return;
+        }
+        self.edit(cx, |core| {
+            core.set_code_language_at(block, language);
+        });
+    }
     fn publish(&mut self, cx: &mut Context<Self>) {
         self.published_revision += 1;
         cx.emit(EditorEvent::Changed {
@@ -504,6 +545,22 @@ impl EditorView {
     }
     fn vertical(&mut self, delta: f32, extend: bool, cx: &mut Context<Self>) {
         let head = self.core.selection().head;
+        if delta > 0.
+            && !extend
+            && self.core.selection().is_empty()
+            && head.block + 1 == self.document().blocks.len()
+            && head.byte == self.document().blocks[head.block].len()
+            && matches!(
+                self.document().blocks[head.block].kind,
+                BlockKind::Code { .. }
+            )
+        {
+            self.edit(cx, |core| {
+                core.exit_code_block();
+            });
+            return;
+        }
+        let head = self.core.selection().head;
         if let Some(row) = self.layout.get(head.block) {
             let caret = row.caret(head.byte, self.upstream);
             let x = self.preferred_x.unwrap_or(caret.x);
@@ -544,8 +601,43 @@ impl EditorView {
     fn copy(&mut self, cx: &mut Context<Self>) {
         let text = self.core.selection_text();
         if !text.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            if self.single_line {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            } else {
+                clipboard::write(self.core.selection_fragment(), text, cx);
+            }
         }
+    }
+    fn paste(&mut self, mode: clipboard::PasteMode, cx: &mut Context<Self>) {
+        let item = cx
+            .read_from_clipboard()
+            .unwrap_or_else(|| ClipboardItem::new_string(String::new()));
+        let clipboard_text = item.text();
+        let text = clipboard_text.as_deref().unwrap_or_default();
+        let literal = self.single_line
+            || matches!(mode, clipboard::PasteMode::Plain)
+            || matches!(
+                self.document().blocks[self.core.selection().head.block].kind,
+                BlockKind::Code { .. }
+            );
+        if literal && clipboard_text.is_none() {
+            return;
+        }
+        let fragment = (!literal)
+            .then(|| clipboard::read_fragment(&item, mode))
+            .flatten();
+        let single_line = self.single_line;
+        self.edit(cx, |core| {
+            if literal {
+                core.insert_text_plain(&single_line::text(text, single_line));
+            } else if is_web_url(text.trim())
+                && (!core.selection().is_empty() || core.active_link().is_none())
+            {
+                core.set_link(Some(text.trim()));
+            } else if let Some(fragment) = fragment {
+                core.insert_fragment(fragment);
+            }
+        });
     }
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
@@ -877,6 +969,43 @@ impl Render for EditorView {
                 });
             }
         }));
+        root = root
+            .on_action(cx.listener(|this, _: &Indent, _, cx| {
+                if this.single_line || this.is_composing() {
+                    cx.propagate();
+                    return;
+                }
+                let kind = &this.document().blocks[this.core.selection().head.block].kind;
+                if matches!(kind, BlockKind::Code { .. }) {
+                    this.edit(cx, |core| {
+                        if core.selection().is_empty() {
+                            core.insert_text_plain("\t");
+                        } else {
+                            core.indent();
+                        }
+                    });
+                } else if kind.is_list() || *kind == BlockKind::Quote {
+                    this.edit(cx, |core| {
+                        core.indent();
+                    });
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Outdent, _, cx| {
+                if this.single_line || this.is_composing() {
+                    cx.propagate();
+                    return;
+                }
+                let kind = &this.document().blocks[this.core.selection().head.block].kind;
+                if kind.is_list() || matches!(kind, BlockKind::Quote | BlockKind::Code { .. }) {
+                    this.edit(cx, |core| {
+                        core.outdent();
+                    });
+                } else {
+                    cx.propagate();
+                }
+            }));
         edit_action!(WordLeft, |c| {
             c.move_word_left(false);
         });
@@ -957,33 +1086,33 @@ impl Render for EditorView {
             c.toggle_mark(Mark::Underline);
         });
         format_action!(Paragraph, |c| {
-            c.set_block_kind(BlockKind::Paragraph);
+            c.toggle_block_kind(BlockKind::Paragraph);
         });
         format_action!(Heading, |c| {
-            c.set_block_kind(BlockKind::Heading(1));
+            c.toggle_block_kind(BlockKind::Heading(1));
         });
         format_action!(Heading2, |c| {
-            c.set_block_kind(BlockKind::Heading(2));
+            c.toggle_block_kind(BlockKind::Heading(2));
         });
         format_action!(Heading3, |c| {
-            c.set_block_kind(BlockKind::Heading(3));
+            c.toggle_block_kind(BlockKind::Heading(3));
         });
         format_action!(Quote, |c| {
-            c.set_block_kind(BlockKind::Quote);
+            c.toggle_block_kind(BlockKind::Quote);
         });
         format_action!(CodeBlock, |c| {
-            c.set_block_kind(BlockKind::Code {
+            c.toggle_block_kind(BlockKind::Code {
                 language: String::new(),
             });
         });
         format_action!(Ordered, |c| {
-            c.set_block_kind(BlockKind::Ordered);
+            c.toggle_block_kind(BlockKind::Ordered);
         });
         format_action!(Bullet, |c| {
-            c.set_block_kind(BlockKind::Bullet);
+            c.toggle_block_kind(BlockKind::Bullet);
         });
         format_action!(Task, |c| {
-            c.set_block_kind(BlockKind::Task { checked: false });
+            c.toggle_block_kind(BlockKind::Task { checked: false });
         });
         let root = root
             .on_action(cx.listener(|this, _: &Up, _, cx| this.vertical(-1., false, cx)))
@@ -996,6 +1125,25 @@ impl Render for EditorView {
             .on_action(cx.listener(|this, _: &SelectEnd, _, cx| this.line_edge(true, true, cx)))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
                 this.edit(cx, |core| {
+                    if let Some(range) = core
+                        .document()
+                        .code_block_range(core.selection().head.block)
+                    {
+                        let selection = Selection {
+                            anchor: Position {
+                                block: range.start,
+                                byte: 0,
+                            },
+                            head: Position {
+                                block: range.end - 1,
+                                byte: core.document().blocks[range.end - 1].len(),
+                            },
+                        };
+                        if core.selection().ordered() != selection.ordered() {
+                            core.set_selection(selection);
+                            return;
+                        }
+                    }
                     let head = core.utf16_to_position(usize::MAX);
                     core.set_selection(Selection {
                         anchor: Position { block: 0, byte: 0 },
@@ -1015,28 +1163,28 @@ impl Render for EditorView {
                     }
                 });
             }))
-            .on_action(cx.listener(|this, _: &Paste, _, cx| {
-                if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                    let single_line = this.single_line;
-                    let text = single_line::text(&text, single_line);
-                    this.edit(cx, |c| {
-                        // A pasted web address links the selection, or itself.
-                        // Inside an existing link it is ordinary text.
-                        let linkable = !c.selection().is_empty() || c.active_link().is_none();
-                        if !single_line && linkable && is_web_url(text.trim()) {
-                            c.set_link(Some(text.trim()));
-                        } else if single_line {
-                            c.insert_text_plain(&text);
-                        } else {
-                            c.insert_text(&text.replace("\r\n", "\n").replace('\r', "\n"));
-                        }
-                    });
-                }
+            .on_action(
+                cx.listener(|this, _: &Paste, _, cx| {
+                    this.paste(clipboard::PasteMode::Formatted, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &PastePlain, _, cx| {
+                this.paste(clipboard::PasteMode::Plain, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PasteMarkdown, _, cx| {
+                this.paste(clipboard::PasteMode::Markdown, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleTask, _, cx| {
                 let head = this.core.selection().head;
                 if let BlockKind::Task { checked } = this.document().blocks[head.block].kind {
                     this.set_block_kind(BlockKind::Task { checked: !checked }, cx);
+                } else if matches!(
+                    this.document().blocks[head.block].kind,
+                    BlockKind::Code { .. }
+                ) {
+                    this.edit(cx, |core| {
+                        core.exit_code_block();
+                    });
                 }
             }))
             .on_action(

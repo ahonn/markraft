@@ -92,6 +92,7 @@ mod tests {
         let mut editor = Editor::new(Document {
             blocks: vec![Block {
                 kind: BlockKind::Paragraph,
+                depth: 0,
                 spans: vec![
                     Span {
                         text: "ab".into(),

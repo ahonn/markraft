@@ -23,6 +23,10 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.code_language_block = None;
+        self.link_popover = None;
+        self.query
+            .update(cx, |editor, cx| editor.cancel_composition(cx));
         self.editor()
             .update(cx, |editor, cx| editor.cancel_composition(cx));
         self.format_menu = if self.format_menu == Some(menu) {
@@ -199,6 +203,7 @@ impl NotesApp {
             .hover(|s| s.bg(self.hover_color()))
             .active(|s| s.bg(self.pressed_color()))
             .tooltip(self.hint(label))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
                 this.intent(intent.clone(), window, cx);
@@ -385,6 +390,7 @@ impl NotesApp {
                         }
                     }))
                     .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
                         this.intent(intent.clone(), window, cx)
                     }))
                     .child(
@@ -416,6 +422,8 @@ impl NotesApp {
             }])
             .occlude()
             .overflow_hidden()
+            // Preserve the editor selection until the chosen format is applied.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 // Footer controls switch or close menus themselves; preserve their click.
                 if event.position.y < window.bounds().size.height - px(44.) {

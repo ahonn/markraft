@@ -2,6 +2,8 @@
 //! Document positions use UTF-8 byte offsets at extended grapheme boundaries. Platform
 //! input offsets use UTF-16 code units over the document's newline-separated plain text.
 
+mod fragment;
+mod html;
 mod markdown;
 
 use serde::{Deserialize, Serialize};
@@ -94,7 +96,24 @@ pub struct Span {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Block {
     pub kind: BlockKind,
+    /// Zero-based nesting level for lists and block quotes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub depth: u8,
     pub spans: Vec<Span>,
+}
+
+fn is_zero(value: &u8) -> bool {
+    *value == 0
+}
+
+impl BlockKind {
+    pub fn is_list(&self) -> bool {
+        matches!(self, Self::Bullet | Self::Ordered | Self::Task { .. })
+    }
+
+    fn supports_depth(&self) -> bool {
+        self.is_list() || *self == Self::Quote
+    }
 }
 
 impl Block {
@@ -150,17 +169,43 @@ impl Document {
             .join("\n")
     }
 
-    /// The 1-based number of an ordered block within its run of adjacent ordered
-    /// blocks, or `None` for any other block.
-    pub fn ordinal(&self, block: usize) -> Option<usize> {
-        (self.blocks.get(block)?.kind == BlockKind::Ordered).then(|| {
-            self.blocks[..block]
+    /// The 1-based number within the same nesting level, skipping child items.
+    pub fn ordinal(&self, index: usize) -> Option<usize> {
+        let block = self.blocks.get(index)?;
+        if block.kind != BlockKind::Ordered {
+            return None;
+        }
+        let mut ordinal = 1;
+        for previous in self.blocks[..index].iter().rev() {
+            if !previous.kind.is_list() || previous.depth < block.depth {
+                break;
+            }
+            if previous.depth == block.depth {
+                if previous.kind != BlockKind::Ordered {
+                    break;
+                }
+                ordinal += 1;
+            }
+        }
+        Some(ordinal)
+    }
+
+    /// Adjacent code lines with the same language form one code block.
+    pub fn code_block_range(&self, index: usize) -> Option<Range<usize>> {
+        let kind = &self.blocks.get(index)?.kind;
+        if !matches!(kind, BlockKind::Code { .. }) {
+            return None;
+        }
+        let start = self.blocks[..index]
+            .iter()
+            .rposition(|block| block.kind != *kind)
+            .map_or(0, |index| index + 1);
+        let end = index
+            + self.blocks[index..]
                 .iter()
-                .rev()
-                .take_while(|block| block.kind == BlockKind::Ordered)
-                .count()
-                + 1
-        })
+                .take_while(|block| block.kind == *kind)
+                .count();
+        Some(start..end)
     }
 
     /// Normalize empty documents, adjacent runs and heading levels. Newlines in supplied
@@ -176,6 +221,11 @@ impl Document {
             let code = matches!(kind, BlockKind::Code { .. });
             let mut current = Block {
                 kind: kind.clone(),
+                depth: if kind.supports_depth() {
+                    block.depth
+                } else {
+                    0
+                },
                 spans: Vec::new(),
             };
             for span in block.spans {
@@ -185,6 +235,7 @@ impl Document {
                     if index > 0 {
                         blocks.push(current);
                         current = Block {
+                            depth: 0,
                             kind: if code {
                                 kind.clone()
                             } else {
@@ -200,6 +251,22 @@ impl Document {
         }
         if blocks.is_empty() {
             blocks.push(Block::default());
+        }
+        let mut list_depths = Vec::new();
+        for block in &mut blocks {
+            if block.kind.is_list() {
+                while list_depths
+                    .last()
+                    .is_some_and(|depth| *depth >= block.depth)
+                {
+                    list_depths.pop();
+                }
+                let original_depth = block.depth;
+                block.depth = list_depths.len().min(usize::from(u8::MAX)) as u8;
+                list_depths.push(original_depth);
+            } else {
+                list_depths.clear();
+            }
         }
         self.blocks = blocks;
     }
@@ -716,19 +783,22 @@ impl Editor {
                     };
                     editor.replace_selection("");
                     editor.state.document.blocks[index].kind = BlockKind::Code { language };
+                    editor.state.document.blocks[index].depth = 0;
                     return;
                 }
-                // A blank line inside a code block stays code; only the last one leaves it.
-                let inside_code = matches!(blocks[index].kind, BlockKind::Code { .. })
-                    && blocks
-                        .get(index + 1)
-                        .is_some_and(|next| next.kind == blocks[index].kind);
                 let block = &mut blocks[index];
                 if block.is_empty()
-                    && !inside_code
-                    && !matches!(block.kind, BlockKind::Paragraph | BlockKind::Divider)
+                    && !matches!(
+                        block.kind,
+                        BlockKind::Paragraph | BlockKind::Divider | BlockKind::Code { .. }
+                    )
                 {
-                    block.kind = BlockKind::Paragraph;
+                    if block.kind.supports_depth() {
+                        editor.change_nesting(index..index + 1, false);
+                    } else {
+                        block.kind = BlockKind::Paragraph;
+                        block.depth = 0;
+                    }
                     return;
                 }
             }
@@ -813,7 +883,12 @@ impl Editor {
             } else {
                 kind
             };
-            replacement.push(Block { kind, spans });
+            let depth = if kind.supports_depth() {
+                first.depth
+            } else {
+                0
+            };
+            replacement.push(Block { kind, depth, spans });
         }
         let caret_block = start.block + parts.len() - 1;
         let caret_byte = if parts.len() == 1 {
@@ -822,6 +897,7 @@ impl Editor {
             parts.last().unwrap().len()
         };
         document.blocks.splice(start.block..=end.block, replacement);
+        document.normalize();
         // Inserting a joiner or combining scalar can merge with the following grapheme.
         let caret_text = document.blocks[caret_block].text();
         self.state.selection = Selection::caret(Position {
@@ -836,9 +912,29 @@ impl Editor {
             if selection.is_empty() {
                 let head = selection.head;
                 if head.byte == 0
-                    && editor.document().blocks[head.block].kind != BlockKind::Paragraph
+                    && let Some(range) = editor.document().code_block_range(head.block)
+                    && head.block == range.start
                 {
-                    editor.state.document.blocks[head.block].kind = BlockKind::Paragraph;
+                    // A physical code line is not its own block. Only a wholly
+                    // empty code block clears its format at the start boundary.
+                    if range.len() == 1 && editor.document().blocks[head.block].is_empty() {
+                        editor.state.document.blocks[head.block].kind = BlockKind::Paragraph;
+                    }
+                    return;
+                }
+                if head.byte == 0
+                    && !matches!(
+                        editor.document().blocks[head.block].kind,
+                        BlockKind::Paragraph | BlockKind::Code { .. }
+                    )
+                {
+                    let block = &mut editor.state.document.blocks[head.block];
+                    if block.kind.supports_depth() {
+                        editor.change_nesting(head.block..head.block + 1, false);
+                    } else {
+                        block.kind = BlockKind::Paragraph;
+                        block.depth = 0;
+                    }
                     return;
                 }
                 editor.state.selection.anchor = editor.previous_position(head);
@@ -928,10 +1024,253 @@ impl Editor {
                 end.block
             };
             for block in &mut editor.state.document.blocks[start.block..=last] {
+                if !(block.kind.is_list() && kind.is_list()
+                    || block.kind == BlockKind::Quote && kind == BlockKind::Quote)
+                {
+                    block.depth = 0;
+                }
                 block.kind = kind.clone();
             }
             editor.state.document.normalize();
         })
+    }
+
+    /// Toggle matching selected block formats off; task state and code language
+    /// are attributes, so they do not distinguish the format being toggled.
+    pub fn toggle_block_kind(&mut self, kind: BlockKind) -> Option<Change> {
+        self.transaction(|editor| {
+            let mut range = editor.selected_blocks();
+            let matches = |current: &BlockKind| {
+                *current == kind
+                    || matches!(
+                        (current, &kind),
+                        (BlockKind::Task { .. }, BlockKind::Task { .. })
+                            | (BlockKind::Code { .. }, BlockKind::Code { .. })
+                    )
+            };
+            let clear = editor.document().blocks[range.clone()]
+                .iter()
+                .all(|block| matches(&block.kind));
+            if clear && matches!(kind, BlockKind::Code { .. }) {
+                range.start = editor
+                    .document()
+                    .code_block_range(range.start)
+                    .unwrap()
+                    .start;
+                range.end = editor
+                    .document()
+                    .code_block_range(range.end - 1)
+                    .unwrap()
+                    .end;
+            }
+            let target = if clear { BlockKind::Paragraph } else { kind };
+            for block in &mut editor.state.document.blocks[range] {
+                if !(block.kind.is_list() && target.is_list()
+                    || block.kind == BlockKind::Quote && target == BlockKind::Quote)
+                {
+                    block.depth = 0;
+                }
+                block.kind = target.clone();
+            }
+            editor.state.document.normalize();
+        })
+    }
+
+    /// Move to an ordinary paragraph after the current code block, creating one
+    /// if necessary. The insertion is a single undoable document transaction.
+    pub fn exit_code_block(&mut self) -> Option<Change> {
+        self.transaction(|editor| {
+            let Some(range) = editor
+                .document()
+                .code_block_range(editor.selection().head.block)
+            else {
+                return;
+            };
+            if !editor
+                .document()
+                .blocks
+                .get(range.end)
+                .is_some_and(|block| block.kind == BlockKind::Paragraph)
+            {
+                let last = range.end - 1;
+                let offset = editor.document().global_byte(Position {
+                    block: last,
+                    byte: editor.document().blocks[last].len(),
+                });
+                editor.pending_steps.push(Replacement {
+                    range: offset..offset,
+                    inserted_len: 1,
+                });
+                editor
+                    .state
+                    .document
+                    .blocks
+                    .insert(range.end, Block::default());
+            }
+            editor.select(Selection::caret(Position {
+                block: range.end,
+                byte: 0,
+            }));
+        })
+    }
+
+    /// Indent selected list items (including their children), or selected quotes.
+    pub fn indent(&mut self) -> Option<Change> {
+        self.transaction(|editor| {
+            let range = editor.selected_blocks();
+            editor.indent_code_lines(range.clone(), true);
+            editor.change_nesting(range, true);
+        })
+    }
+
+    /// Outdent one level. Top-level items become ordinary paragraphs.
+    pub fn outdent(&mut self) -> Option<Change> {
+        self.transaction(|editor| {
+            let range = editor.selected_blocks();
+            editor.indent_code_lines(range.clone(), false);
+            editor.change_nesting(range, false);
+        })
+    }
+
+    fn indent_code_lines(&mut self, range: Range<usize>, indent: bool) {
+        for index in range.rev() {
+            let block = &self.document().blocks[index];
+            if !matches!(block.kind, BlockKind::Code { .. }) {
+                continue;
+            }
+            let text = block.text();
+            let removed = if indent {
+                0
+            } else if text.starts_with('\t') {
+                1
+            } else {
+                text.bytes()
+                    .take_while(|byte| *byte == b' ')
+                    .take(2)
+                    .count()
+            };
+            if !indent && removed == 0 {
+                continue;
+            }
+            let offset = self.document().global_byte(Position {
+                block: index,
+                byte: 0,
+            });
+            let mut spans = Vec::new();
+            if indent {
+                push_span(&mut spans, "\t", Marks::default());
+            }
+            for span in slice_spans(&block.spans, removed..block.len()) {
+                push_like(&mut spans, &span.text, &span);
+            }
+            self.state.document.blocks[index].spans = spans;
+            self.pending_steps.push(Replacement {
+                range: offset..offset + removed,
+                inserted_len: usize::from(indent),
+            });
+            for position in [
+                &mut self.state.selection.anchor,
+                &mut self.state.selection.head,
+            ] {
+                if position.block == index {
+                    position.byte = if indent {
+                        position.byte + 1
+                    } else {
+                        position.byte.saturating_sub(removed)
+                    };
+                }
+            }
+        }
+    }
+
+    fn selected_blocks(&self) -> Range<usize> {
+        let (start, end) = self.selection().ordered();
+        let end = if end.byte == 0 && end.block > start.block {
+            end.block
+        } else {
+            end.block + 1
+        };
+        start.block..end
+    }
+
+    fn change_nesting(&mut self, range: Range<usize>, indent: bool) {
+        let blocks = &mut self.state.document.blocks;
+        let first = &blocks[range.start];
+        if indent
+            && first.kind.is_list()
+            && !range.start.checked_sub(1).is_some_and(|previous| {
+                blocks[previous].kind.is_list() && blocks[previous].depth >= first.depth
+            })
+        {
+            return;
+        }
+        let mut index = range.start;
+        while index < range.end {
+            let kind = blocks[index].kind.clone();
+            let depth = blocks[index].depth;
+            if !kind.supports_depth() {
+                index += 1;
+                continue;
+            }
+            let mut end = index + 1;
+            while end < blocks.len()
+                && blocks[end].depth > depth
+                && ((kind.is_list() && blocks[end].kind.is_list())
+                    || (kind == BlockKind::Quote && blocks[end].kind == BlockKind::Quote))
+            {
+                end += 1;
+            }
+            let can_indent = !indent
+                || kind == BlockKind::Quote
+                || index.checked_sub(1).is_some_and(|previous| {
+                    blocks[previous].kind.is_list() && blocks[previous].depth >= depth
+                });
+            if can_indent
+                && (!indent || blocks[index..end].iter().all(|block| block.depth < u8::MAX))
+            {
+                for block in &mut blocks[index..end] {
+                    if indent {
+                        block.depth += 1;
+                    } else if block.depth > 0 {
+                        block.depth -= 1;
+                    } else {
+                        block.kind = BlockKind::Paragraph;
+                    }
+                }
+            }
+            index = end;
+        }
+    }
+
+    pub fn set_code_language(&mut self, language: &str) -> Option<Change> {
+        self.set_code_language_at(self.selection().head.block, language)
+    }
+
+    /// Update a code block without changing the caret or its undo selection.
+    pub fn set_code_language_at(&mut self, block: usize, language: &str) -> Option<Change> {
+        let language = language.split_whitespace().next().unwrap_or("").to_owned();
+        self.transaction(|editor| {
+            if let Some(range) = editor.document().code_block_range(block) {
+                for block in &mut editor.state.document.blocks[range] {
+                    block.kind = BlockKind::Code {
+                        language: language.clone(),
+                    };
+                }
+            }
+        })
+    }
+
+    pub fn code_block_text(&self) -> Option<String> {
+        let range = self
+            .document()
+            .code_block_range(self.selection().head.block)?;
+        Some(
+            self.document().blocks[range]
+                .iter()
+                .map(Block::text)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
     }
 
     pub fn undo(&mut self) -> Option<Change> {
@@ -1276,7 +1615,14 @@ impl Editor {
             } else {
                 self.replace_selection("");
             }
-            self.state.document.blocks[position.block].kind = kind;
+            let block = &mut self.state.document.blocks[position.block];
+            if block.kind == BlockKind::Quote && kind == BlockKind::Quote {
+                block.depth = block.depth.saturating_add(1);
+            } else if !(block.kind.is_list() && kind.is_list()) {
+                block.depth = 0;
+            }
+            block.kind = kind;
+            self.state.document.normalize();
             return;
         }
         for (delimiter, mark) in [

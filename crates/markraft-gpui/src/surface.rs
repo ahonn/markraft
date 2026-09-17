@@ -1,7 +1,8 @@
-use crate::{EditorStyle, EditorView};
+use crate::{EditorEvent, EditorStyle, EditorView};
 use gpui::{prelude::*, *};
 use markraft_core::{BlockKind, Document};
 use std::ops::Range;
+use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone)]
 pub(crate) struct LayoutBlock {
@@ -15,16 +16,32 @@ pub(crate) struct LayoutBlock {
     marker: Option<Marker>,
     decoration: Option<Decoration>,
     code_ranges: Vec<Range<usize>>,
+    code_header: Option<CodeHeader>,
+    code_hitboxes: Option<(Hitbox, Hitbox)>,
 }
 
 const NUMBER_GAP: Pixels = px(6.);
-const CODE_PADDING: Pixels = px(10.);
+// SF Mono; Menlo is wider and heavier at this size.
+const CODE_FONT: &str = ".AppleSystemUIFontMonospaced";
+const CODE_PADDING: Pixels = px(12.);
+const CODE_HEADER_HEIGHT: Pixels = px(24.);
+// The header controls sit in the block's top padding rather than below it.
+const CODE_HEADER_LIFT: Pixels = px(8.);
+const CODE_CHEVRON_WIDTH: Pixels = px(14.);
+const CODE_COPY_WIDTH: Pixels = px(28.);
+const CODE_RADIUS: Pixels = px(12.);
+
+#[derive(Clone)]
+struct CodeHeader {
+    language: std::rc::Rc<ShapedLine>,
+}
 
 #[derive(Clone, Copy)]
 enum Decoration {
-    /// A bar left of the text. `joined` extends it across the gap to the next quote.
+    /// One bar per visible nesting level; shared levels join across quote gaps.
     Quote {
-        joined: bool,
+        levels: usize,
+        joined_levels: usize,
     },
     Divider,
     /// One line of a code block; the first and last lines carry its padding.
@@ -39,20 +56,46 @@ enum Marker {
     Glyph(std::rc::Rc<ShapedLine>),
     /// An ordered-list number, right-aligned against the text.
     Number(std::rc::Rc<ShapedLine>),
-    Bullet,
+    Bullet {
+        depth: u8,
+    },
     Task {
         checked: bool,
     },
 }
 
 impl LayoutBlock {
+    /// Window-space button bounds, available only on the first code line.
+    pub(crate) fn code_language_bounds(&self) -> Option<Bounds<Pixels>> {
+        let header = self.code_header.as_ref()?;
+        let language_width = header.language.width + CODE_CHEVRON_WIDTH + px(12.);
+        Some(Bounds::new(
+            point(
+                self.origin.x + self.width - CODE_COPY_WIDTH - language_width - px(2.),
+                self.origin.y - CODE_HEADER_HEIGHT - CODE_HEADER_LIFT,
+            ),
+            size(language_width, CODE_HEADER_HEIGHT),
+        ))
+    }
+
+    fn code_copy_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.code_header.as_ref()?;
+        let width = CODE_COPY_WIDTH;
+        Some(Bounds::new(
+            point(
+                self.origin.x + self.width - width,
+                self.origin.y - CODE_HEADER_HEIGHT - CODE_HEADER_LIFT,
+            ),
+            size(width, CODE_HEADER_HEIGHT),
+        ))
+    }
     pub(crate) fn marker_bounds(&self) -> Option<Bounds<Pixels>> {
         let marker = self.marker.as_ref()?;
         let (offset, width, height) = match marker {
             Marker::Glyph(line) => (px(26.), line.width, self.line_height),
             Marker::Number(line) => (line.width + NUMBER_GAP, line.width, self.line_height),
             // Drawn markers share one center, 15px left of the text.
-            Marker::Bullet => (px(17.5), px(5.), px(5.)),
+            Marker::Bullet { .. } => (px(17.5), px(5.), px(5.)),
             Marker::Task { .. } => (px(22.), px(14.), px(14.)),
         };
         Some(Bounds::new(
@@ -139,6 +182,23 @@ fn shape(
     width: Pixels,
     window: &Window,
 ) -> Vec<LayoutBlock> {
+    let mut highlights = vec![None; document.blocks.len()];
+    for (index, block) in document.blocks.iter().enumerate() {
+        if let BlockKind::Code { language } = &block.kind
+            && let Some(range) = document.code_block_range(index)
+            && range.start == index
+        {
+            let text = document.blocks[range.clone()]
+                .iter()
+                .map(|block| block.text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let lines = crate::syntax::highlight(&text, language, style.background.l < 0.5);
+            for (offset, row) in range.enumerate() {
+                highlights[row] = lines.get(offset).cloned();
+            }
+        }
+    }
     document
         .blocks
         .iter()
@@ -146,6 +206,12 @@ fn shape(
         .map(|(index, block)| {
             let font_size = style.font_size(&block.kind);
             let line_height = font_size * style.line_height_ratio;
+            // Keep deeply nested imported content editable in a narrow note.
+            // Only its visual indentation is capped; document depth is preserved.
+            let max_indent = (width - px(80.)).max(style.quote_indent);
+            let quote_levels = (block.depth as usize + 1)
+                .min((max_indent / style.quote_indent.max(px(1.))) as usize)
+                .max(1);
             let marker = match block.kind {
                 BlockKind::Bullet => Some("•"),
                 BlockKind::Task { checked: false } => Some("☐"),
@@ -154,19 +220,21 @@ fn shape(
             };
             let decoration = match block.kind {
                 BlockKind::Quote => Some(Decoration::Quote {
-                    joined: document
+                    levels: quote_levels,
+                    joined_levels: document
                         .blocks
                         .get(index + 1)
-                        .is_some_and(|next| next.kind == BlockKind::Quote),
+                        .filter(|next| next.kind == BlockKind::Quote)
+                        .map_or(0, |next| (next.depth as usize + 1).min(quote_levels)),
                 }),
                 BlockKind::Divider => Some(Decoration::Divider),
                 BlockKind::Code { .. } => {
-                    let same = |other: Option<&markraft_core::Block>| {
-                        other.is_some_and(|other| other.kind == block.kind)
-                    };
+                    let range = document
+                        .code_block_range(index)
+                        .expect("code line has a range");
                     Some(Decoration::Code {
-                        first: !same(index.checked_sub(1).and_then(|i| document.blocks.get(i))),
-                        last: !same(document.blocks.get(index + 1)),
+                        first: range.start == index,
+                        last: range.end == index + 1,
                     })
                 }
                 _ => None,
@@ -179,7 +247,7 @@ fn shape(
                     &[TextRun {
                         len: text.len(),
                         font: font(".SystemUIFont"),
-                        color: style.muted_text,
+                        color: style.marker,
                         background_color: None,
                         underline: None,
                         strikethrough: None,
@@ -192,28 +260,32 @@ fn shape(
                 .map(|ordinal| std::rc::Rc::new(shape_number(ordinal)));
             // Every item of a run shares the indent its widest number needs.
             let number_width = document.ordinal(index).map(|ordinal| {
-                let last = ordinal
-                    + document.blocks[index + 1..]
-                        .iter()
-                        .take_while(|block| block.kind == BlockKind::Ordered)
-                        .count();
+                let last = document.blocks[index + 1..]
+                    .iter()
+                    .enumerate()
+                    .take_while(|(_, next)| {
+                        next.depth > block.depth
+                            || (next.depth == block.depth && next.kind == BlockKind::Ordered)
+                    })
+                    .filter(|(_, next)| next.depth == block.depth)
+                    .filter_map(|(offset, _)| document.ordinal(index + offset + 1))
+                    .last()
+                    .unwrap_or(ordinal);
                 shape_number(last).width
             });
             let indent = if let Some(width) = number_width {
-                style.list_indent.max(width + NUMBER_GAP)
+                style.list_indent * block.depth as usize + style.list_indent.max(width + NUMBER_GAP)
             } else if marker.is_some() {
-                style.list_indent
+                style.list_indent * (block.depth as usize + 1)
             } else if block.kind == BlockKind::Quote {
-                style.quote_indent
+                style.quote_indent * quote_levels
             } else if matches!(block.kind, BlockKind::Code { .. }) {
                 CODE_PADDING
             } else {
                 px(0.)
-            };
-            let text_color = if matches!(
-                block.kind,
-                BlockKind::Task { checked: true } | BlockKind::Quote
-            ) {
+            }
+            .min(max_indent);
+            let text_color = if matches!(block.kind, BlockKind::Task { checked: true }) {
                 style.muted_text
             } else {
                 style.text
@@ -232,7 +304,7 @@ fn shape(
                     byte_offset += span.text.len();
                     let code_block = matches!(block.kind, BlockKind::Code { .. });
                     let mut face = font(if span.marks.code || code_block {
-                        "Menlo"
+                        CODE_FONT
                     } else {
                         ".SystemUIFont"
                     });
@@ -266,6 +338,35 @@ fn shape(
                     }
                 })
                 .collect();
+            if let Some(highlighted) = &highlights[index]
+                && highlighted.iter().map(|(len, _)| len).sum::<usize>() == text_len
+            {
+                runs = highlighted
+                    .iter()
+                    .map(|(len, syntax)| {
+                        let mut face = font(CODE_FONT);
+                        // Themes embolden keywords; at note size colour alone reads calmer.
+                        if syntax
+                            .font_style
+                            .contains(syntect::highlighting::FontStyle::ITALIC)
+                        {
+                            face.style = FontStyle::Italic;
+                        }
+                        let color = syntax.foreground;
+                        TextRun {
+                            len: *len,
+                            font: face,
+                            color: rgb(((color.r as u32) << 16)
+                                | ((color.g as u32) << 8)
+                                | color.b as u32)
+                            .into(),
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }
+                    })
+                    .collect();
+            }
             let display = if text.is_empty() {
                 runs = vec![TextRun {
                     len: 1,
@@ -301,7 +402,7 @@ fn shape(
                     if style.draw_markers {
                         return match block.kind {
                             BlockKind::Task { checked } => Marker::Task { checked },
-                            _ => Marker::Bullet,
+                            _ => Marker::Bullet { depth: block.depth },
                         };
                     }
                     Marker::Glyph(std::rc::Rc::new(window.text_system().shape_line(
@@ -319,7 +420,12 @@ fn shape(
                     )))
                 })
             });
-            let gap = if single_line {
+            let quote_follows = document
+                .blocks
+                .get(index + 1)
+                .is_some_and(|next| next.kind == BlockKind::Quote);
+            // A quote sits tight against the line above it, and quote lines against each other.
+            let gap = if single_line || quote_follows {
                 px(0.)
             } else if let Some((_, last)) = code {
                 if last {
@@ -340,12 +446,48 @@ fn shape(
             } else {
                 wrap_width
             };
-            let top_gap = if index > 0 && matches!(block.kind, BlockKind::Heading(_)) {
-                style.heading_top_gap
+            let top_gap = if let (true, BlockKind::Heading(level)) = (index > 0, &block.kind) {
+                style.heading_top_gaps[usize::from(*level).clamp(1, 3) - 1]
             } else if let Some((true, _)) = code {
-                CODE_PADDING
+                CODE_PADDING + CODE_HEADER_HEIGHT
             } else {
                 px(0.)
+            };
+            let code_header = if let Some((true, _)) = code {
+                let language = match &block.kind {
+                    BlockKind::Code { language } => language.as_str(),
+                    _ => "",
+                };
+                let label = crate::syntax::code_languages()
+                    .iter()
+                    .find(|(id, _)| *id == language)
+                    .map_or(language, |(_, label)| *label);
+                let shape_label = |label: String| {
+                    std::rc::Rc::new(window.text_system().shape_line(
+                        label.clone().into(),
+                        px(13.),
+                        &[TextRun {
+                            len: label.len(),
+                            font: font(".SystemUIFont"),
+                            color: style.text,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                        None,
+                    ))
+                };
+                let language_width =
+                    (width - CODE_COPY_WIDTH - CODE_CHEVRON_WIDTH - px(30.)).max(px(20.));
+                let mut label = label.graphemes(true).take(64).collect::<Vec<_>>();
+                let mut language = shape_label(label.concat());
+                while language.width > language_width && !label.is_empty() {
+                    label.pop();
+                    language = shape_label(format!("{}…", label.concat()));
+                }
+                Some(CodeHeader { language })
+            } else {
+                None
             };
             LayoutBlock {
                 line: std::rc::Rc::new(line),
@@ -358,6 +500,8 @@ fn shape(
                 decoration,
                 code_ranges,
                 top_gap,
+                code_header,
+                code_hitboxes: None,
             }
         })
         .collect()
@@ -458,6 +602,14 @@ impl Element for EditorSurface {
         // selection, input-method rectangles, and accessible text bounds.
         for row in &mut rows {
             row.origin.x -= single_line_scroll_x;
+            if let (Some(language), Some(copy)) =
+                (row.code_language_bounds(), row.code_copy_bounds())
+            {
+                row.code_hitboxes = Some((
+                    window.insert_hitbox(language, HitboxBehavior::Normal),
+                    window.insert_hitbox(copy, HitboxBehavior::Normal),
+                ));
+            }
         }
         if window.is_a11y_active() {
             view.accessible_text.borrow_mut().update(
@@ -531,6 +683,7 @@ impl Element for EditorSurface {
         let upstream = editor.upstream;
         let style = editor.style.clone();
         let placeholder = (editor.document().blocks.len() == 1
+            && editor.document().blocks[0].kind == BlockKind::Paragraph
             && editor.document().blocks[0].text().is_empty())
         .then(|| editor.placeholder.clone());
         window.handle_input(
@@ -547,34 +700,43 @@ impl Element for EditorSurface {
                 }
             }
             match row.decoration {
-                Some(Decoration::Quote { joined }) => {
-                    let height = if joined {
-                        row.height
-                    } else {
-                        row.line.size(row.line_height).height
-                    };
-                    window.paint_quad(
-                        fill(
+                Some(Decoration::Quote {
+                    levels,
+                    joined_levels,
+                }) => {
+                    for level in 0..levels {
+                        let height = if level < joined_levels {
+                            row.height
+                        } else {
+                            row.line.size(row.line_height).height
+                        };
+                        window.paint_quad(fill(
                             Bounds::new(
-                                point(row.origin.x - style.quote_indent, row.origin.y),
-                                size(px(3.), height),
+                                point(
+                                    row.origin.x - style.quote_indent * (levels - level),
+                                    row.origin.y,
+                                ),
+                                size(px(2.), height),
                             ),
-                            style.rule,
-                        )
-                        .corner_radii(px(1.5)),
-                    );
+                            style.marker,
+                        ));
+                    }
                 }
                 Some(Decoration::Divider) => window.paint_quad(fill(
                     Bounds::new(
                         point(row.origin.x, row.origin.y + row.line_height * 0.5),
-                        size(row.width, px(1.)),
+                        size(row.width, px(1.5)),
                     ),
                     style.rule,
                 )),
                 Some(Decoration::Code { first, last }) => {
-                    let top = if first { CODE_PADDING } else { px(0.) };
+                    let top = if first {
+                        CODE_PADDING + CODE_HEADER_HEIGHT
+                    } else {
+                        px(0.)
+                    };
                     let bottom = if last { CODE_PADDING } else { px(0.) };
-                    let radius = |rounded: bool| if rounded { px(6.) } else { px(0.) };
+                    let radius = |rounded: bool| if rounded { CODE_RADIUS } else { px(0.) };
                     window.paint_quad(
                         fill(
                             Bounds::new(
@@ -595,6 +757,88 @@ impl Element for EditorSurface {
                     );
                 }
                 None => {}
+            }
+            if let Some(header) = &row.code_header {
+                let language = row
+                    .code_language_bounds()
+                    .expect("code header has button bounds");
+                let copy = row
+                    .code_copy_bounds()
+                    .expect("code header has button bounds");
+                let _ = header.language.paint(
+                    language.origin + point(px(6.), px(3.)),
+                    px(18.),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+                let mut icons = PathBuilder::stroke(px(1.2));
+                let chevron = point(
+                    language.right() - CODE_CHEVRON_WIDTH,
+                    language.top() + px(10.5),
+                );
+                icons.move_to(chevron + point(px(2.), px(0.)));
+                icons.line_to(chevron + point(px(5.), px(3.)));
+                icons.line_to(chevron + point(px(8.), px(0.)));
+                // Clipboard: a board with a clip on its top edge.
+                let board = copy.origin + point(px(9.), px(6.5));
+                let (w, h, r) = (px(10.), px(12.), px(2.));
+                icons.move_to(board + point(r, px(0.)));
+                icons.line_to(board + point(w - r, px(0.)));
+                icons.line_to(board + point(w, r));
+                icons.line_to(board + point(w, h - r));
+                icons.line_to(board + point(w - r, h));
+                icons.line_to(board + point(r, h));
+                icons.line_to(board + point(px(0.), h - r));
+                icons.line_to(board + point(px(0.), r));
+                icons.line_to(board + point(r, px(0.)));
+                icons.move_to(board + point(px(3.), px(1.5)));
+                icons.line_to(board + point(px(3.), px(-1.5)));
+                icons.line_to(board + point(px(7.), px(-1.5)));
+                icons.line_to(board + point(px(7.), px(1.5)));
+                if let Ok(path) = icons.build() {
+                    window.paint_path(path, style.muted_text);
+                }
+                if let Some((language, copy)) = &row.code_hitboxes {
+                    window.set_cursor_style(CursorStyle::PointingHand, language);
+                    window.set_cursor_style(CursorStyle::PointingHand, copy);
+                    let language = language.clone();
+                    let copy = copy.clone();
+                    let editor = self.editor.clone();
+                    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                        if !phase.bubble() || event.button != MouseButton::Left {
+                            return;
+                        }
+                        let language_clicked = language.is_hovered_at(event.position, window);
+                        let copy_clicked = copy.is_hovered_at(event.position, window);
+                        if (language_clicked || copy_clicked) && editor.read(cx).is_composing() {
+                            editor.update(cx, |editor, cx| editor.cancel_composition(cx));
+                            // Cancelling can restore a different block list. The next click
+                            // must use the freshly rendered hitboxes and block indices.
+                            cx.stop_propagation();
+                            return;
+                        }
+                        if language_clicked {
+                            editor.update(cx, |_, cx| {
+                                cx.emit(EditorEvent::CodeLanguageRequested { block: i });
+                            });
+                            cx.stop_propagation();
+                        } else if copy_clicked {
+                            let view = editor.read(cx);
+                            if let Some(range) = view.document().code_block_range(i) {
+                                let text = view.document().blocks[range]
+                                    .iter()
+                                    .map(|block| block.text())
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                editor.update(cx, |_, cx| cx.emit(EditorEvent::CodeCopied));
+                            }
+                            cx.stop_propagation();
+                        }
+                    });
+                }
             }
             if a != b && i >= a.block && i <= b.block {
                 let start = if i == a.block { a.byte } else { 0 };
@@ -631,8 +875,21 @@ impl Element for EditorSurface {
                             cx,
                         );
                     }
-                    Marker::Bullet => {
-                        window.paint_quad(fill(marker_bounds, style.marker).corner_radii(px(2.5)))
+                    Marker::Bullet { depth } => {
+                        let radius = if depth % 3 == 2 { px(0.) } else { px(2.5) };
+                        if depth % 3 == 1 {
+                            window.paint_quad(quad(
+                                marker_bounds,
+                                radius,
+                                style.background,
+                                px(1.),
+                                style.marker,
+                                BorderStyle::Solid,
+                            ));
+                        } else {
+                            window
+                                .paint_quad(fill(marker_bounds, style.marker).corner_radii(radius));
+                        }
                     }
                     Marker::Task { checked } => {
                         window.paint_quad(quad(

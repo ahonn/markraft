@@ -75,6 +75,10 @@ pub struct NotesApp {
     picker_scroll: ScrollHandle,
     actions_scroll: ScrollHandle,
     format_scroll: ScrollHandle,
+    code_language_scroll: ScrollHandle,
+    code_language_block: Option<usize>,
+    code_language_focus_pending: bool,
+    code_language_selected: usize,
     dirty: bool,
     revision: u64,
     save_at: Option<Instant>,
@@ -122,10 +126,18 @@ impl NotesApp {
                 .with_style(query_style(dark))
                 .with_placeholder("Search notes…")
         });
-        let query_changes = cx.subscribe(&query, |this, _, _: &EditorEvent, cx| {
+        let query_changes = cx.subscribe(&query, |this, _, event: &EditorEvent, cx| {
+            if !matches!(event, EditorEvent::Changed { .. }) {
+                return;
+            }
             this.selected = 0;
             this.actions_scroll.scroll_to_item(0);
             this.picker_scroll.scroll_to_item(0);
+            // Opening clears the search but preserves the current language selection.
+            if !this.code_language_focus_pending {
+                this.code_language_selected = 0;
+                this.code_language_scroll.scroll_to_item(0);
+            }
             cx.notify();
         });
         let mut platform_error = None;
@@ -215,6 +227,10 @@ impl NotesApp {
             picker_scroll: ScrollHandle::new(),
             actions_scroll: ScrollHandle::new(),
             format_scroll: ScrollHandle::new(),
+            code_language_scroll: ScrollHandle::new(),
+            code_language_block: None,
+            code_language_focus_pending: false,
+            code_language_selected: 0,
             dirty: false,
             revision: 0,
             save_at: None,
@@ -252,6 +268,7 @@ impl NotesApp {
         self.sessions[&self.library.active_id].editor.clone()
     }
     fn ensure_session(&mut self, cx: &mut Context<Self>) {
+        self.code_language_block = None;
         let id = self.library.active_id.clone();
         self.session_order.retain(|entry| entry != &id);
         self.session_order.push_back(id.clone());
@@ -272,12 +289,30 @@ impl NotesApp {
         });
         let note_id = id.clone();
         let changes = cx.subscribe(&editor, move |this, editor, event: &EditorEvent, cx| {
-            if matches!(event, EditorEvent::LinkClicked) {
-                this.link_popover = Some(LinkPopover::View);
-                cx.notify();
+            if matches!(event, EditorEvent::CodeCopied) {
+                if this.library.active_id == note_id {
+                    this.inform("Code copied", cx);
+                }
                 return;
             }
-            this.link_popover = None;
+            if let EditorEvent::CodeLanguageRequested { block } = event {
+                if this.library.active_id == note_id && this.panel == Panel::Editor {
+                    this.open_code_language(*block, cx);
+                }
+                return;
+            }
+            if matches!(event, EditorEvent::LinkClicked) {
+                if this.library.active_id == note_id && this.panel == Panel::Editor {
+                    this.code_language_block = None;
+                    this.link_popover = Some(LinkPopover::View);
+                    cx.notify();
+                }
+                return;
+            }
+            if this.library.active_id == note_id {
+                this.link_popover = None;
+                this.code_language_block = None;
+            }
             let document = editor.read(cx).committed_document().clone();
             if this.library.set_document(&note_id, document) {
                 this.changed(cx);
@@ -462,6 +497,7 @@ impl NotesApp {
         cx.notify();
     }
     pub fn hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.code_language_block = None;
         self.query.update(cx, |e, cx| e.cancel_composition(cx));
         self.editor()
             .update(cx, |editor, cx| editor.cancel_composition(cx));
@@ -504,7 +540,10 @@ impl NotesApp {
             self.editor().update(cx, |e, cx| e.cancel_composition(cx));
             return;
         }
-        if self.format_menu.take().is_some() || self.link_popover.take().is_some() {
+        let had_popover = self.format_menu.take().is_some()
+            | self.link_popover.take().is_some()
+            | self.code_language_block.take().is_some();
+        if had_popover {
             self.focus_editor(window, cx);
             cx.notify();
         } else if self.panel != Panel::Editor {
@@ -520,6 +559,8 @@ impl NotesApp {
     }
     fn new_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.format_menu = None;
+        self.code_language_block = None;
+        self.link_popover = None;
         self.query.update(cx, |e, cx| e.cancel_composition(cx));
         if self.persistence.is_none() {
             return;
@@ -534,6 +575,8 @@ impl NotesApp {
     }
     fn select_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.format_menu = None;
+        self.code_language_block = None;
+        self.link_popover = None;
         self.query.update(cx, |e, cx| e.cancel_composition(cx));
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
         self.sync_documents(cx);
@@ -546,6 +589,8 @@ impl NotesApp {
     }
     fn open_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
         self.format_menu = None;
+        self.code_language_block = None;
+        self.link_popover = None;
         if self.persistence.is_none() {
             return;
         }
@@ -679,6 +724,7 @@ impl NotesApp {
             return;
         }
         self.format_menu = None;
+        self.code_language_block = None;
         if self.editor().read(cx).active_link().is_some() {
             self.link_popover = Some(LinkPopover::View);
             cx.notify();
@@ -687,6 +733,7 @@ impl NotesApp {
         }
     }
     fn edit_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.code_language_block = None;
         let url = self
             .editor()
             .read(cx)
@@ -960,7 +1007,8 @@ fn notes_style(dark: bool) -> EditorStyle {
     } else {
         EditorStyle::notes()
     };
-    style.top_overlay = TOOLBAR_HEIGHT;
+    // Text starts a little under the toolbar's lower edge, which is only a fade.
+    style.top_overlay = TOOLBAR_HEIGHT - px(13.);
     style.bottom_overlay = FOOTER_HEIGHT;
     style
 }
@@ -1012,6 +1060,8 @@ pub fn bind_app_keys(cx: &mut App) {
             MenuItem::action("Cut", markraft_gpui::Cut),
             MenuItem::action("Copy", markraft_gpui::Copy),
             MenuItem::action("Paste", markraft_gpui::Paste),
+            MenuItem::action("Paste as Plain Text", markraft_gpui::PastePlain),
+            MenuItem::action("Paste as Markdown", markraft_gpui::PasteMarkdown),
             MenuItem::action("Select All", markraft_gpui::SelectAll),
         ]),
     ]);

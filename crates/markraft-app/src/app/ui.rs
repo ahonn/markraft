@@ -1,3 +1,4 @@
+mod code;
 mod formatting;
 mod icons;
 mod link;
@@ -27,6 +28,8 @@ enum Intent {
     PinNote(String),
     TrashNote(String),
     Copy,
+    PastePlain,
+    PasteMarkdown,
     Export,
     Import,
     Select(String),
@@ -51,6 +54,8 @@ impl NotesApp {
             Intent::Trash => self.open_panel(Panel::Trash, window, cx),
             Intent::Actions => self.open_panel(Panel::Actions, window, cx),
             Intent::ToggleFormatToolbar => {
+                self.code_language_block = None;
+                self.link_popover = None;
                 self.format_toolbar = !self.format_toolbar;
                 self.format_menu = None;
                 self.panel = Panel::Editor;
@@ -80,6 +85,8 @@ impl NotesApp {
                 cx.notify();
             }
             Intent::Back => {
+                self.code_language_block = None;
+                self.link_popover = None;
                 self.query.update(cx, |e, cx| e.cancel_composition(cx));
                 self.panel = Panel::Editor;
                 self.focus_editor(window, cx);
@@ -98,6 +105,15 @@ impl NotesApp {
             Intent::Copy => {
                 self.copy_markdown(cx);
                 self.intent(Intent::Back, window, cx);
+            }
+            Intent::PastePlain | Intent::PasteMarkdown => {
+                self.intent(Intent::Back, window, cx);
+                let action: Box<dyn Action> = if matches!(intent, Intent::PastePlain) {
+                    Box::new(markraft_gpui::PastePlain)
+                } else {
+                    Box::new(markraft_gpui::PasteMarkdown)
+                };
+                window.dispatch_action(action, cx);
             }
             Intent::Export => {
                 self.intent(Intent::Back, window, cx);
@@ -139,7 +155,8 @@ impl NotesApp {
             }
             Intent::Block(kind) => {
                 self.format_menu = None;
-                self.editor().update(cx, |e, cx| e.set_block_kind(kind, cx));
+                self.editor()
+                    .update(cx, |e, cx| e.toggle_block_kind(kind, cx));
                 self.panel = Panel::Editor;
                 self.focus_editor(window, cx);
             }
@@ -338,6 +355,7 @@ impl NotesApp {
             })
             .active(|s| s.bg(self.pressed_color()).opacity(1.))
             .tooltip(self.hint(label))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
                 this.intent(intent.clone(), window, cx);
@@ -812,6 +830,9 @@ impl NotesApp {
         if self.query.read(cx).is_composing() {
             return false;
         }
+        if self.code_language_block.is_some() {
+            return self.code_language_key(key, window, cx);
+        }
         if self.link_popover == Some(LinkPopover::Edit) {
             if key == "enter" {
                 self.apply_link(window, cx);
@@ -880,6 +901,18 @@ impl NotesApp {
                 Intent::Pin,
             ),
             ("copy-markdown", "Copy as Markdown", "⇧⌘C", Intent::Copy),
+            (
+                "paste-plain",
+                "Paste as Plain Text",
+                "⇧⌘V",
+                Intent::PastePlain,
+            ),
+            (
+                "paste-markdown",
+                "Paste as Markdown",
+                "⌥⇧⌘V",
+                Intent::PasteMarkdown,
+            ),
             ("export-note", "Export Markdown…", "⇧⌘E", Intent::Export),
             ("format-bold", "Bold", "⌘B", Intent::Mark(Mark::Bold)),
             ("format-italic", "Italic", "⌘I", Intent::Mark(Mark::Italic)),
@@ -1115,6 +1148,7 @@ impl NotesApp {
             }])
             .occlude()
             .overflow_hidden()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                 this.dismiss(window, cx);
                 cx.stop_propagation();
@@ -1124,6 +1158,21 @@ impl NotesApp {
 }
 impl Render for NotesApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.code_language_block.is_some() && self.code_language_focus_pending {
+            self.code_language_focus_pending = false;
+            window.focus(&self.query.focus_handle(cx), cx);
+            let block = self.code_language_block;
+            let weak = cx.entity().downgrade();
+            window.on_next_frame(move |_, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    if this.code_language_block == block {
+                        this.code_language_scroll
+                            .scroll_to_item(this.code_language_selected);
+                        cx.notify();
+                    }
+                });
+            });
+        }
         let title = self.library.active_note().title();
         window.set_window_title(&title);
         let style = notes_style(self.dark);
@@ -1390,6 +1439,9 @@ impl Render for NotesApp {
             )
             .when_some(self.link_pill(window, cx), |s, pill| {
                 s.child(popover_enter("link-enter", pill, true))
+            })
+            .when_some(self.code_language_popover(window, cx), |s, popover| {
+                s.child(popover_enter("code-language-enter", popover, false))
             })
             .when(self.panel != Panel::Editor, |s| {
                 s.child(popover_enter(

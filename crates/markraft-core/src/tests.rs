@@ -232,6 +232,7 @@ fn unicode_offsets_and_grapheme_deletion() {
 fn normalization_preserves_text_and_merges_runs() {
     let mut document = Document {
         blocks: vec![Block {
+            depth: 0,
             kind: BlockKind::Heading(99),
             spans: vec![
                 Span {
@@ -300,6 +301,7 @@ fn unsupported_markdown_stays_literal_and_code_ticks_roundtrip() {
     for text in ["`literal`", " a ", "  ", "one``two", "中文 😀"] {
         let document = Document {
             blocks: vec![Block {
+                depth: 0,
                 kind: BlockKind::Paragraph,
                 spans: vec![Span {
                     text: text.into(),
@@ -564,6 +566,7 @@ fn code_only_delimiters_and_adjacent_marks_roundtrip() {
     for text in ["one`two", "one``two", "one```two", "`", "``", "```"] {
         let document = Document {
             blocks: vec![Block {
+                depth: 0,
                 kind: BlockKind::Paragraph,
                 spans: vec![Span {
                     text: text.into(),
@@ -593,6 +596,7 @@ fn code_only_delimiters_and_adjacent_marks_roundtrip() {
             };
             let mut document = Document {
                 blocks: vec![Block {
+                    depth: 0,
                     kind: BlockKind::Paragraph,
                     spans: vec![
                         Span {
@@ -632,6 +636,7 @@ fn all_adjacent_mark_combinations_roundtrip() {
         for right in 0..32 {
             let mut document = Document {
                 blocks: vec![Block {
+                    depth: 0,
                     kind: BlockKind::Paragraph,
                     spans: vec![
                         Span {
@@ -808,7 +813,7 @@ fn fenced_code_imports_as_plain_lines_and_round_trips() {
 }
 
 #[test]
-fn code_blocks_are_entered_by_fence_and_left_from_a_trailing_blank_line() {
+fn code_blocks_keep_blank_lines_and_exit_with_an_explicit_command() {
     let mut editor = editor("");
     type_chars(&mut editor, "```js");
     editor.insert_text("\n");
@@ -838,13 +843,15 @@ fn code_blocks_are_entered_by_fence_and_left_from_a_trailing_blank_line() {
     editor.move_document_end(false);
     editor.insert_text("\n");
     editor.insert_text("\n");
+    assert_eq!(editor.document().blocks.last().unwrap().kind, js);
+    editor.exit_code_block();
     assert_eq!(
         editor.document().blocks.last().unwrap().kind,
         BlockKind::Paragraph
     );
     assert_eq!(
         editor.document().to_markdown(),
-        "```js\n# **x** - \n\n\ny\n```\n"
+        "```js\n# **x** - \n\n\ny\n\n\n```\n"
     );
 
     let mut editor = Editor::new(Document::default());
@@ -943,4 +950,330 @@ fn links_are_created_from_a_selection_a_caret_or_typed_markdown() {
     let mut editor = Editor::new(Document::default());
     type_chars(&mut editor, "![alt](image.png)");
     assert_eq!(editor.document().plain_text(), "![alt](image.png)");
+}
+
+#[test]
+fn nested_lists_and_quotes_round_trip_and_number_at_each_level() {
+    let source = "1. first\n    1. child\n        - grandchild\n    2. child two\n2. second\n- [ ] task\n  - [x] nested\n> quote\n> > nested quote";
+    let document = Document::from_markdown(source);
+    assert_eq!(
+        document
+            .blocks
+            .iter()
+            .map(|block| block.depth)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 1, 0, 0, 1, 0, 1]
+    );
+    assert!(
+        document
+            .to_markdown()
+            .contains("\n    1. child\n        - grandchild")
+    );
+    assert_eq!(document.ordinal(1), Some(1));
+    assert_eq!(document.ordinal(3), Some(2));
+    assert_eq!(document.ordinal(4), Some(2));
+    assert_eq!(Document::from_markdown(&document.to_markdown()), document);
+}
+
+#[test]
+fn list_indentation_moves_selected_siblings_and_their_subtrees_atomically() {
+    let mut editor = editor("- first\n- second\n  - child\n- third\n- last");
+    editor.set_selection(Selection {
+        anchor: Position { block: 1, byte: 0 },
+        head: Position { block: 4, byte: 0 },
+    });
+    let before = editor.document().clone();
+    assert!(editor.indent().is_some());
+    assert_eq!(
+        editor
+            .document()
+            .blocks
+            .iter()
+            .map(|block| block.depth)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 1, 0]
+    );
+    editor.undo();
+    assert_eq!(*editor.document(), before);
+    editor.redo();
+    editor.outdent();
+    assert_eq!(*editor.document(), before);
+    editor.set_selection(Selection::caret(Position::default()));
+    assert!(editor.indent().is_none());
+}
+
+#[test]
+fn nested_enter_and_backspace_outdent_before_exiting_the_list() {
+    let mut editor = editor("- first\n  - ");
+    editor.set_selection(Selection::caret(Position { block: 1, byte: 0 }));
+    editor.insert_text("\n");
+    assert_eq!(editor.document().blocks.len(), 2);
+    assert_eq!(editor.document().blocks[1].depth, 0);
+    assert_eq!(editor.document().blocks[1].kind, BlockKind::Bullet);
+    editor.insert_text("\n");
+    assert_eq!(editor.document().blocks[1].kind, BlockKind::Paragraph);
+    editor.undo();
+    editor.undo();
+    editor.insert_text("child");
+    editor.set_selection(Selection::caret(Position { block: 1, byte: 0 }));
+    editor.backspace();
+    assert_eq!(editor.document().blocks[1].depth, 0);
+    assert_eq!(editor.document().blocks[1].text(), "child");
+    editor.backspace();
+    assert_eq!(editor.document().blocks[1].kind, BlockKind::Paragraph);
+}
+
+#[test]
+fn nested_split_preserves_depth_and_format_conversion_clears_it() {
+    let mut editor = editor("- first\n  - child");
+    editor.move_document_end(false);
+    editor.insert_text("\n");
+    assert_eq!(editor.document().blocks[2].depth, 1);
+    editor.set_block_kind(BlockKind::Task { checked: false });
+    assert_eq!(editor.document().blocks[2].depth, 1);
+    editor.set_block_kind(BlockKind::Heading(2));
+    assert_eq!(editor.document().blocks[2].depth, 0);
+}
+
+#[test]
+fn quote_depth_supports_input_rules_and_empty_enter() {
+    let mut editor = editor("");
+    editor.insert_text("> ");
+    editor.insert_text("> ");
+    assert_eq!(editor.document().blocks[0].depth, 1);
+    editor.insert_text("\n");
+    assert_eq!(editor.document().blocks[0].depth, 0);
+    assert_eq!(editor.document().blocks[0].kind, BlockKind::Quote);
+    editor.insert_text("\n");
+    assert_eq!(editor.document().blocks[0].kind, BlockKind::Paragraph);
+}
+
+#[test]
+fn nesting_is_backward_compatible_with_legacy_json() {
+    let legacy = r#"{"version":1,"document":{"blocks":[{"kind":"Bullet","spans":[]}]}}"#;
+    let document = Document::from_json(legacy).unwrap();
+    assert_eq!(document.blocks[0].depth, 0);
+    assert!(!document.to_json().unwrap().contains("depth"));
+    let nested = Document::from_markdown("- root\n  - child");
+    assert_eq!(
+        Document::from_json(&nested.to_json().unwrap()).unwrap(),
+        nested
+    );
+}
+
+#[test]
+fn code_language_changes_whole_run_and_copies_plain_text() {
+    let mut editor = editor("```rust\nlet x = 1;\nprintln!(\"{x}\");\n```\nparagraph");
+    editor.set_selection(Selection::caret(Position { block: 1, byte: 3 }));
+    assert_eq!(editor.document().code_block_range(1), Some(0..2));
+    assert_eq!(
+        editor.code_block_text().as_deref(),
+        Some("let x = 1;\nprintln!(\"{x}\");")
+    );
+    assert!(editor.set_code_language("typescript").is_some());
+    assert!(editor.document().blocks[..2].iter().all(|block| block.kind
+        == BlockKind::Code {
+            language: "typescript".into()
+        }));
+    editor.undo();
+    assert_eq!(
+        editor.document().blocks[0].kind,
+        BlockKind::Code {
+            language: "rust".into()
+        }
+    );
+    editor.move_document_end(false);
+    assert_eq!(editor.code_block_text(), None);
+    assert!(editor.set_code_language("rust").is_none());
+}
+
+#[test]
+fn nesting_commands_preserve_first_item_and_unrelated_block_formats() {
+    let mut editor = editor("- root\n  - child\n- sibling");
+    editor.set_selection(Selection {
+        anchor: Position::default(),
+        head: Position { block: 2, byte: 7 },
+    });
+    assert!(editor.indent().is_none());
+    editor.set_selection(Selection::caret(Position::default()));
+    editor.backspace();
+    assert_eq!(editor.document().blocks[0].kind, BlockKind::Paragraph);
+    assert_eq!(editor.document().blocks[1].kind, BlockKind::Bullet);
+    assert_eq!(editor.document().blocks[1].depth, 0);
+    editor.set_block_kind(BlockKind::Heading(1));
+    assert!(editor.outdent().is_none());
+    assert_eq!(editor.document().blocks[0].kind, BlockKind::Heading(1));
+}
+
+#[test]
+fn format_changes_normalize_orphaned_list_subtrees_without_changing_siblings() {
+    let mut editor = editor("- parent\n  - child\n    - grandchild\n  - second child\n- root");
+    editor.set_block_kind(BlockKind::Heading(1));
+    assert_eq!(
+        editor
+            .document()
+            .blocks
+            .iter()
+            .map(|block| block.depth)
+            .collect::<Vec<_>>(),
+        vec![0, 0, 1, 0, 0]
+    );
+    assert_eq!(
+        Document::from_markdown(&editor.document().to_markdown()),
+        *editor.document()
+    );
+    editor.undo();
+    assert_eq!(editor.document().blocks[2].depth, 2);
+}
+
+#[test]
+fn block_format_toggles_ignore_task_state_and_code_language() {
+    let mut editor = editor("- [x] done\n- [ ] open\nuntouched");
+    editor.set_selection(Selection {
+        anchor: Position::default(),
+        head: Position { block: 2, byte: 0 },
+    });
+    editor.toggle_block_kind(BlockKind::Task { checked: false });
+    assert!(
+        editor.document().blocks[..2]
+            .iter()
+            .all(|block| block.kind == BlockKind::Paragraph)
+    );
+    editor.undo();
+    assert_eq!(
+        editor.document().blocks[0].kind,
+        BlockKind::Task { checked: true }
+    );
+    let mut editor = Editor::new(Document::from_markdown("```rust\none\ntwo\n```"));
+    editor.set_selection(Selection::caret(Position { block: 1, byte: 1 }));
+    editor.toggle_block_kind(BlockKind::Code {
+        language: String::new(),
+    });
+    assert!(
+        editor
+            .document()
+            .blocks
+            .iter()
+            .all(|block| block.kind == BlockKind::Paragraph)
+    );
+}
+
+#[test]
+fn explicit_code_exit_maps_positions_and_undoes_once() {
+    let mut editor = editor("```rust\none\ntwo\n```\n# after");
+    let before = editor.document().clone();
+    let selection = Selection::caret(Position { block: 0, byte: 2 });
+    editor.set_selection(selection);
+    let change = editor.exit_code_block().unwrap();
+    assert_eq!(editor.selection().head, Position { block: 2, byte: 0 });
+    assert_eq!(editor.document().blocks[2].kind, BlockKind::Paragraph);
+    assert_eq!(
+        change
+            .mapping
+            .map(Position { block: 2, byte: 1 }, Affinity::After),
+        Position { block: 3, byte: 1 }
+    );
+    editor.undo();
+    assert_eq!(*editor.document(), before);
+    assert_eq!(editor.selection(), selection);
+    let mut editor = Editor::new(Document::from_markdown("```\nx\n```\nafter"));
+    assert!(editor.exit_code_block().is_none());
+    assert_eq!(editor.selection().head, Position { block: 1, byte: 0 });
+    assert_eq!(editor.document().blocks.len(), 2);
+}
+
+#[test]
+fn code_indentation_preserves_selected_text_and_maps_positions() {
+    let mut editor = editor("```rust\none\n  two\nlast\n```");
+    let selection = Selection {
+        anchor: Position::default(),
+        head: Position { block: 2, byte: 0 },
+    };
+    editor.set_selection(selection);
+    let change = editor.indent().unwrap();
+    assert_eq!(editor.document().plain_text(), "\tone\n\t  two\nlast");
+    assert_eq!(
+        change
+            .mapping
+            .map(Position { block: 1, byte: 4 }, Affinity::After),
+        Position { block: 1, byte: 5 }
+    );
+    assert_eq!(editor.selection().head, selection.head);
+    editor.outdent();
+    assert_eq!(editor.document().plain_text(), "one\n  two\nlast");
+    editor.set_selection(Selection::caret(Position { block: 1, byte: 3 }));
+    editor.outdent();
+    assert_eq!(editor.document().blocks[1].text(), "two");
+    assert_eq!(editor.selection().head.byte, 1);
+    editor.undo();
+    assert_eq!(editor.selection().head.byte, 3);
+}
+
+#[test]
+fn code_language_updates_at_a_block_preserve_the_original_undo_selection() {
+    let mut editor = editor("```rust\nx\n```\nafter");
+    editor.move_document_end(false);
+    let selection = editor.selection();
+    editor.set_code_language_at(0, "typescript");
+    assert_eq!(editor.selection(), selection);
+    editor.undo();
+    assert_eq!(editor.selection(), selection);
+    assert_eq!(
+        editor.document().blocks[0].kind,
+        BlockKind::Code {
+            language: "rust".into()
+        }
+    );
+}
+
+#[test]
+fn backspace_joins_code_lines_without_splitting_the_code_block() {
+    let mut editor = editor("```rust\na\nb\n```");
+    let before = editor.document().clone();
+    editor.set_selection(Selection::caret(Position { block: 1, byte: 0 }));
+    editor.backspace();
+    assert_eq!(editor.document().blocks.len(), 1);
+    assert_eq!(editor.document().blocks[0].text(), "ab");
+    assert_eq!(
+        editor.document().blocks[0].kind,
+        BlockKind::Code {
+            language: "rust".into()
+        }
+    );
+    assert_eq!(editor.selection().head, Position { block: 0, byte: 1 });
+    editor.undo();
+    assert_eq!(*editor.document(), before);
+    assert_eq!(editor.selection().head, Position { block: 1, byte: 0 });
+}
+
+#[test]
+fn backspace_only_clears_a_wholly_empty_code_block() {
+    for source in [
+        "```rust\n\nafter\n```",
+        "```rust\ntext\n```",
+        "before\n```rust\n\nafter\n```",
+    ] {
+        let mut editor = editor(source);
+        let index = editor
+            .document()
+            .blocks
+            .iter()
+            .position(|block| matches!(block.kind, BlockKind::Code { .. }))
+            .unwrap();
+        editor.set_selection(Selection::caret(Position {
+            block: index,
+            byte: 0,
+        }));
+        let before = editor.document().clone();
+        assert!(editor.backspace().is_none());
+        assert_eq!(*editor.document(), before);
+    }
+    let mut editor = editor("```\n```");
+    assert!(editor.backspace().is_some());
+    assert_eq!(editor.document().blocks[0].kind, BlockKind::Paragraph);
+    editor.undo();
+    assert!(matches!(
+        editor.document().blocks[0].kind,
+        BlockKind::Code { .. }
+    ));
 }
