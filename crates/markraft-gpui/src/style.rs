@@ -20,6 +20,9 @@ pub struct EditorStyle {
     pub marker: Hsla,
     pub link: Hsla,
     pub code_background: Hsla,
+    /// Inline code is a pill: its own, slightly stronger fill and quieter text.
+    pub inline_code_background: Hsla,
+    pub inline_code_text: Hsla,
     pub code_radius: Pixels,
     /// Quote bars and horizontal rules.
     pub rule: Hsla,
@@ -51,6 +54,8 @@ impl Default for EditorStyle {
             marker: rgb(0x74766e).into(),
             link: rgb(0x2a6fdb).into(),
             code_background: rgb(0xedece7).into(),
+            inline_code_background: rgb(0xedece7).into(),
+            inline_code_text: rgb(0x24282e).into(),
             code_radius: px(0.),
             rule: rgb(0xd9d7d0).into(),
             quote_indent: px(18.),
@@ -81,7 +86,9 @@ impl EditorStyle {
             marker: rgb(0x2f7cf6).into(),
             link: rgb(0x2f7cf6).into(),
             code_background: rgb(0xe3e3e4).into(),
-            code_radius: px(3.),
+            inline_code_background: rgb(0xdbdbdd).into(),
+            inline_code_text: rgb(0x55575c).into(),
+            code_radius: px(6.),
             rule: rgb(0xc4c5c9).into(),
             quote_indent: px(12.),
             draw_markers: true,
@@ -99,6 +106,8 @@ impl EditorStyle {
             marker: rgb(0x4c9bff).into(),
             link: rgb(0x4c9bff).into(),
             code_background: rgb(0x34363b).into(),
+            inline_code_background: rgb(0x3c3e44).into(),
+            inline_code_text: rgb(0xb9bcc2).into(),
             rule: rgb(0x46484e).into(),
             scrollbar: rgba(0xffffff4d).into(),
             ..Self::notes()

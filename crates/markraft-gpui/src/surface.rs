@@ -15,11 +15,32 @@ pub(crate) struct LayoutBlock {
     pub(crate) top_gap: Pixels,
     marker: Option<Marker>,
     decoration: Option<Decoration>,
-    code_ranges: Vec<Range<usize>>,
+    inline_code: Vec<InlineCode>,
     code_header: Option<CodeHeader>,
     code_hitboxes: Option<(Hitbox, Hitbox)>,
 }
 
+/// Inline code on one visual row. Text runs share one font size, so the main line only
+/// reserves the space and the code is painted again, smaller, centred in that slot.
+/// What is left of the slot on either side becomes the pill's padding.
+#[derive(Clone)]
+struct InlineCode {
+    range: Range<usize>,
+    row: usize,
+    /// Relative to the block's origin.
+    left: Pixels,
+    slot: Pixels,
+    line: std::rc::Rc<ShapedLine>,
+}
+
+impl InlineCode {
+    fn text_left(&self) -> Pixels {
+        self.left + (self.slot - self.line.width) / 2.
+    }
+}
+
+const INLINE_CODE_SCALE: f32 = 0.86;
+const INLINE_CODE_PADDING: Pixels = px(5.);
 const NUMBER_GAP: Pixels = px(6.);
 // SF Mono; Menlo is wider and heavier at this size.
 const CODE_FONT: &str = ".AppleSystemUIFontMonospaced";
@@ -111,13 +132,34 @@ impl LayoutBlock {
                 }
             }
         }
-        self.origin
-            + self
-                .line
-                .position_for_index(byte.min(self.text_len), self.line_height)
-                .unwrap_or_default()
+        let mut position = self
+            .line
+            .position_for_index(byte.min(self.text_len), self.line_height)
+            .unwrap_or_default();
+        let row = (position.y / self.line_height).round() as usize;
+        if let Some(x) = self.inline_code_x(byte, row) {
+            position.x = x;
+        }
+        self.origin + position
     }
-    pub(crate) fn rectangles(&self, range: Range<usize>, newline: bool) -> Vec<Bounds<Pixels>> {
+    /// Where a position strictly inside inline code is drawn. Its edges keep the
+    /// slot's own bounds, so the caret rests outside the pill there.
+    fn inline_code_x(&self, byte: usize, row: usize) -> Option<Pixels> {
+        let code = self
+            .inline_code
+            .iter()
+            .find(|code| code.row == row && code.range.start < byte && byte < code.range.end)?;
+        Some(code.text_left() + code.line.x_for_index(byte - code.range.start))
+    }
+    /// The position under `local` (relative to the origin) when it falls on inline code.
+    pub(crate) fn inline_code_index(&self, local: Point<Pixels>) -> Option<usize> {
+        let row = (local.y / self.line_height).floor() as usize;
+        let code = self.inline_code.iter().find(|code| {
+            code.row == row && code.left <= local.x && local.x <= code.left + code.slot
+        })?;
+        Some(code.range.start + code.line.closest_index_for_x(local.x - code.text_left()))
+    }
+    fn row_starts(&self) -> Vec<usize> {
         let mut starts = vec![0];
         starts.extend(
             self.line
@@ -125,6 +167,10 @@ impl LayoutBlock {
                 .iter()
                 .map(|b| self.line.runs()[b.run_ix].glyphs[b.glyph_ix].index),
         );
+        starts
+    }
+    pub(crate) fn rectangles(&self, range: Range<usize>, newline: bool) -> Vec<Bounds<Pixels>> {
+        let starts = self.row_starts();
         let mut rectangles = vec![];
         for (row, &start) in starts.iter().enumerate() {
             let end = starts.get(row + 1).copied().unwrap_or(self.text_len);
@@ -148,7 +194,7 @@ impl LayoutBlock {
                 } else if p.y > self.line_height * row {
                     self.width
                 } else {
-                    p.x
+                    self.inline_code_x(index, row).unwrap_or(p.x)
                 }
             };
             let left = x_for(a);
@@ -298,9 +344,7 @@ fn shape(
                 .spans
                 .iter()
                 .map(|span| {
-                    if span.marks.code {
-                        code_ranges.push(byte_offset..byte_offset + span.text.len());
-                    }
+                    let span_range = byte_offset..byte_offset + span.text.len();
                     byte_offset += span.text.len();
                     let code_block = matches!(block.kind, BlockKind::Code { .. });
                     let mut face = font(if span.marks.code || code_block {
@@ -314,10 +358,19 @@ fn shape(
                     if span.marks.italic {
                         face.style = FontStyle::Italic;
                     }
-                    let color = if span.link.is_some() {
+                    let ink = if span.link.is_some() {
                         style.link
+                    } else if span.marks.code {
+                        style.inline_code_text
                     } else {
                         text_color
+                    };
+                    // Inline code only reserves its space here; see `InlineCode`.
+                    let color = if span.marks.code {
+                        code_ranges.push((span_range, face.clone(), ink));
+                        gpui::transparent_black()
+                    } else {
+                        ink
                     };
                     TextRun {
                         len: span.text.len(),
@@ -327,13 +380,13 @@ fn shape(
                         underline: (span.marks.underline || span.link.is_some()).then_some(
                             UnderlineStyle {
                                 thickness: px(1.),
-                                color: Some(color),
+                                color: Some(ink),
                                 wavy: false,
                             },
                         ),
                         strikethrough: span.marks.strikethrough.then_some(StrikethroughStyle {
                             thickness: px(1.),
-                            color: Some(color),
+                            color: Some(ink),
                         }),
                     }
                 })
@@ -489,7 +542,7 @@ fn shape(
             } else {
                 None
             };
-            LayoutBlock {
+            let mut layout = LayoutBlock {
                 line: std::rc::Rc::new(line),
                 origin: point(indent, px(0.)),
                 line_height,
@@ -498,11 +551,55 @@ fn shape(
                 text_len,
                 marker,
                 decoration,
-                code_ranges,
+                inline_code: vec![],
                 top_gap,
                 code_header,
                 code_hitboxes: None,
+            };
+            let text = block.text();
+            let starts = layout.row_starts();
+            for (range, face, ink) in code_ranges {
+                let parts: Vec<_> = starts
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(row, &start)| {
+                        let end = starts.get(row + 1).copied().unwrap_or(text_len);
+                        let part = range.start.max(start)..range.end.min(end);
+                        let slot = layout.rectangles(part.clone(), false).into_iter().next()?;
+                        (!part.is_empty()).then_some((row, part, slot))
+                    })
+                    .collect();
+                // The slot is as wide as full-size text. Shrinking by a fixed ratio would
+                // leave long spans mostly padding, so the size is chosen to leave about
+                // `INLINE_CODE_PADDING` on either side of each row instead.
+                let reserved: Pixels = parts.iter().map(|(_, _, slot)| slot.size.width).sum();
+                let padding = INLINE_CODE_PADDING * 2. * parts.len() as f32;
+                let scale =
+                    ((reserved - padding) / reserved.max(px(1.))).clamp(INLINE_CODE_SCALE, 1.);
+                for (row, part, slot) in parts {
+                    let line = window.text_system().shape_line(
+                        text[part.clone()].to_owned().into(),
+                        font_size * scale,
+                        &[TextRun {
+                            len: part.len(),
+                            font: face.clone(),
+                            color: ink,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                        None,
+                    );
+                    layout.inline_code.push(InlineCode {
+                        range: part,
+                        row,
+                        left: slot.origin.x - layout.origin.x,
+                        slot: slot.size.width,
+                        line: std::rc::Rc::new(line),
+                    });
+                }
             }
+            layout
         })
         .collect()
 }
@@ -692,12 +789,16 @@ impl Element for EditorSurface {
             cx,
         );
         for (i, row) in rows.iter().enumerate() {
-            for range in &row.code_ranges {
-                for rect in row.rectangles(range.clone(), false) {
-                    window.paint_quad(
-                        fill(rect, style.code_background).corner_radii(style.code_radius),
-                    );
-                }
+            for code in &row.inline_code {
+                // A pill shorter than the line.
+                let inset = (row.line_height * 0.1).round();
+                let pill = Bounds::new(
+                    row.origin + point(code.left, row.line_height * code.row + inset),
+                    size(code.slot, row.line_height - inset * 2.),
+                );
+                window.paint_quad(
+                    fill(pill, style.inline_code_background).corner_radii(style.code_radius),
+                );
             }
             match row.decoration {
                 Some(Decoration::Quote {
@@ -862,6 +963,16 @@ impl Element for EditorSurface {
                 window,
                 cx,
             );
+            for code in &row.inline_code {
+                let _ = code.line.paint(
+                    row.origin + point(code.text_left(), row.line_height * code.row),
+                    row.line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            }
             if let Some(marker) = &row.marker {
                 let marker_bounds = row.marker_bounds().expect("marker has bounds");
                 match marker {

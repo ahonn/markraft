@@ -526,10 +526,11 @@ impl EditorView {
                 .max(px(0.))
                 .min(row.line.size(row.line_height).height - px(1.)),
         );
-        let byte = row
-            .line
-            .closest_index_for_position(local, row.line_height)
-            .unwrap_or_else(|i| i);
+        let byte = row.inline_code_index(local).unwrap_or_else(|| {
+            row.line
+                .closest_index_for_position(local, row.line_height)
+                .unwrap_or_else(|i| i)
+        });
         Position {
             block,
             byte: byte.min(row.text_len),
