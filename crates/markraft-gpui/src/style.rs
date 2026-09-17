@@ -105,6 +105,7 @@ impl EditorStyle {
             BlockKind::Heading(1) => self.heading_sizes[0],
             BlockKind::Heading(2) => self.heading_sizes[1],
             BlockKind::Heading(_) => self.heading_sizes[2],
+            BlockKind::Code { .. } => self.body_size - px(1.),
             _ => self.body_size,
         }
     }

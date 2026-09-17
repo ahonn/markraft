@@ -82,6 +82,14 @@ impl NotesApp {
                     Intent::Block(BlockKind::Quote),
                     kind == Some(BlockKind::Quote),
                 ));
+                items.push((
+                    "Code Block",
+                    "⌥⌘C",
+                    Intent::Block(BlockKind::Code {
+                        language: String::new(),
+                    }),
+                    matches!(kind, Some(BlockKind::Code { .. })),
+                ));
                 items
             }
             Some(FormatMenu::Inline) => vec![

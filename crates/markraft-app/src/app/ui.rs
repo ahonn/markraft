@@ -356,6 +356,7 @@ impl NotesApp {
             Intent::Mark(Mark::Underline) => Icon::Underline,
             Intent::Block(BlockKind::Heading(_)) => Icon::Heading,
             Intent::Block(BlockKind::Quote) => Icon::Quote,
+            Intent::Block(BlockKind::Code { .. }) => Icon::CodeBlock,
             Intent::Block(BlockKind::Ordered) => Icon::Ordered,
             Intent::Block(BlockKind::Bullet) => Icon::Bullet,
             Intent::Block(BlockKind::Task { .. }) => Icon::Task,
@@ -868,6 +869,14 @@ impl NotesApp {
                 "Quote",
                 "⇧⌘B",
                 Intent::Block(BlockKind::Quote),
+            ),
+            (
+                "format-code-block",
+                "Code Block",
+                "⌥⌘C",
+                Intent::Block(BlockKind::Code {
+                    language: String::new(),
+                }),
             ),
             (
                 "format-paragraph",

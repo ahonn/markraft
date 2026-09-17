@@ -72,6 +72,11 @@ pub enum BlockKind {
         checked: bool,
     },
     Quote,
+    /// One line of a code block. Adjacent lines with the same language form one
+    /// block; they hold plain text, without marks or input rules.
+    Code {
+        language: String,
+    },
     /// A horizontal rule. It never holds text: typing into one turns it back into a
     /// paragraph, so it stays an ordinary, empty line for selection and navigation.
     Divider,
@@ -165,17 +170,26 @@ impl Document {
                 BlockKind::Divider if !block.is_empty() => BlockKind::Paragraph,
                 kind => kind,
             };
+            let code = matches!(kind, BlockKind::Code { .. });
             let mut current = Block {
-                kind,
+                kind: kind.clone(),
                 spans: Vec::new(),
             };
             for span in block.spans {
+                let marks = if code { Marks::default() } else { span.marks };
                 for (index, part) in span.text.split('\n').enumerate() {
                     if index > 0 {
                         blocks.push(current);
-                        current = Block::default();
+                        current = Block {
+                            kind: if code {
+                                kind.clone()
+                            } else {
+                                BlockKind::Paragraph
+                            },
+                            spans: Vec::new(),
+                        };
                     }
-                    push_span(&mut current.spans, part, span.marks);
+                    push_span(&mut current.spans, part, marks);
                 }
             }
             blocks.push(current);
@@ -689,8 +703,25 @@ impl Editor {
         self.transaction_in_group(group, |editor| {
             let selection = editor.selection();
             if text == "\n" && selection.is_empty() {
-                let block = &mut editor.state.document.blocks[selection.head.block];
+                let index = selection.head.block;
+                let blocks = &mut editor.state.document.blocks;
+                if let Some(language) = fence_language(&blocks[index]) {
+                    editor.state.selection.anchor = Position {
+                        block: index,
+                        byte: 0,
+                    };
+                    editor.replace_selection("");
+                    editor.state.document.blocks[index].kind = BlockKind::Code { language };
+                    return;
+                }
+                // A blank line inside a code block stays code; only the last one leaves it.
+                let inside_code = matches!(blocks[index].kind, BlockKind::Code { .. })
+                    && blocks
+                        .get(index + 1)
+                        .is_some_and(|next| next.kind == blocks[index].kind);
+                let block = &mut blocks[index];
                 if block.is_empty()
+                    && !inside_code
                     && !matches!(block.kind, BlockKind::Paragraph | BlockKind::Divider)
                 {
                     block.kind = BlockKind::Paragraph;
@@ -731,6 +762,11 @@ impl Editor {
             });
         }
         let parts: Vec<&str> = normalized.split('\n').collect();
+        let marks = if matches!(first.kind, BlockKind::Code { .. }) {
+            Marks::default()
+        } else {
+            self.state.typing_marks
+        };
         let mut replacement = Vec::new();
         for (index, part) in parts.iter().enumerate() {
             let kind = if index == 0 {
@@ -741,6 +777,7 @@ impl Editor {
                     BlockKind::Ordered => BlockKind::Ordered,
                     BlockKind::Task { .. } => BlockKind::Task { checked: false },
                     BlockKind::Quote => BlockKind::Quote,
+                    BlockKind::Code { .. } => first.kind.clone(),
                     _ => BlockKind::Paragraph,
                 }
             };
@@ -749,10 +786,15 @@ impl Editor {
             } else {
                 Vec::new()
             };
-            push_span(&mut spans, part, self.state.typing_marks);
+            push_span(&mut spans, part, marks);
             if index == parts.len() - 1 {
                 for span in &suffix {
                     push_span(&mut spans, &span.text, span.marks);
+                }
+            }
+            if matches!(kind, BlockKind::Code { .. }) {
+                for span in &mut spans {
+                    span.marks = Marks::default();
                 }
             }
             let kind = if kind == BlockKind::Divider && !spans.is_empty() {
@@ -861,6 +903,8 @@ impl Editor {
                 block.spans = spans;
             }
             editor.state.typing_marks.set(mark, !all_enabled);
+            // Code lines drop the mark again.
+            editor.state.document.normalize();
         })
     }
 
@@ -1172,6 +1216,12 @@ impl Editor {
 
     fn input_rules(&mut self) {
         let position = self.selection().head;
+        if matches!(
+            self.document().blocks[position.block].kind,
+            BlockKind::Code { .. }
+        ) {
+            return;
+        }
         let text = self.document().blocks[position.block].text();
         let before = &text[..position.byte];
         let kind = match before {
@@ -1179,6 +1229,11 @@ impl Editor {
             "- [ ] " | "[ ] " | "- [] " | "[] " => Some(BlockKind::Task { checked: false }),
             "- [x] " | "- [X] " | "[x] " | "[X] " => Some(BlockKind::Task { checked: true }),
             "> " => Some(BlockKind::Quote),
+            _ if before.ends_with(' ') && fence_info(before.trim_end_matches(' ')).is_some() => {
+                fence_info(before.trim_end_matches(' ')).map(|language| BlockKind::Code {
+                    language: language.to_owned(),
+                })
+            }
             "---" | "___ " | "*** " => Some(BlockKind::Divider),
             _ if before.strip_suffix(". ").is_some_and(|digits| {
                 !digits.is_empty() && digits.bytes().all(|c| c.is_ascii_digit())
@@ -1279,6 +1334,23 @@ impl Editor {
             return;
         }
     }
+}
+
+/// The info string of an opening code fence such as "```rust".
+fn fence_info(line: &str) -> Option<&str> {
+    let info = line
+        .strip_prefix("```")
+        .or_else(|| line.strip_prefix("~~~"))?;
+    info.chars()
+        .all(|c| c.is_alphanumeric() || "+-_#.".contains(c))
+        .then_some(info)
+}
+
+fn fence_language(block: &Block) -> Option<String> {
+    if block.kind != BlockKind::Paragraph {
+        return None;
+    }
+    fence_info(&block.text()).map(str::to_owned)
 }
 
 fn push_span(spans: &mut Vec<Span>, text: &str, marks: Marks) {

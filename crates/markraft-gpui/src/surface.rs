@@ -18,6 +18,7 @@ pub(crate) struct LayoutBlock {
 }
 
 const NUMBER_GAP: Pixels = px(6.);
+const CODE_PADDING: Pixels = px(10.);
 
 #[derive(Clone, Copy)]
 enum Decoration {
@@ -26,6 +27,11 @@ enum Decoration {
         joined: bool,
     },
     Divider,
+    /// One line of a code block; the first and last lines carry its padding.
+    Code {
+        first: bool,
+        last: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -154,6 +160,15 @@ fn shape(
                         .is_some_and(|next| next.kind == BlockKind::Quote),
                 }),
                 BlockKind::Divider => Some(Decoration::Divider),
+                BlockKind::Code { .. } => {
+                    let same = |other: Option<&markraft_core::Block>| {
+                        other.is_some_and(|other| other.kind == block.kind)
+                    };
+                    Some(Decoration::Code {
+                        first: !same(index.checked_sub(1).and_then(|i| document.blocks.get(i))),
+                        last: !same(document.blocks.get(index + 1)),
+                    })
+                }
                 _ => None,
             };
             let shape_number = |ordinal: usize| {
@@ -190,6 +205,8 @@ fn shape(
                 style.list_indent
             } else if block.kind == BlockKind::Quote {
                 style.quote_indent
+            } else if matches!(block.kind, BlockKind::Code { .. }) {
+                CODE_PADDING
             } else {
                 px(0.)
             };
@@ -213,7 +230,8 @@ fn shape(
                         code_ranges.push(byte_offset..byte_offset + span.text.len());
                     }
                     byte_offset += span.text.len();
-                    let mut face = font(if span.marks.code {
+                    let code_block = matches!(block.kind, BlockKind::Code { .. });
+                    let mut face = font(if span.marks.code || code_block {
                         "Menlo"
                     } else {
                         ".SystemUIFont"
@@ -254,7 +272,12 @@ fn shape(
             } else {
                 text
             };
-            let wrap_width = (width - indent).max(px(40.));
+            let code = match decoration {
+                Some(Decoration::Code { first, last }) => Some((first, last)),
+                _ => None,
+            };
+            let wrap_width =
+                (width - indent - if code.is_some() { CODE_PADDING } else { px(0.) }).max(px(40.));
             let line = window
                 .text_system()
                 .shape_text(
@@ -291,6 +314,12 @@ fn shape(
             });
             let gap = if single_line {
                 px(0.)
+            } else if let Some((_, last)) = code {
+                if last {
+                    CODE_PADDING + style.paragraph_gap
+                } else {
+                    px(0.)
+                }
             } else if marker.is_some() {
                 style.list_gap
             } else if matches!(block.kind, BlockKind::Heading(_)) {
@@ -306,6 +335,8 @@ fn shape(
             };
             let top_gap = if index > 0 && matches!(block.kind, BlockKind::Heading(_)) {
                 style.heading_top_gap
+            } else if let Some((true, _)) = code {
+                CODE_PADDING
             } else {
                 px(0.)
             };
@@ -533,6 +564,29 @@ impl Element for EditorSurface {
                     ),
                     style.rule,
                 )),
+                Some(Decoration::Code { first, last }) => {
+                    let top = if first { CODE_PADDING } else { px(0.) };
+                    let bottom = if last { CODE_PADDING } else { px(0.) };
+                    let radius = |rounded: bool| if rounded { px(6.) } else { px(0.) };
+                    window.paint_quad(
+                        fill(
+                            Bounds::new(
+                                point(row.origin.x - CODE_PADDING, row.origin.y - top),
+                                size(
+                                    row.width + CODE_PADDING * 2.,
+                                    row.line.size(row.line_height).height + top + bottom,
+                                ),
+                            ),
+                            style.code_background,
+                        )
+                        .corner_radii(Corners {
+                            top_left: radius(first),
+                            top_right: radius(first),
+                            bottom_left: radius(last),
+                            bottom_right: radius(last),
+                        }),
+                    );
+                }
                 None => {}
             }
             if a != b && i >= a.block && i <= b.block {

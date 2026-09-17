@@ -289,11 +289,10 @@ fn document_versions_and_markdown_roundtrip() {
 
 #[test]
 fn unsupported_markdown_stays_literal_and_code_ticks_roundtrip() {
-    let document =
-        Document::from_markdown("```rust\n# literal\n**literal**\n```\n![alt](image.png)");
+    let document = Document::from_markdown("| a | b |\n[text](url)\n![alt](image.png)");
     assert_eq!(
         document.plain_text(),
-        "```rust\n# literal\n**literal**\n```\n![alt](image.png)"
+        "| a | b |\n[text](url)\n![alt](image.png)"
     );
     assert_eq!(Document::from_markdown(&document.to_markdown()), document);
     for text in ["`literal`", " a ", "  ", "one``two", "中文 😀"] {
@@ -778,4 +777,74 @@ fn ordered_lists_number_each_run_and_round_trip() {
     assert_eq!(literal.blocks[0].kind, BlockKind::Paragraph);
     assert_eq!(literal.plain_text(), "1. not a list");
     assert_eq!(literal.to_markdown(), "1\\. not a list");
+}
+
+#[test]
+fn fenced_code_imports_as_plain_lines_and_round_trips() {
+    let source = "```rust\n# not a heading\n\n**not bold**\n```\nafter\n````\n```\n````";
+    let document = Document::from_markdown(source);
+    let rust = BlockKind::Code {
+        language: "rust".into(),
+    };
+    assert_eq!(
+        document.plain_text(),
+        "# not a heading\n\n**not bold**\nafter\n```"
+    );
+    assert!(document.blocks[..3].iter().all(|block| block.kind == rust));
+    assert_eq!(document.blocks[2].spans[0].marks, Marks::default());
+    assert_eq!(document.to_markdown(), source);
+    assert_eq!(
+        Document::from_markdown("~~~\n~~~").to_markdown(),
+        "```\n\n```"
+    );
+}
+
+#[test]
+fn code_blocks_are_entered_by_fence_and_left_from_a_trailing_blank_line() {
+    let mut editor = editor("");
+    type_chars(&mut editor, "```js");
+    editor.insert_text("\n");
+    let js = BlockKind::Code {
+        language: "js".into(),
+    };
+    assert_eq!(editor.document().blocks.len(), 1);
+    assert_eq!(editor.document().blocks[0].kind, js);
+    editor.toggle_mark(Mark::Bold);
+    type_chars(&mut editor, "# **x** - ");
+    editor.insert_text("\n");
+    type_chars(&mut editor, "y");
+    // Blank lines above the last one are inside the block, so Enter keeps them.
+    editor.set_selection(Selection::caret(Position { block: 0, byte: 10 }));
+    editor.insert_text("\n");
+    editor.insert_text("\n");
+    assert!(
+        editor
+            .document()
+            .blocks
+            .iter()
+            .all(|block| block.kind == js)
+    );
+    assert_eq!(editor.document().plain_text(), "# **x** - \n\n\ny");
+    assert_eq!(editor.document().blocks[0].spans[0].marks, Marks::default());
+
+    editor.move_document_end(false);
+    editor.insert_text("\n");
+    editor.insert_text("\n");
+    assert_eq!(
+        editor.document().blocks.last().unwrap().kind,
+        BlockKind::Paragraph
+    );
+    assert_eq!(
+        editor.document().to_markdown(),
+        "```js\n# **x** - \n\n\ny\n```\n"
+    );
+
+    let mut editor = Editor::new(Document::default());
+    type_chars(&mut editor, "``` ");
+    assert_eq!(
+        editor.document().blocks[0].kind,
+        BlockKind::Code {
+            language: String::new()
+        }
+    );
 }

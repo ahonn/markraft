@@ -21,6 +21,7 @@ pub(super) enum Icon {
     Underline,
     Heading,
     Quote,
+    CodeBlock,
     Paragraph,
     Ordered,
     Bullet,
@@ -188,6 +189,11 @@ pub(super) fn icon(kind: Icon, color: Hsla) -> impl IntoElement {
                     line(&mut path, &[(2., 10.), (4.5, 10.), (2., 13.5), (4.5, 13.5)]);
                     line(&mut path, &[(7.5, 4.5), (14., 4.5)]);
                     line(&mut path, &[(7.5, 11.5), (14., 11.5)]);
+                }
+                Icon::CodeBlock => {
+                    rounded_rect(&mut path, 1.5, 2.5, 13., 11., 2.);
+                    line(&mut path, &[(6., 5.5), (3.8, 8.), (6., 10.5)]);
+                    line(&mut path, &[(10., 5.5), (12.2, 8.), (10., 10.5)]);
                 }
                 Icon::Paragraph => {
                     path.move_to(point(px(9.), px(8.5)));

@@ -2,41 +2,40 @@ use crate::{Block, BlockKind, Document, Mark, Marks, Span, push_span};
 
 impl Document {
     /// Import the supported Markdown subset. Each physical line is one block and blank
-    /// lines are retained as empty paragraphs. Unsupported block syntax stays literal;
-    /// fenced blocks are retained verbatim, including their opening/closing fences.
+    /// lines are retained as empty paragraphs. Unsupported block syntax stays literal.
     pub fn from_markdown(source: &str) -> Self {
         let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
-        let mut fence: Option<char> = None;
+        // The open fence's marker and the index of the first block it produced.
+        let mut fence: Option<(String, BlockKind, usize)> = None;
         let mut blocks = Vec::new();
         for line in normalized.split('\n') {
-            let trimmed = line.trim_start();
-            let fence_char = if trimmed.starts_with("```")
-                && find_code_close(trimmed, trimmed.bytes().take_while(|b| *b == b'`').count())
-                    .is_none()
-            {
-                Some('`')
-            } else if trimmed.starts_with("~~~") {
-                Some('~')
-            } else {
-                None
-            };
-            if fence.is_some() || fence_char.is_some() {
-                blocks.push(Block {
-                    kind: BlockKind::Paragraph,
-                    spans: if line.is_empty() {
-                        vec![]
-                    } else {
-                        vec![Span {
-                            text: line.to_owned(),
-                            marks: Marks::default(),
-                        }]
-                    },
-                });
-                if fence.is_none() {
-                    fence = fence_char;
-                } else if fence == fence_char {
+            if let Some((marker, kind, first)) = &fence {
+                let trimmed = line.trim();
+                if trimmed.starts_with(marker.as_str())
+                    && trimmed.trim_start_matches(&marker[..1]).is_empty()
+                {
+                    if blocks.len() == *first {
+                        blocks.push(Block {
+                            kind: kind.clone(),
+                            spans: vec![],
+                        });
+                    }
                     fence = None;
+                    continue;
                 }
+                let mut spans = vec![];
+                push_span(&mut spans, line, Marks::default());
+                blocks.push(Block {
+                    kind: kind.clone(),
+                    spans,
+                });
+                continue;
+            }
+            if let Some((marker, language)) = parse_fence(line) {
+                let kind = BlockKind::Code {
+                    language: language.to_owned(),
+                };
+                fence = Some((marker.to_owned(), kind, blocks.len()));
                 continue;
             }
             let (kind, text) = parse_block(line);
@@ -45,54 +44,112 @@ impl Document {
                 spans: parse_inline(text, Marks::default()),
             });
         }
+        if let Some((_, kind, first)) = fence
+            && blocks.len() == first
+        {
+            blocks.push(Block {
+                kind,
+                spans: vec![],
+            });
+        }
         let mut document = Self { blocks };
         document.normalize();
         document
     }
 
     pub fn to_markdown(&self) -> String {
-        self.blocks
-            .iter()
-            .enumerate()
-            .map(|(index, block)| {
-                let prefix = match block.kind {
-                    BlockKind::Paragraph => String::new(),
-                    BlockKind::Heading(level) => {
-                        format!("{} ", "#".repeat(usize::from(level.clamp(1, 6))))
-                    }
-                    BlockKind::Bullet => "- ".to_owned(),
-                    BlockKind::Ordered => format!("{}. ", self.ordinal(index).unwrap_or(1)),
-                    BlockKind::Task { checked: false } => "- [ ] ".to_owned(),
-                    BlockKind::Task { checked: true } => "- [x] ".to_owned(),
-                    BlockKind::Quote => "> ".to_owned(),
-                    BlockKind::Divider => return "---".to_owned(),
-                };
-                let mut line = prefix;
-                for span in &block.spans {
-                    let mut text = if span.marks.code {
-                        code_text(&span.text)
-                    } else {
-                        escape(&span.text)
-                    };
-                    if span.marks.italic {
-                        text = format!("*{text}*");
-                    }
-                    if span.marks.bold {
-                        text = format!("**{text}**");
-                    }
-                    if span.marks.strikethrough {
-                        text = format!("~~{text}~~");
-                    }
-                    if span.marks.underline {
-                        text = format!("<u>{text}</u>");
-                    }
-                    line.push_str(&text);
+        let mut lines = Vec::new();
+        for (index, block) in self.blocks.iter().enumerate() {
+            if let BlockKind::Code { language } = &block.kind {
+                let continues = |other: Option<&Block>| other.is_some_and(|b| b.kind == block.kind);
+                let run_start = self.blocks[..=index]
+                    .iter()
+                    .rposition(|b| b.kind != block.kind)
+                    .map_or(0, |i| i + 1);
+                let run_len = self.blocks[run_start..]
+                    .iter()
+                    .take_while(|b| b.kind == block.kind)
+                    .count();
+                // The fence outgrows any backtick run that starts a line of the block.
+                let fence = "`".repeat(
+                    self.blocks[run_start..run_start + run_len]
+                        .iter()
+                        .map(|b| {
+                            b.text()
+                                .trim_start()
+                                .bytes()
+                                .take_while(|c| *c == b'`')
+                                .count()
+                                + 1
+                        })
+                        .max()
+                        .unwrap_or(0)
+                        .max(3),
+                );
+                if !continues(index.checked_sub(1).and_then(|i| self.blocks.get(i))) {
+                    lines.push(format!("{fence}{language}"));
                 }
-                line
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+                lines.push(block.text());
+                if !continues(self.blocks.get(index + 1)) {
+                    lines.push(fence);
+                }
+                continue;
+            }
+            let prefix = match block.kind {
+                BlockKind::Paragraph | BlockKind::Code { .. } => String::new(),
+                BlockKind::Heading(level) => {
+                    format!("{} ", "#".repeat(usize::from(level.clamp(1, 6))))
+                }
+                BlockKind::Bullet => "- ".to_owned(),
+                BlockKind::Ordered => format!("{}. ", self.ordinal(index).unwrap_or(1)),
+                BlockKind::Task { checked: false } => "- [ ] ".to_owned(),
+                BlockKind::Task { checked: true } => "- [x] ".to_owned(),
+                BlockKind::Quote => "> ".to_owned(),
+                BlockKind::Divider => {
+                    lines.push("---".to_owned());
+                    continue;
+                }
+            };
+            let mut line = prefix;
+            for span in &block.spans {
+                let mut text = if span.marks.code {
+                    code_text(&span.text)
+                } else {
+                    escape(&span.text)
+                };
+                if span.marks.italic {
+                    text = format!("*{text}*");
+                }
+                if span.marks.bold {
+                    text = format!("**{text}**");
+                }
+                if span.marks.strikethrough {
+                    text = format!("~~{text}~~");
+                }
+                if span.marks.underline {
+                    text = format!("<u>{text}</u>");
+                }
+                line.push_str(&text);
+            }
+            lines.push(line);
+        }
+        lines.join("\n")
     }
+}
+
+/// An opening fence: its marker and info string. Inline code written as
+/// "```text```" on one line is not a fence.
+fn parse_fence(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim();
+    let character = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let length = trimmed.chars().take_while(|c| *c == character).count();
+    let info = trimmed[length..].trim();
+    (length >= 3 && !(character == '`' && info.contains('`'))).then(|| {
+        (
+            &trimmed[..length],
+            info.split_whitespace().next().unwrap_or(""),
+        )
+    })
 }
 
 fn parse_block(line: &str) -> (BlockKind, &str) {
