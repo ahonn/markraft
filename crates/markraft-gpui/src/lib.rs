@@ -72,6 +72,35 @@ actions!(
     ]
 );
 
+/// Links come from imported Markdown too, so only web and mail URLs are opened.
+/// A bare host such as "example.com" is treated as HTTPS.
+fn openable_url(url: &str) -> Option<String> {
+    let scheme = url
+        .split_once(':')
+        .map(|(scheme, _)| scheme.to_ascii_lowercase());
+    match scheme.as_deref() {
+        Some("http" | "https" | "mailto") => Some(url.to_owned()),
+        Some(scheme)
+            if scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)) =>
+        {
+            // "host:port/path" has digits after the colon; anything else is a foreign scheme.
+            let rest = &url[scheme.len() + 1..];
+            rest.starts_with(|c: char| c.is_ascii_digit())
+                .then(|| format!("https://{url}"))
+        }
+        _ => Some(format!("https://{url}")),
+    }
+}
+
+fn is_web_url(text: &str) -> bool {
+    ["http://", "https://"]
+        .iter()
+        .any(|scheme| text.len() > scheme.len() && text.starts_with(scheme))
+        && !text.contains(char::is_whitespace)
+}
+
 pub fn bind_keys(cx: &mut App) {
     macro_rules! bind { ($($key:literal => $action:ident),* $(,)?) => {
         cx.bind_keys([$(KeyBinding::new($key, $action, Some("Markraft"))),*]);
@@ -103,7 +132,11 @@ pub fn bind_keys(cx: &mut App) {
 
 #[derive(Clone, Debug)]
 pub enum EditorEvent {
-    Changed { revision: u64 },
+    Changed {
+        revision: u64,
+    },
+    /// A link was clicked without ⌘; the caret is now inside it.
+    LinkClicked,
 }
 
 pub struct EditorView {
@@ -249,6 +282,67 @@ impl EditorView {
         self.edit(cx, |core| {
             core.toggle_mark(mark);
         });
+    }
+    /// The link containing the caret, or the one shared by the whole selection.
+    pub fn active_link(&self) -> Option<&str> {
+        self.core.active_link()
+    }
+    /// Link the selection to `url`, or unlink it with `None`. A caret edits the link
+    /// it touches; elsewhere it inserts the URL itself as linked text.
+    pub fn set_link(&mut self, url: Option<&str>, cx: &mut Context<Self>) {
+        if self.single_line {
+            return;
+        }
+        self.edit(cx, |core| {
+            core.set_link(url);
+        });
+    }
+    /// Window bounds of the first line of the selection, or of the link touching the
+    /// caret, for anchoring host popovers. Valid after the editor has painted.
+    pub fn anchor_bounds(&self) -> Option<Bounds<Pixels>> {
+        let (start, end) = self.core.selection().ordered();
+        let row = self.layout.get(start.block)?;
+        let range = if start != end {
+            start.byte..if end.block == start.block {
+                end.byte
+            } else {
+                row.text_len
+            }
+        } else if let Some((range, _)) = self.core.link_at(start) {
+            range
+        } else {
+            start.byte..start.byte
+        };
+        if range.is_empty() {
+            let caret = row.caret(range.start, self.upstream);
+            return Some(Bounds::new(caret, size(px(0.), row.line_height)));
+        }
+        let rectangles = row.rectangles(range, false);
+        let first = *rectangles.first()?;
+        // Only the first visual row: a popover belongs above where the text begins.
+        Some(
+            rectangles
+                .iter()
+                .filter(|rect| rect.origin.y == first.origin.y)
+                .fold(first, |all, rect| all.union(rect)),
+        )
+    }
+    /// Open `url` in the browser if it is a web or mail address.
+    pub fn open_link(url: &str, cx: &mut App) {
+        if let Some(url) = openable_url(url) {
+            cx.open_url(&url);
+        }
+    }
+    /// The URL of the link drawn under `point`.
+    fn link_under(&self, point: Point<Pixels>) -> Option<String> {
+        let position = self.hit(point);
+        let (range, url) = self.core.link_at(position)?;
+        self.layout
+            .get(position.block)?
+            .rectangles(range, false)
+            .iter()
+            .any(|bounds| bounds.contains(&point))
+            .then(|| url.to_owned())
     }
     pub fn set_block_kind(&mut self, kind: BlockKind, cx: &mut Context<Self>) {
         if self.single_line {
@@ -457,6 +551,13 @@ impl EditorView {
         window.focus(&self.focus, cx);
         self.selecting = true;
         self.preferred_x = None;
+        if event.modifiers.platform
+            && let Some(url) = self.link_under(event.position)
+        {
+            self.selecting = false;
+            Self::open_link(&url, cx);
+            return;
+        }
         let position = self.hit(event.position);
         // Task markers are presentation outside the text coordinate space.
         if let Some(row) = self.layout.get(position.block)
@@ -471,6 +572,13 @@ impl EditorView {
             return;
         }
         self.select_point(event.position, event.modifiers.shift, cx);
+        if event.click_count == 1
+            && !event.modifiers.shift
+            && !self.single_line
+            && self.link_under(event.position).is_some()
+        {
+            cx.emit(EditorEvent::LinkClicked);
+        }
         if event.click_count >= 3 {
             let end = Position {
                 block: position.block,
@@ -912,7 +1020,12 @@ impl Render for EditorView {
                     let single_line = this.single_line;
                     let text = single_line::text(&text, single_line);
                     this.edit(cx, |c| {
-                        if single_line {
+                        // A pasted web address links the selection, or itself.
+                        // Inside an existing link it is ordinary text.
+                        let linkable = !c.selection().is_empty() || c.active_link().is_none();
+                        if !single_line && linkable && is_web_url(text.trim()) {
+                            c.set_link(Some(text.trim()));
+                        } else if single_line {
                             c.insert_text_plain(&text);
                         } else {
                             c.insert_text(&text.replace("\r\n", "\n").replace('\r', "\n"));
@@ -967,5 +1080,32 @@ impl Render for EditorView {
                 )
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::openable_url;
+
+    #[test]
+    fn only_web_and_mail_links_open() {
+        assert_eq!(
+            openable_url("https://a.example/x").as_deref(),
+            Some("https://a.example/x")
+        );
+        assert_eq!(
+            openable_url("mailto:a@b.example").as_deref(),
+            Some("mailto:a@b.example")
+        );
+        assert_eq!(
+            openable_url("a.example/x").as_deref(),
+            Some("https://a.example/x")
+        );
+        assert_eq!(
+            openable_url("localhost:8080/x").as_deref(),
+            Some("https://localhost:8080/x")
+        );
+        assert_eq!(openable_url("file:///etc/passwd"), None);
+        assert_eq!(openable_url("javascript:alert(1)"), None);
     }
 }

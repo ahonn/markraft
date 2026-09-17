@@ -108,6 +108,7 @@ impl NotesApp {
                     marks.underline,
                 ),
                 ("Inline Code", "⌘E", Intent::Mark(Mark::Code), marks.code),
+                ("Link", "⌘L", Intent::Link, editor.active_link().is_some()),
             ],
             Some(FormatMenu::List) => vec![
                 (
@@ -163,7 +164,7 @@ impl NotesApp {
         true
     }
 
-    fn format_button(
+    pub(super) fn format_button(
         &self,
         id: &'static str,
         label: &'static str,

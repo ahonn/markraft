@@ -1,5 +1,6 @@
 mod formatting;
 mod icons;
+mod link;
 
 use super::*;
 use icons::{Icon, icon};
@@ -14,6 +15,12 @@ enum Intent {
     ToggleFormatToolbar,
     FormatMenu(FormatMenu),
     Settings,
+    Link,
+    EditLink,
+    ApplyLink,
+    Unlink,
+    CopyLink,
+    OpenLink,
     Back,
     Delete,
     Pin,
@@ -52,6 +59,26 @@ impl NotesApp {
             }
             Intent::FormatMenu(menu) => self.open_format_menu(menu, window, cx),
             Intent::Settings => self.open_panel(Panel::Settings, window, cx),
+            Intent::Link => {
+                self.panel = Panel::Editor;
+                self.open_link_popover(window, cx);
+            }
+            Intent::EditLink => self.edit_link(window, cx),
+            Intent::ApplyLink => self.apply_link(window, cx),
+            Intent::Unlink => self.unlink(window, cx),
+            Intent::CopyLink | Intent::OpenLink => {
+                if let Some(url) = self.editor().read(cx).active_link().map(str::to_owned) {
+                    if matches!(intent, Intent::CopyLink) {
+                        cx.write_to_clipboard(ClipboardItem::new_string(url));
+                        self.inform("Link copied", cx);
+                    } else {
+                        EditorView::open_link(&url, cx);
+                    }
+                }
+                self.link_popover = None;
+                self.focus_editor(window, cx);
+                cx.notify();
+            }
             Intent::Back => {
                 self.query.update(cx, |e, cx| e.cancel_composition(cx));
                 self.panel = Panel::Editor;
@@ -354,6 +381,7 @@ impl NotesApp {
             Intent::Mark(Mark::Code) => Icon::Code,
             Intent::Mark(Mark::Strikethrough) => Icon::Strikethrough,
             Intent::Mark(Mark::Underline) => Icon::Underline,
+            Intent::Link => Icon::Link,
             Intent::Block(BlockKind::Heading(_)) => Icon::Heading,
             Intent::Block(BlockKind::Quote) => Icon::Quote,
             Intent::Block(BlockKind::Code { .. }) => Icon::CodeBlock,
@@ -781,7 +809,17 @@ impl NotesApp {
         if self.format_menu.is_some() {
             return self.format_key(key, window, cx);
         }
-        if self.panel == Panel::Editor || self.query.read(cx).is_composing() {
+        if self.query.read(cx).is_composing() {
+            return false;
+        }
+        if self.link_popover == Some(LinkPopover::Edit) {
+            if key == "enter" {
+                self.apply_link(window, cx);
+            }
+            // Up and down have nowhere to go in a one-line field.
+            return true;
+        }
+        if self.panel == Panel::Editor {
             return false;
         }
         if self.panel == Panel::Settings {
@@ -858,6 +896,7 @@ impl NotesApp {
                 Intent::Mark(Mark::Underline),
             ),
             ("format-code", "Inline Code", "⌘E", Intent::Mark(Mark::Code)),
+            ("format-link", "Link", "⌘L", Intent::Link),
             (
                 "format-heading",
                 "Heading",
@@ -1133,6 +1172,7 @@ impl Render for NotesApp {
             .on_action(
                 cx.listener(|this, _: &Settings, w, cx| this.open_panel(Panel::Settings, w, cx)),
             )
+            .on_action(cx.listener(|this, _: &Link, w, cx| this.open_link_popover(w, cx)))
             .on_action(cx.listener(|this, _: &Export, _, cx| this.export(cx)))
             .on_action(cx.listener(|this, _: &Import, w, cx| this.import(w, cx)));
         let actions = self
@@ -1348,6 +1388,9 @@ impl Render for NotesApp {
                     ))
                 },
             )
+            .when_some(self.link_pill(window, cx), |s, pill| {
+                s.child(popover_enter("link-enter", pill, true))
+            })
             .when(self.panel != Panel::Editor, |s| {
                 s.child(popover_enter(
                     "overlay-enter",

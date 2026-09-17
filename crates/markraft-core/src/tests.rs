@@ -237,10 +237,12 @@ fn normalization_preserves_text_and_merges_runs() {
                 Span {
                     text: "a".into(),
                     marks: Marks::default(),
+                    link: None,
                 },
                 Span {
                     text: "b\nc".into(),
                     marks: Marks::default(),
+                    link: None,
                 },
             ],
         }],
@@ -289,10 +291,10 @@ fn document_versions_and_markdown_roundtrip() {
 
 #[test]
 fn unsupported_markdown_stays_literal_and_code_ticks_roundtrip() {
-    let document = Document::from_markdown("| a | b |\n[text](url)\n![alt](image.png)");
+    let document = Document::from_markdown("| a | b |\n[text] (url)\n![alt](image.png)");
     assert_eq!(
         document.plain_text(),
-        "| a | b |\n[text](url)\n![alt](image.png)"
+        "| a | b |\n[text] (url)\n![alt](image.png)"
     );
     assert_eq!(Document::from_markdown(&document.to_markdown()), document);
     for text in ["`literal`", " a ", "  ", "one``two", "中文 😀"] {
@@ -307,6 +309,7 @@ fn unsupported_markdown_stays_literal_and_code_ticks_roundtrip() {
                         italic: true,
                         ..Marks::default()
                     },
+                    link: None,
                 }],
             }],
         };
@@ -568,6 +571,7 @@ fn code_only_delimiters_and_adjacent_marks_roundtrip() {
                         code: true,
                         ..Marks::default()
                     },
+                    link: None,
                 }],
             }],
         };
@@ -594,10 +598,12 @@ fn code_only_delimiters_and_adjacent_marks_roundtrip() {
                         Span {
                             text: "left".into(),
                             marks: marks(a),
+                            link: None,
                         },
                         Span {
                             text: "right".into(),
                             marks: marks(b),
+                            link: None,
                         },
                     ],
                 }],
@@ -631,10 +637,12 @@ fn all_adjacent_mark_combinations_roundtrip() {
                         Span {
                             text: "left".into(),
                             marks: marks(left),
+                            link: None,
                         },
                         Span {
                             text: "right".into(),
                             marks: marks(right),
+                            link: None,
                         },
                     ],
                 }],
@@ -847,4 +855,92 @@ fn code_blocks_are_entered_by_fence_and_left_from_a_trailing_blank_line() {
             language: String::new()
         }
     );
+}
+
+#[test]
+fn links_round_trip_and_stay_whole_while_editing() {
+    let source = "see [the **docs**](https://example.com/a_(b)) and [x](<a b>)";
+    let document = Document::from_markdown(source);
+    assert_eq!(document.plain_text(), "see the docs and x");
+    let spans = &document.blocks[0].spans;
+    assert_eq!(spans[1].link.as_deref(), Some("https://example.com/a_(b)"));
+    assert!(spans[2].marks.bold && spans[2].link == spans[1].link);
+    assert_eq!(spans[4].link.as_deref(), Some("a b"));
+    assert_eq!(document.to_markdown(), source);
+    assert_eq!(
+        Document::from_json(&document.to_json().unwrap()).unwrap(),
+        document
+    );
+
+    let mut editor = Editor::new(document);
+    // Inside the link the text joins it; at its end it does not.
+    editor.set_selection(Selection::caret(Position { block: 0, byte: 6 }));
+    editor.insert_text("!");
+    editor.set_selection(Selection::caret(Position { block: 0, byte: 13 }));
+    assert_eq!(editor.active_link(), Some("https://example.com/a_(b)"));
+    editor.insert_text("?");
+    assert_eq!(
+        editor.document().to_markdown(),
+        "see [th\\!e **docs**](https://example.com/a_(b))**?** and [x](<a b>)"
+    );
+
+    // A caret edits or removes the whole link it touches.
+    editor.set_selection(Selection::caret(Position { block: 0, byte: 5 }));
+    editor.set_link(Some("https://new.example"));
+    assert!(
+        editor
+            .document()
+            .to_markdown()
+            .starts_with("see [th\\!e **docs**](https://new.example)")
+    );
+    editor.set_link(None);
+    assert!(
+        editor
+            .document()
+            .to_markdown()
+            .starts_with("see th\\!e **docs?** and")
+    );
+    assert_eq!(editor.active_link(), None);
+    editor.undo();
+    assert_eq!(editor.active_link(), Some("https://new.example"));
+}
+
+#[test]
+fn links_are_created_from_a_selection_a_caret_or_typed_markdown() {
+    let mut editor = editor("read this");
+    editor.set_selection(Selection {
+        anchor: Position { block: 0, byte: 5 },
+        head: Position { block: 0, byte: 9 },
+    });
+    editor.set_link(Some("https://a.example"));
+    assert_eq!(
+        editor.document().to_markdown(),
+        "read [this](https://a.example)"
+    );
+    assert_eq!(editor.active_link(), Some("https://a.example"));
+
+    let mut editor = Editor::new(Document::default());
+    editor.set_link(Some("https://b.example"));
+    assert_eq!(
+        editor.document().to_markdown(),
+        "[https://b\\.example](https://b.example)"
+    );
+
+    let mut editor = Editor::new(Document::default());
+    type_chars(&mut editor, "go [here](https://c.example)");
+    assert_eq!(editor.document().plain_text(), "go here");
+    assert_eq!(editor.selection().head, Position { block: 0, byte: 7 });
+    assert_eq!(
+        editor.document().to_markdown(),
+        "go [here](https://c.example)"
+    );
+    editor.undo();
+    assert_eq!(
+        editor.document().plain_text(),
+        "go [here](https://c.example"
+    );
+
+    let mut editor = Editor::new(Document::default());
+    type_chars(&mut editor, "![alt](image.png)");
+    assert_eq!(editor.document().plain_text(), "![alt](image.png)");
 }

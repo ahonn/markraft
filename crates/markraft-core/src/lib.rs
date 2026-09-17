@@ -86,6 +86,9 @@ pub enum BlockKind {
 pub struct Span {
     pub text: String,
     pub marks: Marks,
+    /// The URL this text links to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +180,7 @@ impl Document {
             };
             for span in block.spans {
                 let marks = if code { Marks::default() } else { span.marks };
+                let link = span.link.as_deref().filter(|_| !code);
                 for (index, part) in span.text.split('\n').enumerate() {
                     if index > 0 {
                         blocks.push(current);
@@ -189,7 +193,7 @@ impl Document {
                             spans: Vec::new(),
                         };
                     }
-                    push_span(&mut current.spans, part, marks);
+                    push_linked_span(&mut current.spans, part, marks, link);
                 }
             }
             blocks.push(current);
@@ -767,6 +771,12 @@ impl Editor {
         } else {
             self.state.typing_marks
         };
+        // Text typed strictly inside a link stays part of it; at either edge it does not.
+        let link = prefix
+            .last()
+            .and_then(|span| span.link.clone())
+            .filter(|link| suffix.first().and_then(|span| span.link.as_ref()) == Some(link))
+            .filter(|_| parts.len() == 1);
         let mut replacement = Vec::new();
         for (index, part) in parts.iter().enumerate() {
             let kind = if index == 0 {
@@ -786,15 +796,16 @@ impl Editor {
             } else {
                 Vec::new()
             };
-            push_span(&mut spans, part, marks);
+            push_linked_span(&mut spans, part, marks, link.as_deref());
             if index == parts.len() - 1 {
                 for span in &suffix {
-                    push_span(&mut spans, &span.text, span.marks);
+                    push_like(&mut spans, &span.text, span);
                 }
             }
             if matches!(kind, BlockKind::Code { .. }) {
                 for span in &mut spans {
                     span.marks = Marks::default();
+                    span.link = None;
                 }
             }
             let kind = if kind == BlockKind::Divider && !spans.is_empty() {
@@ -895,10 +906,10 @@ impl Editor {
                 let mut spans = slice_spans(&block.spans, 0..start_byte);
                 for mut span in slice_spans(&block.spans, start_byte..end_byte) {
                     span.marks.set(mark, !all_enabled);
-                    push_span(&mut spans, &span.text, span.marks);
+                    push_like(&mut spans, &span.text, &span);
                 }
                 for span in slice_spans(&block.spans, end_byte..block.len()) {
-                    push_span(&mut spans, &span.text, span.marks);
+                    push_like(&mut spans, &span.text, &span);
                 }
                 block.spans = spans;
             }
@@ -1302,37 +1313,149 @@ impl Editor {
             {
                 continue;
             }
-            let block_start = self.document().global_byte(Position {
-                block: position.block,
-                byte: 0,
-            });
-            // Apply the trailing delimiter removal before the leading removal so
-            // both offsets refer to the original block's bytes.
-            self.pending_steps.push(Replacement {
-                range: block_start + content_end..block_start + position.byte,
-                inserted_len: 0,
-            });
-            self.pending_steps.push(Replacement {
-                range: block_start + open..block_start + content_start,
-                inserted_len: 0,
-            });
-            let block = &mut self.state.document.blocks[position.block];
-            let mut spans = slice_spans(&block.spans, 0..open);
-            for mut span in slice_spans(&block.spans, content_start..content_end) {
-                span.marks.set(mark, true);
-                push_span(&mut spans, &span.text, span.marks);
-            }
-            for span in slice_spans(&block.spans, position.byte..block.len()) {
-                push_span(&mut spans, &span.text, span.marks);
-            }
-            block.spans = spans;
-            self.state.selection = Selection::caret(Position {
-                block: position.block,
-                byte: open + content_end - content_start,
-            });
+            self.unwrap_delimited(
+                position.block,
+                open..content_start,
+                content_end..position.byte,
+                |span| span.marks.set(mark, true),
+            );
             self.state.typing_marks.set(mark, false);
             return;
         }
+        // [text](url)
+        if let Some(inner) = before.strip_suffix(')')
+            && let Some(middle) = inner.rfind("](")
+            && let Some(open) = before[..middle].rfind('[')
+            && open + 1 < middle
+            && !before[..open].ends_with(['!', '\\'])
+        {
+            let url = before[middle + 2..inner.len()].to_owned();
+            if !url.is_empty() && !url.contains(char::is_whitespace) {
+                self.unwrap_delimited(
+                    position.block,
+                    open..open + 1,
+                    middle..position.byte,
+                    |span| span.link = Some(url.clone()),
+                );
+            }
+        }
+    }
+
+    /// Remove the `open` and `close` byte ranges of a block, format the text between
+    /// them, and leave the caret after it.
+    fn unwrap_delimited(
+        &mut self,
+        block: usize,
+        open: Range<usize>,
+        close: Range<usize>,
+        apply: impl Fn(&mut Span),
+    ) {
+        let block_start = self.document().global_byte(Position { block, byte: 0 });
+        // Apply the trailing removal before the leading removal so both offsets
+        // refer to the original block's bytes.
+        for range in [&close, &open] {
+            self.pending_steps.push(Replacement {
+                range: block_start + range.start..block_start + range.end,
+                inserted_len: 0,
+            });
+        }
+        let target = &mut self.state.document.blocks[block];
+        let mut spans = slice_spans(&target.spans, 0..open.start);
+        for mut span in slice_spans(&target.spans, open.end..close.start) {
+            apply(&mut span);
+            push_like(&mut spans, &span.text, &span);
+        }
+        for span in slice_spans(&target.spans, close.end..target.len()) {
+            push_like(&mut spans, &span.text, &span);
+        }
+        target.spans = spans;
+        self.state.selection = Selection::caret(Position {
+            block,
+            byte: open.start + close.start - open.end,
+        });
+    }
+
+    /// The link containing the caret, or the one shared by the whole selection.
+    pub fn active_link(&self) -> Option<&str> {
+        let (start, end) = self.selection().ordered();
+        if start == end {
+            return self.link_at(start).map(|(_, link)| link);
+        }
+        let mut links = (start.block..=end.block).flat_map(|index| {
+            let block = &self.document().blocks[index];
+            let from = if index == start.block { start.byte } else { 0 };
+            let to = if index == end.block {
+                end.byte
+            } else {
+                block.len()
+            };
+            let mut offset = 0;
+            block.spans.iter().filter_map(move |span| {
+                let range = offset..offset + span.text.len();
+                offset = range.end;
+                (range.start.max(from) < range.end.min(to)).then_some(span.link.as_deref())
+            })
+        });
+        let first = links.next()??;
+        links.all(|link| link == Some(first)).then_some(first)
+    }
+
+    /// The byte range within its block of the link touching `position`.
+    pub fn link_at(&self, position: Position) -> Option<(Range<usize>, &str)> {
+        let touches =
+            |range: &Range<usize>| range.start <= position.byte && position.byte <= range.end;
+        let mut offset = 0;
+        let mut extent: Option<(Range<usize>, &str)> = None;
+        for span in &self.document().blocks[position.block].spans {
+            let range = offset..offset + span.text.len();
+            offset = range.end;
+            extent = match (extent.take(), span.link.as_deref()) {
+                (Some((current, link)), Some(next)) if link == next => {
+                    Some((current.start..range.end, link))
+                }
+                (Some((current, link)), _) if touches(&current) => return Some((current, link)),
+                (_, link) => link.map(|link| (range, link)),
+            };
+        }
+        extent.filter(|(range, _)| touches(range))
+    }
+
+    /// Link the selection to `url`, or unlink it with `None`. A caret edits the link
+    /// it touches; elsewhere it inserts the URL itself as linked text.
+    pub fn set_link(&mut self, url: Option<&str>) -> Option<Change> {
+        self.transaction(|editor| {
+            let selection = editor.selection();
+            let (mut start, mut end) = selection.ordered();
+            if start == end {
+                if let Some((range, _)) = editor.link_at(start) {
+                    start.byte = range.start;
+                    end.byte = range.end;
+                } else if let Some(url) = url {
+                    editor.replace_selection(url);
+                    end = editor.selection().head;
+                }
+            }
+            for index in start.block..=end.block {
+                let block = &mut editor.state.document.blocks[index];
+                let from = if index == start.block { start.byte } else { 0 };
+                let to = if index == end.block {
+                    end.byte
+                } else {
+                    block.len()
+                };
+                let mut spans = slice_spans(&block.spans, 0..from);
+                for mut span in slice_spans(&block.spans, from..to) {
+                    span.link = url.map(str::to_owned);
+                    push_like(&mut spans, &span.text, &span);
+                }
+                for span in slice_spans(&block.spans, to..block.len()) {
+                    push_like(&mut spans, &span.text, &span);
+                }
+                block.spans = spans;
+            }
+            // Code lines drop the link again.
+            editor.state.document.normalize();
+        })
     }
 }
 
@@ -1354,19 +1477,30 @@ fn fence_language(block: &Block) -> Option<String> {
 }
 
 fn push_span(spans: &mut Vec<Span>, text: &str, marks: Marks) {
+    push_linked_span(spans, text, marks, None);
+}
+
+fn push_linked_span(spans: &mut Vec<Span>, text: &str, marks: Marks, link: Option<&str>) {
     if text.is_empty() {
         return;
     }
     if let Some(last) = spans.last_mut()
         && last.marks == marks
+        && last.link.as_deref() == link
     {
         last.text.push_str(text);
     } else {
         spans.push(Span {
             text: text.to_owned(),
             marks,
+            link: link.map(str::to_owned),
         });
     }
+}
+
+/// Append a copy of `span`'s formatting over `text`.
+fn push_like(spans: &mut Vec<Span>, text: &str, span: &Span) {
+    push_linked_span(spans, text, span.marks, span.link.as_deref());
 }
 
 fn slice_spans(spans: &[Span], range: Range<usize>) -> Vec<Span> {
@@ -1376,7 +1510,7 @@ fn slice_spans(spans: &[Span], range: Range<usize>) -> Vec<Span> {
         let start = range.start.saturating_sub(offset).min(span.text.len());
         let end = range.end.saturating_sub(offset).min(span.text.len());
         if start < end {
-            push_span(&mut result, &span.text[start..end], span.marks);
+            push_like(&mut result, &span.text[start..end], span);
         }
         offset += span.text.len();
     }

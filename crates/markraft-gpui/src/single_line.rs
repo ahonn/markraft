@@ -15,6 +15,7 @@ pub(crate) fn document(document: Document) -> Document {
     result.blocks[0].spans.push(Span {
         text: text(&document.plain_text(), true).into_owned(),
         marks: Default::default(),
+        link: None,
     });
     result.normalize();
     result

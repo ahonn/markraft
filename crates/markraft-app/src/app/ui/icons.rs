@@ -19,6 +19,9 @@ pub(super) enum Icon {
     Code,
     Strikethrough,
     Underline,
+    Link,
+    Edit,
+    Open,
     Heading,
     Quote,
     CodeBlock,
@@ -167,6 +170,37 @@ pub(super) fn icon(kind: Icon, color: Hsla) -> impl IntoElement {
                     );
                     line(&mut path, &[(11.5, 8.), (11.5, 2.5)]);
                     line(&mut path, &[(3.5, 13.5), (12.5, 13.5)]);
+                }
+                Icon::Edit => {
+                    line(
+                        &mut path,
+                        &[
+                            (3., 13.),
+                            (3.5, 10.5),
+                            (10.5, 3.5),
+                            (12.5, 5.5),
+                            (5.5, 12.5),
+                            (3., 13.),
+                        ],
+                    );
+                    line(&mut path, &[(9., 5.), (11., 7.)]);
+                }
+                Icon::Open => {
+                    line(&mut path, &[(4., 12.), (12., 4.)]);
+                    line(&mut path, &[(6., 4.), (12., 4.), (12., 10.)]);
+                }
+                Icon::Link => {
+                    line(
+                        &mut path,
+                        &[(7., 5.), (9., 3.), (11.5, 3.), (13., 4.5), (13., 7.)],
+                    );
+                    line(&mut path, &[(13., 7.), (11., 9.)]);
+                    line(
+                        &mut path,
+                        &[(9., 11.), (7., 13.), (4.5, 13.), (3., 11.5), (3., 9.)],
+                    );
+                    line(&mut path, &[(3., 9.), (5., 7.)]);
+                    line(&mut path, &[(6., 10.), (10., 6.)]);
                 }
                 Icon::Code => {
                     line(&mut path, &[(5., 4.), (1.5, 8.), (5., 12.)]);

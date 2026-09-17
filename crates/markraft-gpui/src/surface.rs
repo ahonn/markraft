@@ -74,7 +74,7 @@ impl LayoutBlock {
                 .position_for_index(byte.min(self.text_len), self.line_height)
                 .unwrap_or_default()
     }
-    fn rectangles(&self, range: Range<usize>, newline: bool) -> Vec<Bounds<Pixels>> {
+    pub(crate) fn rectangles(&self, range: Range<usize>, newline: bool) -> Vec<Bounds<Pixels>> {
         let mut starts = vec![0];
         starts.extend(
             self.line
@@ -242,19 +242,26 @@ fn shape(
                     if span.marks.italic {
                         face.style = FontStyle::Italic;
                     }
+                    let color = if span.link.is_some() {
+                        style.link
+                    } else {
+                        text_color
+                    };
                     TextRun {
                         len: span.text.len(),
                         font: face,
-                        color: text_color,
+                        color,
                         background_color: None,
-                        underline: span.marks.underline.then_some(UnderlineStyle {
-                            thickness: px(1.),
-                            color: Some(text_color),
-                            wavy: false,
-                        }),
+                        underline: (span.marks.underline || span.link.is_some()).then_some(
+                            UnderlineStyle {
+                                thickness: px(1.),
+                                color: Some(color),
+                                wavy: false,
+                            },
+                        ),
                         strikethrough: span.marks.strikethrough.then_some(StrikethroughStyle {
                             thickness: px(1.),
-                            color: Some(text_color),
+                            color: Some(color),
                         }),
                     }
                 })

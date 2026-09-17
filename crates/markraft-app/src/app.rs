@@ -27,6 +27,7 @@ actions!(
         Browse,
         Actions,
         Settings,
+        Link,
         Trash,
         Export,
         Import
@@ -40,6 +41,12 @@ enum Panel {
     Trash,
     Actions,
     Settings,
+}
+/// The pill above a link: its actions, or the field that edits its address.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LinkPopover {
+    View,
+    Edit,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FormatMenu {
@@ -77,6 +84,7 @@ pub struct NotesApp {
     show_words: bool,
     format_toolbar: bool,
     format_menu: Option<FormatMenu>,
+    link_popover: Option<LinkPopover>,
     format_selected: usize,
     format_snapshot: Option<(markraft_core::Marks, Option<BlockKind>)>,
     dark: bool,
@@ -201,6 +209,7 @@ impl NotesApp {
             query,
             _query_changes: query_changes,
             panel: Panel::Editor,
+            link_popover: None,
             panel_focus: cx.focus_handle(),
             selected: 0,
             picker_scroll: ScrollHandle::new(),
@@ -262,7 +271,13 @@ impl NotesApp {
                 .with_placeholder("Start writing…")
         });
         let note_id = id.clone();
-        let changes = cx.subscribe(&editor, move |this, editor, _: &EditorEvent, cx| {
+        let changes = cx.subscribe(&editor, move |this, editor, event: &EditorEvent, cx| {
+            if matches!(event, EditorEvent::LinkClicked) {
+                this.link_popover = Some(LinkPopover::View);
+                cx.notify();
+                return;
+            }
+            this.link_popover = None;
             let document = editor.read(cx).committed_document().clone();
             if this.library.set_document(&note_id, document) {
                 this.changed(cx);
@@ -439,11 +454,7 @@ impl NotesApp {
         }
         if self.persistence.is_none() {
             window.focus(&self.panel_focus, cx);
-        } else if self.panel == Panel::Browse
-            || self.panel == Panel::Trash
-            || self.panel == Panel::Settings
-            || self.panel == Panel::Actions
-        {
+        } else if self.panel != Panel::Editor {
             window.focus(&self.query.focus_handle(cx), cx);
         } else {
             self.focus_editor(window, cx);
@@ -493,7 +504,7 @@ impl NotesApp {
             self.editor().update(cx, |e, cx| e.cancel_composition(cx));
             return;
         }
-        if self.format_menu.take().is_some() {
+        if self.format_menu.take().is_some() || self.link_popover.take().is_some() {
             self.focus_editor(window, cx);
             cx.notify();
         } else if self.panel != Panel::Editor {
@@ -546,28 +557,17 @@ impl NotesApp {
             panel
         };
         self.selected = 0;
-        let query = if self.panel == Panel::Settings {
-            self.library.preferences.hotkey.as_str()
-        } else {
-            ""
+        let (query, placeholder) = match self.panel {
+            Panel::Settings => (
+                self.library.preferences.hotkey.clone(),
+                "Record a shortcut…",
+            ),
+            Panel::Actions => (String::new(), "Search for actions…"),
+            _ => (String::new(), "Search for notes…"),
         };
-        self.query.update(cx, |e, cx| {
-            e.replace_document(Document::from_markdown(query), cx);
-            e.set_placeholder(
-                if self.panel == Panel::Actions {
-                    "Search for actions…"
-                } else if self.panel == Panel::Settings {
-                    "Record a shortcut…"
-                } else {
-                    "Search for notes…"
-                },
-                cx,
-            );
-        });
-        if matches!(
-            self.panel,
-            Panel::Browse | Panel::Trash | Panel::Settings | Panel::Actions
-        ) {
+        self.link_popover = None;
+        self.set_query(query, placeholder, cx);
+        if self.panel != Panel::Editor {
             window.focus(&self.query.focus_handle(cx), cx);
         } else {
             self.focus_editor(window, cx);
@@ -658,6 +658,67 @@ impl NotesApp {
         }
         self.query
             .update(cx, |e, cx| e.set_style(query_style(self.dark), cx));
+        cx.notify();
+    }
+    /// The query field holds literal text, so it is never read as Markdown.
+    fn set_query(&mut self, text: String, placeholder: &'static str, cx: &mut Context<Self>) {
+        self.query.update(cx, |e, cx| {
+            let mut document = Document::default();
+            document.blocks[0].spans = vec![markraft_core::Span {
+                text,
+                marks: Default::default(),
+                link: None,
+            }];
+            e.replace_document(document, cx);
+            e.set_placeholder(placeholder, cx);
+        });
+    }
+    /// ⌘L: a link under the caret shows its actions, anything else asks for an address.
+    fn open_link_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.persistence.is_none() || self.panel != Panel::Editor {
+            return;
+        }
+        self.format_menu = None;
+        if self.editor().read(cx).active_link().is_some() {
+            self.link_popover = Some(LinkPopover::View);
+            cx.notify();
+        } else {
+            self.edit_link(window, cx);
+        }
+    }
+    fn edit_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let url = self
+            .editor()
+            .read(cx)
+            .active_link()
+            .unwrap_or_default()
+            .to_owned();
+        self.editor().update(cx, |e, cx| e.cancel_composition(cx));
+        self.set_query(url, "Enter a link…", cx);
+        self.link_popover = Some(LinkPopover::Edit);
+        window.focus(&self.query.focus_handle(cx), cx);
+        cx.notify();
+    }
+    fn unlink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor()
+            .update(cx, |editor, cx| editor.set_link(None, cx));
+        self.link_popover = None;
+        self.focus_editor(window, cx);
+        cx.notify();
+    }
+    fn apply_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let url = self
+            .query
+            .read(cx)
+            .committed_document()
+            .plain_text()
+            .trim()
+            .to_string();
+        self.editor().update(cx, |editor, cx| {
+            editor.set_link((!url.is_empty()).then_some(url.as_str()), cx)
+        });
+        self.link_popover = None;
+        self.focus_editor(window, cx);
         cx.notify();
     }
     fn apply_shortcut(&mut self, cx: &mut Context<Self>) {
@@ -926,6 +987,7 @@ pub fn bind_app_keys(cx: &mut App) {
         KeyBinding::new("cmd-p", Browse, Some("MarkraftApp")),
         KeyBinding::new("cmd-k", Actions, Some("MarkraftApp")),
         KeyBinding::new("cmd-,", Settings, Some("MarkraftApp")),
+        KeyBinding::new("cmd-l", Link, Some("MarkraftApp")),
         KeyBinding::new("cmd-shift-e", Export, Some("MarkraftApp")),
         KeyBinding::new("cmd-o", Import, Some("MarkraftApp")),
     ]);

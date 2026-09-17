@@ -1,4 +1,6 @@
-use crate::{Block, BlockKind, Document, Mark, Marks, Span, push_span};
+use crate::{
+    Block, BlockKind, Document, Mark, Marks, Span, push_like, push_linked_span, push_span,
+};
 
 impl Document {
     /// Import the supported Markdown subset. Each physical line is one block and blank
@@ -111,7 +113,17 @@ impl Document {
                 }
             };
             let mut line = prefix;
+            let mut link: Option<&str> = None;
             for span in &block.spans {
+                if link != span.link.as_deref() {
+                    if let Some(url) = link {
+                        line.push_str(&link_close(url));
+                    }
+                    link = span.link.as_deref();
+                    if link.is_some() {
+                        line.push('[');
+                    }
+                }
                 let mut text = if span.marks.code {
                     code_text(&span.text)
                 } else {
@@ -130,6 +142,9 @@ impl Document {
                     text = format!("<u>{text}</u>");
                 }
                 line.push_str(&text);
+            }
+            if let Some(url) = link {
+                line.push_str(&link_close(url));
             }
             lines.push(line);
         }
@@ -234,6 +249,21 @@ fn parse_inline(source: &str, marks: Marks) -> Vec<Span> {
                 continue;
             }
         }
+        // Images have no model; keep them literal rather than reading a link after "!".
+        if rest.starts_with("![")
+            && let Some((_, _, length)) = parse_link(&rest[1..])
+        {
+            push_span(&mut spans, &rest[..1 + length], marks);
+            index += 1 + length;
+            continue;
+        }
+        if let Some((text, url, length)) = parse_link(rest) {
+            for span in parse_inline(text, marks) {
+                push_linked_span(&mut spans, &span.text, span.marks, Some(url));
+            }
+            index += length;
+            continue;
+        }
         let mut parsed = false;
         for (open, close, mark) in INLINE_DELIMITERS {
             if !rest.starts_with(open) {
@@ -245,7 +275,7 @@ fn parse_inline(source: &str, marks: Marks) -> Vec<Span> {
                     inner.set(*mark, true);
                 }
                 for span in parse_inline(&rest[open.len()..end], inner) {
-                    push_span(&mut spans, &span.text, span.marks);
+                    push_like(&mut spans, &span.text, &span);
                 }
                 index += end + close.len();
                 parsed = true;
@@ -260,6 +290,69 @@ fn parse_inline(source: &str, marks: Marks) -> Vec<Span> {
         index += character.len_utf8();
     }
     spans
+}
+
+/// `[text](url)` or `[text](<url>)` at the start of `source`: the text, the URL and
+/// the length of the whole construct.
+fn parse_link(source: &str) -> Option<(&str, &str, usize)> {
+    let mut depth = 0;
+    let mut close = None;
+    let mut characters = source.char_indices();
+    while let Some((index, character)) = characters.next() {
+        match character {
+            '\\' => {
+                characters.next();
+            }
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            _ if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    let close = close.filter(|close| *close > 1)?;
+    let target = source[close + 1..].strip_prefix('(')?;
+    let start = close + 2;
+    if let Some(bracketed) = target.strip_prefix('<') {
+        let end = bracketed.find('>')?;
+        bracketed[end + 1..].starts_with(')').then_some(())?;
+        return Some((&source[1..close], &bracketed[..end], start + end + 3));
+    }
+    let mut depth = 0;
+    for (index, character) in target.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' if depth == 0 => {
+                return (index > 0).then_some((
+                    &source[1..close],
+                    &target[..index],
+                    start + index + 1,
+                ));
+            }
+            ')' => depth -= 1,
+            _ if character.is_whitespace() => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn link_close(url: &str) -> String {
+    let balanced = url.chars().try_fold(0i32, |depth, c| match c {
+        '(' => Some(depth + 1),
+        ')' => (depth > 0).then_some(depth - 1),
+        _ => Some(depth),
+    }) == Some(0);
+    if url.is_empty() || url.contains(char::is_whitespace) || !balanced {
+        format!("](<{url}>)")
+    } else {
+        format!("]({url})")
+    }
 }
 
 /// Longer delimiters come first so `***` is not read as `**` followed by `*`.

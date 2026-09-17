@@ -100,6 +100,7 @@ mod tests {
                             italic: true,
                             ..Marks::default()
                         },
+                        link: None,
                     },
                     Span {
                         text: "cd".into(),
@@ -107,10 +108,12 @@ mod tests {
                             bold: true,
                             ..Marks::default()
                         },
+                        link: None,
                     },
                     Span {
                         text: "ef".into(),
                         marks: Marks::default(),
+                        link: None,
                     },
                 ],
             }],
