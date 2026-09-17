@@ -1,0 +1,14 @@
+[package]
+name = "markraft-vim"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Opt-in modal editing for the Markraft editor"
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+gpui.workspace = true
+markraft-core.workspace = true
+markraft-gpui.workspace = true
+unicode-segmentation = "1.12"

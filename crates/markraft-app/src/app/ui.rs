@@ -3,6 +3,7 @@ mod formatting;
 mod icons;
 mod link;
 pub(in crate::app) mod slash;
+mod vim;
 
 use super::*;
 use icons::{Icon, icon};
@@ -39,6 +40,7 @@ enum Intent {
     Theme(Option<bool>),
     Login,
     AutoHeight,
+    VimMode,
     Shortcut,
     Reveal,
     ChooseFolder,
@@ -49,6 +51,11 @@ enum Intent {
     Mark(Mark),
     Block(BlockKind),
 }
+/// The settings rows drawn as a switch rather than as a labelled button.
+fn is_switch(id: &str) -> bool {
+    matches!(id, "auto-height" | "launch-at-login" | "vim-mode")
+}
+
 /// The icon a command shows in the ⌘K panel and in the `/` menu.
 fn intent_icon(intent: &Intent) -> Icon {
     match intent {
@@ -170,6 +177,7 @@ impl NotesApp {
                 self.library.preferences.auto_height = !self.library.preferences.auto_height;
                 self.changed(cx);
             }
+            Intent::VimMode => self.toggle_vim(window, cx),
             Intent::Shortcut => self.apply_shortcut(cx),
             Intent::Reveal => {
                 if let Some(path) = &self.path {
@@ -271,6 +279,7 @@ impl NotesApp {
         let accessible_label = match id {
             "auto-height" => "Automatic height",
             "launch-at-login" => "Launch at login",
+            "vim-mode" => "Vim mode",
             _ => label.as_ref(),
         }
         .to_string();
@@ -278,7 +287,7 @@ impl NotesApp {
             .id(id)
             .role(Role::Button)
             .aria_label(accessible_label)
-            .when(matches!(id, "auto-height" | "launch-at-login"), |s| {
+            .when(is_switch(id), |s| {
                 s.role(Role::Switch)
                     .aria_toggled(if label.as_ref() == "On" {
                         accesskit::Toggled::True
@@ -300,7 +309,7 @@ impl NotesApp {
             .on_click(
                 cx.listener(move |this, _, window, cx| this.intent(intent.clone(), window, cx)),
             )
-            .child(if matches!(id, "auto-height" | "launch-at-login") {
+            .child(if is_switch(id) {
                 let enabled = label.as_ref() == "On";
                 div()
                     .w(px(28.))
@@ -764,6 +773,24 @@ impl NotesApp {
                     .flex()
                     .justify_between()
                     .items_center()
+                    .child("Vim mode")
+                    .child(self.button(
+                        "vim-mode",
+                        if self.library.preferences.vim_mode {
+                            "On"
+                        } else {
+                            "Off"
+                        },
+                        Intent::VimMode,
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .py_3()
+                    .flex()
+                    .justify_between()
+                    .items_center()
                     .child("Launch at login")
                     .child(self.button(
                         "launch-at-login",
@@ -1059,6 +1086,16 @@ impl NotesApp {
                 "Move to Recently Deleted",
                 "",
                 Intent::Delete,
+            ),
+            Command::new(
+                "vim-mode",
+                if self.library.preferences.vim_mode {
+                    "Disable Vim Mode"
+                } else {
+                    "Enable Vim Mode"
+                },
+                "",
+                Intent::VimMode,
             ),
             Command::new("open-settings", "Settings…", "⌘,", Intent::Settings),
         ]

@@ -82,6 +82,9 @@ fn main() {
     });
     application.run(move |cx: &mut App| {
         markraft_gpui::bind_keys(cx);
+        // After the editor's own bindings, so that at the editor's context depth vim's
+        // win; its predicates stand aside for the typeahead where that matters.
+        markraft_vim::bind_keys(cx);
         bind_app_keys(cx);
         cx.set_reduce_motion(Platform::system_reduce_motion());
         let platform = Platform::new();

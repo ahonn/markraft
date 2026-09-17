@@ -13,7 +13,8 @@ mod syntax;
 mod typeahead;
 pub use emoji::{EmojiShortcodes, emoji_menu};
 pub use extension::{
-    ActionHandler, EditorCx, Extension, ExtensionHandle, ExtensionPayload, Overlay, Update,
+    ActionHandler, CaretShape, EditorCx, Extension, ExtensionHandle, ExtensionPayload, InputPolicy,
+    Overlay, Update,
 };
 pub use style::EditorStyle;
 pub use syntax::code_languages;
@@ -587,12 +588,57 @@ impl EditorView {
         }
     }
     fn select_point(&mut self, point: Point<Pixels>, extend: bool, cx: &mut Context<Self>) {
-        let position = self.hit(point);
-        self.upstream = self
+        let (position, upstream) = self.hit_upstream(point);
+        self.upstream = upstream;
+        self.select(position, extend, cx);
+    }
+    /// The position under `target`, and whether the caret there belongs to the visual row
+    /// above the one the point fell in.
+    fn hit_upstream(&self, target: Point<Pixels>) -> (Position, bool) {
+        let position = self.hit(target);
+        let upstream = self
             .layout
             .get(position.block)
-            .is_some_and(|row| row.caret(position.byte, false).y > point.y);
-        self.select(position, extend, cx);
+            .is_some_and(|row| row.caret(position.byte, false).y > target.y);
+        (position, upstream)
+    }
+    /// The caret `delta` visual rows away and the column to keep there. `None` before the
+    /// first paint, when there is no layout to walk.
+    pub(crate) fn visual_row_target(&self, delta: isize) -> Option<(Position, Pixels, bool)> {
+        let head = self.core.selection().head;
+        let row = self.layout.get(head.block)?;
+        let caret = row.caret(head.byte, self.upstream);
+        let x = self.preferred_x.unwrap_or(caret.x);
+        let centers: Vec<_> = self
+            .layout
+            .iter()
+            .flat_map(|row| {
+                (0..=row.line.wrap_boundaries().len())
+                    .map(|i| row.origin.y + row.line_height * (i as f32 + 0.5))
+            })
+            .collect();
+        let current = centers
+            .iter()
+            .position(|&y| y > caret.y)
+            .unwrap_or(centers.len() - 1);
+        let next = (current as isize + delta).clamp(0, centers.len() as isize - 1) as usize;
+        let target = point(x, centers[next]);
+        let (position, upstream) = self.hit_upstream(target);
+        Some((position, x, upstream))
+    }
+    /// The start or end of the caret's visual row. A wrapped block has several.
+    pub(crate) fn line_edge_target(&self, end: bool) -> Option<(Position, bool)> {
+        let head = self.core.selection().head;
+        let row = self.layout.get(head.block)?;
+        let caret = row.caret(head.byte, self.upstream);
+        Some(self.hit_upstream(point(
+            if end {
+                row.origin.x + row.width
+            } else {
+                row.origin.x
+            },
+            caret.y + row.line_height * 0.5,
+        )))
     }
     fn vertical(&mut self, delta: f32, extend: bool, cx: &mut Context<Self>) {
         let head = self.core.selection().head;
@@ -609,42 +655,17 @@ impl EditorView {
             self.edit(cx, |core| core.exit_code_block());
             return;
         }
-        let head = self.core.selection().head;
-        if let Some(row) = self.layout.get(head.block) {
-            let caret = row.caret(head.byte, self.upstream);
-            let x = self.preferred_x.unwrap_or(caret.x);
-            let centers: Vec<_> = self
-                .layout
-                .iter()
-                .flat_map(|row| {
-                    (0..=row.line.wrap_boundaries().len())
-                        .map(|i| row.origin.y + row.line_height * (i as f32 + 0.5))
-                })
-                .collect();
-            let current = centers
-                .iter()
-                .position(|&y| y > caret.y)
-                .unwrap_or(centers.len() - 1);
-            let next =
-                (current as isize + delta as isize).clamp(0, centers.len() as isize - 1) as usize;
-            self.select_point(point(x, centers[next]), extend, cx);
+        if let Some((position, x, upstream)) = self.visual_row_target(delta as isize) {
+            self.upstream = upstream;
+            self.select(position, extend, cx);
             self.preferred_x = Some(x);
         }
     }
     fn line_edge(&mut self, end: bool, extend: bool, cx: &mut Context<Self>) {
-        let head = self.core.selection().head;
-        if let Some(row) = self.layout.get(head.block) {
-            let caret = row.caret(head.byte, self.upstream);
-            let target = point(
-                if end {
-                    row.origin.x + row.width
-                } else {
-                    row.origin.x
-                },
-                caret.y + row.line_height * 0.5,
-            );
+        if let Some((position, upstream)) = self.line_edge_target(end) {
             self.preferred_x = None;
-            self.select_point(target, extend, cx);
+            self.upstream = upstream;
+            self.select(position, extend, cx);
         }
     }
     fn copy(&mut self, cx: &mut Context<Self>) {
@@ -766,9 +787,23 @@ impl EditorView {
     fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.selecting = false;
     }
+    /// The one answer gpui asks the input handler for, and uses twice: it gates inserted
+    /// text, and `ElementInputHandler` also returns it for
+    /// `prefers_ime_for_printable_keys`, which is what decides whether a printable key
+    /// goes to an active input method before key-binding matching.
+    ///
+    /// A live composition always accepts: the input method owns the marked text, so an
+    /// extension that refuses mid-composition is ignored until it ends rather than
+    /// stranding the candidate.
+    pub(crate) fn accepts_text_input(&self) -> bool {
+        self.core.is_composing() || self.extension_input_policy() == InputPolicy::Accept
+    }
 }
 
 impl EntityInputHandler for EditorView {
+    fn accepts_text_input(&self, _: &mut Window, _: &mut Context<Self>) -> bool {
+        EditorView::accepts_text_input(self)
+    }
     fn text_for_range(
         &mut self,
         range: Range<usize>,
@@ -820,6 +855,11 @@ impl EntityInputHandler for EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Belt and braces: an unbound printable key can still reach here through a
+        // platform path that does not consult `accepts_text_input`.
+        if !EditorView::accepts_text_input(self) {
+            return;
+        }
         let text = single_line::text(text, self.single_line);
         let text = text.as_ref();
         let single_line = self.single_line;

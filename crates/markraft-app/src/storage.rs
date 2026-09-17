@@ -19,6 +19,9 @@ pub struct Preferences {
     pub auto_height: bool,
     pub hotkey: String,
     pub window_bounds: Option<[f32; 4]>,
+    /// Modal editing in the note editors. Settings files written before it existed
+    /// deserialize to `false`.
+    pub vim_mode: bool,
 }
 
 impl Default for Preferences {
@@ -28,6 +31,7 @@ impl Default for Preferences {
             auto_height: true,
             hotkey: "Alt+N".into(),
             window_bounds: None,
+            vim_mode: false,
         }
     }
 }

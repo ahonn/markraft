@@ -267,7 +267,7 @@ impl NotesApp {
                     ),
             )
             .when(!self.format_toolbar, |s| {
-                s.child(
+                s.children(self.vim_badge()).child(
                     div()
                         .id("word-count")
                         .role(Role::Button)

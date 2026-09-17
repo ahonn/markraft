@@ -342,6 +342,35 @@ impl Document {
         }
     }
 
+    /// The plain text of a range, walking only the blocks it covers. The range is ordered
+    /// and clamped.
+    pub fn text_in(&self, range: Range<Position>) -> String {
+        let (start, end) = self.ordered_range(range);
+        let last = end.block - start.block;
+        let mut text = String::new();
+        for (offset, block) in self.blocks[start.block..=end.block].iter().enumerate() {
+            if offset > 0 {
+                text.push('\n');
+            }
+            let from = if offset == 0 { start.byte } else { 0 };
+            let to = if offset == last {
+                end.byte
+            } else {
+                block.len()
+            };
+            push_span_text(&mut text, &block.spans, from..to);
+        }
+        text
+    }
+
+    /// Order a range and clamp both ends into the document.
+    fn ordered_range(&self, range: Range<Position>) -> (Position, Position) {
+        (
+            self.clamp_position(range.start.min(range.end)),
+            self.clamp_position(range.start.max(range.end)),
+        )
+    }
+
     fn global_byte(&self, position: Position) -> usize {
         self.global_byte_raw(self.clamp_position(position))
     }
@@ -766,37 +795,9 @@ impl Editor {
         self.text_in(start..end)
     }
 
-    /// The plain text of a range, walking only the blocks it covers. The range is ordered
-    /// and clamped.
+    /// See [`Document::text_in`].
     pub fn text_in(&self, range: Range<Position>) -> String {
-        let (start, end) = self.ordered_range(range);
-        let last = end.block - start.block;
-        let mut text = String::new();
-        for (offset, block) in self.document().blocks[start.block..=end.block]
-            .iter()
-            .enumerate()
-        {
-            if offset > 0 {
-                text.push('\n');
-            }
-            let from = if offset == 0 { start.byte } else { 0 };
-            let to = if offset == last {
-                end.byte
-            } else {
-                block.len()
-            };
-            push_span_text(&mut text, &block.spans, from..to);
-        }
-        text
-    }
-
-    /// Order a range and clamp both ends into the document.
-    fn ordered_range(&self, range: Range<Position>) -> (Position, Position) {
-        let document = self.document();
-        (
-            document.clamp_position(range.start.min(range.end)),
-            document.clamp_position(range.start.max(range.end)),
-        )
+        self.document().text_in(range)
     }
 
     /// Order a range onto grapheme boundaries. An empty range is an insertion point and
@@ -2059,6 +2060,21 @@ impl Transaction<'_> {
     /// See [`Editor::set_block_kind_at`].
     pub fn set_block_kind_at(&mut self, block: usize, kind: BlockKind) {
         self.editor.apply_set_block_kind_at(block, kind);
+    }
+
+    /// See [`Editor::insert_fragment`].
+    pub fn insert_fragment(&mut self, fragment: Document) {
+        self.editor.apply_insert_fragment(fragment);
+    }
+
+    /// See [`Editor::remove_blocks`].
+    pub fn remove_blocks(&mut self, range: Range<usize>) {
+        self.editor.apply_remove_blocks(range);
+    }
+
+    /// See [`Editor::insert_blocks`].
+    pub fn insert_blocks(&mut self, index: usize, blocks: Vec<Block>) {
+        self.editor.apply_insert_blocks(index, blocks);
     }
 }
 

@@ -61,6 +61,10 @@ struct Session {
     _format_changes: Subscription,
     /// Unregisters the note's editor extensions when the session is evicted.
     _extensions: [ExtensionHandle; 3],
+    /// Modal editing, while the preference is on. Dropping the handle turns it off.
+    vim: Option<ExtensionHandle>,
+    /// The mode this note's editor last reported.
+    vim_mode: markraft_vim::Mode,
 }
 pub struct NotesApp {
     library: Library,
@@ -308,13 +312,20 @@ impl NotesApp {
                 editor.add_extension(markraft_gpui::EmojiShortcodes, cx),
             ]
         });
+        let vim = self
+            .library
+            .preferences
+            .vim_mode
+            .then(|| Self::attach_vim(&editor, cx));
         let note_id = id.clone();
         let changes = cx.subscribe_in(
             &editor,
             window,
             move |this, editor, event: &EditorEvent, window, cx| {
                 if let EditorEvent::Extension { id, payload } = event {
-                    if *id == ui::slash::SLASH_MENU && this.library.active_id == note_id {
+                    if *id == markraft_vim::VIM {
+                        this.vim_effect(&note_id, payload, cx);
+                    } else if *id == ui::slash::SLASH_MENU && this.library.active_id == note_id {
                         this.slash_effect(payload, window, cx);
                     }
                     return;
@@ -368,6 +379,8 @@ impl NotesApp {
                 _changes: changes,
                 _format_changes: format_changes,
                 _extensions: extensions,
+                vim,
+                vim_mode: markraft_vim::Mode::default(),
             },
         );
     }

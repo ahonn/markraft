@@ -12,6 +12,7 @@ gpui.workspace = true
 gpui_platform.workspace = true
 markraft-core.workspace = true
 markraft-gpui.workspace = true
+markraft-vim.workspace = true
 tempfile = "3"
 unicode-segmentation = "1.12"
 serde = { version = "1", features = ["derive"] }

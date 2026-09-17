@@ -3594,6 +3594,7 @@ dependencies = [
  "gpui-pre-platform",
  "markraft-core",
  "markraft-gpui",
+ "markraft-vim",
  "notify",
  "objc2 0.6.4",
  "raw-window-handle",
@@ -3627,6 +3628,16 @@ dependencies = [
  "serde_json",
  "syntect",
  "two-face",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "markraft-vim"
+version = "0.1.0"
+dependencies = [
+ "gpui-pre",
+ "markraft-core",
+ "markraft-gpui",
  "unicode-segmentation",
 ]
 

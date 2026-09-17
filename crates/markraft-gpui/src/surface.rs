@@ -1,8 +1,50 @@
-use crate::{EditorEvent, EditorStyle, EditorView};
+use crate::{CaretShape, EditorEvent, EditorStyle, EditorView};
 use gpui::{prelude::*, *};
-use markraft_core::{BlockKind, Document};
+use markraft_core::{BlockKind, Document, Position};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
+
+/// A block caret over text is translucent rather than inverted: the run under it keeps
+/// its own colour, weight and syntax highlighting, which repainting one grapheme would
+/// have to reproduce.
+const BLOCK_CARET_ALPHA: f32 = 0.42;
+/// How wide a block caret is where there is no grapheme to cover, past the last one of a
+/// line, as a share of the row's line height.
+const EMPTY_BLOCK_CARET_RATIO: f32 = 0.4;
+const CARET_THICKNESS: Pixels = px(2.);
+
+/// The caret quad for `shape` at `byte` of `row`. `next` is the grapheme boundary after
+/// the caret within the same block, when there is one.
+fn caret_quad(
+    row: &LayoutBlock,
+    byte: usize,
+    next: Option<usize>,
+    upstream: bool,
+    shape: CaretShape,
+) -> Bounds<Pixels> {
+    let origin = row.caret(byte, upstream);
+    let bar = Bounds::new(origin, size(CARET_THICKNESS, row.line_height));
+    match shape {
+        CaretShape::Bar => bar,
+        CaretShape::Block | CaretShape::Underline => {
+            // A grapheme that wraps onto the next visual row leaves no width here, so
+            // the caret falls back to its nominal one rather than spanning the row.
+            let width = next
+                .map(|next| row.caret(next, false))
+                .filter(|end| end.y == origin.y && end.x > origin.x)
+                .map(|end| end.x - origin.x)
+                .unwrap_or(row.line_height * EMPTY_BLOCK_CARET_RATIO);
+            if shape == CaretShape::Block {
+                Bounds::new(origin, size(width, row.line_height))
+            } else {
+                Bounds::new(
+                    origin + point(px(0.), row.line_height - CARET_THICKNESS),
+                    size(width, CARET_THICKNESS),
+                )
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct LayoutBlock {
@@ -776,6 +818,12 @@ impl Element for EditorSurface {
         });
         let focused = editor.focus.is_focused(window);
         let caret_visible = editor.caret_blink.visible && window.is_window_active();
+        let caret_shape = editor.extension_caret();
+        // The grapheme the caret rests on, for the shapes that cover one.
+        let caret_next = (caret_shape != CaretShape::Bar && a == b)
+            .then(|| editor.core.next_position(b))
+            .filter(|next| next.block == b.block && next.byte > b.byte)
+            .map(|next: Position| next.byte);
         let focus = editor.focus.clone();
         let upstream = editor.upstream;
         let style = editor.style.clone();
@@ -1076,9 +1124,13 @@ impl Element for EditorSurface {
                 }
             }
             if focused && caret_visible && a == b && i == b.block {
+                let mut color = style.marker;
+                if caret_shape == CaretShape::Block {
+                    color.a = BLOCK_CARET_ALPHA;
+                }
                 window.paint_quad(fill(
-                    Bounds::new(row.caret(b.byte, upstream), size(px(2.), row.line_height)),
-                    style.marker,
+                    caret_quad(row, b.byte, caret_next, upstream, caret_shape),
+                    color,
                 ));
             }
         }
