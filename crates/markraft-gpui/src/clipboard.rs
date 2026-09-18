@@ -1,15 +1,18 @@
 //! The system clipboard, in three flavours.
 //!
 //! A copy writes the selected [`Slice`] three times: as HTML, which is what a
-//! word processor takes; as Markdown, which is the item's text and what every
-//! plain-text reader sees; and as JSON in the item's metadata, which is what
-//! another Markraft window reads back so that a round trip is exact. A paste
-//! prefers that JSON, then the HTML flavour another application left, then the
-//! text read as Markdown.
+//! word processor takes; as the document kind's own markup, which is the item's
+//! text and what every plain-text reader sees; and as JSON in the item's
+//! metadata, which is what another Markraft window reads back so that a round
+//! trip is exact. A paste prefers that JSON, then the HTML flavour another
+//! application left, then the text read as markup.
+//!
+//! Only the JSON is this crate's own: it needs the schema and nothing else. The
+//! other two flavours come from the host's [`Codecs`], so the view never learns
+//! which document kind it is editing.
 
 use gpui::{App, ClipboardItem};
-use markraft_doc::{Schema, Slice};
-use markraft_markdown::{HtmlParser, HtmlSerializer, MarkdownParser, commonmark_serializer};
+use markraft_core::{Codecs, Schema, Slice};
 
 #[derive(Clone, Copy)]
 pub(crate) enum PasteMode {
@@ -20,19 +23,24 @@ pub(crate) enum PasteMode {
 
 const METADATA_PREFIX: &str = "markraft-fragment-v1:";
 
-/// The Markdown flavour of `slice`, which is also what a plain paste inserts.
-pub(crate) fn markdown(schema: &Schema, slice: &Slice) -> String {
-    commonmark_serializer(schema).serialize_fragment(slice)
+/// The string flavour of `slice`: the kind's markup, or its plain text when the
+/// kind has no markup of its own.
+pub(crate) fn markup(codecs: &dyn Codecs, slice: &Slice) -> String {
+    codecs
+        .to_markup(slice)
+        .unwrap_or_else(|| codecs.to_text(slice))
 }
 
-pub(crate) fn write(schema: &Schema, slice: &Slice, cx: &mut App) {
+pub(crate) fn write(schema: &Schema, codecs: &dyn Codecs, slice: &Slice, cx: &mut App) {
     let metadata = format!("{METADATA_PREFIX}{}", slice.to_json(schema));
     cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(
-        markdown(schema, slice),
+        markup(codecs, slice),
         metadata,
     ));
     // The rich flavour goes on the same item, after it has been written.
-    platform::write_html(&HtmlSerializer::commonmark(schema).serialize_fragment(slice));
+    if let Some(html) = codecs.to_html(slice) {
+        platform::write_html(&html);
+    }
 }
 
 /// The slice `item` holds, read according to `mode`.
@@ -41,12 +49,13 @@ pub(crate) fn write(schema: &Schema, slice: &Slice, cx: &mut App) {
 /// falls back to inserting the item's text literally.
 pub(crate) fn read_fragment(
     schema: &Schema,
+    codecs: &dyn Codecs,
     item: &ClipboardItem,
     mode: PasteMode,
 ) -> Option<Slice> {
     let text = item.text();
     if matches!(mode, PasteMode::Markdown) {
-        return text.and_then(|text| parse_markdown(schema, &text));
+        return text.and_then(|text| codecs.from_markup(&text));
     }
     if let Some(slice) = item
         .metadata()
@@ -57,19 +66,11 @@ pub(crate) fn read_fragment(
         return Some(slice);
     }
     if let Some(html) = platform::read_html()
-        && let Ok(slice) = HtmlParser::commonmark(schema.clone()).parse_fragment(&html)
-        && !slice.is_empty()
+        && let Some(slice) = codecs.from_html(&html)
     {
         return Some(slice);
     }
-    text.and_then(|text| parse_markdown(schema, &text))
-}
-
-fn parse_markdown(schema: &Schema, source: &str) -> Option<Slice> {
-    MarkdownParser::commonmark(schema.clone())
-        .parse_fragment(source)
-        .ok()
-        .filter(|slice| !slice.is_empty())
+    text.and_then(|text| codecs.from_markup(&text))
 }
 
 #[cfg(target_os = "macos")]
@@ -108,32 +109,31 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use markraft_markdown::commonmark_schema;
+    use markraft_commonmark::{CommonMarkCodecs, commonmark_schema};
 
     #[test]
     fn a_slice_survives_the_metadata_round_trip() {
         let schema = commonmark_schema();
-        let slice = MarkdownParser::commonmark(schema.clone())
-            .parse_fragment("**bold** and `code`")
+        let codecs = CommonMarkCodecs::new(schema.clone());
+        let slice = codecs
+            .from_markup("**bold** and `code`")
             .expect("a fragment");
         let json = slice.to_json(&schema);
         let back = Slice::from_json(&schema, &json).expect("the same slice");
         assert_eq!(back, slice);
-        assert_eq!(markdown(&schema, &slice), "**bold** and `code`");
+        assert_eq!(markup(&codecs, &slice), "**bold** and `code`");
     }
 
     #[test]
     fn the_rich_flavour_is_html_another_application_can_read() {
         let schema = commonmark_schema();
-        let slice = MarkdownParser::commonmark(schema.clone())
-            .parse_fragment("**bold** and `code`")
+        let codecs = CommonMarkCodecs::new(schema.clone());
+        let slice = codecs
+            .from_markup("**bold** and `code`")
             .expect("a fragment");
-        let html = HtmlSerializer::commonmark(&schema).serialize_fragment(&slice);
+        let html = codecs.to_html(&slice).expect("an HTML flavour");
         assert_eq!(html, "<p><strong>bold</strong> and <code>code</code></p>");
         // And it is what the paste path reads when there is no metadata.
-        let back = HtmlParser::commonmark(schema.clone())
-            .parse_fragment(&html)
-            .expect("the HTML reparses");
-        assert_eq!(back, slice);
+        assert_eq!(codecs.from_html(&html).as_ref(), Some(&slice));
     }
 }

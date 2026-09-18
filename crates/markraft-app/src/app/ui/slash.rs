@@ -1,5 +1,5 @@
 use super::*;
-use markraft_doc::commands::{Command as EditCommand, command};
+use markraft_core::commands::{Command as EditCommand, command};
 use markraft_gpui::{Typeahead, TypeaheadItem, TypeaheadProvider};
 use std::{any::Any, rc::Rc};
 
@@ -187,9 +187,9 @@ mod tests {
     // Not `use super::*`: that would bring gpui's `test` macro in over the built-in one.
     use super::{Command, Intent, SlashEffect, SlashProvider, TypeaheadProvider};
     use crate::doc;
-    use markraft_doc::commands::delete_range;
-    use markraft_doc::projection::projection_of;
-    use markraft_doc::{EditorState, EditorStateConfig, Extension};
+    use markraft_core::commands::delete_range;
+    use markraft_core::projection::projection_of;
+    use markraft_core::{EditorState, EditorStateConfig, Extension};
 
     fn provider() -> SlashProvider {
         SlashProvider::new(vec![
@@ -234,17 +234,15 @@ mod tests {
             EditorStateConfig::new(doc::schema().clone())
                 .doc(doc::from_markdown(source))
                 .extensions(Extension::all([
-                    markraft_doc::projection::projection(),
-                    markraft_doc::history(Default::default()),
+                    markraft_core::projection::projection(),
+                    markraft_core::history(Default::default()),
                     doc::extensions(),
                 ])),
         )
         .expect("a valid state")
-        .update([
-            markraft_doc::TransactionSpec::new().selection(markraft_doc::Selection::cursor(
-                doc::from_markdown(source).content_size() - 1,
-            )),
-        ])
+        .update([markraft_core::TransactionSpec::new().selection(
+            markraft_core::Selection::cursor(doc::from_markdown(source).content_size() - 1),
+        )])
         .expect("a caret at the end")
         .state()
         .clone()

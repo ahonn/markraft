@@ -2,9 +2,9 @@
 //!
 //! The view holds an [`EditorState`] built from the host's schema and
 //! extensions. Every edit is a [`TransactionSpec`] or a
-//! [`markraft_doc::commands::Command`] from the catalogue; nothing here
+//! [`markraft_core::commands::Command`] from the catalogue; nothing here
 //! touches the tree. Everything drawn comes from the state's
-//! [`markraft_doc::projection::Projection`].
+//! [`markraft_core::projection::Projection`].
 mod accessibility;
 mod caret;
 mod clipboard;
@@ -30,18 +30,18 @@ pub use extension::{
 pub use style::EditorStyle;
 pub use syntax::code_languages;
 pub use typeahead::{Typeahead, TypeaheadItem, TypeaheadProvider};
+pub use types::DocTypes;
 
 use extension::AnchoredOverlay;
 use gpui::{prelude::*, *};
-use markraft_doc::commands::{Command, Direction};
-use markraft_doc::projection::{Projection, projection_of};
-use markraft_doc::{
+use markraft_core::commands::{Command, Direction};
+use markraft_core::projection::{Projection, projection_of};
+use markraft_core::{
     Attrs, EditorState, EditorStateConfig, HistoryConfig, MarkSet, MarkTypeId, Node, NodeTypeId,
     Schema, Selection, Transaction, TransactionSpec,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 use surface::{EditorSurface, LayoutLine, ShapeInput};
-use types::DocTypes;
 
 /// How long a pause splits one typing session from the next, in milliseconds.
 const TYPING_GROUP_DELAY: u64 = 750;
@@ -190,9 +190,25 @@ pub enum EditorEvent {
 }
 
 /// How to build an [`EditorView`]: the host's document kind and its extensions.
+///
+/// The view is schema-agnostic. Everything that names a concrete document kind
+/// comes in here: the compiled [`Schema`], the [`DocTypes`] that say which of
+/// its types play the roles the view draws and binds keys to, and the
+/// [`Codecs`](markraft_core::Codecs) the clipboard reads and writes with.
 pub struct Setup {
+    /// The document kind's compiled schema.
     pub schema: Schema,
-    pub extensions: markraft_doc::Extension,
+    /// Which of the schema's types play the roles the view knows about. The
+    /// default leaves every role unset, which is what a plain-text editor wants.
+    pub types: DocTypes,
+    /// The host's state extensions — input rules, corrections and fields. The
+    /// view adds history, composition and the projection itself.
+    pub extensions: markraft_core::Extension,
+    /// How the clipboard reads and writes this document kind. Without it a copy
+    /// writes plain text and a paste is inserted literally.
+    pub codecs: Option<Arc<dyn markraft_core::Codecs>>,
+    /// The document to open with. The schema's smallest valid document
+    /// otherwise.
     pub doc: Option<Node>,
 }
 
@@ -200,12 +216,22 @@ impl Setup {
     pub fn new(schema: Schema) -> Setup {
         Setup {
             schema,
-            extensions: markraft_doc::Extension::none(),
+            types: DocTypes::none(),
+            extensions: markraft_core::Extension::none(),
+            codecs: None,
             doc: None,
         }
     }
-    pub fn extensions(mut self, extensions: markraft_doc::Extension) -> Setup {
+    pub fn types(mut self, types: DocTypes) -> Setup {
+        self.types = types;
+        self
+    }
+    pub fn extensions(mut self, extensions: markraft_core::Extension) -> Setup {
         self.extensions = extensions;
+        self
+    }
+    pub fn codecs(mut self, codecs: Arc<dyn markraft_core::Codecs>) -> Setup {
+        self.codecs = Some(codecs);
         self
     }
     pub fn doc(mut self, doc: Node) -> Setup {
@@ -218,8 +244,10 @@ pub struct EditorView {
     state: EditorState,
     projection: Arc<Projection>,
     pub(crate) types: DocTypes,
+    /// The host's clipboard codecs, absent for an editor that only holds text.
+    pub(crate) codecs: Option<Arc<dyn markraft_core::Codecs>>,
     /// The host's extensions, kept so the state can be rebuilt on a replacement.
-    host_extensions: markraft_doc::Extension,
+    host_extensions: markraft_core::Extension,
     pub(crate) extensions: Vec<extension::Registration>,
     /// The selection the extensions were last told about.
     pub(crate) extension_selection: Selection,
@@ -256,19 +284,19 @@ impl Focusable for EditorView {
 }
 
 /// The extensions every view configures, whatever the host adds.
-fn base_extensions() -> markraft_doc::Extension {
-    markraft_doc::Extension::all([
-        markraft_doc::history(HistoryConfig {
+fn base_extensions() -> markraft_core::Extension {
+    markraft_core::Extension::all([
+        markraft_core::history(HistoryConfig {
             new_group_delay: TYPING_GROUP_DELAY,
             ..HistoryConfig::default()
         }),
-        markraft_doc::composition(),
-        markraft_doc::projection::projection(),
+        markraft_core::composition(),
+        markraft_core::projection::projection(),
     ])
 }
 
-fn build_state(schema: &Schema, host: &markraft_doc::Extension, doc: Option<Node>) -> EditorState {
-    let extensions = markraft_doc::Extension::all([base_extensions(), host.clone()]);
+fn build_state(schema: &Schema, host: &markraft_core::Extension, doc: Option<Node>) -> EditorState {
+    let extensions = markraft_core::Extension::all([base_extensions(), host.clone()]);
     let config = EditorStateConfig::new(schema.clone()).extensions(extensions.clone());
     let config = match doc {
         Some(doc) => config.doc(doc),
@@ -286,13 +314,16 @@ impl EditorView {
     pub fn new(setup: Setup, cx: &mut Context<Self>) -> Self {
         let Setup {
             schema,
+            types,
             extensions,
+            codecs,
             doc,
         } = setup;
         let state = build_state(&schema, &extensions, doc);
         let projection = projection_of(&state);
         Self {
-            types: DocTypes::of(&schema),
+            types,
+            codecs,
             extension_selection: state.selection().clone(),
             state,
             projection,
@@ -387,7 +418,7 @@ impl EditorView {
         self.state.selection().head(self.state.doc())
     }
     pub fn is_composing(&self) -> bool {
-        markraft_doc::is_composing(&self.state)
+        markraft_core::is_composing(&self.state)
     }
 
     /// Height at the most recently laid-out width, including editor padding.
@@ -519,7 +550,7 @@ impl EditorView {
     /// Fold every undo entry made until [`EditorView::end_undo_group`] into one.
     pub fn begin_undo_group(&mut self) {
         let _ = self.apply([TransactionSpec::new()
-            .effect(markraft_doc::begin_undo_group().of(()))
+            .effect(markraft_core::begin_undo_group().of(()))
             .add_to_history(false)]);
         self.undo_group_depth += 1;
     }
@@ -528,33 +559,33 @@ impl EditorView {
         while self.undo_group_depth > 0 {
             self.undo_group_depth -= 1;
             let _ = self.apply([TransactionSpec::new()
-                .effect(markraft_doc::end_undo_group().of(()))
+                .effect(markraft_core::end_undo_group().of(()))
                 .add_to_history(false)]);
         }
     }
 
     pub fn cancel_composition(&mut self, cx: &mut Context<Self>) {
-        let Some(range) = markraft_doc::composition_range(&self.state) else {
+        let Some(range) = markraft_core::composition_range(&self.state) else {
             return;
         };
         let specs = vec![
             TransactionSpec::new()
-                .changes([markraft_doc::Change::delete(range.from, range.to)
-                    .with_fit(markraft_doc::Fit::Auto)])
+                .changes([markraft_core::Change::delete(range.from, range.to)
+                    .with_fit(markraft_core::Fit::Auto)])
                 .selection(Selection::cursor(range.from))
                 .add_to_history(false),
-            markraft_doc::finish_composition().sequential(),
+            markraft_core::finish_composition().sequential(),
         ];
         self.edit(cx, true, specs);
     }
 
     pub fn toggle_mark(&mut self, ty: MarkTypeId, attrs: Attrs, cx: &mut Context<Self>) {
-        let command = markraft_doc::commands::toggle_mark(ty, attrs);
+        let command = markraft_core::commands::toggle_mark(ty, attrs);
         self.run_command(&command, cx);
     }
 
     pub fn set_block_type(&mut self, ty: NodeTypeId, attrs: Attrs, cx: &mut Context<Self>) {
-        let command = markraft_doc::commands::set_block_type(ty, attrs);
+        let command = markraft_core::commands::set_block_type(ty, attrs);
         self.run_command(&command, cx);
     }
 
@@ -630,11 +661,12 @@ impl EditorView {
             return;
         };
         let updated = node.with_attrs(node.attrs().with("language", language));
-        let slice = markraft_doc::Slice::from_fragment(markraft_doc::Fragment::from_node(updated));
-        let change = markraft_doc::Change::replace(pos, pos + node.node_size(), slice);
+        let slice =
+            markraft_core::Slice::from_fragment(markraft_core::Fragment::from_node(updated));
+        let change = markraft_core::Change::replace(pos, pos + node.node_size(), slice);
         // The node keeps its size, so the caret keeps its position.
         if let Some(spec) =
-            markraft_doc::commands::changes_spec(&self.state, vec![change], "format.block")
+            markraft_core::commands::changes_spec(&self.state, vec![change], "format.block")
         {
             let spec = spec.selection(self.state.selection().clone());
             self.edit(cx, false, vec![spec]);
@@ -779,7 +811,7 @@ impl EditorView {
                 .scroll_into_view(),
         ];
         if self.is_composing() {
-            specs.push(markraft_doc::finish_composition().sequential());
+            specs.push(markraft_core::finish_composition().sequential());
         }
         self.edit(cx, false, specs);
     }
@@ -885,7 +917,7 @@ impl EditorView {
                 .line(last_line)
                 .is_some_and(|line| line.to == head && self.types.is_code_block(line))
         {
-            let command = markraft_doc::commands::exit_code();
+            let command = markraft_core::commands::exit_code();
             if self.run_command(&command, cx) {
                 return;
             }
@@ -906,7 +938,7 @@ impl EditorView {
     }
 
     /// The selected content, as a slice.
-    pub fn selection_slice(&self) -> markraft_doc::Slice {
+    pub fn selection_slice(&self) -> markraft_core::Slice {
         self.state.selection().content(self.state.doc())
     }
 
@@ -915,12 +947,15 @@ impl EditorView {
         if slice.is_empty() {
             return;
         }
-        if self.single_line {
-            let text = markraft_doc::projection::slice_to_plain_text(self.state.schema(), &slice);
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-        } else {
-            let schema = self.state.schema().clone();
-            clipboard::write(&schema, &slice, cx);
+        let schema = self.state.schema().clone();
+        match self.codecs.clone().filter(|_| !self.single_line) {
+            Some(codecs) => clipboard::write(&schema, codecs.as_ref(), &slice, cx),
+            // Without codecs there is only one flavour to write, and a
+            // single-line editor holds nothing but text anyway.
+            None => {
+                let text = markraft_core::projection::slice_to_plain_text(&schema, &slice);
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
         }
     }
 
@@ -931,6 +966,7 @@ impl EditorView {
         let clipboard_text = item.text();
         let text = clipboard_text.as_deref().unwrap_or_default();
         let literal = self.single_line
+            || self.codecs.is_none()
             || matches!(mode, clipboard::PasteMode::Plain)
             || self.types.in_code_block_at(&self.state);
         if literal && clipboard_text.is_none() {
@@ -939,7 +975,7 @@ impl EditorView {
         let schema = self.state.schema().clone();
         let spec = if literal {
             let text = single_line::text(text, self.single_line);
-            markraft_doc::commands::insert_text(&text)(&self.state)
+            markraft_core::commands::insert_text(&text)(&self.state)
         } else if is_web_url(text.trim())
             && self.types.link.is_some()
             && (!self.state.selection().is_empty(self.state.doc()) || self.active_link().is_none())
@@ -949,8 +985,12 @@ impl EditorView {
                 self.types.link.expect("checked"),
                 Some(text.trim()),
             )
-        } else if let Some(slice) = clipboard::read_fragment(&schema, &item, mode) {
-            markraft_doc::commands::replace_selection(slice)(&self.state)
+        } else if let Some(slice) = self
+            .codecs
+            .clone()
+            .and_then(|codecs| clipboard::read_fragment(&schema, codecs.as_ref(), &item, mode))
+        {
+            markraft_core::commands::replace_selection(slice)(&self.state)
         } else {
             None
         };
@@ -1342,7 +1382,7 @@ impl EditorView {
             .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
             .on_action(cx.listener(|this, _: &Cut, _, cx| {
                 this.copy(cx);
-                let command = markraft_doc::commands::delete_selection();
+                let command = markraft_core::commands::delete_selection();
                 this.run_command(&command, cx);
             }))
             .on_action(
@@ -1367,7 +1407,7 @@ impl EditorView {
 fn block(types: &DocTypes, ty: Option<NodeTypeId>, attrs: Attrs) -> Command {
     match ty {
         Some(ty) => keymap::toggle_block(types, ty, attrs),
-        None => markraft_doc::commands::command(|_| None),
+        None => markraft_core::commands::command(|_| None),
     }
 }
 
@@ -1375,7 +1415,7 @@ fn block(types: &DocTypes, ty: Option<NodeTypeId>, attrs: Attrs) -> Command {
 fn list(types: &DocTypes, ty: Option<NodeTypeId>, item: Option<NodeTypeId>) -> Command {
     match (ty, item) {
         (Some(ty), Some(item)) => keymap::toggle_list(types, ty, item),
-        _ => markraft_doc::commands::command(|_| None),
+        _ => markraft_core::commands::command(|_| None),
     }
 }
 

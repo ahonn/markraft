@@ -8,8 +8,8 @@
 
 use crate::doc;
 use crate::storage::{Library, Note, Preferences};
-use markraft_doc::{Attrs, Mark, MarkSet, Node};
-use markraft_markdown::schema as md;
+use markraft_commonmark::schema as md;
+use markraft_core::{Attrs, Mark, MarkSet, Node};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -222,8 +222,8 @@ fn inline(block: &LegacyBlock) -> String {
         Ok(paragraph) => paragraph,
         Err(_) => return plain(block),
     };
-    let slice = markraft_doc::Slice::new(markraft_doc::Fragment::from_node(paragraph), 1, 1);
-    markraft_markdown::to_markdown_fragment(schema, &slice)
+    let slice = markraft_core::Slice::new(markraft_core::Fragment::from_node(paragraph), 1, 1);
+    markraft_commonmark::to_markdown_fragment(schema, &slice)
 }
 
 #[cfg(test)]

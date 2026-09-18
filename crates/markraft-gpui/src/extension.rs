@@ -12,9 +12,9 @@
 
 use crate::{EditorEvent, EditorStyle, EditorView, clipboard};
 use gpui::{prelude::*, *};
-use markraft_doc::commands::Command;
-use markraft_doc::projection::Projection;
-use markraft_doc::{
+use markraft_core::commands::Command;
+use markraft_core::projection::Projection;
+use markraft_core::{
     ChangeDesc, EditorState, Selection, Slice, TrackMode, Transaction, TransactionSpec,
 };
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use std::{any::Any, cell::Cell, collections::VecDeque, rc::Rc};
 /// stops a runaway.
 const ROUNDS: usize = 8;
 
-/// The [`origin`](markraft_doc::origin) annotation every extension edit carries,
+/// The [`origin`](markraft_core::origin) annotation every extension edit carries,
 /// so an extension can tell its own edits from the user's.
 pub const EXTENSION_ORIGIN_PREFIX: &str = "extension:";
 
@@ -79,7 +79,7 @@ impl Update {
     pub fn origin(&self) -> Option<&str> {
         self.transactions
             .iter()
-            .find_map(|tr| tr.annotation(markraft_doc::origin()))
+            .find_map(|tr| tr.annotation(markraft_core::origin()))
             .map(String::as_str)
     }
 }
@@ -250,8 +250,9 @@ impl<'a> EditorCx<'a> {
     pub fn projection(&self) -> Arc<Projection> {
         self.view.projection()
     }
-    /// The node and mark types the editor's schema declares.
-    pub(crate) fn types(&self) -> &crate::types::DocTypes {
+    /// Which of the schema's types play the roles the editor knows about, as
+    /// the host configured them. The [`commands`](crate::commands) take it.
+    pub fn types(&self) -> &crate::DocTypes {
         &self.view.types
     }
     pub fn selection(&self) -> &Selection {
@@ -301,7 +302,7 @@ impl<'a> EditorCx<'a> {
         let origin = format!("{EXTENSION_ORIGIN_PREFIX}{}", self.id);
         let specs: Vec<TransactionSpec> = specs
             .into_iter()
-            .map(|spec| spec.annotate(markraft_doc::origin().of(origin.clone())))
+            .map(|spec| spec.annotate(markraft_core::origin().of(origin.clone())))
             .collect();
         let applied = self.view.apply(specs)?;
         self.view.upstream = false;
@@ -319,11 +320,11 @@ impl<'a> EditorCx<'a> {
     /// Undo one entry, as ⌘Z does. `None` while a composition is live or when there is
     /// nothing left to undo.
     pub fn undo(&mut self) -> Option<Transaction> {
-        let spec = markraft_doc::undo(self.view.state())?;
+        let spec = markraft_core::undo(self.view.state())?;
         self.dispatch([spec])
     }
     pub fn redo(&mut self) -> Option<Transaction> {
-        let spec = markraft_doc::redo(self.view.state())?;
+        let spec = markraft_core::redo(self.view.state())?;
         self.dispatch([spec])
     }
     /// Set the selection, collapsed or ranged, without changing the document. It goes
@@ -409,23 +410,35 @@ impl<'a> EditorCx<'a> {
     pub fn end_undo_group(&mut self) {
         self.view.end_undo_group();
     }
-    /// Put a slice and its Markdown on the system clipboard, exactly as ⌘C does, so
-    /// another application pastes the Markdown and this one pastes the slice.
+    /// Put a slice and its markup on the system clipboard, exactly as ⌘C does, so
+    /// another application pastes the markup and this one pastes the slice.
+    ///
+    /// `false` when the hook cannot reach the application, or when the host
+    /// configured no codecs.
     pub fn write_clipboard(&mut self, slice: &Slice) -> bool {
         let schema = self.view.state().schema().clone();
+        let Some(codecs) = self.view.codecs.clone() else {
+            return false;
+        };
         let Some(app) = self.app.as_deref_mut() else {
             return false;
         };
-        clipboard::write(&schema, slice, app);
+        clipboard::write(&schema, codecs.as_ref(), slice, app);
         true
     }
     /// The slice on the system clipboard, read as ⌘V reads it: this editor's own
-    /// slice when it wrote one, otherwise HTML or Markdown from another application.
+    /// slice when it wrote one, otherwise HTML or markup from another application.
     pub fn read_clipboard(&mut self) -> Option<Slice> {
         let schema = self.view.state().schema().clone();
+        let codecs = self.view.codecs.clone()?;
         let app = self.app.as_deref_mut()?;
         let item = app.read_from_clipboard()?;
-        clipboard::read_fragment(&schema, &item, clipboard::PasteMode::Formatted)
+        clipboard::read_fragment(
+            &schema,
+            codecs.as_ref(),
+            &item,
+            clipboard::PasteMode::Formatted,
+        )
     }
 }
 

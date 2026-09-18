@@ -15,15 +15,19 @@ use crate::{
     motion::Motion,
     state::{Mode, Operator, State},
 };
-use markraft_doc::commands::Command;
-use markraft_doc::projection::{Projection, projection_of, slice_to_plain_text};
-use markraft_doc::{EditorState, EditorStateConfig, Extension, Selection, Slice, TransactionSpec};
-use markraft_markdown::{commonmark_extensions, commonmark_schema, from_markdown, to_markdown};
+use markraft_commonmark::{
+    commonmark_doc_type_names, commonmark_extensions, commonmark_schema, from_markdown, to_markdown,
+};
+use markraft_core::commands::Command;
+use markraft_core::projection::{Projection, projection_of, slice_to_plain_text};
+use markraft_core::{EditorState, EditorStateConfig, Extension, Selection, Slice, TransactionSpec};
+use markraft_gpui::DocTypes;
 use std::sync::Arc;
 
 /// A state plus a clipboard, standing in for `EditorCx`.
 struct Editing {
     state: EditorState,
+    types: DocTypes,
     clipboard: Option<Slice>,
     group_depth: usize,
 }
@@ -31,6 +35,9 @@ struct Editing {
 impl Host for Editing {
     fn state(&self) -> &EditorState {
         &self.state
+    }
+    fn types(&self) -> &DocTypes {
+        &self.types
     }
     fn projection(&self) -> Arc<Projection> {
         projection_of(&self.state)
@@ -80,9 +87,9 @@ impl Host for Editing {
     }
     fn history(&mut self, undo: bool) -> bool {
         let spec = if undo {
-            markraft_doc::undo(&self.state)
+            markraft_core::undo(&self.state)
         } else {
-            markraft_doc::redo(&self.state)
+            markraft_core::redo(&self.state)
         };
         match spec {
             Some(spec) => self.dispatch(vec![spec]),
@@ -93,7 +100,7 @@ impl Host for Editing {
         self.group_depth += 1;
         self.dispatch(vec![
             TransactionSpec::new()
-                .effect(markraft_doc::begin_undo_group().of(()))
+                .effect(markraft_core::begin_undo_group().of(()))
                 .add_to_history(false),
         ]);
     }
@@ -102,7 +109,7 @@ impl Host for Editing {
             self.group_depth -= 1;
             self.dispatch(vec![
                 TransactionSpec::new()
-                    .effect(markraft_doc::end_undo_group().of(()))
+                    .effect(markraft_core::end_undo_group().of(()))
                     .add_to_history(false),
             ]);
         }
@@ -123,15 +130,16 @@ impl Keys {
         let state =
             EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
                 Extension::all([
-                    markraft_doc::projection::projection(),
-                    markraft_doc::composition(),
-                    markraft_doc::history(Default::default()),
+                    markraft_core::projection::projection(),
+                    markraft_core::composition(),
+                    markraft_core::history(Default::default()),
                     commonmark_extensions(&schema),
                 ]),
             ))
             .expect("a valid state");
         Self {
             host: Editing {
+                types: DocTypes::from_schema_names(&schema, &commonmark_doc_type_names()),
                 state,
                 clipboard: None,
                 group_depth: 0,
@@ -162,9 +170,9 @@ impl Keys {
         keys.host.state =
             EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
                 Extension::all([
-                    markraft_doc::projection::projection(),
-                    markraft_doc::composition(),
-                    markraft_doc::history(Default::default()),
+                    markraft_core::projection::projection(),
+                    markraft_core::composition(),
+                    markraft_core::history(Default::default()),
                     commonmark_extensions(&schema),
                 ]),
             ))
@@ -174,7 +182,7 @@ impl Keys {
 
     /// The Return key, which is the editor's own Enter chain.
     fn enter(&mut self) -> &mut Self {
-        let command = markraft_gpui::commands::enter(&self.host.state.schema().clone());
+        let command = markraft_gpui::commands::enter(&self.host.types.clone());
         self.host.run(&command);
         self
     }
@@ -604,7 +612,7 @@ fn a_clipboard_from_elsewhere_pastes_inline_rather_than_as_lines() {
     // Something else took the clipboard: the linewise flag no longer applies.
     let schema = keys.host.state.schema().clone();
     keys.host.clipboard =
-        Some(markraft_markdown::from_markdown_fragment(&schema, "X").expect("a fragment"));
+        Some(markraft_commonmark::from_markdown_fragment(&schema, "X").expect("a fragment"));
     keys.keys("p");
     assert_eq!(keys.text(), "oXne\ntwo");
 }

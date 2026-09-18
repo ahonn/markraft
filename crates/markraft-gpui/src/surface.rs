@@ -12,8 +12,8 @@ use crate::style::EditorStyle;
 use crate::types::DocTypes;
 use crate::{CaretShape, EditorEvent, EditorView};
 use gpui::{prelude::*, *};
-use markraft_doc::projection::{Line, LineKind, Projection, RunContent};
-use markraft_doc::{MarkSet, Node};
+use markraft_core::projection::{Line, LineKind, Projection, RunContent};
+use markraft_core::{MarkSet, Node};
 use std::ops::Range;
 use std::rc::Rc;
 use unicode_segmentation::UnicodeSegmentation;
@@ -730,7 +730,7 @@ fn highlight_runs(
     runs
 }
 
-fn has(ty: Option<markraft_doc::MarkTypeId>, marks: &MarkSet) -> bool {
+fn has(ty: Option<markraft_core::MarkTypeId>, marks: &MarkSet) -> bool {
     ty.is_some_and(|ty| marks.contains_type(ty))
 }
 
@@ -1161,7 +1161,7 @@ impl Element for EditorSurface {
         let selection = state.selection();
         let (a, b) = (selection.from(doc), selection.to(doc));
         let caret_pos = selection.head(doc);
-        let marked = markraft_doc::composition_range(state).map(|range| (range.from, range.to));
+        let marked = markraft_core::composition_range(state).map(|range| (range.from, range.to));
         let focused = editor.focus.is_focused(window);
         let caret_visible = editor.caret_blink.visible && window.is_window_active();
         let caret_shape = editor.extension_caret();

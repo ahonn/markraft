@@ -6,9 +6,9 @@
 //! [`Slice`] cut out of the document and put back somewhere else.
 
 use crate::motion::{self, Span};
-use markraft_doc::commands::delete_range_changes;
-use markraft_doc::projection::{Projection, slice_to_plain_text};
-use markraft_doc::{
+use markraft_core::commands::delete_range_changes;
+use markraft_core::projection::{Projection, slice_to_plain_text};
+use markraft_core::{
     Change, ChangeSet, EditorState, Fit, Node, Selection, Slice, TrackMode, TransactionSpec,
 };
 use std::ops::Range;
@@ -30,7 +30,7 @@ pub(crate) struct Register {
 /// The node range whole lines `lines` occupy, and the depth of the parent that holds
 /// it.
 ///
-/// The model's own [`block_range`](markraft_doc::ResolvedPos::block_range) finds the
+/// The model's own [`block_range`](markraft_core::ResolvedPos::block_range) finds the
 /// smallest run of siblings covering the lines, which is what keeps a range spanning
 /// several nesting levels well formed. It is then widened outwards while the parent
 /// holds nothing but that run, so `dd` on the only paragraph of a list item takes the
@@ -278,17 +278,19 @@ pub(crate) fn visual_range(projection: &Projection, anchor: usize, cursor: usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use markraft_doc::projection::projection_of;
-    use markraft_doc::{EditorStateConfig, Extension};
-    use markraft_markdown::{commonmark_extensions, commonmark_schema, from_markdown, to_markdown};
+    use markraft_commonmark::{
+        commonmark_extensions, commonmark_schema, from_markdown, to_markdown,
+    };
+    use markraft_core::projection::projection_of;
+    use markraft_core::{EditorStateConfig, Extension};
 
     fn state_of(markdown: &str) -> EditorState {
         let schema = commonmark_schema();
         let doc = from_markdown(&schema, markdown).expect("valid Markdown");
         EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
             Extension::all([
-                markraft_doc::projection::projection(),
-                markraft_doc::history(Default::default()),
+                markraft_core::projection::projection(),
+                markraft_core::history(Default::default()),
                 commonmark_extensions(&schema),
             ]),
         ))
@@ -310,7 +312,7 @@ mod tests {
             .slice(range.start, range.end)
             .expect("a valid slice");
         (
-            markraft_markdown::to_markdown_fragment(state.schema(), &slice),
+            markraft_commonmark::to_markdown_fragment(state.schema(), &slice),
             depth,
         )
     }
@@ -341,7 +343,7 @@ mod tests {
         assert!(register.linewise);
         assert_eq!(register.text, "b");
         assert_eq!(
-            markraft_markdown::to_markdown_fragment(state.schema(), &register.slice),
+            markraft_commonmark::to_markdown_fragment(state.schema(), &register.slice),
             "- b"
         );
     }

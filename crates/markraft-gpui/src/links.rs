@@ -5,7 +5,7 @@
 //! thing the mark model does not answer directly is "which stretch is this one
 //! link", which a caret inside a link needs, so that is computed here.
 
-use markraft_doc::{
+use markraft_core::{
     Attrs, Change, EditorState, Mark, MarkTypeId, Node, Selection, TransactionSpec,
 };
 use std::ops::Range;
@@ -116,7 +116,7 @@ pub(crate) fn set_link(
         ),
         None => Change::remove_mark_type(from, to, ty),
     };
-    markraft_doc::commands::changes_spec(state, vec![change], "format.link")
+    markraft_core::commands::changes_spec(state, vec![change], "format.link")
 }
 
 /// Insert `url` as its own linked text at the caret.
@@ -124,15 +124,15 @@ fn insert_linked(state: &EditorState, ty: MarkTypeId, url: &str) -> TransactionS
     let schema = state.schema();
     let doc = state.doc();
     let range = state.selection().replacement_range(doc);
-    let marks = markraft_doc::MarkSet::from_marks(
+    let marks = markraft_core::MarkSet::from_marks(
         schema,
         [Mark::with_attrs(ty, Attrs::from_pairs([("href", url)]))],
     );
-    let slice = markraft_doc::Slice::from_fragment(markraft_doc::Fragment::from_node(
+    let slice = markraft_core::Slice::from_fragment(markraft_core::Fragment::from_node(
         schema.text_marked(url, marks),
     ));
     TransactionSpec::new()
-        .changes([Change::replace(range.from, range.to, slice).with_fit(markraft_doc::Fit::Auto)])
+        .changes([Change::replace(range.from, range.to, slice).with_fit(markraft_core::Fit::Auto)])
         .selection(Selection::cursor(range.from + url.chars().count()))
         .user_event("format.link")
         .scroll_into_view()

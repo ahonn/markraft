@@ -1,7 +1,7 @@
 //! What the selection is formatted as, for a host drawing a toolbar.
 
-use markraft_doc::projection::{Line, Projection};
-use markraft_doc::{Attrs, EditorState, MarkSet, NodeTypeId};
+use markraft_core::projection::{Line, Projection};
+use markraft_core::{Attrs, EditorState, MarkSet, NodeTypeId};
 
 /// The marks every part of the selection carries, or the marks new text would
 /// get at a cursor.
@@ -47,7 +47,7 @@ pub(crate) fn active_marks(state: &EditorState) -> MarkSet {
 /// `None` when they differ.
 ///
 /// A selection ending exactly at the start of a following block does not count
-/// that block, matching what [`set_block_type`](markraft_doc::commands::set_block_type)
+/// that block, matching what [`set_block_type`](markraft_core::commands::set_block_type)
 /// would change.
 pub(crate) fn active_block_type(
     state: &EditorState,
@@ -87,10 +87,10 @@ pub(crate) fn touched_lines<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use markraft_doc::commands::{run_command, toggle_mark};
-    use markraft_doc::projection::projection_of;
-    use markraft_doc::{Attrs, EditorStateConfig, Extension, Schema, Selection};
-    use markraft_markdown::{commonmark_schema, from_markdown, schema as md};
+    use markraft_commonmark::{commonmark_schema, from_markdown, schema as md};
+    use markraft_core::commands::{run_command, toggle_mark};
+    use markraft_core::projection::projection_of;
+    use markraft_core::{Attrs, EditorStateConfig, Extension, Schema, Selection};
 
     fn state_of(source: &str) -> (Schema, EditorState) {
         let schema = commonmark_schema();
@@ -98,8 +98,8 @@ mod tests {
         let state =
             EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
                 Extension::all([
-                    markraft_doc::projection::projection(),
-                    markraft_doc::history(Default::default()),
+                    markraft_core::projection::projection(),
+                    markraft_core::history(Default::default()),
                 ]),
             ))
             .expect("a valid state");
@@ -112,7 +112,7 @@ mod tests {
         let schema = commonmark_schema();
         let strong = schema.mark_id(md::STRONG).unwrap();
         let bold = |text: &str| {
-            let marks = MarkSet::from_marks(&schema, [markraft_doc::Mark::new(strong)]);
+            let marks = MarkSet::from_marks(&schema, [markraft_core::Mark::new(strong)]);
             schema
                 .node(md::PARAGRAPH, [schema.text_marked(text, marks)])
                 .expect("a paragraph")
@@ -127,8 +127,8 @@ mod tests {
         let state =
             EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
                 Extension::all([
-                    markraft_doc::projection::projection(),
-                    markraft_doc::history(Default::default()),
+                    markraft_core::projection::projection(),
+                    markraft_core::history(Default::default()),
                 ]),
             ))
             .expect("a valid state");
@@ -137,7 +137,9 @@ mod tests {
 
     fn select(state: &EditorState, anchor: usize, head: usize) -> EditorState {
         state
-            .update([markraft_doc::TransactionSpec::new().selection(Selection::text(anchor, head))])
+            .update(
+                [markraft_core::TransactionSpec::new().selection(Selection::text(anchor, head))],
+            )
             .expect("a selection")
             .state()
             .clone()

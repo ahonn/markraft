@@ -10,8 +10,8 @@ license.workspace = true
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
-markraft-doc.workspace = true
-markraft-markdown.workspace = true
+markraft-core.workspace = true
+markraft-commonmark.workspace = true
 markraft-gpui.workspace = true
 markraft-vim.workspace = true
 tempfile = "3"

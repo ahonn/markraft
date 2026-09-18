@@ -8,8 +8,8 @@
 //! through on their own because the schema offers them nothing to do.
 
 use gpui::{Pixels, px};
-use markraft_doc::projection::Projection;
-use markraft_doc::{Node, NodeTypeSpec, Schema, SchemaSpec};
+use markraft_core::projection::Projection;
+use markraft_core::{Node, NodeTypeSpec, Schema, SchemaSpec};
 use std::sync::LazyLock;
 use std::{borrow::Cow, ops::Range};
 
@@ -101,7 +101,7 @@ pub(crate) fn scroll_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use markraft_markdown::{commonmark_schema, from_markdown};
+    use markraft_commonmark::{commonmark_schema, from_markdown};
 
     #[test]
     fn single_line_preserves_literal_markers_and_maps_composition_offsets() {

@@ -4,14 +4,17 @@
 //! [`EditorState`], so every command in `command.rs` runs unchanged in both and there is
 //! no second implementation of vim to drift.
 
-use markraft_doc::commands::Command;
-use markraft_doc::projection::Projection;
-use markraft_doc::{EditorState, Selection, Slice, TransactionSpec};
-use markraft_gpui::EditorCx;
+use markraft_core::commands::Command;
+use markraft_core::projection::Projection;
+use markraft_core::{EditorState, Selection, Slice, TransactionSpec};
+use markraft_gpui::{DocTypes, EditorCx};
 use std::sync::Arc;
 
 pub(crate) trait Host {
     fn state(&self) -> &EditorState;
+    /// Which of the schema's types play the roles the editor knows about, as
+    /// the host wired them. The `markraft_gpui::commands` take it.
+    fn types(&self) -> &DocTypes;
     fn projection(&self) -> Arc<Projection>;
     /// See [`EditorCx::select`].
     fn select(&mut self, selection: Selection, keep_column: bool);
@@ -47,6 +50,9 @@ pub(crate) fn anchor(host: &impl Host) -> usize {
 impl Host for EditorCx<'_> {
     fn state(&self) -> &EditorState {
         EditorCx::state(self)
+    }
+    fn types(&self) -> &DocTypes {
+        EditorCx::types(self)
     }
     fn projection(&self) -> Arc<Projection> {
         EditorCx::projection(self)

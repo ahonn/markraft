@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/markraft-doc",
-    "crates/markraft-markdown",
+    "crates/markraft-core",
+    "crates/markraft-commonmark",
     "crates/markraft-gpui",
     "crates/markraft-vim",
     "crates/markraft-app",
@@ -18,8 +18,8 @@ repository = "https://github.com/ahonn/markraft"
 [workspace.dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.4" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.4", features = ["font-kit", "runtime_shaders"] }
-markraft-doc = { path = "crates/markraft-doc" }
-markraft-markdown = { path = "crates/markraft-markdown" }
+markraft-core = { path = "crates/markraft-core" }
+markraft-commonmark = { path = "crates/markraft-commonmark" }
 markraft-gpui = { path = "crates/markraft-gpui" }
 markraft-vim = { path = "crates/markraft-vim" }
 

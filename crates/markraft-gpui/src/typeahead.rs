@@ -10,9 +10,9 @@ use crate::{
     extension::OVERLAY_MARGIN,
 };
 use gpui::*;
-use markraft_doc::TrackMode;
-use markraft_doc::commands::{Command, delete_range};
-use markraft_doc::projection::Projection;
+use markraft_core::TrackMode;
+use markraft_core::commands::{Command, delete_range};
+use markraft_core::projection::Projection;
 use std::{any::Any, cell::RefCell, ops::Range, rc::Rc};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -133,26 +133,20 @@ pub(crate) fn trigger_match(
     if in_code {
         return None;
     }
-    let (index, offset) = projection.pos_to_line_offset(caret)?;
-    let line = projection.line(index)?;
-    let text = projection.line_text(index)?;
-    let byte = text
-        .char_indices()
-        .nth(offset)
-        .map_or(text.len(), |(i, _)| i);
-    let before = text.get(..byte)?;
-    let (start, trigger) = before
-        .grapheme_indices(true)
+    let index = projection.line_at(caret)?;
+    let (start, trigger) = projection
+        .graphemes(index)
+        .filter(|(pos, _)| *pos < caret)
         .rev()
         .take_while(|(_, grapheme)| !grapheme.chars().any(char::is_whitespace))
         .last()?;
     if !is_trigger(trigger, triggers) {
         return None;
     }
-    let at = |byte: usize| line.from + before[..byte.min(before.len())].chars().count();
+    let end = start + trigger.chars().count();
     Some(TriggerMatch {
-        trigger: at(start)..at(start + trigger.len()),
-        query: before[start + trigger.len()..].to_owned(),
+        trigger: start..end,
+        query: projection.text_between(end, caret)?.to_owned(),
     })
 }
 
@@ -441,14 +435,17 @@ pub(crate) mod tests {
     use super::{Open, State, TriggerMatch, Update, open_match, track_dismissed, trigger_match};
     use crate::typeahead::TypeaheadItem;
     use crate::types::DocTypes;
-    use markraft_doc::EditorState;
-    use markraft_doc::commands::{Command, delete_range, insert_text, run_command, set_block_type};
-    use markraft_doc::projection::projection_of;
-    use markraft_doc::{
-        Attrs, EditorStateConfig, Extension as DocExtension, Schema, Selection, TransactionSpec,
+    use markraft_commonmark::{
+        commonmark_doc_type_names, commonmark_extensions, commonmark_schema, from_markdown,
+        schema as md,
     };
-    use markraft_markdown::{
-        commonmark_extensions, commonmark_schema, from_markdown, schema as md,
+    use markraft_core::EditorState;
+    use markraft_core::commands::{
+        Command, delete_range, insert_text, run_command, set_block_type,
+    };
+    use markraft_core::projection::projection_of;
+    use markraft_core::{
+        Attrs, EditorStateConfig, Extension as DocExtension, Schema, Selection, TransactionSpec,
     };
 
     const SLASH: [char; 2] = ['/', '、'];
@@ -460,12 +457,12 @@ pub(crate) mod tests {
         state_with(schema, doc)
     }
 
-    fn state_with(schema: Schema, doc: markraft_doc::Node) -> EditorState {
+    fn state_with(schema: Schema, doc: markraft_core::Node) -> EditorState {
         EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
             DocExtension::all([
-                markraft_doc::projection::projection(),
-                markraft_doc::composition(),
-                markraft_doc::history(Default::default()),
+                markraft_core::projection::projection(),
+                markraft_core::composition(),
+                markraft_core::history(Default::default()),
                 commonmark_extensions(&schema),
             ]),
         ))
@@ -488,6 +485,11 @@ pub(crate) mod tests {
         state_with(schema, doc)
     }
 
+    /// The CommonMark roles, as a host wires them.
+    pub(crate) fn types_of(state: &EditorState) -> DocTypes {
+        DocTypes::from_schema_names(state.schema(), &commonmark_doc_type_names())
+    }
+
     /// Move the caret to `pos`.
     pub(crate) fn at(state: &EditorState, pos: usize) -> EditorState {
         state
@@ -506,7 +508,7 @@ pub(crate) mod tests {
     }
 
     fn found(state: &EditorState, pos: usize) -> Option<TriggerMatch> {
-        let types = DocTypes::of(state.schema());
+        let types = types_of(state);
         let state = at(state, pos);
         trigger_match(
             &projection_of(&state),
@@ -659,14 +661,20 @@ pub(crate) mod tests {
         assert_eq!(projection_of(&state).plain_text(), "");
         assert_eq!(state.doc().child(0).type_id(), heading);
 
-        let state = run(&state, &markraft_doc::commands::command(markraft_doc::undo));
+        let state = run(
+            &state,
+            &markraft_core::commands::command(markraft_core::undo),
+        );
         assert_eq!(projection_of(&state).plain_text(), "/head");
         assert_eq!(
             state.doc().child(0).type_id(),
             schema.node_id(md::PARAGRAPH).unwrap()
         );
         // The entry before it is the typing itself, so exactly one step was added.
-        let state = run(&state, &markraft_doc::commands::command(markraft_doc::undo));
+        let state = run(
+            &state,
+            &markraft_core::commands::command(markraft_core::undo),
+        );
         assert_eq!(projection_of(&state).plain_text(), "");
     }
 
@@ -714,7 +722,7 @@ pub(crate) mod tests {
     }
 
     /// The tracking a dismissed trigger goes through, expressed over transactions.
-    fn update_of(before: &EditorState, after: &markraft_doc::Transaction) -> Update {
+    fn update_of(before: &EditorState, after: &markraft_core::Transaction) -> Update {
         let _ = before;
         Update {
             transactions: vec![after.clone()],

@@ -8,11 +8,10 @@ use crate::{
     EditorCx, Extension, Typeahead, TypeaheadItem, TypeaheadProvider, Update, typeahead::is_trigger,
 };
 use emojis::Emoji;
-use markraft_doc::commands::{Command, command, insert_text};
-use markraft_doc::projection::Projection;
-use markraft_doc::{EditorState, Node};
+use markraft_core::commands::{Command, command, insert_text};
+use markraft_core::projection::Projection;
+use markraft_core::{EditorState, Node};
 use std::ops::Range;
-use unicode_segmentation::UnicodeSegmentation;
 
 /// The extension id of the `:` menu; it names the edits it makes.
 const EMOJI_MENU: &str = "emoji-menu";
@@ -84,14 +83,14 @@ impl Extension for EmojiShortcodes {
             else {
                 return;
             };
-            let slice = markraft_doc::Slice::from_fragment(markraft_doc::Fragment::from_node(
+            let slice = markraft_core::Slice::from_fragment(markraft_core::Fragment::from_node(
                 state.schema().text(emoji),
             ));
-            markraft_doc::commands::changes_spec(
+            markraft_core::commands::changes_spec(
                 state,
                 vec![
-                    markraft_doc::Change::replace(run.start, run.end, slice)
-                        .with_fit(markraft_doc::Fit::Auto),
+                    markraft_core::Change::replace(run.start, run.end, slice)
+                        .with_fit(markraft_core::Fit::Auto),
                 ],
                 "input.replace",
             )
@@ -115,30 +114,23 @@ fn closing_shortcode(
     if types.in_code_block_at(state) {
         return None;
     }
-    let (index, offset) = projection.pos_to_line_offset(caret)?;
-    let line = projection.line(index)?;
-    let text = projection.line_text(index)?;
-    let byte = text
-        .char_indices()
-        .nth(offset)
-        .map_or(text.len(), |(i, _)| i);
-    let before = text.get(..byte)?;
-    let (closing, close) = before.grapheme_indices(true).next_back()?;
+    let index = projection.line_at(caret)?;
+    let (closing, close) = projection.graphemes(index).rfind(|(pos, _)| *pos < caret)?;
     if !is_trigger(close, &COLONS) {
         return None;
     }
     // The same scan the menu's trigger uses: back to the start of the caret's word.
-    let (opening, open) = before[..closing]
-        .grapheme_indices(true)
+    let (opening, open) = projection
+        .graphemes(index)
+        .filter(|(pos, _)| *pos < closing)
         .rev()
         .take_while(|(_, grapheme)| !grapheme.chars().any(char::is_whitespace))
         .last()?;
     if !is_trigger(open, &COLONS) {
         return None;
     }
-    let emoji = shortcode(&before[opening + open.len()..closing])?;
-    let at = |byte: usize| line.from + before[..byte.min(before.len())].chars().count();
-    let range = at(opening)..caret;
+    let emoji = shortcode(projection.text_between(opening + open.chars().count(), closing)?)?;
+    let range = opening..caret;
     (!is_code(state, types, range.start, range.end)).then_some((range, emoji))
 }
 
@@ -244,7 +236,7 @@ mod tests {
     use super::*;
     use crate::typeahead::open_match;
     use crate::typeahead::tests::{at, run, state_of, text_state};
-    use markraft_doc::projection::projection_of;
+    use markraft_core::projection::projection_of;
 
     fn labels(query: &str) -> Vec<String> {
         ranked(query)
@@ -265,7 +257,7 @@ mod tests {
 
     /// The replacement at the end of a plain paragraph holding `source`.
     fn found_in(state: &EditorState, caret: usize) -> Option<(Range<usize>, &'static str)> {
-        let types = DocTypes::of(state.schema());
+        let types = crate::typeahead::tests::types_of(state);
         let state = at(state, caret);
         closing_shortcode(&state, &projection_of(&state), &types, caret)
     }
@@ -385,18 +377,18 @@ mod tests {
     /// The transaction [`EmojiShortcodes`] runs, driven directly on the state.
     fn replace(text: &str) -> EditorState {
         let state = run(&state_of(""), &insert_text(text));
-        let types = DocTypes::of(state.schema());
+        let types = crate::typeahead::tests::types_of(&state);
         let caret = state.selection().head(state.doc());
         let (run_range, emoji) = closing_shortcode(&state, &projection_of(&state), &types, caret)
             .expect("a shortcode at the caret");
-        let slice = markraft_doc::Slice::from_fragment(markraft_doc::Fragment::from_node(
+        let slice = markraft_core::Slice::from_fragment(markraft_core::Fragment::from_node(
             state.schema().text(emoji),
         ));
-        let spec = markraft_doc::commands::changes_spec(
+        let spec = markraft_core::commands::changes_spec(
             &state,
             vec![
-                markraft_doc::Change::replace(run_range.start, run_range.end, slice)
-                    .with_fit(markraft_doc::Fit::Auto),
+                markraft_core::Change::replace(run_range.start, run_range.end, slice)
+                    .with_fit(markraft_core::Fit::Auto),
             ],
             "input.replace",
         )
@@ -412,10 +404,10 @@ mod tests {
     fn auto_replace_is_one_undo_step_that_restores_the_literal_text() {
         let state = replace("hi :smile:");
         assert_eq!(projection_of(&state).plain_text(), "hi 😄");
-        let state = run(&state, &command(markraft_doc::undo));
+        let state = run(&state, &command(markraft_core::undo));
         assert_eq!(projection_of(&state).plain_text(), "hi :smile:");
         // The entry before it is the typing itself, so exactly one step was added.
-        let state = run(&state, &command(markraft_doc::undo));
+        let state = run(&state, &command(markraft_core::undo));
         assert_eq!(projection_of(&state).plain_text(), "");
     }
 
@@ -439,7 +431,7 @@ mod tests {
     #[test]
     fn undoing_is_not_typing_and_leaves_no_shortcode_to_replace_again() {
         let state = replace(":smile:");
-        let spec = markraft_doc::undo(&state).expect("an undo");
+        let spec = markraft_core::undo(&state).expect("an undo");
         let tr = state.update([spec]).expect("the undo applies");
         assert!(tr.is_user_event("undo"));
         assert!(!tr.is_user_event("input.type"));
@@ -502,7 +494,7 @@ mod tests {
     fn the_code_mark_check_covers_the_whole_run() {
         // Guards `is_code`'s walk against an off-by-one at the run's edges.
         let state = state_of("ab`cd`ef");
-        let types = DocTypes::of(state.schema());
+        let types = crate::typeahead::tests::types_of(&state);
         assert!(!is_code(&state, &types, 1, 3));
         assert!(is_code(&state, &types, 2, 4));
         assert!(is_code(&state, &types, 3, 5));

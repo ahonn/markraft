@@ -2,12 +2,12 @@
 //! replacement calls, all over the projection's UTF-16 conversions.
 //!
 //! A composition lives in the document as ordinary content with a marked range
-//! the [`composition`](markraft_doc::composition) extension keeps; nothing here
+//! the [`composition`](markraft_core::composition) extension keeps; nothing here
 //! holds an uncommitted buffer of its own.
 
 use crate::{EditorView, keymap, single_line};
 use gpui::{prelude::*, *};
-use markraft_doc::{CompositionRange, Selection, TransactionSpec};
+use markraft_core::{CompositionRange, Selection, TransactionSpec};
 use std::ops::Range;
 
 impl EditorView {
@@ -27,7 +27,7 @@ impl EditorView {
     fn commit(&mut self, range: Option<(usize, usize)>, text: &str, cx: &mut Context<Self>) {
         let doc = self.state().doc();
         let (from, to) = range
-            .or_else(|| markraft_doc::composition_range(self.state()).map(|r| (r.from, r.to)))
+            .or_else(|| markraft_core::composition_range(self.state()).map(|r| (r.from, r.to)))
             .unwrap_or_else(|| {
                 let replacement = self.state().selection().replacement_range(doc);
                 (replacement.from, replacement.to)
@@ -46,7 +46,7 @@ impl EditorView {
         if let Some(insert) = insert {
             specs.push(insert.sequential());
         }
-        specs.push(markraft_doc::finish_composition().sequential());
+        specs.push(markraft_core::finish_composition().sequential());
         self.dispatch(specs, cx);
     }
 
@@ -134,12 +134,12 @@ impl EntityInputHandler for EditorView {
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        let range = markraft_doc::composition_range(self.state())?;
+        let range = markraft_core::composition_range(self.state())?;
         self.utf16_of(range.from, range.to)
     }
 
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.dispatch([markraft_doc::finish_composition()], cx);
+        self.dispatch([markraft_core::finish_composition()], cx);
     }
 
     fn replace_text_in_range(
@@ -183,7 +183,7 @@ impl EntityInputHandler for EditorView {
         if let Some(range) = range.as_ref()
             && let Some((from, to)) = self.positions_of(range)
         {
-            specs.push(markraft_doc::start_composition(CompositionRange::new(
+            specs.push(markraft_core::start_composition(CompositionRange::new(
                 from, to,
             )));
         }
@@ -214,7 +214,7 @@ impl EntityInputHandler for EditorView {
             .as_ref()
             .map(|tr| tr.state())
             .unwrap_or_else(|| self.state());
-        let Ok(spec) = markraft_doc::update_composition(base, &text, caret) else {
+        let Ok(spec) = markraft_core::update_composition(base, &text, caret) else {
             return;
         };
         let spec = if specs.is_empty() {

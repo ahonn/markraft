@@ -3,23 +3,45 @@
 //!
 //! One CommonMark schema is shared by every note editor, the query field's
 //! flattening and the vault's codec, so a document read from disk can be handed
-//! to any of them. [`Block`] and [`Inline`] are the application's own names for
+//! to any of them. [`types`] and [`codecs`] are what the editor view needs of
+//! that kind: which types play the roles it draws, and how the clipboard reads
+//! and writes it. [`Block`] and [`Inline`] are the application's own names for
 //! the formats its toolbar and slash menu offer; each resolves to a command from
 //! the editor's catalogue.
 
-use markraft_doc::commands::{Command, command, replace_selection};
-use markraft_doc::projection::Projection;
-use markraft_doc::{
+use markraft_commonmark::{
+    CommonMarkCodecs, commonmark_doc_type_names, commonmark_extensions, commonmark_schema,
+    schema as md,
+};
+use markraft_core::Codecs;
+use markraft_core::commands::{Command, command, replace_selection};
+use markraft_core::projection::Projection;
+use markraft_core::{
     Attrs, EditorState, Extension, Fragment, MarkSet, MarkTypeId, Node, NodeTypeId, Schema, Slice,
 };
-use markraft_markdown::{commonmark_extensions, commonmark_schema, schema as md};
-use std::sync::LazyLock;
+use markraft_gpui::DocTypes;
+use std::sync::{Arc, LazyLock};
 
 static SCHEMA: LazyLock<Schema> = LazyLock::new(commonmark_schema);
+static TYPES: LazyLock<DocTypes> =
+    LazyLock::new(|| DocTypes::from_schema_names(schema(), &commonmark_doc_type_names()));
+static CODECS: LazyLock<Arc<dyn Codecs>> =
+    LazyLock::new(|| Arc::new(CommonMarkCodecs::new(schema().clone())));
 
 /// The document kind every note is written in.
 pub fn schema() -> &'static Schema {
     &SCHEMA
+}
+
+/// Which of the schema's types play the roles the editor view draws and binds
+/// keys to.
+pub fn types() -> &'static DocTypes {
+    &TYPES
+}
+
+/// How the editor's clipboard reads and writes this document kind.
+pub fn codecs() -> Arc<dyn Codecs> {
+    CODECS.clone()
 }
 
 /// The input rules and corrections a CommonMark editor wants.
@@ -40,15 +62,15 @@ pub fn empty() -> Node {
 /// Read a note's body. Nothing is rejected: what the model cannot interpret is
 /// kept verbatim, so a file another editor wrote survives a round trip.
 pub fn from_markdown(source: &str) -> Node {
-    markraft_markdown::from_markdown(schema(), source).unwrap_or_else(|_| empty())
+    markraft_commonmark::from_markdown(schema(), source).unwrap_or_else(|_| empty())
 }
 
 pub fn to_markdown(doc: &Node) -> String {
-    markraft_markdown::to_markdown(schema(), doc)
+    markraft_commonmark::to_markdown(schema(), doc)
 }
 
 pub fn plain_text(doc: &Node) -> String {
-    markraft_markdown::to_plain_text(schema(), doc)
+    markraft_commonmark::to_plain_text(schema(), doc)
 }
 
 fn node(name: &str) -> NodeTypeId {
@@ -79,32 +101,32 @@ pub enum Block {
 impl Block {
     /// The command the toolbar and the slash menu run for this format.
     pub fn command(self) -> Command {
-        let schema = schema();
+        let types = types();
         match self {
             Block::Paragraph => {
-                markraft_gpui::commands::toggle_block(schema, node(md::PARAGRAPH), Attrs::empty())
+                markraft_gpui::commands::toggle_block(types, node(md::PARAGRAPH), Attrs::empty())
             }
             Block::Heading(level) => markraft_gpui::commands::toggle_block(
-                schema,
+                types,
                 node(md::HEADING),
                 Attrs::from_pairs([("level", i64::from(level))]),
             ),
             Block::Code => {
-                markraft_gpui::commands::toggle_block(schema, node(md::CODE_BLOCK), Attrs::empty())
+                markraft_gpui::commands::toggle_block(types, node(md::CODE_BLOCK), Attrs::empty())
             }
-            Block::Quote => markraft_gpui::commands::toggle_quote(schema),
+            Block::Quote => markraft_gpui::commands::toggle_quote(types),
             Block::Ordered => markraft_gpui::commands::toggle_list(
-                schema,
+                types,
                 node(md::ORDERED_LIST),
                 node(md::LIST_ITEM),
             ),
             Block::Bullet => markraft_gpui::commands::toggle_list(
-                schema,
+                types,
                 node(md::BULLET_LIST),
                 node(md::LIST_ITEM),
             ),
             Block::Task => markraft_gpui::commands::toggle_list(
-                schema,
+                types,
                 node(md::BULLET_LIST),
                 node(md::TASK_ITEM),
             ),
@@ -208,7 +230,7 @@ impl Inline {
     }
 
     pub fn command(self) -> Command {
-        markraft_doc::commands::toggle_mark(self.mark(), Attrs::empty())
+        markraft_core::commands::toggle_mark(self.mark(), Attrs::empty())
     }
 
     pub fn is_active(self, marks: &MarkSet) -> bool {
@@ -219,16 +241,16 @@ impl Inline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use markraft_doc::projection::projection_of;
-    use markraft_doc::{EditorStateConfig, Selection, TransactionSpec};
+    use markraft_core::projection::projection_of;
+    use markraft_core::{EditorStateConfig, Selection, TransactionSpec};
 
     fn state_of(source: &str) -> EditorState {
         EditorState::create(
             EditorStateConfig::new(schema().clone())
                 .doc(from_markdown(source))
                 .extensions(Extension::all([
-                    markraft_doc::projection::projection(),
-                    markraft_doc::history(Default::default()),
+                    markraft_core::projection::projection(),
+                    markraft_core::history(Default::default()),
                     extensions(),
                 ])),
         )
@@ -284,13 +306,13 @@ mod tests {
     #[test]
     fn a_block_command_toggles_back_to_a_paragraph() {
         let state = state_of("text");
-        let heading = markraft_doc::commands::run_command(&state, &Block::Heading(1).command())
+        let heading = markraft_core::commands::run_command(&state, &Block::Heading(1).command())
             .expect("the heading applies")
             .expect("a transaction")
             .state()
             .clone();
         assert_eq!(to_markdown(heading.doc()), "# text");
-        let back = markraft_doc::commands::run_command(&heading, &Block::Heading(1).command())
+        let back = markraft_core::commands::run_command(&heading, &Block::Heading(1).command())
             .expect("the heading toggles")
             .expect("a transaction")
             .state()

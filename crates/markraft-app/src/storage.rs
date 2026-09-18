@@ -1,6 +1,6 @@
 //! Local note-library persistence owned by the application, never by the editor.
 use crate::doc;
-use markraft_doc::Node;
+use markraft_core::Node;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,

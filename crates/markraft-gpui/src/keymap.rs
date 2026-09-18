@@ -6,19 +6,21 @@
 //! leaves the list.
 
 use crate::types::DocTypes;
-use markraft_doc::commands::{
+use markraft_core::commands::{
     Command, Direction, chain, command, create_paragraph_near, delete_by_grapheme, delete_by_word,
     delete_selection, exit_code, join_backward, join_forward, lift, lift_empty_block,
     lift_list_item, move_by_grapheme, move_by_word, new_line_in_code, select_node_backward,
     select_node_forward, set_block_type, sink_list_item, split_block_keep_marks, split_list_item,
     toggle_mark, undo_input_rule, wrap_in, wrap_in_list,
 };
-use markraft_doc::projection::projection_of;
-use markraft_doc::{AttrValue, Attrs, Change, EditorState, NodeTypeId, Selection, TransactionSpec};
+use markraft_core::projection::projection_of;
+use markraft_core::{
+    AttrValue, Attrs, Change, EditorState, NodeTypeId, Selection, TransactionSpec,
+};
 
 /// Run `command` only where `pred` holds.
 fn when(pred: impl Fn(&EditorState) -> bool + Send + Sync + 'static, command: Command) -> Command {
-    markraft_doc::commands::command(move |state| pred(state).then(|| command(state)).flatten())
+    markraft_core::commands::command(move |state| pred(state).then(|| command(state)).flatten())
 }
 
 /// One command running `steps` in order, as a single edit.
@@ -28,7 +30,7 @@ fn when(pred: impl Fn(&EditorState) -> bool + Send + Sync + 'static, command: Co
 fn composed(steps: Vec<Command>) -> Command {
     command(move |state| {
         let mut current = state.clone();
-        let mut set: Option<markraft_doc::ChangeSet> = None;
+        let mut set: Option<markraft_core::ChangeSet> = None;
         let mut selection = None;
         let mut event = None;
         for step in &steps {
@@ -70,8 +72,8 @@ fn split_task_item(types: &DocTypes, item: NodeTypeId) -> Command {
             let node = state.doc().node_at(before)?;
             let cleared = node.with_attrs(attrs.with("checked", AttrValue::Bool(false)));
             let slice =
-                markraft_doc::Slice::from_fragment(markraft_doc::Fragment::from_node(cleared));
-            markraft_doc::commands::changes_spec(
+                markraft_core::Slice::from_fragment(markraft_core::Fragment::from_node(cleared));
+            markraft_core::commands::changes_spec(
                 state,
                 vec![Change::replace(before, before + node.node_size(), slice)],
                 "format.block",
@@ -243,7 +245,7 @@ pub(crate) fn indent(types: &DocTypes) -> Command {
         let types = types.clone();
         when(
             move |state| types.in_code_block(state) && state.selection().is_cursor(),
-            markraft_doc::commands::insert_text("\t"),
+            markraft_core::commands::insert_text("\t"),
         )
     };
     let mut list = per_item(types, sink_list_item);
@@ -262,15 +264,15 @@ pub(crate) fn outdent(types: &DocTypes) -> Command {
 pub(crate) fn history(undo: bool) -> Command {
     command(move |state| {
         if undo {
-            markraft_doc::undo(state)
+            markraft_core::undo(state)
         } else {
-            markraft_doc::redo(state)
+            markraft_core::redo(state)
         }
     })
 }
 
 /// Toggle a mark over the selection.
-pub(crate) fn mark(ty: Option<markraft_doc::MarkTypeId>) -> Command {
+pub(crate) fn mark(ty: Option<markraft_core::MarkTypeId>) -> Command {
     match ty {
         Some(ty) => toggle_mark(ty, Attrs::empty()),
         None => command(|_| None),
@@ -348,8 +350,9 @@ fn convert_items(state: &EditorState, types: &DocTypes, item: NodeTypeId) -> Com
                 node.content().clone(),
             )
             .ok()?;
-        let slice = markraft_doc::Slice::from_fragment(markraft_doc::Fragment::from_node(replaced));
-        markraft_doc::commands::changes_spec(
+        let slice =
+            markraft_core::Slice::from_fragment(markraft_core::Fragment::from_node(replaced));
+        markraft_core::commands::changes_spec(
             state,
             vec![Change::replace(before, before + node.node_size(), slice)],
             "format.block",
@@ -372,9 +375,10 @@ pub(crate) fn toggle_task(types: &DocTypes) -> Command {
         let node = state.doc().node_at(before)?;
         let checked = DocTypes::task_checked(&attrs);
         let updated = node.with_attrs(attrs.with("checked", AttrValue::Bool(!checked)));
-        let slice = markraft_doc::Slice::from_fragment(markraft_doc::Fragment::from_node(updated));
+        let slice =
+            markraft_core::Slice::from_fragment(markraft_core::Fragment::from_node(updated));
         // The node keeps its size, so the caret keeps its position.
-        markraft_doc::commands::changes_spec(
+        markraft_core::commands::changes_spec(
             state,
             vec![Change::replace(before, before + node.node_size(), slice)],
             "format.block",
@@ -394,7 +398,7 @@ pub(crate) fn insert_plain(types: &DocTypes, text: &str) -> Command {
     let text = text.to_owned();
     command(move |state| {
         if !text.contains('\n') || types.in_code_block(state) {
-            return markraft_doc::commands::insert_text(&text)(state);
+            return markraft_core::commands::insert_text(&text)(state);
         }
         let schema = state.schema();
         let paragraph = types.paragraph?;
@@ -403,22 +407,22 @@ pub(crate) fn insert_plain(types: &DocTypes, text: &str) -> Command {
             .split('\n')
             .map(|part| {
                 let content = if part.is_empty() {
-                    markraft_doc::Fragment::empty()
+                    markraft_core::Fragment::empty()
                 } else {
-                    markraft_doc::Fragment::from_node(schema.text(part))
+                    markraft_core::Fragment::from_node(schema.text(part))
                 };
                 schema
                     .create(
                         paragraph,
                         attrs.clone(),
-                        markraft_doc::MarkSet::empty(),
+                        markraft_core::MarkSet::empty(),
                         content,
                     )
                     .ok()
             })
             .collect();
-        let slice = markraft_doc::Slice::new(markraft_doc::Fragment::from_nodes(nodes?), 1, 1);
-        markraft_doc::commands::replace_selection(slice)(state)
+        let slice = markraft_core::Slice::new(markraft_core::Fragment::from_nodes(nodes?), 1, 1);
+        markraft_core::commands::replace_selection(slice)(state)
     })
 }
 
@@ -442,27 +446,23 @@ pub(crate) fn select_all(types: &DocTypes) -> Command {
                 );
             }
         }
-        markraft_doc::commands::select_all()(state)
+        markraft_core::commands::select_all()(state)
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typeahead::tests::{at, state_of};
-    use markraft_doc::commands::run_command;
-    use markraft_doc::projection::projection_of;
-    use markraft_markdown::{schema as md, to_markdown};
+    use crate::typeahead::tests::{at, state_of, types_of};
+    use markraft_commonmark::{schema as md, to_markdown};
+    use markraft_core::commands::run_command;
+    use markraft_core::projection::projection_of;
 
     /// Run `command` and give back the Markdown it leaves, or `None` when the
     /// command does not apply.
     fn after(state: &EditorState, command: &Command) -> Option<String> {
         let tr = run_command(state, command)?.expect("a transaction");
         Some(to_markdown(state.schema(), tr.state().doc()))
-    }
-
-    fn types_of(state: &EditorState) -> DocTypes {
-        DocTypes::of(state.schema())
     }
 
     /// The caret at the start of the line holding `needle`.

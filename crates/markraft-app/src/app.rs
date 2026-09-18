@@ -9,7 +9,7 @@ use crate::{
     vault::{External, Store},
 };
 use gpui::{prelude::*, *};
-use markraft_doc::MarkSet;
+use markraft_core::MarkSet;
 use markraft_gpui::{EditorEvent, EditorStyle, EditorView, ExtensionHandle, Setup};
 use std::{
     collections::{HashMap, VecDeque},
@@ -296,6 +296,8 @@ impl NotesApp {
         let editor = cx.new(|cx| {
             EditorView::new(
                 Setup::new(doc::schema().clone())
+                    .types(doc::types().clone())
+                    .codecs(doc::codecs())
                     .extensions(doc::extensions())
                     .doc(document),
                 cx,

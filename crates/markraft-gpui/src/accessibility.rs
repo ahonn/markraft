@@ -1,8 +1,8 @@
 //! AccessKit text coordinates are selectable units, not UTF-16 offsets.
 use crate::surface::LayoutLine;
 use gpui::{A11ySubtreeBuilder, Role, accesskit};
-use markraft_doc::projection::Projection;
-use markraft_doc::{EditorState, Selection};
+use markraft_core::projection::Projection;
+use markraft_core::{EditorState, Selection};
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Default)]

@@ -8,8 +8,8 @@ use crate::{
     motion::{self, Motion, Span},
     state::{Mode, Operator, State},
 };
-use markraft_doc::Selection;
-use markraft_doc::projection::{LineKind, Projection};
+use markraft_core::Selection;
+use markraft_core::projection::{LineKind, Projection};
 use std::ops::Range;
 
 /// Normal mode keeps the cursor on a grapheme, never past the last one of a non-empty
@@ -296,7 +296,7 @@ fn register(state: &State, cx: &mut impl Host) -> Option<Register> {
     match &state.register {
         Some(register) if register.slice == slice => Some(register.clone()),
         _ => Some(Register {
-            text: markraft_doc::projection::slice_to_plain_text(&schema, &slice),
+            text: markraft_core::projection::slice_to_plain_text(&schema, &slice),
             slice,
             linewise: false,
             depth: 0,
@@ -370,14 +370,14 @@ pub(crate) fn open_line(state: &mut State, cx: &mut impl Host, below: bool) {
         // A horizontal rule holds no text to split, so a paragraph is created beside it.
         let pos = line.ancestors.last().map_or(line.from, |own| own.before);
         cx.select(Selection::node(pos), false);
-        cx.run(&markraft_doc::commands::create_paragraph_near());
+        cx.run(&markraft_core::commands::create_paragraph_near());
         return;
     }
     cx.select(
         Selection::cursor(if below { line.to } else { line.from }),
         false,
     );
-    let command = markraft_gpui::commands::enter(&cx.state().schema().clone());
+    let command = markraft_gpui::commands::enter(cx.types());
     if !cx.run(&command) {
         return;
     }
@@ -490,6 +490,6 @@ pub(crate) fn settle(state: &mut State, cx: &mut impl Host, replaced: bool) -> O
 /// Insert text the way the platform delivers it, for a test that has no window.
 #[cfg(test)]
 pub(crate) fn typed(cx: &mut impl Host, text: &str) {
-    let command = markraft_gpui::commands::insert_plain(&cx.state().schema().clone(), text);
+    let command = markraft_gpui::commands::insert_plain(cx.types(), text);
     cx.run(&command);
 }
