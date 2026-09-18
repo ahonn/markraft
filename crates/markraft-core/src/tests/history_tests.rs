@@ -424,3 +424,81 @@ fn the_history_field_round_trips_through_json() {
     let undone = run(&restored, undo(&restored).expect("something to undo"));
     assert_eq!(schema.describe(undone.doc()), r#"doc(paragraph("hello"))"#);
 }
+
+/// What an input method does inside a modal editor's insert session: compose a
+/// candidate, close the composition with the text it settled on, and keep
+/// typing. The session is one entry and undoing it leaves nothing behind.
+#[test]
+fn a_composition_committed_inside_an_explicit_group_undoes_with_it() {
+    let schema = shared_schema();
+    let start = state(
+        doc(&schema, [n(&schema, "paragraph", [t(&schema, "end")])]),
+        Extension::all([history(HistoryConfig::default()), composition()]),
+    );
+    let state = run(
+        &start,
+        TransactionSpec::new()
+            .effect(begin_undo_group().of(()))
+            .time(0),
+    );
+    let state = run(&state, start_composition(CompositionRange::new(4, 4)));
+    let state = run(&state, update_composition(&state, "h", 1).unwrap().time(1));
+    let state = run(&state, update_composition(&state, "hi", 2).unwrap().time(2));
+    assert_eq!(schema.describe(state.doc()), r#"doc(paragraph("endhi"))"#);
+
+    // Closing the composition is its last step, so it says so rather than
+    // starting an entry of its own.
+    let state = run(
+        &state,
+        finish_composition()
+            .user_event(crate::composition::COMPOSE_USER_EVENT)
+            .time(3),
+    );
+    let state = run(&state, typed(&schema, 6, "!", 4));
+    assert_eq!(schema.describe(state.doc()), r#"doc(paragraph("endhi!"))"#);
+
+    let state = run(
+        &state,
+        TransactionSpec::new()
+            .effect(end_undo_group().of(()))
+            .time(5),
+    );
+    assert_eq!(undo_depth(&state), 1, "the whole session is one entry");
+    let undone = run(&state, undo(&state).expect("something to undo"));
+    assert_eq!(
+        schema.describe(undone.doc()),
+        r#"doc(paragraph("end"))"#,
+        "the composed text is gone"
+    );
+    assert_eq!(undo_depth(&undone), 0);
+}
+
+/// A spec that only establishes the range a later one edits must not decide
+/// whether the transaction is recorded.
+#[test]
+fn a_later_spec_has_the_last_word_on_an_annotation() {
+    let schema = shared_schema();
+    let start = history_state(doc(&schema, [n(&schema, "paragraph", [t(&schema, "ab")])]));
+    // The first spec keeps itself out of the history; the second says the
+    // transaction is typing after all, and the transaction is recorded.
+    let state = run(
+        &start,
+        TransactionSpec::new()
+            .selection(Selection::cursor(1))
+            .add_to_history(false),
+    );
+    assert_eq!(undo_depth(&state), 0);
+    let tr = state
+        .update([
+            TransactionSpec::new()
+                .selection(Selection::text(1, 3))
+                .add_to_history(false),
+            typed(&schema, 3, "C", 0).add_to_history(true).sequential(),
+        ])
+        .expect("a valid transaction");
+    assert_eq!(tr.annotation(crate::state::add_to_history()), Some(&true));
+    let state = tr.state().clone();
+    assert_eq!(undo_depth(&state), 1);
+    let undone = run(&state, undo(&state).expect("something to undo"));
+    assert_eq!(schema.describe(undone.doc()), r#"doc(paragraph("ab"))"#);
+}

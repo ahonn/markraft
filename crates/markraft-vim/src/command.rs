@@ -471,13 +471,22 @@ pub(crate) fn settle(state: &mut State, cx: &mut impl Host, replaced: bool) -> O
             anchor
         };
     } else if state.mode == Mode::Normal {
-        let selection = cx.state().selection().clone();
-        // A ranged selection in Normal mode was made with the mouse; leave it alone so
-        // that ⌘C still copies it. The next motion collapses it.
-        if selection.is_cursor() {
+        // A ranged *text* selection in Normal mode was made with the mouse; leave it
+        // alone so that ⌘C still copies it. The next motion collapses it.
+        let ranged = matches!(
+            cx.state().selection(),
+            Selection::Text { anchor, head, .. } if anchor != head
+        );
+        if !ranged {
             let head = host::head(cx);
             let clamped = clamp(&projection, head);
-            if clamped != head {
+            // Normal mode always shows a caret, so a selection it cannot show one
+            // for has to become one: a node or whole-document selection — which
+            // `Selection::near` answers wherever a mapped position is not inline
+            // content — puts the head on a boundary between blocks, where nothing
+            // is painted and no motion starts. A cursor only needs clamping, which
+            // a transaction vim did not make may well have left it needing.
+            if clamped != head || !cx.state().selection().is_cursor() {
                 // The remembered column survives, so `j` down a short line and on keeps
                 // the column it started from.
                 cx.select(Selection::cursor(clamped), true);

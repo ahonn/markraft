@@ -392,9 +392,7 @@ impl<'a> EditorCx<'a> {
             .selection(selection)
             .scroll_into_view()])
         {
-            self.effects
-                .transactions
-                .extend(applied.into_iter().filter(|tr| tr.doc_changed()));
+            self.effects.transactions.extend(applied);
         }
         self.view.upstream = upstream;
         self.view.preferred_x = None;
@@ -462,8 +460,7 @@ impl EditorView {
     /// Window bounds of the caret at `pos`, from the layout of the frame that last
     /// painted. `None` before the first paint.
     pub fn caret_bounds(&self, pos: usize) -> Option<Bounds<Pixels>> {
-        let (index, offset) = self.projection().pos_to_line_offset(pos)?;
-        let row = self.layout.get(index)?;
+        let (row, offset) = self.row_at(pos)?;
         Some(Bounds::new(
             row.caret(offset, false),
             size(px(0.), row.line_height),
@@ -613,13 +610,10 @@ impl EditorView {
             notify,
             selected,
         } = effects;
-        let edits: Vec<Transaction> = transactions
-            .into_iter()
-            .filter(|tr| tr.doc_changed())
-            .collect();
+        let changed = transactions.iter().any(Transaction::doc_changed);
         // The edit is published before the extension's own events, so a host that
         // closes its popovers on a document change cannot undo what the event asks for.
-        if edits.is_empty() {
+        if !changed {
             if selected {
                 self.reset_caret_blink(cx);
             }
@@ -636,16 +630,20 @@ impl EditorView {
         for event in events {
             cx.emit(event);
         }
-        let mut updates: Vec<Update> = edits
+        // Every applied transaction owes the extensions a round, whether or not it
+        // touched the document: one that only moved the selection — an undo
+        // restoring where the caret was, another extension's edit — is exactly
+        // what a modal extension has to settle.
+        let mut updates: Vec<Update> = transactions
             .into_iter()
             .map(|transaction| Update {
+                committed: transaction.doc_changed(),
                 transactions: vec![transaction],
-                committed: true,
                 ..Update::default()
             })
             .collect();
-        // A move with no edit still owes the extensions a round; `selection_moved` is
-        // derived there, so the round carries no other news.
+        // A move with no transaction of its own still owes them one;
+        // `selection_moved` is derived there, so the round carries no other news.
         if updates.is_empty() && selected {
             updates.push(Update::default());
         }

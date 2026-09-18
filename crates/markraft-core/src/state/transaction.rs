@@ -13,6 +13,15 @@
 //! ([`ChangeSet::transform`]) and composes; combining a sequential one simply
 //! composes. Selections and effects are mapped through whichever side they did
 //! not travel with, so a spec's own positions always mean what it wrote.
+//!
+//! # Annotations
+//!
+//! A later spec's annotation replaces an earlier spec's annotation of the same
+//! type, exactly as its selection replaces the earlier selection. An annotation
+//! therefore describes the *transaction*, not the spec it was written on:
+//! [`TransactionSpec::add_to_history`] keeps a whole transaction out of the
+//! undo history and must only be set by a caller that means all of it. A spec
+//! that merely establishes the range a later one edits leaves it alone.
 
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -295,7 +304,9 @@ impl Transaction {
 
     /// The value of an annotation of the given type, if present.
     ///
-    /// When several specs annotated the same type, the first one wins.
+    /// Within one spec the first of several annotations of a type wins. Across
+    /// specs the later spec's annotation replaced the earlier one when they
+    /// were merged, so what is left here is already the winner.
     pub fn annotation<T: Send + Sync + 'static>(&self, ty: &AnnotationType<T>) -> Option<&T> {
         self.0.annotations.iter().find_map(|a| a.value(ty))
     }
@@ -433,7 +444,16 @@ fn merge(
     };
     let mut effects = StateEffect::map_all(&a.effects, &map_for_a);
     effects.extend(StateEffect::map_all(&b.effects, &map_for_b));
+    // A later spec has the last word on any annotation it sets, so a spec can
+    // amend what an earlier one said rather than being shadowed by it. This is
+    // what keeps `add_to_history(false)` on a spec that only establishes a
+    // selection from deciding the whole transaction.
     let mut annotations = a.annotations;
+    annotations.retain(|earlier| {
+        !b.annotations
+            .iter()
+            .any(|later| later.type_id() == earlier.type_id())
+    });
     annotations.extend(b.annotations);
     Ok(Resolved {
         changes,

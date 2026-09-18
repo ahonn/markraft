@@ -63,6 +63,14 @@ pub struct Annotation {
 }
 
 impl Annotation {
+    /// The id of this annotation's type.
+    ///
+    /// Two annotations with the same id annotate the same thing, which is what
+    /// lets one replace the other when specs are merged.
+    pub fn type_id(&self) -> u64 {
+        self.ty
+    }
+
     /// Whether this annotation has the given type.
     pub fn is<T: Send + Sync + 'static>(&self, ty: &AnnotationType<T>) -> bool {
         self.ty == ty.id

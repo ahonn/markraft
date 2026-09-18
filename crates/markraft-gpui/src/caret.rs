@@ -2,8 +2,11 @@ use std::time::Duration;
 
 pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
-/// A composition or selected range pauses blinking. Restarting an input session
-/// always exposes the caret before waiting for the first timer tick.
+/// A composition or selected range pauses blinking, and a caret that covers the
+/// grapheme it rests on never blinks at all: a block or underline caret is a
+/// modal editor's cursor, which is steady, and blinking one hides the character
+/// under it. Restarting an input session always exposes the caret before waiting
+/// for the first timer tick.
 #[derive(Default)]
 pub(crate) struct CaretBlink {
     pub(crate) visible: bool,
@@ -11,9 +14,15 @@ pub(crate) struct CaretBlink {
 }
 
 impl CaretBlink {
-    pub(crate) fn reset(&mut self, focused: bool, composing: bool, selection_empty: bool) -> bool {
+    pub(crate) fn reset(
+        &mut self,
+        focused: bool,
+        composing: bool,
+        selection_empty: bool,
+        steady: bool,
+    ) -> bool {
         self.visible = true;
-        self.enabled = focused && !composing && selection_empty;
+        self.enabled = focused && !composing && selection_empty && !steady;
         self.enabled
     }
 
@@ -32,11 +41,11 @@ mod tests {
     #[test]
     fn input_reveals_a_hidden_caret_before_blinking_resumes() {
         let mut caret = CaretBlink::default();
-        assert!(caret.reset(true, false, true));
+        assert!(caret.reset(true, false, true, false));
         assert!(caret.visible);
         assert!(caret.tick());
         assert!(!caret.visible);
-        assert!(caret.reset(true, false, true));
+        assert!(caret.reset(true, false, true, false));
         assert!(caret.visible);
         assert!(caret.tick());
         assert!(!caret.visible);
@@ -45,20 +54,23 @@ mod tests {
     }
 
     #[test]
-    fn composition_selection_and_inactive_sessions_pause_the_timer() {
+    fn composition_selection_steady_shapes_and_inactive_sessions_pause_the_timer() {
         let mut caret = CaretBlink::default();
-        for (focused, composing, empty) in [
-            (true, true, true),
-            (true, false, false),
-            (false, false, true),
+        for (focused, composing, empty, steady) in [
+            (true, true, true, false),
+            (true, false, false, false),
+            (false, false, true, false),
+            // A block or underline caret is steady, so it never blinks away
+            // from the grapheme it covers.
+            (true, false, true, true),
         ] {
-            assert!(!caret.reset(focused, composing, empty));
+            assert!(!caret.reset(focused, composing, empty, steady));
             for _ in 0..3 {
                 assert!(!caret.tick());
                 assert!(caret.visible);
             }
         }
-        assert!(caret.reset(true, false, true));
+        assert!(caret.reset(true, false, true, false));
         assert!(caret.tick());
         assert!(!caret.visible);
     }

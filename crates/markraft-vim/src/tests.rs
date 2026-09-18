@@ -180,6 +180,33 @@ impl Keys {
         keys
     }
 
+    /// A transaction from outside vim — the platform's input handler, an
+    /// extension, a click. Vim's `update` hook sees it, exactly as it does live.
+    fn external(&mut self, specs: Vec<TransactionSpec>) -> &mut Self {
+        self.host.dispatch(specs);
+        self.settle();
+        self
+    }
+
+    /// What an input method does: mark a candidate, then commit it. The specs
+    /// are the ones the view's own input handler builds.
+    fn composed(&mut self, text: &str) -> &mut Self {
+        let head = host::head(&self.host);
+        let start =
+            markraft_core::start_composition(markraft_core::CompositionRange::new(head, head));
+        self.external(vec![start]);
+        let update =
+            markraft_core::update_composition(self.host.state(), text, text.chars().count())
+                .expect("a composition update");
+        self.external(vec![update]);
+        assert!(markraft_core::is_composing(self.host.state()));
+        let types = crate::host::Host::types(&self.host).clone();
+        let specs = markraft_gpui::ime::commit_specs(self.host.state(), &types, None, text);
+        self.external(specs);
+        assert!(!markraft_core::is_composing(self.host.state()));
+        self
+    }
+
     /// The Return key, which is the editor's own Enter chain.
     fn enter(&mut self) -> &mut Self {
         let command = markraft_gpui::commands::enter(&self.host.types.clone());
@@ -962,4 +989,120 @@ fn a_paste_into_a_code_block_stays_literal() {
     keys.keys("v$y");
     keys.keys("j$p");
     assert_eq!(keys.markdown(), "**bold**\n\n```rust\nxbold\n```");
+}
+
+/// The block caret is painted from the editor's own selection, so leaving
+/// Insert at a line end has to put *that* on the last grapheme, not only vim's
+/// notion of the cursor.
+#[test]
+fn escape_at_a_line_end_leaves_the_caret_on_the_last_grapheme() {
+    let mut keys = Keys::new("end").at(0, 0);
+    keys.keys("A").typed("hi").keys("<esc>");
+    assert_eq!(keys.text(), "endhi");
+    assert_eq!(keys.line_col(), (0, 4));
+    assert_eq!(
+        keys.caret(),
+        (0, 4),
+        "the editor's caret, which the block covers"
+    );
+    // The same by way of `o`, which is how a session usually starts.
+    let mut keys = Keys::new("end").at(0, 0);
+    keys.keys("o").typed("hi").keys("<esc>");
+    assert_eq!(keys.text(), "end\nhi");
+    assert_eq!(keys.line_col(), (1, 1));
+    assert_eq!(keys.caret(), (1, 1));
+    // And on a line the session left empty, where there is no grapheme to rest
+    // on at all.
+    let mut keys = Keys::new("end").at(0, 0);
+    keys.keys("o").keys("<esc>");
+    assert_eq!(keys.line_col(), (1, 0));
+    assert_eq!(keys.caret(), (1, 0));
+}
+
+// ---------------------------------------------------------------- input method
+
+/// The live repro: `o`, a composed candidate the input method commits, then
+/// Escape. The caret has to end up on the committed character, inside the line.
+#[test]
+fn escape_after_an_input_method_commit_lands_on_the_committed_character() {
+    let mut keys = Keys::new("end").at(0, 0);
+    keys.keys("o").composed("h").keys("<esc>");
+    assert_eq!(keys.text(), "end\nh");
+    assert_eq!(keys.state.mode, Mode::Normal);
+    assert_eq!(keys.line_col(), (1, 0));
+    assert_eq!(keys.caret(), (1, 0), "the caret the block is painted from");
+    let head = host::head(&keys.host);
+    let projection = keys.host.projection();
+    assert!(
+        projection.is_caret_position(head),
+        "the caret sits in a textblock"
+    );
+    // And it moves from there the way Normal mode expects.
+    assert_eq!(keys.keys("k").line_col(), (0, 0));
+    assert_eq!(keys.keys("j").line_col(), (1, 0));
+}
+
+/// The same, with more than one character, so the step back is visible.
+#[test]
+fn escape_after_a_longer_commit_steps_back_one_grapheme() {
+    let mut keys = Keys::new("end").at(0, 0);
+    keys.keys("o").composed("hi").keys("<esc>");
+    assert_eq!(keys.text(), "end\nhi");
+    assert_eq!(keys.line_col(), (1, 1));
+    assert_eq!(keys.caret(), (1, 1));
+}
+
+/// A transaction vim did not make — an undo restoring a selection, an
+/// extension's edit, a click — may leave the caret past the last grapheme.
+/// Normal mode never rests there, so settling has to pull it back.
+#[test]
+fn an_external_selection_at_a_line_end_is_settled_onto_the_last_grapheme() {
+    let mut keys = Keys::new("end").at(0, 0);
+    let end = keys.host.projection().lines()[0].to;
+    keys.external(vec![
+        TransactionSpec::new().selection(Selection::cursor(end)),
+    ]);
+    assert_eq!(keys.line_col(), (0, 2));
+    assert_eq!(keys.caret(), (0, 2), "the caret the block is painted from");
+}
+
+/// Undo restores the selection from before the entry, which may sit at a line
+/// end; Normal mode settles it the same way.
+#[test]
+fn the_caret_after_an_undo_rests_on_a_grapheme() {
+    let mut keys = Keys::new("end").at(0, 0);
+    keys.keys("A").typed("hi").keys("<esc>");
+    assert_eq!(keys.text(), "endhi");
+    keys.keys("u");
+    assert_eq!(keys.text(), "end");
+    assert_eq!(keys.line_col(), (0, 2));
+    assert_eq!(keys.caret(), (0, 2));
+}
+
+/// A transaction from outside vim may leave a selection that is not a text
+/// cursor at all — `Selection::near` answers a node selection wherever the
+/// position it was given is not inline content. Normal mode has no caret there,
+/// so settling has to collapse it onto a grapheme.
+#[test]
+fn an_external_node_selection_is_settled_into_the_text() {
+    let mut keys = Keys::new("one\n\n***\n\ntwo").at(0, 0);
+    let rule = keys.host.projection().lines()[1]
+        .ancestors
+        .last()
+        .expect("the rule's own node")
+        .before;
+    keys.external(vec![
+        TransactionSpec::new().selection(Selection::node(rule)),
+    ]);
+    let head = host::head(&keys.host);
+    let projection = keys.host.projection();
+    assert!(
+        projection.line_at(head).is_some(),
+        "the caret sits in a line, not on a boundary between blocks"
+    );
+    assert!(keys.host.state().selection().is_cursor());
+    // A rule holds no text, so resting on it is what vim intends there; the
+    // caret is still somewhere the view can paint and a motion can start from.
+    assert_eq!(keys.line_col(), (1, 0));
+    assert_eq!(keys.keys("k").line_col(), (0, 0));
 }

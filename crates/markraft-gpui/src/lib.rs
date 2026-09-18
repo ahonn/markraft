@@ -13,7 +13,7 @@ mod completion;
 mod emoji;
 mod extension;
 mod format_state;
-mod ime;
+pub mod ime;
 mod keymap;
 mod links;
 mod single_line;
@@ -413,6 +413,17 @@ impl EditorView {
             single_line: self.single_line,
         }
     }
+    /// The laid-out row holding `pos`, and the `char` offset into it.
+    ///
+    /// Found by asking the rows, not by taking a line index from the projection
+    /// and indexing `layout` with it: the layout is one frame's work and the
+    /// projection is the live document, and a lookup that assumes they agree
+    /// silently answers for the wrong row when they do not.
+    pub(crate) fn row_at(&self, pos: usize) -> Option<(&LayoutLine, usize)> {
+        let row = self.layout.iter().find(|row| row.contains(pos))?;
+        Some((row, pos - row.from))
+    }
+
     /// The caret, or the moving end of a range.
     pub fn head(&self) -> usize {
         self.state.selection().head(self.state.doc())
@@ -564,6 +575,14 @@ impl EditorView {
         }
     }
 
+    /// Take back the text an input method has not committed.
+    ///
+    /// The whole transaction stays out of the history — unlike a commit, which
+    /// belongs in it — because the candidate was never the user's text. No
+    /// later spec sets the annotation, so it describes all of it, which is what
+    /// the merge rule requires. The history rebases what it holds through the
+    /// deletion instead, so an undo group this cancel sits inside still undoes
+    /// to the document it started from.
     pub fn cancel_composition(&mut self, cx: &mut Context<Self>) {
         let Some(range) = markraft_core::composition_range(&self.state) else {
             return;
@@ -610,11 +629,8 @@ impl EditorView {
         let ty = self.types.link?;
         let pos = self.hit(point);
         let (range, mark) = links::link_at(self.state.doc(), ty, pos)?;
-        let (index, _) = self.projection.pos_to_line_offset(range.start)?;
-        let line = self.projection.line(index)?;
-        self.layout
-            .get(index)?
-            .rectangles(range.start - line.from..range.end - line.from, false)
+        let (row, offset) = self.row_at(range.start)?;
+        row.rectangles(offset..range.end - row.from, false)
             .iter()
             .any(|bounds| bounds.contains(&point))
             .then(|| {
@@ -681,17 +697,15 @@ impl EditorView {
             self.state.selection().from(doc),
             self.state.selection().to(doc),
         );
-        let (index, offset) = self.projection.pos_to_line_offset(start)?;
-        let line = self.projection.line(index)?;
-        let row = self.layout.get(index)?;
+        let (row, offset) = self.row_at(start)?;
         let range = if start != end {
-            offset..(end.min(line.to) - line.from)
+            offset..(end.min(row.to()) - row.from)
         } else if let Some((span, _)) = self
             .types
             .link
             .and_then(|ty| links::link_at(doc, ty, start))
         {
-            span.start - line.from..span.end - line.from
+            span.start.max(row.from) - row.from..span.end.min(row.to()) - row.from
         } else {
             offset..offset
         };
@@ -770,6 +784,7 @@ impl EditorView {
             self.caret_focused,
             self.is_composing(),
             self.state.selection().is_empty(doc),
+            self.extension_caret() != CaretShape::Bar,
         ) {
             return;
         }
@@ -845,13 +860,8 @@ impl EditorView {
     fn hit_upstream(&self, target: Point<Pixels>) -> (usize, bool) {
         let pos = self.hit(target);
         let upstream = self
-            .projection
-            .pos_to_line_offset(pos)
-            .and_then(|(index, offset)| {
-                self.layout
-                    .get(index)
-                    .map(|row| row.caret(offset, false).y > target.y)
-            })
+            .row_at(pos)
+            .map(|(row, offset)| row.caret(offset, false).y > target.y)
             .unwrap_or(false);
         (pos, upstream)
     }
@@ -871,8 +881,7 @@ impl EditorView {
     /// first paint, when there is no layout to walk.
     pub(crate) fn visual_row_target(&self, delta: isize) -> Option<(usize, Pixels, bool)> {
         let head = self.head();
-        let (index, offset) = self.projection.pos_to_line_offset(head)?;
-        let row = self.layout.get(index)?;
+        let (row, offset) = self.row_at(head)?;
         let caret = row.caret(offset, self.upstream);
         let x = self.preferred_x.unwrap_or(caret.x);
         let centers = self.visual_row_centers();
@@ -892,8 +901,7 @@ impl EditorView {
     /// The start or end of the caret's visual row. A wrapped block has several.
     pub(crate) fn line_edge_target(&self, end: bool) -> Option<(usize, bool)> {
         let head = self.head();
-        let (index, offset) = self.projection.pos_to_line_offset(head)?;
-        let row = self.layout.get(index)?;
+        let (row, offset) = self.row_at(head)?;
         let caret = row.caret(offset, self.upstream);
         Some(self.hit_upstream(point(
             if end {
@@ -1012,8 +1020,7 @@ impl EditorView {
         }
         let position = self.hit(event.position);
         // Task markers are presentation outside the text coordinate space.
-        if let Some((index, _)) = self.projection.pos_to_line_offset(position)
-            && let Some(row) = self.layout.get(index)
+        if let Some((row, _)) = self.row_at(position)
             && row
                 .marker_bounds()
                 .is_some_and(|bounds| bounds.contains(&event.position))

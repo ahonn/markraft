@@ -160,6 +160,25 @@ pub(crate) struct LayoutLine {
 }
 
 impl LayoutLine {
+    /// The document position just past the line's own content.
+    pub(crate) fn to(&self) -> usize {
+        self.from + self.char_len
+    }
+
+    /// Whether `pos` falls inside this line.
+    ///
+    /// This is what decides which row draws the caret. Asking the row rather
+    /// than asking the projection for a line index and comparing it to
+    /// [`LayoutLine::index`] is deliberate: a layout is shaped from one
+    /// projection and painted against whatever the view holds when the frame
+    /// comes, and if those two ever disagree — a row list left over from a
+    /// document with fewer lines — an index comparison attributes the caret to
+    /// a row that stands for a different line and draws it there. A row that
+    /// only ever answers for its own token range cannot.
+    pub(crate) fn contains(&self, pos: usize) -> bool {
+        pos >= self.from && pos <= self.to()
+    }
+
     /// How many visual rows the line occupies.
     pub(crate) fn visual_rows(&self) -> usize {
         self.rows.iter().map(LayoutRow::visual_rows).sum()
@@ -1069,10 +1088,7 @@ impl Element for EditorSurface {
         let single_line_scroll_x = if view.single_line {
             rows.first()
                 .map(|row| {
-                    let offset = view
-                        .projection()
-                        .pos_to_line_offset(head)
-                        .map_or(0, |(_, o)| o);
+                    let offset = head.saturating_sub(row.from).min(row.char_len);
                     crate::single_line::scroll_offset(
                         view.single_line_scroll_x,
                         row.caret(offset, view.upstream).x - bounds.left(),
@@ -1116,10 +1132,11 @@ impl Element for EditorSurface {
                 if editor.single_line {
                     return;
                 }
-                let projection = editor.projection();
-                if let Some((index, offset)) = projection.pos_to_line_offset(editor.head())
-                    && let Some(row) = rows.get(index)
-                {
+                let head = editor.head();
+                if let Some((row, offset)) = rows.iter().find(|row| row.contains(head)).map(|row| {
+                    let offset = head - row.from;
+                    (row, offset)
+                }) {
                     let caret = row.caret(offset, editor.upstream);
                     let viewport = editor.scroll.bounds();
                     let margin = px(12.);
@@ -1166,10 +1183,10 @@ impl Element for EditorSurface {
         let caret_visible = editor.caret_blink.visible && window.is_window_active();
         let caret_shape = editor.extension_caret();
         // The grapheme the caret rests on, for the shapes that cover one.
+        // The row that draws the caret keeps this only while it stays inside it.
         let caret_next = (caret_shape != CaretShape::Bar && a == b)
             .then(|| projection.next_grapheme_boundary(caret_pos))
-            .flatten()
-            .filter(|next| projection.line_at(*next) == projection.line_at(caret_pos));
+            .flatten();
         let focus = editor.focus.clone();
         let upstream = editor.upstream;
         let style = editor.style.clone();
@@ -1181,7 +1198,6 @@ impl Element for EditorSurface {
             cx,
         );
         for row in rows.iter() {
-            let line = &projection.lines()[row.index];
             for inner in &row.rows {
                 for code in &inner.inline_code {
                     // A pill shorter than the line.
@@ -1247,10 +1263,10 @@ impl Element for EditorSurface {
                 paint_code_header(self, row, header, &style, window, cx);
             }
             if a != b {
-                let from = a.saturating_sub(line.from);
-                let to = b.saturating_sub(line.from);
-                if b > line.from && a <= line.to {
-                    let spans_next = b > line.to;
+                let from = a.saturating_sub(row.from);
+                let to = b.saturating_sub(row.from);
+                if b > row.from && a <= row.to() {
+                    let spans_next = b > row.to();
                     for rect in row.rectangles(from..to.min(row.char_len), spans_next) {
                         window.paint_quad(fill(
                             rect,
@@ -1317,22 +1333,18 @@ impl Element for EditorSurface {
                 }
             }
             if let Some((start, end)) = marked
-                && end > line.from
-                && start <= line.to
+                && end > row.from
+                && start <= row.to()
             {
-                let from = start.saturating_sub(line.from);
-                let to = (end.saturating_sub(line.from)).min(row.char_len);
+                let from = start.saturating_sub(row.from);
+                let to = (end.saturating_sub(row.from)).min(row.char_len);
                 for mut rect in row.rectangles(from..to, false) {
                     rect.origin.y += rect.size.height - px(2.);
                     rect.size.height = px(1.5);
                     window.paint_quad(fill(rect, style.marker));
                 }
             }
-            if focused
-                && caret_visible
-                && a == b
-                && projection.line_at(caret_pos) == Some(row.index)
-            {
+            if focused && caret_visible && a == b && row.contains(caret_pos) {
                 let mut color = style.marker;
                 if caret_shape == CaretShape::Block {
                     color.a = BLOCK_CARET_ALPHA;
@@ -1340,8 +1352,10 @@ impl Element for EditorSurface {
                 window.paint_quad(fill(
                     caret_quad(
                         row,
-                        caret_pos - line.from,
-                        caret_next.map(|next| next - line.from),
+                        caret_pos - row.from,
+                        caret_next
+                            .filter(|next| row.contains(*next))
+                            .map(|next| next - row.from),
                         upstream,
                         caret_shape,
                     ),
@@ -1501,4 +1515,102 @@ fn paint_code_header(
             cx.stop_propagation();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LayoutLine;
+    use crate::typeahead::tests::state_of;
+    use gpui::{Pixels, point, px};
+    use markraft_core::projection::projection_of;
+
+    /// A row carrying only the token range it stands for, which is all the
+    /// caret and selection geometry decides with.
+    fn probe(index: usize, from: usize, char_len: usize) -> LayoutLine {
+        LayoutLine {
+            index,
+            from,
+            char_len,
+            rows: Vec::new(),
+            origin: point(px(0.), px(0.)),
+            line_height: px(10.),
+            height: px(10.),
+            width: px(100.),
+            top_gap: Pixels::ZERO,
+            code_pos: None,
+            marker: None,
+            decoration: None,
+            code_header: None,
+            code_hitboxes: None,
+        }
+    }
+
+    /// The rows a document's projection would be laid out into, as ranges.
+    fn rows_of(source: &str) -> Vec<LayoutLine> {
+        let state = state_of(source);
+        let projection = projection_of(&state);
+        projection
+            .lines()
+            .iter()
+            .enumerate()
+            .map(|(index, line)| probe(index, line.from, line.len()))
+            .collect()
+    }
+
+    /// The document the live session ended with: every shape that makes a row
+    /// stand for something other than one plain paragraph — a multi-row code
+    /// block, a leaf block with no text, an empty paragraph — followed by the
+    /// line holding the caret.
+    const SHAPE: &str = "# Head\n\npara\n\n- a\n- b\n- [ ] c\n- [x] d\n\n1. x\n1. y\n\n\
+                         > - q\n\n```rust\na\nb\nc\n```\n\n---\n\nLast paragraph\n\n\
+                         h\n\nh\n\nh\n\nh\n\n<br>\n\nh";
+
+    #[test]
+    fn exactly_one_row_holds_any_caret_position() {
+        let rows = rows_of(SHAPE);
+        assert!(rows.len() > 15, "the shape lays out as many rows");
+        let last = rows.last().expect("a last row");
+        for pos in 0..=last.to() {
+            let holding: Vec<usize> = rows
+                .iter()
+                .filter(|row| row.contains(pos))
+                .map(|row| row.index)
+                .collect();
+            assert!(
+                holding.len() <= 1,
+                "position {pos} is claimed by rows {holding:?}"
+            );
+        }
+    }
+
+    /// The bug the live smoke test found: the caret on the document's last line
+    /// was painted five rows above it. The row that draws it is the one whose
+    /// own range holds the caret, so it can only ever be the right one.
+    #[test]
+    fn the_caret_on_the_last_line_belongs_to_the_last_row() {
+        let rows = rows_of(SHAPE);
+        let last = rows.last().expect("a last row").clone();
+        assert_eq!(last.char_len, 1, "the last line holds one character");
+        for caret in [last.from, last.to()] {
+            let drawn: Vec<usize> = rows
+                .iter()
+                .filter(|row| row.contains(caret))
+                .map(|row| row.index)
+                .collect();
+            assert_eq!(drawn, vec![last.index], "caret {caret}");
+        }
+    }
+
+    /// A layout left over from a document with fewer lines draws no caret at
+    /// all rather than drawing it on whichever row happens to share an index.
+    #[test]
+    fn a_stale_layout_draws_no_caret_rather_than_the_wrong_one() {
+        let rows = rows_of(SHAPE);
+        let caret = rows.last().expect("a last row").to();
+        let stale = &rows[..rows.len() - 5];
+        assert!(
+            stale.iter().all(|row| !row.contains(caret)),
+            "a row that does not hold the caret never draws it"
+        );
+    }
 }
