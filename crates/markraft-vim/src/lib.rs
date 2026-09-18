@@ -30,6 +30,36 @@
 //! - Deleting everything leaves the smallest document the schema allows.
 //! - In Normal mode the cursor sits on a grapheme, never past the last one of a
 //!   non-empty line; it is clamped after every command and whenever the editor moves it.
+//! - A table is the one place where the line is not the projection line: there it is
+//!   the row, which the next section is about.
+//!
+//! # Tables
+//!
+//! The projection gives every cell a line of its own, in row-major order, but vim's
+//! line inside a table is the *row*. A row is what can be taken out and put back; a row
+//! with fewer cells than the header is a table no content rule can reject, no command
+//! can put right and nothing but undo can undo.
+//!
+//! - `dd` takes the row, and the table with it when it is the only one. `yy` takes the
+//!   row whole, and `p` and `P` put one back below and above the cursor's row. That
+//!   same register pasted where there is no table becomes a table of its own, and
+//!   anything that is not a row pasted inside one lands beside the table.
+//! - `cc` is the exception: it clears the *cell*. Emptying every cell of a row is a
+//!   great deal to ask of a keystroke that in vim never leaves the text it is on, and
+//!   `dd` is there for the row itself.
+//! - `o` and `O` add a row below or above and begin Insert mode in the same column.
+//!   They are not Enter here: Enter inside a cell steps to the row below and appends
+//!   one at the bottom of the table, which is right for Enter and not for `o`.
+//! - `j` and `k` step rows, keeping the column, and leave the table at its edges
+//!   rather than appending a row there; `h` and `l` step into the cell beside when the
+//!   cursor is at a cell's own edge, and stop at the table's; `w`, `b` and `e` cross
+//!   cells exactly as they cross lines; `0`, `^` and `$` act on the cell; `gg` and `G`
+//!   count lines, so in a table they count cells.
+//! - A count counts rows: `2dd` takes two of them, and stops at the last one rather
+//!   than reaching out of the grid.
+//! - `V` selects the whole row. `d`, `c` and `x` refuse a charwise selection that
+//!   spans two cells — the one edit that would merge them — and leave both the
+//!   document and the selection alone; a yank changes nothing and is free to span it.
 //!
 //! # Words
 //!
@@ -63,13 +93,15 @@
 //!
 //! # Not implemented
 //!
-//! `.`, text objects, marks, macros, named registers, search and `:` commands.
+//! `.`, `J`, text objects, marks, macros, named registers, search and `:` commands.
+//! Nothing joins two lines, so nothing can join two table rows either.
 
 mod command;
 mod edit;
 mod host;
 mod motion;
 mod state;
+mod table;
 #[cfg(test)]
 mod tests;
 

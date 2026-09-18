@@ -7,9 +7,11 @@ use crate::{
     edit::{self, Register},
     motion::{self, Motion, Span},
     state::{Mode, Operator, State},
+    table,
 };
 use markraft_core::Selection;
 use markraft_core::projection::{LineKind, Projection};
+use markraft_gpui::DocTypes;
 use std::ops::Range;
 
 /// Normal mode keeps the cursor on a grapheme, never past the last one of a non-empty
@@ -48,6 +50,7 @@ pub(crate) fn cursor(state: &State, cx: &impl Host) -> usize {
 /// The selection a visual mode shows for an anchor and a cursor, keeping its direction
 /// so that the caret stays at the moving end.
 fn visual_selection(
+    types: &DocTypes,
     projection: &Projection,
     anchor: usize,
     cursor: usize,
@@ -56,7 +59,9 @@ fn visual_selection(
     if linewise {
         let a = motion::line_of(projection, anchor);
         let b = motion::line_of(projection, cursor);
-        let (first, last) = (a.min(b), a.max(b));
+        // A table row is the line here, so `V` on a cell shows the whole row.
+        let lines = table::whole_rows(types, projection, a.min(b)..a.max(b) + 1);
+        let (first, last) = (lines.start, lines.end.saturating_sub(1));
         let start = motion::line_start(projection, first);
         let end = motion::line_end(projection, last);
         return if b >= a {
@@ -81,6 +86,7 @@ fn move_cursor(state: &State, cx: &mut impl Host, target: usize) {
     let projection = cx.projection();
     let selection = if state.mode.is_visual() {
         visual_selection(
+            cx.types(),
             &projection,
             state.visual_anchor,
             target,
@@ -117,6 +123,19 @@ pub(crate) fn motion(state: &mut State, cx: &mut impl Host, motion: Motion) {
     {
         target = motion::line_end(&projection, motion::line_of(&projection, from));
     }
+    // At a cell's edge `h` and `l` step into the cell beside it, which is where the
+    // previous or next line is. Only as bare motions: `dl` and `dh` still take the
+    // grapheme they are on, because a range that reached into another cell could not
+    // be deleted without merging the two.
+    if operator.is_none()
+        && let Some(crossed) = match motion {
+            Motion::Left => table::cross_cell(cx.types(), &projection, from, false),
+            Motion::Right => table::cross_cell(cx.types(), &projection, from, true),
+            _ => None,
+        }
+    {
+        target = crossed;
+    }
     let Some(operator) = operator else {
         move_cursor(state, cx, target);
         return;
@@ -135,14 +154,21 @@ pub(crate) fn motion(state: &mut State, cx: &mut impl Host, motion: Motion) {
 
 /// `j` and `k`. They follow visual rows in Normal and charwise Visual mode, where the
 /// caret is somewhere in a wrapped line; with an operator pending and in Visual Line
-/// mode they are linewise, so `dj` takes two whole lines however they wrap.
+/// mode they are linewise, so `dj` takes two whole lines however they wrap. Inside a
+/// table they step rows, keeping the column, and leave the table at its edges.
 pub(crate) fn vertical(state: &mut State, cx: &mut impl Host, delta: isize) {
     let operator = state.pending.operator();
     let count = state.pending.take();
+    let rows = delta.saturating_mul(count as isize);
+    let projection = cx.projection();
+    let from = cursor(state, cx);
+    // A table row is the line, so `j` and `k` step whole rows keeping the column, and
+    // leave the table at its edges. Without this they would follow visual rows, which
+    // inside a table means walking along one row's cells.
+    let in_table = table::row_step(cx.types(), &projection, from, rows);
     if operator.is_some() || state.mode == Mode::VisualLine {
-        let projection = cx.projection();
-        let from = cursor(state, cx);
-        let target = motion::target(&projection, from, Motion::LineDelta(delta), count);
+        let target = in_table
+            .unwrap_or_else(|| motion::target(&projection, from, Motion::LineDelta(delta), count));
         match operator {
             Some(operator) => {
                 let lines = motion::line_range(&projection, from, target);
@@ -152,7 +178,10 @@ pub(crate) fn vertical(state: &mut State, cx: &mut impl Host, delta: isize) {
         }
         return;
     }
-    let rows = delta.saturating_mul(count as isize);
+    if let Some(target) = in_table {
+        move_cursor(state, cx, target);
+        return;
+    }
     if state.mode != Mode::Visual {
         cx.rows(rows, false);
         return;
@@ -164,7 +193,7 @@ pub(crate) fn vertical(state: &mut State, cx: &mut impl Host, delta: isize) {
     cx.rows(rows, true);
     let projection = cx.projection();
     let target = cursor(state, cx);
-    let selection = visual_selection(&projection, state.visual_anchor, target, false);
+    let selection = visual_selection(cx.types(), &projection, state.visual_anchor, target, false);
     if selection != *cx.state().selection() {
         cx.select(selection, false);
     }
@@ -176,6 +205,14 @@ fn yank(state: &mut State, cx: &mut impl Host, register: Register) {
 }
 
 fn charwise(state: &mut State, cx: &mut impl Host, operator: Operator, range: Range<usize>) {
+    // A range reaching from one cell into another cannot be replaced: doing so would
+    // merge the two and leave their rows short. Core's `guard_cell_range` stops the
+    // editor's own keys there; here the whole operator is refused, selection and all,
+    // so that it can be narrowed and tried again. A yank changes nothing and is free
+    // to span as much of the table as it likes.
+    if operator != Operator::Yank && table::crosses_cells(cx.types(), &cx.projection(), &range) {
+        return;
+    }
     let register = edit::charwise_register(cx.state(), range.clone());
     yank(state, cx, register);
     match operator {
@@ -203,6 +240,24 @@ fn charwise(state: &mut State, cx: &mut impl Host, operator: Operator, range: Ra
 
 fn linewise(state: &mut State, cx: &mut impl Host, operator: Operator, lines: Range<usize>) {
     let projection = cx.projection();
+    // Vim's line inside a table is the row, so a range that covers part of one is
+    // widened to the whole of it: an operator that took a cell out of a row would
+    // leave that row narrower than the rest, which no schema rule can express and no
+    // command can put right. What is left is whole rows, which the linewise machinery
+    // below takes as it takes any other run of siblings — the last of them with the
+    // table around it, because a table may no more be empty than a list may.
+    let lines = table::whole_rows(cx.types(), &projection, lines);
+    let cell = table::cell_at(cx.types(), &projection, cursor(state, cx));
+    if let Some(cell) = &cell
+        && operator == Operator::Change
+    {
+        // `cc` clears the cell, not the row. The row is the line here, but emptying
+        // every cell of one is a great deal to ask of a keystroke that in vim never
+        // leaves the text it is on, and `dd` is still there for the row itself.
+        let line = &projection.lines()[cell.line];
+        charwise(state, cx, operator, line.from..line.to);
+        return;
+    }
     if let Some(register) = edit::linewise_register(cx.state(), &projection, lines.clone()) {
         yank(state, cx, register);
     }
@@ -213,8 +268,18 @@ fn linewise(state: &mut State, cx: &mut impl Host, operator: Operator, lines: Ra
             state.mode = Mode::Normal;
         }
         Operator::Delete => {
+            // Where the caret goes afterwards, decided before the edit. Only when the
+            // range starts inside the table: one that reaches above it moves the table
+            // itself, and the position naming it would then name something else.
+            let table = cell.filter(|cell| {
+                table::cell(cx.types(), &projection, lines.start)
+                    .is_some_and(|first| first.table == cell.table)
+            });
             if let Some(spec) = edit::delete_linewise(cx.state(), &projection, lines) {
                 cx.dispatch(vec![spec]);
+            }
+            if let Some(cell) = table {
+                caret_in_table(cx, &cell);
             }
             state.mode = Mode::Normal;
         }
@@ -225,6 +290,25 @@ fn linewise(state: &mut State, cx: &mut impl Host, operator: Operator, lines: Ra
             }
         }
     }
+}
+
+/// Put the caret back in the table a row was just deleted from, in the column it was
+/// in and in the row that took the deleted one's place — or the last row, when the
+/// deleted one was the last. That is where vim leaves it after `dd`, and the linewise
+/// deletion on its own would leave it on the first line after the row, which for the
+/// last row of a table is outside the grid.
+///
+/// Does nothing when the whole table went, which is what deleting its only row does.
+fn caret_in_table(cx: &mut impl Host, cell: &table::Cell) {
+    let projection = cx.projection();
+    let Some(line) = table::locate(cx.types(), &projection, cell.table, cell.row, cell.column)
+    else {
+        return;
+    };
+    cx.select(
+        Selection::cursor(motion::first_non_blank(&projection, line)),
+        false,
+    );
 }
 
 /// `d`, `c` and `y`: on the selection in a visual mode, doubled for a whole line, and
@@ -240,8 +324,11 @@ pub(crate) fn operator(state: &mut State, cx: &mut impl Host, operator: Operator
     let count = state.pending.take();
     let projection = cx.projection();
     let from = motion::line_of(&projection, cursor(state, cx));
-    let end = from.saturating_add(count).min(projection.line_count());
-    linewise(state, cx, operator, from..end);
+    // Inside a table the count counts rows, and stops at the last one rather than
+    // reaching out of the grid and taking the block below it as well.
+    let lines = table::count_rows(cx.types(), &projection, from, count)
+        .unwrap_or_else(|| from..from.saturating_add(count).min(projection.line_count()));
+    linewise(state, cx, operator, lines);
 }
 
 /// `d`, `x`, `y` and `c` in a visual mode.
@@ -307,11 +394,21 @@ fn register(state: &State, cx: &mut impl Host) -> Option<Register> {
 /// `p` and `P`. The count is consumed but not repeated.
 pub(crate) fn paste(state: &mut State, cx: &mut impl Host, after: bool) {
     state.pending.take();
-    let Some(register) = register(state, cx) else {
+    let Some(mut register) = register(state, cx) else {
         return;
     };
     let projection = cx.projection();
     let from = cursor(state, cx);
+    // A register's depth is where its nodes were cut from, which is not always where
+    // they can go: only a whole row may join a grid, so a row pasted in a table goes
+    // below or above the cursor's row, a row pasted anywhere else goes at the top
+    // level — `Fit` makes it a table of its own — and anything else pasted in a table
+    // goes beside the table rather than into it.
+    if register.linewise
+        && let Some(level) = table::paste_level(cx.types(), &projection, from, &register.slice)
+    {
+        register.depth = level;
+    }
     if let Some(spec) = edit::paste(cx.state(), &projection, from, &register, after) {
         cx.dispatch(vec![spec]);
     }
@@ -354,17 +451,58 @@ pub(crate) fn insert(state: &mut State, cx: &mut impl Host, at: InsertAt) {
     cx.select(Selection::cursor(target), false);
 }
 
+/// `o` and `O` inside a table: a row of empty cells below or above the cursor's, and
+/// the caret in the same column of it.
+///
+/// Not the editor's Enter chain, which inside a cell steps to the row below and appends
+/// one at the bottom of the table — right for Enter, and not what `o` means.
+fn open_row(state: &mut State, cx: &mut impl Host, below: bool) {
+    let Some(types) = table::types(cx.types()) else {
+        return;
+    };
+    let projection = cx.projection();
+    let Some(cell) = table::cell_at(cx.types(), &projection, cursor(state, cx)) else {
+        return;
+    };
+    enter_insert(state, cx);
+    let command = if below {
+        markraft_core::commands::add_row_after(types)
+    } else {
+        markraft_core::commands::add_row_before(types)
+    };
+    if !cx.run(&command) {
+        return;
+    }
+    // A row added above took the cursor's own index, and pushed the cursor's row down.
+    let row = cell.row + usize::from(below);
+    let projection = cx.projection();
+    let Some(moved) = table::cell_at(cx.types(), &projection, host::head(cx)) else {
+        return;
+    };
+    if let Some(line) = table::line_of_cell(cx.types(), &projection, &moved, row, cell.column) {
+        cx.select(
+            Selection::cursor(motion::line_start(&projection, line)),
+            false,
+        );
+    }
+}
+
 /// `o` and `O`: a new line of the kind Enter would produce, and the cursor in it.
 ///
 /// It is literally Enter: the caret goes to the end of the line — or its start for `O` —
 /// and the editor's own Enter chain runs, so a list item repeats itself, a heading gives
 /// a paragraph and a code line stays inside its block without a fence being written.
+/// Inside a table it is [`open_row`] instead, a row being the line there.
 pub(crate) fn open_line(state: &mut State, cx: &mut impl Host, below: bool) {
     state.pending.clear();
     let projection = cx.projection();
     let from = cursor(state, cx);
     let index = motion::line_of(&projection, from);
     let line = &projection.lines()[index];
+    if table::cell_at(cx.types(), &projection, from).is_some() {
+        open_row(state, cx, below);
+        return;
+    }
     enter_insert(state, cx);
     if line.kind == LineKind::LeafBlock {
         // A horizontal rule holds no text to split, so a paragraph is created beside it.

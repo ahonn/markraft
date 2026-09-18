@@ -317,6 +317,7 @@ impl Keys {
         if self.state.mode != Mode::Insert {
             command::settle(&mut self.state, &mut self.host, false);
         }
+        self.check();
     }
 
     /// Text typed in Insert mode, exactly as the platform delivers it.
@@ -367,6 +368,26 @@ impl Keys {
 
     fn lines(&self) -> usize {
         self.host.projection().line_count()
+    }
+
+    /// Every command leaves a document the schema accepts, and every table in it as
+    /// wide as its header. The second half is not something [`Node::check`] can
+    /// report: a row with fewer cells than its siblings breaks no content rule, and
+    /// there is no command that would put it right again.
+    fn check(&self) {
+        let (schema, doc) = (self.host.state.schema(), self.host.state.doc());
+        doc.check(schema).expect("a valid document");
+        fn walk(schema: &markraft_core::Schema, node: &markraft_core::Node) {
+            if schema.node_type(node.type_id()).name() == "table" {
+                let widths: Vec<usize> = node.children().map(|row| row.child_count()).collect();
+                assert!(
+                    widths.iter().all(|width| *width == widths[0]),
+                    "a table row lost a cell: {widths:?}"
+                );
+            }
+            node.children().for_each(|child| walk(schema, child));
+        }
+        walk(schema, doc);
     }
 }
 
@@ -1207,4 +1228,314 @@ fn charwise_yanks_preserve_nested_inline_scopes_when_pasted_into_plain_text() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------- tables
+
+/// A paragraph, a table of a header row and one body row, and a paragraph. Every
+/// cell is a line, in row-major order, so the lines are `before`, the three header
+/// cells, the three body cells and `after`.
+const TABLE: &str = "before\n\n| a | b | c |\n| --- | --- | --- |\n| d | e | f |\n\nafter";
+
+/// The same table with room to move inside a cell.
+const WIDE: &str = "| one two | b |\n| --- | --- |\n| three | d |";
+
+#[test]
+fn dd_takes_the_row_and_the_last_row_takes_the_table() {
+    let mut keys = Keys::new(TABLE).at(4, 0);
+    keys.keys("dd");
+    assert_eq!(
+        keys.markdown(),
+        "before\n\n| a   | b   | c   |\n| --- | --- | --- |\n\nafter"
+    );
+    // The caret stays in the grid, in the column it was in and in the row that took
+    // the deleted one's place — here the header, the deleted row being the last.
+    assert_eq!(keys.line_col(), (1, 0));
+    // Deleting the only row deletes the table, which may not be empty.
+    keys.keys("dd");
+    assert_eq!(keys.markdown(), "before\n\nafter");
+    // Each is one undo step.
+    assert_eq!(
+        keys.keys("u").markdown(),
+        "before\n\n| a   | b   | c   |\n| --- | --- | --- |\n\nafter"
+    );
+    assert_eq!(keys.keys("u").markdown(), Keys::new(TABLE).markdown());
+}
+
+#[test]
+fn dd_on_the_header_makes_the_row_below_it_the_header() {
+    let mut keys = Keys::new(TABLE).at(2, 0);
+    keys.keys("dd");
+    assert_eq!(
+        keys.markdown(),
+        "before\n\n| d   | e   | f   |\n| --- | --- | --- |\n\nafter"
+    );
+}
+
+#[test]
+fn a_count_and_dj_count_rows_not_cells() {
+    let mut keys = Keys::new(TABLE).at(1, 0);
+    keys.keys("dj");
+    assert_eq!(keys.markdown(), "before\n\nafter");
+    let mut keys = Keys::new(TABLE).at(2, 0);
+    keys.keys("2dd");
+    assert_eq!(keys.markdown(), "before\n\nafter");
+    // A count that runs past the last row stops at the end of the grid.
+    let mut keys = Keys::new(TABLE).at(5, 0);
+    keys.keys("9dd");
+    assert_eq!(
+        keys.markdown(),
+        "before\n\n| a   | b   | c   |\n| --- | --- | --- |\n\nafter"
+    );
+}
+
+#[test]
+fn yy_takes_the_whole_row_and_p_puts_a_row_below_or_above() {
+    let mut keys = Keys::new(TABLE).at(4, 0);
+    keys.keys("yy");
+    let register = keys.state.register.clone().expect("a yanked row");
+    assert!(register.linewise);
+    assert_eq!(register.text, "d\ne\nf");
+    // One whole `table_row` node, not the three cells and not the table.
+    assert_eq!(register.slice.content().child_count(), 1);
+    assert_eq!(
+        keys.host
+            .state
+            .schema()
+            .node_type(register.slice.content().child(0).type_id())
+            .name(),
+        "table_row"
+    );
+    // Below and above the cursor's row, not its cell.
+    let mut keys = Keys::new(TABLE).at(1, 0);
+    keys.keys("yy");
+    let pos = keys.pos(5, 0);
+    keys.host.select(Selection::cursor(pos), false);
+    keys.settle();
+    keys.keys("p");
+    assert_eq!(
+        keys.markdown(),
+        "before\n\n| a   | b   | c   |\n| --- | --- | --- |\n| d   | e   | f   |\n| a   | b   | c   |\n\nafter"
+    );
+    assert_eq!(keys.keys("u").markdown(), Keys::new(TABLE).markdown());
+    keys.keys("P");
+    assert_eq!(
+        keys.markdown(),
+        "before\n\n| a   | b   | c   |\n| --- | --- | --- |\n| a   | b   | c   |\n| d   | e   | f   |\n\nafter"
+    );
+}
+
+#[test]
+fn a_row_pasted_outside_a_table_becomes_a_table_of_its_own() {
+    let mut keys = Keys::new(TABLE).at(4, 0);
+    keys.keys("yy");
+    keys.keys("G");
+    keys.keys("p");
+    assert_eq!(
+        keys.markdown(),
+        "before\n\n| a   | b   | c   |\n| --- | --- | --- |\n| d   | e   | f   |\n\nafter\n\n| d   | e   | f   |\n| --- | --- | --- |"
+    );
+}
+
+#[test]
+fn cc_clears_the_cell_and_leaves_the_row_whole() {
+    let mut keys = Keys::new(TABLE).at(4, 0);
+    keys.keys("cc");
+    assert_eq!(keys.state.mode, Mode::Insert);
+    keys.typed("x");
+    keys.keys("<esc>");
+    assert_eq!(
+        keys.markdown(),
+        "before\n\n| a   | b   | c   |\n| --- | --- | --- |\n| x   | e   | f   |\n\nafter"
+    );
+}
+
+#[test]
+fn o_and_shift_o_add_a_row_and_open_insert_in_the_same_column() {
+    let mut keys = Keys::new(TABLE).at(5, 0);
+    keys.keys("o");
+    assert_eq!(keys.state.mode, Mode::Insert);
+    keys.typed("x");
+    keys.keys("<esc>");
+    assert_eq!(
+        keys.markdown(),
+        "before\n\n| a   | b   | c   |\n| --- | --- | --- |\n| d   | e   | f   |\n|     | x   |     |\n\nafter"
+    );
+    assert_eq!(keys.keys("u").markdown(), Keys::new(TABLE).markdown());
+    let mut keys = Keys::new(TABLE).at(5, 0);
+    keys.keys("O");
+    keys.typed("x");
+    keys.keys("<esc>");
+    assert_eq!(
+        keys.markdown(),
+        "before\n\n| a   | b   | c   |\n| --- | --- | --- |\n|     | x   |     |\n| d   | e   | f   |\n\nafter"
+    );
+}
+
+#[test]
+fn j_and_k_step_rows_and_leave_the_table_at_its_edges() {
+    let mut keys = Keys::new(TABLE).at(2, 0);
+    assert_eq!(keys.keys("j").line_col(), (5, 0));
+    // No row is appended at the last one; `j` leaves the table.
+    assert_eq!(keys.keys("j").line_col(), (7, 0));
+    assert_eq!(keys.lines(), 8);
+    let mut keys = Keys::new(TABLE).at(5, 0);
+    assert_eq!(keys.keys("k").line_col(), (2, 0));
+    assert_eq!(keys.keys("k").line_col(), (0, 0));
+}
+
+#[test]
+fn h_and_l_cross_into_the_cell_beside_and_stop_at_the_table() {
+    let mut keys = Keys::new(TABLE).at(1, 0);
+    assert_eq!(keys.keys("l").line_col(), (2, 0));
+    assert_eq!(keys.keys("h").line_col(), (1, 0));
+    // The first cell of the table has nothing before it.
+    assert_eq!(keys.keys("h").line_col(), (1, 0));
+    // Nor does the last have anything after it: no row is appended.
+    let mut keys = Keys::new(TABLE).at(6, 0);
+    assert_eq!(keys.keys("l").line_col(), (6, 0));
+    assert_eq!(keys.lines(), 8);
+    // Inside a cell they stay in it.
+    let mut keys = Keys::new(WIDE).at(0, 0);
+    assert_eq!(keys.keys("l").line_col(), (0, 1));
+    // `dl` takes the grapheme it is on rather than crossing.
+    let mut keys = Keys::new(TABLE).at(1, 0);
+    keys.keys("dl");
+    assert_eq!(
+        keys.markdown(),
+        "before\n\n|     | b   | c   |\n| --- | --- | --- |\n| d   | e   | f   |\n\nafter"
+    );
+}
+
+#[test]
+fn zero_caret_and_dollar_act_on_the_cell() {
+    let mut keys = Keys::new(WIDE).at(0, 4);
+    assert_eq!(keys.keys("0").line_col(), (0, 0));
+    assert_eq!(keys.keys("$").line_col(), (0, 6));
+    assert_eq!(keys.keys("^").line_col(), (0, 0));
+}
+
+#[test]
+fn word_motions_cross_cells_the_way_they_cross_lines() {
+    let mut keys = Keys::new(WIDE).at(0, 0);
+    assert_eq!(keys.keys("w").line_col(), (0, 4));
+    assert_eq!(keys.keys("w").line_col(), (1, 0));
+    assert_eq!(keys.keys("b").line_col(), (0, 4));
+    assert_eq!(keys.keys("e").line_col(), (0, 6));
+    assert_eq!(keys.keys("e").line_col(), (1, 0));
+}
+
+#[test]
+fn gg_and_g_keep_counting_lines_through_a_table() {
+    let mut keys = Keys::new(TABLE).at(0, 0);
+    assert_eq!(keys.keys("G").line_col(), (7, 0));
+    assert_eq!(keys.keys("3gg").line_col(), (2, 0));
+    assert_eq!(keys.keys("gg").line_col(), (0, 0));
+}
+
+#[test]
+fn visual_line_mode_takes_the_whole_row() {
+    let mut keys = Keys::new(TABLE).at(4, 0);
+    keys.keys("V");
+    assert_eq!(keys.selected(), "d\ne\nf");
+    keys.keys("d");
+    assert_eq!(
+        keys.markdown(),
+        "before\n\n| a   | b   | c   |\n| --- | --- | --- |\n\nafter"
+    );
+    // Extending it downwards out of the table keeps whole rows.
+    let mut keys = Keys::new(TABLE).at(1, 0);
+    keys.keys("Vj");
+    assert_eq!(keys.selected(), "a\nb\nc\nd\ne\nf");
+}
+
+#[test]
+fn a_charwise_selection_across_two_cells_refuses_to_be_edited() {
+    for operator in ["d", "c", "x"] {
+        let mut keys = Keys::new(TABLE).at(1, 0);
+        keys.keys("vl");
+        assert_eq!(keys.selected(), "a\nb");
+        keys.keys(operator);
+        assert_eq!(keys.markdown(), Keys::new(TABLE).markdown(), "{operator}");
+        assert_ne!(keys.state.mode, Mode::Insert, "{operator}");
+    }
+    // A yank changes nothing, so it is allowed to span them.
+    let mut keys = Keys::new(TABLE).at(1, 0);
+    keys.keys("vly");
+    assert_eq!(keys.markdown(), Keys::new(TABLE).markdown());
+}
+
+#[test]
+fn the_insert_commands_place_the_caret_inside_the_cell() {
+    assert_eq!(Keys::new(WIDE).at(0, 4).keys("i").caret(), (0, 4));
+    assert_eq!(Keys::new(WIDE).at(0, 4).keys("a").caret(), (0, 5));
+    assert_eq!(Keys::new(WIDE).at(0, 4).keys("I").caret(), (0, 0));
+    let mut keys = Keys::new(WIDE).at(0, 4);
+    assert_eq!(keys.keys("A").caret(), (0, 7));
+    keys.typed("!");
+    keys.keys("<esc>");
+    assert_eq!(keys.host.projection().line_text(0), Some("one two!"));
+}
+
+#[test]
+fn a_linewise_operator_that_reaches_out_of_a_table_still_takes_whole_rows() {
+    // `dG` from the body row takes it and everything after it.
+    let mut keys = Keys::new(TABLE).at(4, 0);
+    keys.keys("dG");
+    assert_eq!(
+        keys.markdown(),
+        "before\n\n| a   | b   | c   |\n| --- | --- | --- |"
+    );
+    // A Visual Line selection grown over both rows takes the table with them.
+    let mut keys = Keys::new(TABLE).at(2, 0);
+    keys.keys("Vjd");
+    assert_eq!(keys.markdown(), "before\n\nafter");
+    // And a range starting outside one takes the row it reaches into whole.
+    let mut keys = Keys::new(TABLE).at(0, 0);
+    keys.keys("dj");
+    assert_eq!(
+        keys.markdown(),
+        "| d   | e   | f   |\n| --- | --- | --- |\n\nafter"
+    );
+}
+
+#[test]
+fn a_table_that_is_the_whole_document_leaves_the_smallest_one_the_schema_allows() {
+    let mut keys = Keys::new("| a | b |\n| --- | --- |").at(0, 0);
+    keys.keys("dd");
+    assert_eq!(keys.markdown(), "");
+    assert_eq!(keys.lines(), 1);
+    assert_eq!(keys.keys("u").markdown(), "| a   | b   |\n| --- | --- |");
+}
+
+#[test]
+fn a_paste_that_is_not_a_row_lands_beside_the_table_rather_than_in_it() {
+    let mut keys = Keys::new(TABLE).at(0, 0);
+    keys.keys("yy");
+    let pos = keys.pos(4, 0);
+    keys.host.select(Selection::cursor(pos), false);
+    keys.settle();
+    keys.keys("p");
+    assert_eq!(
+        keys.markdown(),
+        "before\n\n| a   | b   | c   |\n| --- | --- | --- |\n| d   | e   | f   |\n\nbefore\n\nafter"
+    );
+}
+
+#[test]
+fn x_and_shift_d_keep_to_the_cell_they_are_in() {
+    let mut keys = Keys::new(TABLE).at(1, 0);
+    keys.keys("x");
+    assert_eq!(
+        keys.markdown(),
+        "before\n\n|     | b   | c   |\n| --- | --- | --- |\n| d   | e   | f   |\n\nafter"
+    );
+    // An empty cell is still a cell, and `h` crosses out of it.
+    assert_eq!(keys.keys("l").line_col(), (2, 0));
+    let mut keys = Keys::new(WIDE).at(0, 4);
+    keys.keys("D");
+    assert_eq!(
+        keys.markdown(),
+        "| one   | b   |\n| ----- | --- |\n| three | d   |"
+    );
 }
