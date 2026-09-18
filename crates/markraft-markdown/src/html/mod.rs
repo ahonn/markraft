@@ -1,4 +1,8 @@
-//! Reading HTML — a clipboard's rich flavour — into a document tree.
+//! HTML — a clipboard's rich flavour — read into and written from a document
+//! tree.
+//!
+//! [`HtmlParser`] reads; [`HtmlSerializer`] writes, and its module documents
+//! what the two agree on.
 //!
 //! The shape mirrors [`crate::parse`]: a rule table maps elements onto schema
 //! types, and whatever the two disagree about is repaired through the schema
@@ -29,10 +33,16 @@
 //! `text-decoration` are read as the marks they stand for.
 
 mod rules;
+mod serialize;
 
 pub use rules::{
     HtmlAttrsFn, HtmlMatchFn, HtmlRule, HtmlRules, HtmlTarget, commonmark_html_rules,
     html_attrs_fn, html_match_fn,
+};
+pub use serialize::{
+    HtmlMarkRule, HtmlMarkRules, HtmlNodeRule, HtmlNodeRules, HtmlSerializer, HtmlState,
+    commonmark_html_mark_rules, commonmark_html_node_rules, commonmark_html_serializer,
+    escape_attr, escape_text,
 };
 
 use markraft_doc::{Attrs, Fragment, Mark, MarkSet, Node, NodeTypeId, Schema, Slice};

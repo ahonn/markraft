@@ -48,8 +48,8 @@ enum Intent {
     Retry,
     SaveCopy,
     Reload,
-    Mark(Mark),
-    Block(BlockKind),
+    Mark(doc::Inline),
+    Block(doc::Block),
 }
 /// The settings rows drawn as a switch rather than as a labelled button.
 fn is_switch(id: &str) -> bool {
@@ -66,18 +66,19 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::Copy | Intent::SaveCopy => Icon::Copy,
         Intent::Export | Intent::Import => Icon::Export,
         Intent::Settings => Icon::Settings,
-        Intent::Mark(Mark::Bold) => Icon::Bold,
-        Intent::Mark(Mark::Italic) => Icon::Italic,
-        Intent::Mark(Mark::Code) => Icon::Code,
-        Intent::Mark(Mark::Strikethrough) => Icon::Strikethrough,
-        Intent::Mark(Mark::Underline) => Icon::Underline,
+        Intent::Mark(doc::Inline::Bold) => Icon::Bold,
+        Intent::Mark(doc::Inline::Italic) => Icon::Italic,
+        Intent::Mark(doc::Inline::Code) => Icon::Code,
+        Intent::Mark(doc::Inline::Strikethrough) => Icon::Strikethrough,
+        Intent::Mark(doc::Inline::Underline) => Icon::Underline,
         Intent::Link => Icon::Link,
-        Intent::Block(BlockKind::Heading(_)) => Icon::Heading,
-        Intent::Block(BlockKind::Quote) => Icon::Quote,
-        Intent::Block(BlockKind::Code { .. }) => Icon::CodeBlock,
-        Intent::Block(BlockKind::Ordered) => Icon::Ordered,
-        Intent::Block(BlockKind::Bullet) => Icon::Bullet,
-        Intent::Block(BlockKind::Task { .. }) => Icon::Task,
+        Intent::Block(doc::Block::Heading(_)) => Icon::Heading,
+        Intent::Block(doc::Block::Quote) => Icon::Quote,
+        Intent::Block(doc::Block::Code) => Icon::CodeBlock,
+        Intent::Block(doc::Block::Ordered) => Icon::Ordered,
+        Intent::Block(doc::Block::Bullet) => Icon::Bullet,
+        Intent::Block(doc::Block::Task) => Icon::Task,
+        Intent::Block(doc::Block::Divider) => Icon::Divider,
         _ => Icon::Paragraph,
     }
 }
@@ -108,7 +109,7 @@ impl NotesApp {
             Intent::ApplyLink => self.apply_link(window, cx),
             Intent::Unlink => self.unlink(window, cx),
             Intent::CopyLink | Intent::OpenLink => {
-                if let Some(url) = self.editor().read(cx).active_link().map(str::to_owned) {
+                if let Some(url) = self.editor().read(cx).active_link() {
                     if matches!(intent, Intent::CopyLink) {
                         cx.write_to_clipboard(ClipboardItem::new_string(url));
                         self.inform("Link copied", cx);
@@ -195,14 +196,15 @@ impl NotesApp {
             Intent::Reload => self.reload(window, cx),
             Intent::Mark(mark) => {
                 self.format_menu = None;
-                self.editor().update(cx, |e, cx| e.toggle_mark(mark, cx));
+                self.editor()
+                    .update(cx, |e, cx| e.run_command(&mark.command(), cx));
                 self.panel = Panel::Editor;
                 self.focus_editor(window, cx);
             }
-            Intent::Block(kind) => {
+            Intent::Block(block) => {
                 self.format_menu = None;
                 self.editor()
-                    .update(cx, |e, cx| e.toggle_block_kind(kind, cx));
+                    .update(cx, |e, cx| e.run_command(&block.command(), cx));
                 self.panel = Panel::Editor;
                 self.focus_editor(window, cx);
             }
@@ -473,7 +475,7 @@ impl NotesApp {
     }
     fn picker(&self, cx: &mut Context<Self>) -> Div {
         let deleted = self.panel == Panel::Trash;
-        let query = self.query.read(cx).document().plain_text();
+        let query = self.query.read(cx).text().to_owned();
         let notes = self.matching_notes(query.trim(), deleted);
         let mut list = div()
             .id("note-results")
@@ -506,7 +508,7 @@ impl NotesApp {
             };
             let current = note.id == self.library.active_id;
             let selected = index == self.selected;
-            let count = note.document.plain_text().graphemes(true).count();
+            let count = doc::plain_text(&note.document).graphemes(true).count();
             let meta = if deleted {
                 "Restore note"
             } else if current {
@@ -940,7 +942,7 @@ impl NotesApp {
             }
             self.actions_scroll.scroll_to_item(self.selected);
         } else {
-            let query = self.query.read(cx).committed_document().plain_text();
+            let query = self.query.read(cx).text().to_owned();
             let notes = self.matching_notes(query.trim(), self.panel == Panel::Trash);
             match key {
                 "up" => self.selected = self.selected.saturating_sub(1),
@@ -993,94 +995,102 @@ impl NotesApp {
                 Intent::PasteMarkdown,
             ),
             Command::new("export-note", "Export Markdown…", "⇧⌘E", Intent::Export),
-            Command::new("format-bold", "Bold", "⌘B", Intent::Mark(Mark::Bold)),
-            Command::new("format-italic", "Italic", "⌘I", Intent::Mark(Mark::Italic)),
+            Command::new("format-bold", "Bold", "⌘B", Intent::Mark(doc::Inline::Bold)),
+            Command::new(
+                "format-italic",
+                "Italic",
+                "⌘I",
+                Intent::Mark(doc::Inline::Italic),
+            ),
             Command::new(
                 "format-strikethrough",
                 "Strikethrough",
                 "⇧⌘S",
-                Intent::Mark(Mark::Strikethrough),
+                Intent::Mark(doc::Inline::Strikethrough),
             ),
             Command::new(
                 "format-underline",
                 "Underline",
                 "⌘U",
-                Intent::Mark(Mark::Underline),
+                Intent::Mark(doc::Inline::Underline),
             ),
-            Command::new("format-code", "Inline Code", "⌘E", Intent::Mark(Mark::Code)),
+            Command::new(
+                "format-code",
+                "Inline Code",
+                "⌘E",
+                Intent::Mark(doc::Inline::Code),
+            ),
             Command::new("format-link", "Link", "⌘L", Intent::Link).slash(10, SlashEffect::Host),
             Command::new(
                 "format-heading",
                 "Heading 1",
                 "⌥⌘1",
-                Intent::Block(BlockKind::Heading(1)),
+                Intent::Block(doc::Block::Heading(1)),
             )
-            .slash(1, SlashEffect::Block(BlockKind::Heading(1))),
+            .slash(1, SlashEffect::Block(doc::Block::Heading(1))),
             Command::new(
                 "format-heading-2",
                 "Heading 2",
                 "⌥⌘2",
-                Intent::Block(BlockKind::Heading(2)),
+                Intent::Block(doc::Block::Heading(2)),
             )
-            .slash(2, SlashEffect::Block(BlockKind::Heading(2))),
+            .slash(2, SlashEffect::Block(doc::Block::Heading(2))),
             Command::new(
                 "format-heading-3",
                 "Heading 3",
                 "⌥⌘3",
-                Intent::Block(BlockKind::Heading(3)),
+                Intent::Block(doc::Block::Heading(3)),
             )
-            .slash(3, SlashEffect::Block(BlockKind::Heading(3))),
+            .slash(3, SlashEffect::Block(doc::Block::Heading(3))),
             Command::new(
                 "format-quote",
                 "Quote",
                 "⇧⌘B",
-                Intent::Block(BlockKind::Quote),
+                Intent::Block(doc::Block::Quote),
             )
-            .slash(7, SlashEffect::Block(BlockKind::Quote)),
+            .slash(7, SlashEffect::Block(doc::Block::Quote)),
             Command::new(
                 "format-code-block",
                 "Code Block",
                 "⌥⌘C",
-                Intent::Block(BlockKind::Code {
-                    language: String::new(),
-                }),
+                Intent::Block(doc::Block::Code),
             )
-            .slash(
-                8,
-                SlashEffect::Block(BlockKind::Code {
-                    language: String::new(),
-                }),
-            ),
+            .slash(8, SlashEffect::Block(doc::Block::Code)),
             Command::new(
                 "format-paragraph",
                 "Paragraph",
                 "⌥⌘0",
-                Intent::Block(BlockKind::Paragraph),
+                Intent::Block(doc::Block::Paragraph),
             )
-            .slash(0, SlashEffect::Block(BlockKind::Paragraph)),
+            .slash(0, SlashEffect::Block(doc::Block::Paragraph)),
             Command::new(
                 "format-ordered",
                 "Ordered List",
                 "⇧⌘7",
-                Intent::Block(BlockKind::Ordered),
+                Intent::Block(doc::Block::Ordered),
             )
-            .slash(5, SlashEffect::Block(BlockKind::Ordered)),
+            .slash(5, SlashEffect::Block(doc::Block::Ordered)),
             Command::new(
                 "format-bullet",
                 "Bullet List",
                 "⇧⌘8",
-                Intent::Block(BlockKind::Bullet),
+                Intent::Block(doc::Block::Bullet),
             )
-            .slash(4, SlashEffect::Block(BlockKind::Bullet)),
+            .slash(4, SlashEffect::Block(doc::Block::Bullet)),
             Command::new(
                 "format-task",
                 "Task List",
                 "⇧⌘9",
-                Intent::Block(BlockKind::Task { checked: false }),
+                Intent::Block(doc::Block::Task),
             )
-            .slash(6, SlashEffect::Block(BlockKind::Task { checked: false })),
+            .slash(6, SlashEffect::Block(doc::Block::Task)),
             // A rule replaces the line it is on, so only the `/` menu offers it.
-            Command::editor("insert-divider", "Divider", 9, SlashEffect::Divider),
+            Command::editor(
+                "insert-divider",
+                "Divider",
+                9,
+                SlashEffect::Block(doc::Block::Divider),
+            ),
             Command::new(
                 "delete-note",
                 "Move to Recently Deleted",
@@ -1101,13 +1111,7 @@ impl NotesApp {
         ]
     }
     fn filtered_actions(&self, cx: &App) -> Vec<Command> {
-        let query = self
-            .query
-            .read(cx)
-            .document()
-            .plain_text()
-            .trim()
-            .to_lowercase();
+        let query = self.query.read(cx).text().to_owned().trim().to_lowercase();
         self.action_items()
             .into_iter()
             .filter(|command| {
@@ -1196,7 +1200,7 @@ impl NotesApp {
                 let n = self
                     .library
                     .search(
-                        self.query.read(cx).document().plain_text().trim(),
+                        self.query.read(cx).text().trim(),
                         self.panel == Panel::Trash,
                     )
                     .len();
@@ -1470,7 +1474,7 @@ impl Render for NotesApp {
                     .child(actions),
             );
         }
-        let text = self.editor().read(cx).document().plain_text();
+        let text = self.editor().read(cx).text().to_owned();
         let count = if self.show_words {
             let n = text.unicode_words().count();
             format!("{n} {}", if n == 1 { "word" } else { "words" })

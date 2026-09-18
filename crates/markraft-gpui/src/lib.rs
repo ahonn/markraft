@@ -1,20 +1,31 @@
 //! Native editing adapter. The core owns document semantics; the host owns persistence.
+//!
+//! The view holds an [`EditorState`] built from the host's schema and
+//! extensions. Every edit is a [`TransactionSpec`] or a
+//! [`markraft_doc::commands::Command`] from the catalogue; nothing here
+//! touches the tree. Everything drawn comes from the state's
+//! [`markraft_doc::projection::Projection`].
 mod accessibility;
 mod caret;
 mod clipboard;
+pub mod commands;
 mod completion;
 mod emoji;
 mod extension;
 mod format_state;
+mod ime;
+mod keymap;
+mod links;
 mod single_line;
 mod style;
 mod surface;
 mod syntax;
 mod typeahead;
+mod types;
 pub use emoji::{EmojiShortcodes, emoji_menu};
 pub use extension::{
-    ActionHandler, CaretShape, EditorCx, Extension, ExtensionHandle, ExtensionPayload, InputPolicy,
-    Overlay, Update,
+    ActionHandler, CaretShape, EXTENSION_ORIGIN_PREFIX, EditorCx, Extension, ExtensionHandle,
+    ExtensionPayload, InputPolicy, Overlay, Update,
 };
 pub use style::EditorStyle;
 pub use syntax::code_languages;
@@ -22,14 +33,18 @@ pub use typeahead::{Typeahead, TypeaheadItem, TypeaheadProvider};
 
 use extension::AnchoredOverlay;
 use gpui::{prelude::*, *};
-use markraft_core::{BlockKind, Change, Document, Editor, Mark, Position, Selection};
-use std::{
-    cell::RefCell,
-    ops::Range,
-    rc::Rc,
-    time::{Duration, Instant},
+use markraft_doc::commands::{Command, Direction};
+use markraft_doc::projection::{Projection, projection_of};
+use markraft_doc::{
+    Attrs, EditorState, EditorStateConfig, HistoryConfig, MarkSet, MarkTypeId, Node, NodeTypeId,
+    Schema, Selection, Transaction, TransactionSpec,
 };
-use surface::{EditorSurface, LayoutBlock};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
+use surface::{EditorSurface, LayoutLine, ShapeInput};
+use types::DocTypes;
+
+/// How long a pause splits one typing session from the next, in milliseconds.
+const TYPING_GROUP_DELAY: u64 = 750;
 
 // All bindings are scoped so embedding hosts retain their own shortcuts.
 actions!(
@@ -161,9 +176,9 @@ pub enum EditorEvent {
     /// A link was clicked without ⌘; the caret is now inside it.
     LinkClicked,
     /// The code header was clicked; the host can show a language picker without
-    /// moving the editor's selection.
+    /// moving the editor's selection. `pos` is directly before the code block.
     CodeLanguageRequested {
-        block: usize,
+        pos: usize,
     },
     CodeCopied,
     /// An extension asked the host to do something only the host can do. Hosts that
@@ -174,8 +189,37 @@ pub enum EditorEvent {
     },
 }
 
+/// How to build an [`EditorView`]: the host's document kind and its extensions.
+pub struct Setup {
+    pub schema: Schema,
+    pub extensions: markraft_doc::Extension,
+    pub doc: Option<Node>,
+}
+
+impl Setup {
+    pub fn new(schema: Schema) -> Setup {
+        Setup {
+            schema,
+            extensions: markraft_doc::Extension::none(),
+            doc: None,
+        }
+    }
+    pub fn extensions(mut self, extensions: markraft_doc::Extension) -> Setup {
+        self.extensions = extensions;
+        self
+    }
+    pub fn doc(mut self, doc: Node) -> Setup {
+        self.doc = Some(doc);
+        self
+    }
+}
+
 pub struct EditorView {
-    pub(crate) core: Editor,
+    state: EditorState,
+    projection: Arc<Projection>,
+    pub(crate) types: DocTypes,
+    /// The host's extensions, kept so the state can be rebuilt on a replacement.
+    host_extensions: markraft_doc::Extension,
     pub(crate) extensions: Vec<extension::Registration>,
     /// The selection the extensions were last told about.
     pub(crate) extension_selection: Selection,
@@ -184,16 +228,15 @@ pub struct EditorView {
     pub(crate) single_line: bool,
     pub(crate) single_line_scroll_x: Pixels,
     pub(crate) focus: FocusHandle,
-    pub(crate) layout: Vec<LayoutBlock>,
+    pub(crate) layout: Vec<LayoutLine>,
     pub(crate) scroll: ScrollHandle,
     pub(crate) reveal: bool,
     pub(crate) upstream: bool,
     selecting: bool,
-    preferred_x: Option<Pixels>,
+    pub(crate) preferred_x: Option<Pixels>,
     published_revision: u64,
-    typing_group: u64,
-    last_typed_at: Option<Instant>,
-    accessible_text: Rc<RefCell<accessibility::AccessibleText>>,
+    undo_group_depth: usize,
+    pub(crate) accessible_text: Rc<RefCell<accessibility::AccessibleText>>,
     focus_subscriptions: Option<[Subscription; 3]>,
     pub(crate) caret_blink: caret::CaretBlink,
     /// Whether the editor holds the window's focus, regardless of window activation.
@@ -212,12 +255,49 @@ impl Focusable for EditorView {
     }
 }
 
+/// The extensions every view configures, whatever the host adds.
+fn base_extensions() -> markraft_doc::Extension {
+    markraft_doc::Extension::all([
+        markraft_doc::history(HistoryConfig {
+            new_group_delay: TYPING_GROUP_DELAY,
+            ..HistoryConfig::default()
+        }),
+        markraft_doc::composition(),
+        markraft_doc::projection::projection(),
+    ])
+}
+
+fn build_state(schema: &Schema, host: &markraft_doc::Extension, doc: Option<Node>) -> EditorState {
+    let extensions = markraft_doc::Extension::all([base_extensions(), host.clone()]);
+    let config = EditorStateConfig::new(schema.clone()).extensions(extensions.clone());
+    let config = match doc {
+        Some(doc) => config.doc(doc),
+        None => config,
+    };
+    EditorState::create(config).unwrap_or_else(|_| {
+        // A document the schema rejects is a host bug; an empty one keeps the
+        // view usable rather than taking the process down.
+        EditorState::create(EditorStateConfig::new(schema.clone()).extensions(extensions))
+            .expect("the schema describes a valid empty document")
+    })
+}
+
 impl EditorView {
-    pub fn new(document: Document, cx: &mut Context<Self>) -> Self {
+    pub fn new(setup: Setup, cx: &mut Context<Self>) -> Self {
+        let Setup {
+            schema,
+            extensions,
+            doc,
+        } = setup;
+        let state = build_state(&schema, &extensions, doc);
+        let projection = projection_of(&state);
         Self {
-            core: Editor::new(document),
+            types: DocTypes::of(&schema),
+            extension_selection: state.selection().clone(),
+            state,
+            projection,
+            host_extensions: extensions,
             extensions: Vec::new(),
-            extension_selection: Selection::default(),
             style: EditorStyle::default(),
             placeholder: SharedString::default(),
             single_line: false,
@@ -230,8 +310,7 @@ impl EditorView {
             selecting: false,
             preferred_x: None,
             published_revision: 0,
-            typing_group: 0,
-            last_typed_at: None,
+            undo_group_depth: 0,
             accessible_text: Rc::default(),
             focus_subscriptions: None,
             caret_blink: caret::CaretBlink::default(),
@@ -242,6 +321,18 @@ impl EditorView {
             scrollbar_task: None,
         }
     }
+
+    /// A literal, single-line input for host-owned query and settings fields.
+    /// Enter is left to the host; native composition and selection stay enabled.
+    ///
+    /// It runs on its own `doc > paragraph > text` schema, so nothing it is told
+    /// to do can produce a second block or a mark.
+    pub fn single_line(cx: &mut Context<Self>) -> Self {
+        let mut view = EditorView::new(Setup::new(single_line::schema().clone()), cx);
+        view.single_line = true;
+        view
+    }
+
     pub fn with_style(mut self, style: EditorStyle) -> Self {
         self.style = style;
         self
@@ -258,18 +349,47 @@ impl EditorView {
         self.placeholder = placeholder.into();
         cx.notify();
     }
-    /// A literal, single-line input for host-owned query and settings fields.
-    /// Enter is left to the host; native composition and selection stay enabled.
-    pub fn with_single_line(mut self) -> Self {
-        self.single_line = true;
-        self.core = Editor::new(single_line::document(self.document().clone()));
-        self
-    }
     pub fn set_style(&mut self, style: EditorStyle, cx: &mut Context<Self>) {
         self.style = style;
         self.reveal = true;
         cx.notify();
     }
+
+    /// The editor's state: document, selection and every extension field.
+    pub fn state(&self) -> &EditorState {
+        &self.state
+    }
+    pub fn doc(&self) -> &Node {
+        self.state.doc()
+    }
+    pub fn schema(&self) -> &Schema {
+        self.state.schema()
+    }
+    /// The document's flattened, line-oriented view.
+    pub fn projection(&self) -> Arc<Projection> {
+        self.projection.clone()
+    }
+    /// The whole document as text, lines joined by `'\n'`.
+    pub fn text(&self) -> &str {
+        self.projection.plain_text()
+    }
+    pub(crate) fn shape_input(&self) -> ShapeInput<'_> {
+        ShapeInput {
+            doc: self.state.doc(),
+            types: &self.types,
+            projection: &self.projection,
+            style: &self.style,
+            single_line: self.single_line,
+        }
+    }
+    /// The caret, or the moving end of a range.
+    pub fn head(&self) -> usize {
+        self.state.selection().head(self.state.doc())
+    }
+    pub fn is_composing(&self) -> bool {
+        markraft_doc::is_composing(&self.state)
+    }
+
     /// Height at the most recently laid-out width, including editor padding.
     pub fn content_height(&self) -> Option<Pixels> {
         (!self.layout.is_empty()).then(|| {
@@ -282,35 +402,32 @@ impl EditorView {
             )
         })
     }
-    pub fn committed_document(&self) -> &Document {
-        self.core.committed_document()
+
+    /// Marks shared by all selected text, or the marks new text would get.
+    pub fn active_marks(&self) -> MarkSet {
+        format_state::active_marks(&self.state)
     }
-    pub fn is_composing(&self) -> bool {
-        self.core.is_composing()
+    /// The type and attributes every selected block shares; mixed formats give `None`.
+    pub fn active_block_type(&self) -> Option<(NodeTypeId, Attrs)> {
+        format_state::active_block_type(&self.state, &self.projection)
     }
-    pub fn cancel_composition(&mut self, cx: &mut Context<Self>) {
-        self.edit_inner(cx, true, |core| core.cancel_composition());
-    }
-    pub fn document(&self) -> &Document {
-        self.core.document()
-    }
-    /// Marks shared by all selected text, or the current typing marks at a caret.
-    pub fn active_marks(&self) -> markraft_core::Marks {
-        format_state::active_marks(&self.core)
-    }
-    /// The selected blocks' common kind; mixed block formats return `None`.
-    pub fn active_block_kind(&self) -> Option<BlockKind> {
-        format_state::active_block_kind(&self.core)
-    }
-    pub fn replace_document(&mut self, document: Document, cx: &mut Context<Self>) {
-        self.last_typed_at = None;
-        self.single_line_scroll_x = px(0.);
-        let document = if self.single_line {
-            single_line::document(document)
+
+    /// Replace the document, discarding the undo history with it.
+    pub fn replace_doc(&mut self, doc: Node, cx: &mut Context<Self>) {
+        let doc = if self.single_line {
+            single_line::document(&doc, &self.state.schema().clone())
         } else {
-            document
+            doc
         };
-        self.core = Editor::new(document);
+        self.single_line_scroll_x = px(0.);
+        self.state = build_state(
+            &self.state.schema().clone(),
+            &self.host_extensions,
+            Some(doc),
+        );
+        self.projection = projection_of(&self.state);
+        self.extension_selection = self.state.selection().clone();
+        self.undo_group_depth = 0;
         self.layout.clear();
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.reset_caret_blink(cx);
@@ -324,39 +441,227 @@ impl EditorView {
             cx,
         );
     }
-    pub fn toggle_mark(&mut self, mark: Mark, cx: &mut Context<Self>) {
-        if self.single_line {
-            return;
+
+    /// Replace a single-line editor's value.
+    pub fn set_value(&mut self, value: &str, cx: &mut Context<Self>) {
+        let doc = single_line::document_from_text(&single_line::text(value, self.single_line));
+        self.replace_doc(doc, cx);
+    }
+
+    /// Apply `specs` as one transaction, together with whatever the configured
+    /// appenders add. `None` when the edit could not be built.
+    pub(crate) fn apply(
+        &mut self,
+        specs: impl IntoIterator<Item = TransactionSpec>,
+    ) -> Option<Vec<Transaction>> {
+        let transactions = self.state.update_with_appended(specs).ok()?;
+        let last = transactions.last()?;
+        self.state = last.state().clone();
+        self.projection = projection_of(&self.state);
+        Some(transactions)
+    }
+
+    /// The editing funnel: apply, publish and tell the extensions.
+    ///
+    /// `discarding` marks an edit that takes back uncommitted text — cancelling a
+    /// composition — so extensions are not told the document changed for good.
+    fn edit(
+        &mut self,
+        cx: &mut Context<Self>,
+        discarding: bool,
+        specs: Vec<TransactionSpec>,
+    ) -> bool {
+        let composing = self.is_composing();
+        let Some(transactions) = self.apply(specs) else {
+            return false;
+        };
+        let changed = transactions.iter().any(Transaction::doc_changed);
+        self.upstream = false;
+        if changed || composing != self.is_composing() {
+            self.publish(cx);
         }
-        self.edit(cx, |core| core.toggle_mark(mark));
+        self.preferred_x = None;
+        self.reveal = true;
+        self.reset_caret_blink(cx);
+        cx.notify();
+        let composing_now = self.is_composing();
+        self.run_extensions(
+            extension::Update {
+                committed: !discarding && !composing_now && (changed || composing),
+                transactions,
+                ..extension::Update::default()
+            },
+            cx,
+        );
+        changed
     }
+
+    /// Run a catalogue command. `false` when it does not apply.
+    pub fn run_command(&mut self, command: &Command, cx: &mut Context<Self>) -> bool {
+        match command(&self.state) {
+            Some(spec) => {
+                self.edit(cx, false, vec![spec]);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Apply specs the host built itself.
+    pub fn dispatch(
+        &mut self,
+        specs: impl IntoIterator<Item = TransactionSpec>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.edit(cx, false, specs.into_iter().collect())
+    }
+
+    /// Fold every undo entry made until [`EditorView::end_undo_group`] into one.
+    pub fn begin_undo_group(&mut self) {
+        let _ = self.apply([TransactionSpec::new()
+            .effect(markraft_doc::begin_undo_group().of(()))
+            .add_to_history(false)]);
+        self.undo_group_depth += 1;
+    }
+
+    pub fn end_undo_group(&mut self) {
+        while self.undo_group_depth > 0 {
+            self.undo_group_depth -= 1;
+            let _ = self.apply([TransactionSpec::new()
+                .effect(markraft_doc::end_undo_group().of(()))
+                .add_to_history(false)]);
+        }
+    }
+
+    pub fn cancel_composition(&mut self, cx: &mut Context<Self>) {
+        let Some(range) = markraft_doc::composition_range(&self.state) else {
+            return;
+        };
+        let specs = vec![
+            TransactionSpec::new()
+                .changes([markraft_doc::Change::delete(range.from, range.to)
+                    .with_fit(markraft_doc::Fit::Auto)])
+                .selection(Selection::cursor(range.from))
+                .add_to_history(false),
+            markraft_doc::finish_composition().sequential(),
+        ];
+        self.edit(cx, true, specs);
+    }
+
+    pub fn toggle_mark(&mut self, ty: MarkTypeId, attrs: Attrs, cx: &mut Context<Self>) {
+        let command = markraft_doc::commands::toggle_mark(ty, attrs);
+        self.run_command(&command, cx);
+    }
+
+    pub fn set_block_type(&mut self, ty: NodeTypeId, attrs: Attrs, cx: &mut Context<Self>) {
+        let command = markraft_doc::commands::set_block_type(ty, attrs);
+        self.run_command(&command, cx);
+    }
+
     /// The link containing the caret, or the one shared by the whole selection.
-    pub fn active_link(&self) -> Option<&str> {
-        self.core.active_link()
+    pub fn active_link(&self) -> Option<String> {
+        links::active_link(&self.state, self.types.link?)
     }
-    /// Link the selection to `url`, or unlink it with `None`. A caret edits the link
-    /// it touches; elsewhere it inserts the URL itself as linked text.
+
+    /// Link the selection to `url`, or unlink it with `None`.
     pub fn set_link(&mut self, url: Option<&str>, cx: &mut Context<Self>) {
         if self.single_line {
             return;
         }
-        self.edit(cx, |core| core.set_link(url));
+        let Some(ty) = self.types.link else { return };
+        if let Some(spec) = links::set_link(&self.state, ty, url) {
+            self.edit(cx, false, vec![spec]);
+        }
     }
+
+    /// The URL of the link drawn under `point`.
+    fn link_under(&self, point: Point<Pixels>) -> Option<String> {
+        let ty = self.types.link?;
+        let pos = self.hit(point);
+        let (range, mark) = links::link_at(self.state.doc(), ty, pos)?;
+        let (index, _) = self.projection.pos_to_line_offset(range.start)?;
+        let line = self.projection.line(index)?;
+        self.layout
+            .get(index)?
+            .rectangles(range.start - line.from..range.end - line.from, false)
+            .iter()
+            .any(|bounds| bounds.contains(&point))
+            .then(|| {
+                mark.attrs
+                    .get("href")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+    }
+
+    /// Open `url` in the browser if it is a web or mail address.
+    pub fn open_link(url: &str, cx: &mut App) {
+        if let Some(url) = openable_url(url) {
+            cx.open_url(&url);
+        }
+    }
+
+    /// The language of the code block starting at `pos`.
+    pub fn code_language(&self, pos: usize) -> Option<String> {
+        let node = self.state.doc().node_at(pos)?;
+        (Some(node.type_id()) == self.types.code_block).then(|| {
+            node.attrs()
+                .get("language")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned()
+        })
+    }
+
+    pub fn code_header_bounds(&self, pos: usize) -> Option<Bounds<Pixels>> {
+        self.layout
+            .iter()
+            .find(|row| row.code_pos == Some(pos))?
+            .code_language_bounds()
+    }
+
+    /// Set the language of the code block starting at `pos`.
+    pub fn set_code_language_at(&mut self, pos: usize, language: &str, cx: &mut Context<Self>) {
+        if self.single_line || self.code_language(pos).is_none() {
+            return;
+        }
+        let Some(node) = self.state.doc().node_at(pos) else {
+            return;
+        };
+        let updated = node.with_attrs(node.attrs().with("language", language));
+        let slice = markraft_doc::Slice::from_fragment(markraft_doc::Fragment::from_node(updated));
+        let change = markraft_doc::Change::replace(pos, pos + node.node_size(), slice);
+        // The node keeps its size, so the caret keeps its position.
+        if let Some(spec) =
+            markraft_doc::commands::changes_spec(&self.state, vec![change], "format.block")
+        {
+            let spec = spec.selection(self.state.selection().clone());
+            self.edit(cx, false, vec![spec]);
+        }
+    }
+
     /// Window bounds of the first line of the selection, or of the link touching the
     /// caret, for anchoring host popovers. Valid after the editor has painted.
     pub fn anchor_bounds(&self) -> Option<Bounds<Pixels>> {
-        let (start, end) = self.core.selection().ordered();
-        let row = self.layout.get(start.block)?;
+        let doc = self.state.doc();
+        let (start, end) = (
+            self.state.selection().from(doc),
+            self.state.selection().to(doc),
+        );
+        let (index, offset) = self.projection.pos_to_line_offset(start)?;
+        let line = self.projection.line(index)?;
+        let row = self.layout.get(index)?;
         let range = if start != end {
-            start.byte..if end.block == start.block {
-                end.byte
-            } else {
-                row.text_len
-            }
-        } else if let Some((range, _)) = self.core.link_at(start) {
-            range
+            offset..(end.min(line.to) - line.from)
+        } else if let Some((span, _)) = self
+            .types
+            .link
+            .and_then(|ty| links::link_at(doc, ty, start))
+        {
+            span.start - line.from..span.end - line.from
         } else {
-            start.byte..start.byte
+            offset..offset
         };
         if range.is_empty() {
             let caret = row.caret(range.start, self.upstream);
@@ -372,51 +677,7 @@ impl EditorView {
                 .fold(first, |all, rect| all.union(rect)),
         )
     }
-    /// Open `url` in the browser if it is a web or mail address.
-    pub fn open_link(url: &str, cx: &mut App) {
-        if let Some(url) = openable_url(url) {
-            cx.open_url(&url);
-        }
-    }
-    /// The URL of the link drawn under `point`.
-    fn link_under(&self, point: Point<Pixels>) -> Option<String> {
-        let position = self.hit(point);
-        let (range, url) = self.core.link_at(position)?;
-        self.layout
-            .get(position.block)?
-            .rectangles(range, false)
-            .iter()
-            .any(|bounds| bounds.contains(&point))
-            .then(|| url.to_owned())
-    }
-    pub fn set_block_kind(&mut self, kind: BlockKind, cx: &mut Context<Self>) {
-        if self.single_line {
-            return;
-        }
-        self.edit(cx, |core| core.set_block_kind(kind));
-    }
-    pub fn toggle_block_kind(&mut self, kind: BlockKind, cx: &mut Context<Self>) {
-        if self.single_line {
-            return;
-        }
-        self.edit(cx, |core| core.toggle_block_kind(kind));
-    }
-    pub fn code_language(&self, block: usize) -> Option<&str> {
-        match &self.document().blocks.get(block)?.kind {
-            BlockKind::Code { language } => Some(language),
-            _ => None,
-        }
-    }
-    pub fn code_header_bounds(&self, block: usize) -> Option<Bounds<Pixels>> {
-        let start = self.document().code_block_range(block)?.start;
-        self.layout.get(start)?.code_language_bounds()
-    }
-    pub fn set_code_language_at(&mut self, block: usize, language: &str, cx: &mut Context<Self>) {
-        if self.single_line || self.code_language(block).is_none() {
-            return;
-        }
-        self.edit(cx, |core| core.set_code_language_at(block, language));
-    }
+
     fn publish(&mut self, cx: &mut Context<Self>) {
         self.published_revision += 1;
         cx.emit(EditorEvent::Changed {
@@ -424,6 +685,7 @@ impl EditorView {
         });
         cx.notify();
     }
+
     fn sync_caret_focus(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.focused = self.focus.is_focused(window);
         let focused = window.is_window_active() && self.focused;
@@ -433,6 +695,7 @@ impl EditorView {
             cx.notify();
         }
     }
+
     fn flash_scrollbar(&mut self, cx: &mut Context<Self>) {
         self.scrollbar_active = true;
         // Replacing the task cancels the previous hide timer.
@@ -447,6 +710,7 @@ impl EditorView {
         }));
         cx.notify();
     }
+
     /// Thumb offset and height within the editor, from the previous frame's scroll
     /// geometry. None while the content fits.
     fn scrollbar_thumb(&self) -> Option<(Pixels, Pixels)> {
@@ -464,14 +728,16 @@ impl EditorView {
             height,
         ))
     }
-    fn reset_caret_blink(&mut self, cx: &mut Context<Self>) {
+
+    pub(crate) fn reset_caret_blink(&mut self, cx: &mut Context<Self>) {
         // Dropping the previous task cancels its pending timer. Only the focused
         // editor with a collapsed, committed selection owns a ticking task.
         self.caret_blink_task = None;
+        let doc = self.state.doc();
         if !self.caret_blink.reset(
             self.caret_focused,
-            self.core.is_composing(),
-            self.core.selection().is_empty(),
+            self.is_composing(),
+            self.state.selection().is_empty(doc),
         ) {
             return;
         }
@@ -492,131 +758,95 @@ impl EditorView {
             }
         }));
     }
-    fn edit(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Editor) -> Option<Change>) {
-        self.edit_inner(cx, false, f);
-    }
-    /// `discarding` marks an edit that restores the committed text — cancelling a
-    /// composition — so extensions are not told the committed document changed.
-    fn edit_inner(
-        &mut self,
-        cx: &mut Context<Self>,
-        discarding: bool,
-        f: impl FnOnce(&mut Editor) -> Option<Change>,
-    ) {
-        self.last_typed_at = None;
-        let before = self.core.revision();
-        let composing = self.core.is_composing();
-        let change = f(&mut self.core);
-        self.upstream = false;
-        if self.core.revision() != before || composing != self.core.is_composing() {
-            self.publish(cx);
-        }
-        self.preferred_x = None;
-        self.reveal = true;
-        self.reset_caret_blink(cx);
-        cx.notify();
-        let composing_now = self.core.is_composing();
-        self.run_extensions(
-            extension::Update {
-                committed: !discarding && !composing_now && (change.is_some() || composing),
-                change,
-                ..extension::Update::default()
-            },
-            cx,
-        );
-    }
-    fn select(&mut self, head: Position, extend: bool, cx: &mut Context<Self>) {
-        self.last_typed_at = None;
-        let composing = self.core.is_composing();
-        let committed = self.core.finish_composition();
+
+    /// Move the selection, as a pointer or an arrow key does.
+    fn select(&mut self, head: usize, extend: bool, cx: &mut Context<Self>) {
+        let doc = self.state.doc();
         let anchor = if extend {
-            self.core.selection().anchor
+            self.state.selection().anchor(doc)
         } else {
             head
         };
-        self.core.set_selection(Selection { anchor, head });
-        if composing {
-            self.publish(cx);
+        let selection = if extend {
+            Selection::text(anchor, head)
+        } else {
+            Selection::near(self.state.schema(), doc, head, 1)
+        };
+        let mut specs = vec![
+            TransactionSpec::new()
+                .selection(selection)
+                .user_event("select.pointer")
+                .scroll_into_view(),
+        ];
+        if self.is_composing() {
+            specs.push(markraft_doc::finish_composition().sequential());
         }
-        self.reveal = true;
-        self.reset_caret_blink(cx);
-        cx.notify();
-        self.run_extensions(
-            extension::Update {
-                committed,
-                ..extension::Update::default()
-            },
-            cx,
-        );
+        self.edit(cx, false, specs);
     }
-    fn range(&self) -> Range<usize> {
-        let s = self.core.selection();
-        let a = self.core.position_to_utf16(s.anchor);
-        let b = self.core.position_to_utf16(s.head);
-        a.min(b)..a.max(b)
-    }
-    pub(crate) fn hit(&self, point: Point<Pixels>) -> Position {
+
+    /// The document position under `point`.
+    pub(crate) fn hit(&self, point: Point<Pixels>) -> usize {
         let Some(last) = self.layout.last() else {
-            return Position { block: 0, byte: 0 };
+            return 0;
         };
         if point.y >= last.origin.y + last.height {
-            return Position {
-                block: self.layout.len() - 1,
-                byte: last.text_len,
-            };
+            return last.from + last.char_len;
         }
-        let (block, row) = self
+        let row = self
             .layout
             .iter()
-            .enumerate()
-            .find(|(_, row)| point.y < row.origin.y + row.height)
-            .unwrap_or((0, &self.layout[0]));
-        let local = gpui::point(
-            (point.x - row.origin.x).max(px(0.)),
-            (point.y - row.origin.y)
-                .max(px(0.))
-                .min(row.line.size(row.line_height).height - px(1.)),
-        );
-        let byte = row.inline_code_index(local).unwrap_or_else(|| {
-            row.line
-                .closest_index_for_position(local, row.line_height)
-                .unwrap_or_else(|i| i)
-        });
-        Position {
-            block,
-            byte: byte.min(row.text_len),
-        }
+            .find(|row| point.y < row.origin.y + row.height)
+            .unwrap_or(&self.layout[0]);
+        let local = gpui::point(point.x - row.origin.x, point.y - row.origin.y);
+        let pos = row.from + row.char_at(local).min(row.char_len);
+        self.projection.floor_grapheme(pos)
     }
+
     fn select_point(&mut self, point: Point<Pixels>, extend: bool, cx: &mut Context<Self>) {
         let (position, upstream) = self.hit_upstream(point);
         self.upstream = upstream;
         self.select(position, extend, cx);
     }
+
     /// The position under `target`, and whether the caret there belongs to the visual row
     /// above the one the point fell in.
-    fn hit_upstream(&self, target: Point<Pixels>) -> (Position, bool) {
-        let position = self.hit(target);
+    fn hit_upstream(&self, target: Point<Pixels>) -> (usize, bool) {
+        let pos = self.hit(target);
         let upstream = self
-            .layout
-            .get(position.block)
-            .is_some_and(|row| row.caret(position.byte, false).y > target.y);
-        (position, upstream)
+            .projection
+            .pos_to_line_offset(pos)
+            .and_then(|(index, offset)| {
+                self.layout
+                    .get(index)
+                    .map(|row| row.caret(offset, false).y > target.y)
+            })
+            .unwrap_or(false);
+        (pos, upstream)
     }
-    /// The caret `delta` visual rows away and the column to keep there. `None` before the
-    /// first paint, when there is no layout to walk.
-    pub(crate) fn visual_row_target(&self, delta: isize) -> Option<(Position, Pixels, bool)> {
-        let head = self.core.selection().head;
-        let row = self.layout.get(head.block)?;
-        let caret = row.caret(head.byte, self.upstream);
-        let x = self.preferred_x.unwrap_or(caret.x);
-        let centers: Vec<_> = self
-            .layout
+
+    /// Every visual row's vertical centre, across the whole laid-out document.
+    fn visual_row_centers(&self) -> Vec<Pixels> {
+        self.layout
             .iter()
             .flat_map(|row| {
-                (0..=row.line.wrap_boundaries().len())
-                    .map(|i| row.origin.y + row.line_height * (i as f32 + 0.5))
+                (0..row.visual_rows())
+                    .map(move |i| row.origin.y + row.line_height * (i as f32 + 0.5))
             })
-            .collect();
+            .collect()
+    }
+
+    /// The caret `delta` visual rows away and the column to keep there. `None` before the
+    /// first paint, when there is no layout to walk.
+    pub(crate) fn visual_row_target(&self, delta: isize) -> Option<(usize, Pixels, bool)> {
+        let head = self.head();
+        let (index, offset) = self.projection.pos_to_line_offset(head)?;
+        let row = self.layout.get(index)?;
+        let caret = row.caret(offset, self.upstream);
+        let x = self.preferred_x.unwrap_or(caret.x);
+        let centers = self.visual_row_centers();
+        if centers.is_empty() {
+            return None;
+        }
         let current = centers
             .iter()
             .position(|&y| y > caret.y)
@@ -626,11 +856,13 @@ impl EditorView {
         let (position, upstream) = self.hit_upstream(target);
         Some((position, x, upstream))
     }
+
     /// The start or end of the caret's visual row. A wrapped block has several.
-    pub(crate) fn line_edge_target(&self, end: bool) -> Option<(Position, bool)> {
-        let head = self.core.selection().head;
-        let row = self.layout.get(head.block)?;
-        let caret = row.caret(head.byte, self.upstream);
+    pub(crate) fn line_edge_target(&self, end: bool) -> Option<(usize, bool)> {
+        let head = self.head();
+        let (index, offset) = self.projection.pos_to_line_offset(head)?;
+        let row = self.layout.get(index)?;
+        let caret = row.caret(offset, self.upstream);
         Some(self.hit_upstream(point(
             if end {
                 row.origin.x + row.width
@@ -640,27 +872,31 @@ impl EditorView {
             caret.y + row.line_height * 0.5,
         )))
     }
-    fn vertical(&mut self, delta: f32, extend: bool, cx: &mut Context<Self>) {
-        let head = self.core.selection().head;
-        if delta > 0.
+
+    fn vertical(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
+        let head = self.head();
+        let last_line = self.projection.line_count().saturating_sub(1);
+        if delta > 0
             && !extend
-            && self.core.selection().is_empty()
-            && head.block + 1 == self.document().blocks.len()
-            && head.byte == self.document().blocks[head.block].len()
-            && matches!(
-                self.document().blocks[head.block].kind,
-                BlockKind::Code { .. }
-            )
+            && self.state.selection().is_cursor()
+            && self.projection.line_at(head) == Some(last_line)
+            && self
+                .projection
+                .line(last_line)
+                .is_some_and(|line| line.to == head && self.types.is_code_block(line))
         {
-            self.edit(cx, |core| core.exit_code_block());
-            return;
+            let command = markraft_doc::commands::exit_code();
+            if self.run_command(&command, cx) {
+                return;
+            }
         }
-        if let Some((position, x, upstream)) = self.visual_row_target(delta as isize) {
+        if let Some((position, x, upstream)) = self.visual_row_target(delta) {
             self.upstream = upstream;
             self.select(position, extend, cx);
             self.preferred_x = Some(x);
         }
     }
+
     fn line_edge(&mut self, end: bool, extend: bool, cx: &mut Context<Self>) {
         if let Some((position, upstream)) = self.line_edge_target(end) {
             self.preferred_x = None;
@@ -668,16 +904,26 @@ impl EditorView {
             self.select(position, extend, cx);
         }
     }
+
+    /// The selected content, as a slice.
+    pub fn selection_slice(&self) -> markraft_doc::Slice {
+        self.state.selection().content(self.state.doc())
+    }
+
     fn copy(&mut self, cx: &mut Context<Self>) {
-        let text = self.core.selection_text();
-        if !text.is_empty() {
-            if self.single_line {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            } else {
-                clipboard::write(self.core.selection_fragment(), text, cx);
-            }
+        let slice = self.selection_slice();
+        if slice.is_empty() {
+            return;
+        }
+        if self.single_line {
+            let text = markraft_doc::projection::slice_to_plain_text(self.state.schema(), &slice);
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        } else {
+            let schema = self.state.schema().clone();
+            clipboard::write(&schema, &slice, cx);
         }
     }
+
     fn paste(&mut self, mode: clipboard::PasteMode, cx: &mut Context<Self>) {
         let item = cx
             .read_from_clipboard()
@@ -686,31 +932,33 @@ impl EditorView {
         let text = clipboard_text.as_deref().unwrap_or_default();
         let literal = self.single_line
             || matches!(mode, clipboard::PasteMode::Plain)
-            || matches!(
-                self.document().blocks[self.core.selection().head.block].kind,
-                BlockKind::Code { .. }
-            );
+            || self.types.in_code_block_at(&self.state);
         if literal && clipboard_text.is_none() {
             return;
         }
-        let fragment = (!literal)
-            .then(|| clipboard::read_fragment(&item, mode))
-            .flatten();
-        let single_line = self.single_line;
-        self.edit(cx, |core| {
-            if literal {
-                core.insert_text_plain(&single_line::text(text, single_line))
-            } else if is_web_url(text.trim())
-                && (!core.selection().is_empty() || core.active_link().is_none())
-            {
-                core.set_link(Some(text.trim()))
-            } else if let Some(fragment) = fragment {
-                core.insert_fragment(fragment)
-            } else {
-                None
-            }
-        });
+        let schema = self.state.schema().clone();
+        let spec = if literal {
+            let text = single_line::text(text, self.single_line);
+            markraft_doc::commands::insert_text(&text)(&self.state)
+        } else if is_web_url(text.trim())
+            && self.types.link.is_some()
+            && (!self.state.selection().is_empty(self.state.doc()) || self.active_link().is_none())
+        {
+            links::set_link(
+                &self.state,
+                self.types.link.expect("checked"),
+                Some(text.trim()),
+            )
+        } else if let Some(slice) = clipboard::read_fragment(&schema, &item, mode) {
+            markraft_doc::commands::replace_selection(slice)(&self.state)
+        } else {
+            None
+        };
+        if let Some(spec) = spec {
+            self.edit(cx, false, vec![spec.user_event("input.paste")]);
+        }
     }
+
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         self.selecting = true;
@@ -724,16 +972,19 @@ impl EditorView {
         }
         let position = self.hit(event.position);
         // Task markers are presentation outside the text coordinate space.
-        if let Some(row) = self.layout.get(position.block)
+        if let Some((index, _)) = self.projection.pos_to_line_offset(position)
+            && let Some(row) = self.layout.get(index)
             && row
                 .marker_bounds()
                 .is_some_and(|bounds| bounds.contains(&event.position))
-            && let BlockKind::Task { checked } = self.document().blocks[position.block].kind
         {
+            let types = self.types.clone();
+            let toggle = keymap::toggle_task(&types);
             self.select(position, false, cx);
-            self.set_block_kind(BlockKind::Task { checked: !checked }, cx);
-            self.selecting = false;
-            return;
+            if self.run_command(&toggle, cx) {
+                self.selecting = false;
+                return;
+            }
         }
         self.select_point(event.position, event.modifiers.shift, cx);
         if event.click_count == 1
@@ -743,42 +994,34 @@ impl EditorView {
         {
             cx.emit(EditorEvent::LinkClicked);
         }
+        let head = self.head();
         if event.click_count >= 3 {
-            let end = Position {
-                block: position.block,
-                byte: self.document().blocks[position.block].text().len(),
-            };
-            self.core.set_selection(Selection {
-                anchor: Position {
-                    block: position.block,
-                    byte: 0,
-                },
-                head: end,
-            });
-        } else if event.click_count == 2 {
-            use unicode_segmentation::UnicodeSegmentation;
-            let text = self.document().blocks[position.block].text();
-            if let Some((start, word)) = text
-                .split_word_bound_indices()
-                .find(|(start, word)| *start <= position.byte && position.byte < start + word.len())
+            if let Some((index, _)) = self.projection.pos_to_line_offset(head)
+                && let Some(line) = self.projection.line(index)
             {
-                self.core.set_selection(Selection {
-                    anchor: Position {
-                        block: position.block,
-                        byte: start,
-                    },
-                    head: Position {
-                        block: position.block,
-                        byte: start + word.len(),
-                    },
-                });
+                self.select_range(line.from, line.to, cx);
             }
+        } else if event.click_count == 2 {
+            let from = self.projection.prev_word_boundary(head).unwrap_or(head);
+            let to = self.projection.next_word_boundary(from).unwrap_or(head);
+            self.select_range(from, to, cx);
         }
         self.reset_caret_blink(cx);
         cx.notify();
-        // A double or triple click sets the selection outside `select`.
-        self.run_extensions(extension::Update::default(), cx);
     }
+
+    fn select_range(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        self.edit(
+            cx,
+            false,
+            vec![
+                TransactionSpec::new()
+                    .selection(Selection::text(from, to))
+                    .user_event("select.pointer"),
+            ],
+        );
+    }
+
     fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.selecting {
             self.select_point(event.position, true, cx);
@@ -787,6 +1030,7 @@ impl EditorView {
     fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.selecting = false;
     }
+
     /// The one answer gpui asks the input handler for, and uses twice: it gates inserted
     /// text, and `ElementInputHandler` also returns it for
     /// `prefers_ime_for_printable_keys`, which is what decides whether a printable key
@@ -796,150 +1040,16 @@ impl EditorView {
     /// extension that refuses mid-composition is ignored until it ends rather than
     /// stranding the candidate.
     pub(crate) fn accepts_text_input(&self) -> bool {
-        self.core.is_composing() || self.extension_input_policy() == InputPolicy::Accept
+        self.is_composing() || self.extension_input_policy() == InputPolicy::Accept
     }
 }
 
-impl EntityInputHandler for EditorView {
-    fn accepts_text_input(&self, _: &mut Window, _: &mut Context<Self>) -> bool {
-        EditorView::accepts_text_input(self)
-    }
-    fn text_for_range(
-        &mut self,
-        range: Range<usize>,
-        actual: &mut Option<Range<usize>>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<String> {
-        let start = self
-            .core
-            .position_to_utf16(self.core.utf16_to_position(range.start));
-        let end = self
-            .core
-            .position_to_utf16(self.core.utf16_to_position(range.end))
-            .max(start);
-        *actual = Some(start..end);
-        Some(String::from_utf16_lossy(
-            &self
-                .document()
-                .plain_text()
-                .encode_utf16()
-                .collect::<Vec<_>>()[start..end],
-        ))
-    }
-    fn selected_text_range(
-        &mut self,
-        _: bool,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<UTF16Selection> {
-        let s = self.core.selection();
-        Some(UTF16Selection {
-            range: self.range(),
-            reversed: (s.anchor.block, s.anchor.byte) > (s.head.block, s.head.byte),
-        })
-    }
-    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        self.core.marked_range()
-    }
-    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.edit(cx, |c| {
-            c.finish_composition();
-            None
-        });
-    }
-    fn replace_text_in_range(
-        &mut self,
-        range: Option<Range<usize>>,
-        text: &str,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Belt and braces: an unbound printable key can still reach here through a
-        // platform path that does not consult `accepts_text_input`.
-        if !EditorView::accepts_text_input(self) {
-            return;
-        }
-        let text = single_line::text(text, self.single_line);
-        let text = text.as_ref();
-        let single_line = self.single_line;
-        let now = Instant::now();
-        let grouped = range.is_none()
-            && !self.core.is_composing()
-            && !text.is_empty()
-            && !text.contains(['\n', '\r']);
-        if grouped {
-            if self
-                .last_typed_at
-                .is_none_or(|last| now.duration_since(last) > Duration::from_millis(750))
-            {
-                self.typing_group = self.typing_group.wrapping_add(1);
-            }
-            let group = self.typing_group;
-            self.edit(cx, |core| {
-                if single_line {
-                    core.insert_text_plain_grouped(text, group)
-                } else {
-                    core.insert_text_grouped(text, group)
-                }
-            });
-            self.last_typed_at = Some(now);
-        } else {
-            self.edit(cx, |core| {
-                if single_line {
-                    core.commit_composition_plain(range, text)
-                } else {
-                    core.commit_composition(range, text)
-                }
-            });
-        }
-    }
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        range: Option<Range<usize>>,
-        text: &str,
-        selected: Option<Range<usize>>,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let selected = if self.single_line {
-            single_line::selected_range(text, selected)
-        } else {
-            selected
-        };
-        let text = single_line::text(text, self.single_line);
-        self.edit(cx, |c| c.set_composition(range, &text, selected));
-    }
-    fn bounds_for_range(
-        &mut self,
-        range: Range<usize>,
-        _: Bounds<Pixels>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<Bounds<Pixels>> {
-        let start = self.core.utf16_to_position(range.start);
-        let end = self.core.utf16_to_position(range.end);
-        let row = self.layout.get(start.block)?;
-        let a = row.caret(start.byte, self.upstream);
-        let b = if end.block == start.block {
-            row.caret(end.byte, self.upstream)
-        } else {
-            a
-        };
-        let width = if a.y == b.y {
-            (b.x - a.x).max(px(2.))
-        } else {
-            px(2.)
-        };
-        Some(Bounds::new(a, size(width, row.line_height)))
-    }
-    fn character_index_for_point(
-        &mut self,
-        point: Point<Pixels>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<usize> {
-        Some(self.core.position_to_utf16(self.hit(point)))
+impl DocTypes {
+    /// Whether the cursor sits in a code block, for the paste and Tab paths.
+    pub(crate) fn in_code_block_at(&self, state: &EditorState) -> bool {
+        let doc = state.doc();
+        doc.resolve(state.selection().head(doc))
+            .is_ok_and(|resolved| Some(resolved.parent().type_id()) == self.code_block)
     }
 }
 
@@ -952,7 +1062,6 @@ impl Render for EditorView {
                     this.run_extensions(extension::Update::default(), cx);
                 }),
                 cx.on_blur(&self.focus, window, |this, window, cx| {
-                    this.last_typed_at = None;
                     this.selecting = false;
                     this.sync_caret_focus(window, cx);
                     // The input method owns commit/unmark ordering. A host that
@@ -960,7 +1069,6 @@ impl Render for EditorView {
                     this.run_extensions(extension::Update::default(), cx);
                 }),
                 cx.observe_window_activation(window, |this, window, cx| {
-                    this.last_typed_at = None;
                     this.sync_caret_focus(window, cx);
                 }),
             ]);
@@ -970,9 +1078,6 @@ impl Render for EditorView {
         let key_context = self.extension_key_context();
         let overlay = self.extension_overlay(window, cx);
         let accessible_text = self.accessible_text.clone();
-        let selection_editor = cx.entity();
-        let replacement_editor = cx.entity();
-        let value_editor = cx.entity();
         let mut root = div()
             .id("markraft-editor")
             .role(if self.single_line {
@@ -983,62 +1088,6 @@ impl Render for EditorView {
             .aria_label("Text editor")
             .aria_placeholder(self.placeholder.clone())
             .a11y_synthetic_children(move |builder| accessible_text.borrow_mut().write(builder))
-            .on_a11y_action(
-                AccessibleAction::SetTextSelection,
-                move |data, window, cx| {
-                    if let Some(accesskit::ActionData::SetTextSelection(selection)) = data {
-                        selection_editor.update(cx, |this, cx| {
-                            let selection = this.accessible_text.borrow().selection(selection);
-                            if let Some(selection) = selection {
-                                window.focus(&this.focus, cx);
-                                this.edit(cx, |core| {
-                                    core.set_selection(selection);
-                                    None
-                                });
-                            }
-                        });
-                    }
-                },
-            )
-            .on_a11y_action(
-                AccessibleAction::ReplaceSelectedText,
-                move |data, window, cx| {
-                    if let Some(accesskit::ActionData::Value(value)) = data {
-                        replacement_editor.update(cx, |this, cx| {
-                            window.focus(&this.focus, cx);
-                            let single_line = this.single_line;
-                            let value = single_line::text(value, single_line);
-                            this.edit(cx, |core| {
-                                if single_line {
-                                    core.commit_composition_plain(None, &value)
-                                } else {
-                                    core.commit_composition(None, &value)
-                                }
-                            });
-                        });
-                    }
-                },
-            )
-            .on_a11y_action(AccessibleAction::SetValue, move |data, window, cx| {
-                if let Some(accesskit::ActionData::Value(value)) = data {
-                    value_editor.update(cx, |this, cx| {
-                        window.focus(&this.focus, cx);
-                        let single_line = this.single_line;
-                        let value = single_line::text(value, single_line);
-                        this.edit(cx, |core| {
-                            core.set_selection(Selection {
-                                anchor: Position::default(),
-                                head: core.utf16_to_position(usize::MAX),
-                            });
-                            if single_line {
-                                core.insert_text_plain(&value)
-                            } else {
-                                core.insert_text(&value)
-                            }
-                        });
-                    });
-                }
-            })
             .size_full()
             .key_context(key_context)
             .track_focus(&self.focus)
@@ -1047,6 +1096,7 @@ impl Render for EditorView {
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up));
+        root = self.bind_accessibility_actions(root, cx);
         // Extension listeners run from window dispatch, so they may update the editor.
         // One listener per action: a listener consumes its action, so with one each the
         // first extension's would starve the others that listen for the same action.
@@ -1071,215 +1121,8 @@ impl Render for EditorView {
                 }),
             );
         }
-        macro_rules! edit_action {
-            ($action:ty, $call:expr) => {
-                root = root.on_action(cx.listener(|this, _: &$action, _, cx| {
-                    this.edit(cx, $call);
-                }));
-            };
-        }
-        edit_action!(Backspace, |c| c.backspace());
-        edit_action!(Delete, |c| c.delete_forward());
-        root = root.on_action(cx.listener(|this, _: &Enter, _, cx| {
-            if this.single_line {
-                cx.propagate();
-            } else {
-                this.edit(cx, |core| core.insert_text("\n"));
-            }
-        }));
-        root = root
-            .on_action(cx.listener(|this, _: &Indent, _, cx| {
-                if this.single_line || this.is_composing() {
-                    cx.propagate();
-                    return;
-                }
-                let kind = &this.document().blocks[this.core.selection().head.block].kind;
-                if matches!(kind, BlockKind::Code { .. }) {
-                    this.edit(cx, |core| {
-                        if core.selection().is_empty() {
-                            core.insert_text_plain("\t")
-                        } else {
-                            core.indent()
-                        }
-                    });
-                } else if kind.is_list() || *kind == BlockKind::Quote {
-                    this.edit(cx, |core| core.indent());
-                } else {
-                    cx.propagate();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &Outdent, _, cx| {
-                if this.single_line || this.is_composing() {
-                    cx.propagate();
-                    return;
-                }
-                let kind = &this.document().blocks[this.core.selection().head.block].kind;
-                if kind.is_list() || matches!(kind, BlockKind::Quote | BlockKind::Code { .. }) {
-                    this.edit(cx, |core| core.outdent());
-                } else {
-                    cx.propagate();
-                }
-            }));
-        edit_action!(WordLeft, |c| {
-            c.move_word_left(false);
-            None
-        });
-        edit_action!(WordRight, |c| {
-            c.move_word_right(false);
-            None
-        });
-        edit_action!(SelectWordLeft, |c| {
-            c.move_word_left(true);
-            None
-        });
-        edit_action!(SelectWordRight, |c| {
-            c.move_word_right(true);
-            None
-        });
-        edit_action!(DeleteWordBackward, |c| c.delete_word_backward());
-        edit_action!(DeleteWordForward, |c| c.delete_word_forward());
-        edit_action!(DocumentStart, |c| {
-            c.move_document_start(false);
-            None
-        });
-        edit_action!(DocumentEnd, |c| {
-            c.move_document_end(false);
-            None
-        });
-        edit_action!(SelectDocumentStart, |c| {
-            c.move_document_start(true);
-            None
-        });
-        edit_action!(SelectDocumentEnd, |c| {
-            c.move_document_end(true);
-            None
-        });
-        root = root.on_action(cx.listener(|this, _: &CancelComposition, _, cx| {
-            if this.is_composing() {
-                this.cancel_composition(cx);
-            } else {
-                cx.propagate();
-            }
-        }));
-        edit_action!(Left, |c| {
-            c.move_left(false);
-            None
-        });
-        edit_action!(Right, |c| {
-            c.move_right(false);
-            None
-        });
-        edit_action!(SelectLeft, |c| {
-            c.move_left(true);
-            None
-        });
-        edit_action!(SelectRight, |c| {
-            c.move_right(true);
-            None
-        });
-        edit_action!(Undo, |c| c.undo());
-        edit_action!(Redo, |c| c.redo());
-        macro_rules! format_action {
-            ($action:ty, $call:expr) => {
-                root = root.on_action(cx.listener(|this, _: &$action, _, cx| {
-                    if !this.single_line {
-                        this.edit(cx, $call);
-                    }
-                }));
-            };
-        }
-        format_action!(Bold, |c| c.toggle_mark(Mark::Bold));
-        format_action!(Italic, |c| c.toggle_mark(Mark::Italic));
-        format_action!(Code, |c| c.toggle_mark(Mark::Code));
-        format_action!(Strikethrough, |c| c.toggle_mark(Mark::Strikethrough));
-        format_action!(Underline, |c| c.toggle_mark(Mark::Underline));
-        format_action!(Paragraph, |c| c.toggle_block_kind(BlockKind::Paragraph));
-        format_action!(Heading, |c| c.toggle_block_kind(BlockKind::Heading(1)));
-        format_action!(Heading2, |c| c.toggle_block_kind(BlockKind::Heading(2)));
-        format_action!(Heading3, |c| c.toggle_block_kind(BlockKind::Heading(3)));
-        format_action!(Quote, |c| c.toggle_block_kind(BlockKind::Quote));
-        format_action!(CodeBlock, |c| c.toggle_block_kind(BlockKind::Code {
-            language: String::new(),
-        }));
-        format_action!(Ordered, |c| c.toggle_block_kind(BlockKind::Ordered));
-        format_action!(Bullet, |c| c.toggle_block_kind(BlockKind::Bullet));
-        format_action!(Task, |c| c
-            .toggle_block_kind(BlockKind::Task { checked: false }));
+        root = self.bind_editing_actions(root, cx);
         let root = root
-            .on_action(cx.listener(|this, _: &Up, _, cx| this.vertical(-1., false, cx)))
-            .on_action(cx.listener(|this, _: &Down, _, cx| this.vertical(1., false, cx)))
-            .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.vertical(-1., true, cx)))
-            .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.vertical(1., true, cx)))
-            .on_action(cx.listener(|this, _: &Home, _, cx| this.line_edge(false, false, cx)))
-            .on_action(cx.listener(|this, _: &End, _, cx| this.line_edge(true, false, cx)))
-            .on_action(cx.listener(|this, _: &SelectHome, _, cx| this.line_edge(false, true, cx)))
-            .on_action(cx.listener(|this, _: &SelectEnd, _, cx| this.line_edge(true, true, cx)))
-            .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
-                this.edit(cx, |core| {
-                    if let Some(range) = core
-                        .document()
-                        .code_block_range(core.selection().head.block)
-                    {
-                        let selection = Selection {
-                            anchor: Position {
-                                block: range.start,
-                                byte: 0,
-                            },
-                            head: Position {
-                                block: range.end - 1,
-                                byte: core.document().blocks[range.end - 1].len(),
-                            },
-                        };
-                        if core.selection().ordered() != selection.ordered() {
-                            core.set_selection(selection);
-                            return None;
-                        }
-                    }
-                    let head = core.utf16_to_position(usize::MAX);
-                    core.set_selection(Selection {
-                        anchor: Position { block: 0, byte: 0 },
-                        head,
-                    });
-                    None
-                });
-            }))
-            .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
-            .on_action(cx.listener(|this, _: &Cut, _, cx| {
-                this.copy(cx);
-                let single_line = this.single_line;
-                this.edit(cx, |c| {
-                    if single_line {
-                        c.insert_text_plain("")
-                    } else {
-                        c.insert_text("")
-                    }
-                });
-            }))
-            .on_action(
-                cx.listener(|this, _: &Paste, _, cx| {
-                    this.paste(clipboard::PasteMode::Formatted, cx)
-                }),
-            )
-            .on_action(cx.listener(|this, _: &PastePlain, _, cx| {
-                this.paste(clipboard::PasteMode::Plain, cx)
-            }))
-            .on_action(cx.listener(|this, _: &PasteMarkdown, _, cx| {
-                this.paste(clipboard::PasteMode::Markdown, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ToggleTask, _, cx| {
-                let head = this.core.selection().head;
-                if let BlockKind::Task { checked } = this.document().blocks[head.block].kind {
-                    this.set_block_kind(BlockKind::Task { checked: !checked }, cx);
-                } else if matches!(
-                    this.document().blocks[head.block].kind,
-                    BlockKind::Code { .. }
-                ) {
-                    this.edit(cx, |core| core.exit_code_block());
-                }
-            }))
-            .on_action(
-                cx.listener(|_, _: &CharacterPalette, window, _| window.show_character_palette()),
-            )
             .when(self.single_line, |this| {
                 this.overflow_x_hidden().overflow_y_hidden()
             })
@@ -1330,6 +1173,209 @@ impl Render for EditorView {
                     child: overlay.element,
                 }))
             })
+    }
+}
+
+impl EditorView {
+    /// The editor's own key bindings, each a chain of catalogue commands.
+    fn bind_editing_actions(
+        &self,
+        mut root: Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        macro_rules! run {
+            ($action:ty, $build:expr) => {
+                root = root.on_action(cx.listener(|this, _: &$action, _, cx| {
+                    let command: Command = $build(&this.types);
+                    if !this.run_command(&command, cx) {
+                        cx.propagate();
+                    }
+                }));
+            };
+        }
+        macro_rules! rich {
+            ($action:ty, $build:expr) => {
+                root = root.on_action(cx.listener(|this, _: &$action, _, cx| {
+                    if this.single_line {
+                        cx.propagate();
+                        return;
+                    }
+                    let command: Command = $build(&this.types);
+                    if !this.run_command(&command, cx) {
+                        cx.propagate();
+                    }
+                }));
+            };
+        }
+        run!(Backspace, keymap::backspace);
+        run!(Delete, |_: &DocTypes| keymap::delete_forward());
+        root = root.on_action(cx.listener(|this, _: &Enter, _, cx| {
+            if this.single_line {
+                cx.propagate();
+                return;
+            }
+            let command = keymap::enter(&this.types);
+            if !this.run_command(&command, cx) {
+                cx.propagate();
+            }
+        }));
+        rich!(Indent, keymap::indent);
+        rich!(Outdent, keymap::outdent);
+        run!(Left, |_: &DocTypes| keymap::move_grapheme(
+            Direction::Backward,
+            false
+        ));
+        run!(Right, |_: &DocTypes| keymap::move_grapheme(
+            Direction::Forward,
+            false
+        ));
+        run!(SelectLeft, |_: &DocTypes| keymap::move_grapheme(
+            Direction::Backward,
+            true
+        ));
+        run!(SelectRight, |_: &DocTypes| keymap::move_grapheme(
+            Direction::Forward,
+            true
+        ));
+        run!(WordLeft, |_: &DocTypes| keymap::move_word(
+            Direction::Backward,
+            false
+        ));
+        run!(WordRight, |_: &DocTypes| keymap::move_word(
+            Direction::Forward,
+            false
+        ));
+        run!(SelectWordLeft, |_: &DocTypes| keymap::move_word(
+            Direction::Backward,
+            true
+        ));
+        run!(SelectWordRight, |_: &DocTypes| keymap::move_word(
+            Direction::Forward,
+            true
+        ));
+        run!(DeleteWordBackward, |_: &DocTypes| keymap::delete_word(
+            Direction::Backward
+        ));
+        run!(DeleteWordForward, |_: &DocTypes| keymap::delete_word(
+            Direction::Forward
+        ));
+        run!(DocumentStart, |_: &DocTypes| keymap::move_document_edge(
+            false, false
+        ));
+        run!(DocumentEnd, |_: &DocTypes| keymap::move_document_edge(
+            true, false
+        ));
+        run!(SelectDocumentStart, |_: &DocTypes| {
+            keymap::move_document_edge(false, true)
+        });
+        run!(SelectDocumentEnd, |_: &DocTypes| {
+            keymap::move_document_edge(true, true)
+        });
+        run!(Undo, |_: &DocTypes| keymap::history(true));
+        run!(Redo, |_: &DocTypes| keymap::history(false));
+        run!(SelectAll, keymap::select_all);
+        rich!(Bold, |types: &DocTypes| keymap::mark(types.strong));
+        rich!(Italic, |types: &DocTypes| keymap::mark(types.em));
+        rich!(Code, |types: &DocTypes| keymap::mark(types.code));
+        rich!(Strikethrough, |types: &DocTypes| keymap::mark(
+            types.strikethrough
+        ));
+        rich!(Underline, |types: &DocTypes| keymap::mark(types.underline));
+        rich!(Paragraph, |types: &DocTypes| block(
+            types,
+            types.paragraph,
+            Attrs::empty()
+        ));
+        rich!(Heading, |types: &DocTypes| block(
+            types,
+            types.heading,
+            Attrs::from_pairs([("level", 1i64)])
+        ));
+        rich!(Heading2, |types: &DocTypes| block(
+            types,
+            types.heading,
+            Attrs::from_pairs([("level", 2i64)])
+        ));
+        rich!(Heading3, |types: &DocTypes| block(
+            types,
+            types.heading,
+            Attrs::from_pairs([("level", 3i64)])
+        ));
+        rich!(CodeBlock, |types: &DocTypes| block(
+            types,
+            types.code_block,
+            Attrs::empty()
+        ));
+        rich!(Quote, keymap::toggle_quote);
+        rich!(Ordered, |types: &DocTypes| list(
+            types,
+            types.ordered_list,
+            types.list_item
+        ));
+        rich!(Bullet, |types: &DocTypes| list(
+            types,
+            types.bullet_list,
+            types.list_item
+        ));
+        rich!(Task, |types: &DocTypes| list(
+            types,
+            types.bullet_list,
+            types.task_item
+        ));
+        rich!(ToggleTask, keymap::toggle_task);
+        root = root
+            .on_action(cx.listener(|this, _: &Up, _, cx| this.vertical(-1, false, cx)))
+            .on_action(cx.listener(|this, _: &Down, _, cx| this.vertical(1, false, cx)))
+            .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.vertical(-1, true, cx)))
+            .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.vertical(1, true, cx)))
+            .on_action(cx.listener(|this, _: &Home, _, cx| this.line_edge(false, false, cx)))
+            .on_action(cx.listener(|this, _: &End, _, cx| this.line_edge(true, false, cx)))
+            .on_action(cx.listener(|this, _: &SelectHome, _, cx| this.line_edge(false, true, cx)))
+            .on_action(cx.listener(|this, _: &SelectEnd, _, cx| this.line_edge(true, true, cx)))
+            .on_action(cx.listener(|this, _: &CancelComposition, _, cx| {
+                if this.is_composing() {
+                    this.cancel_composition(cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
+            .on_action(cx.listener(|this, _: &Cut, _, cx| {
+                this.copy(cx);
+                let command = markraft_doc::commands::delete_selection();
+                this.run_command(&command, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &Paste, _, cx| {
+                    this.paste(clipboard::PasteMode::Formatted, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &PastePlain, _, cx| {
+                this.paste(clipboard::PasteMode::Plain, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PasteMarkdown, _, cx| {
+                this.paste(clipboard::PasteMode::Markdown, cx)
+            }))
+            .on_action(
+                cx.listener(|_, _: &CharacterPalette, window, _| window.show_character_palette()),
+            );
+        root
+    }
+}
+
+/// Toggle a block type that the schema may not declare.
+fn block(types: &DocTypes, ty: Option<NodeTypeId>, attrs: Attrs) -> Command {
+    match ty {
+        Some(ty) => keymap::toggle_block(types, ty, attrs),
+        None => markraft_doc::commands::command(|_| None),
+    }
+}
+
+/// Toggle a list whose type or item type the schema may not declare.
+fn list(types: &DocTypes, ty: Option<NodeTypeId>, item: Option<NodeTypeId>) -> Command {
+    match (ty, item) {
+        (Some(ty), Some(item)) => keymap::toggle_list(types, ty, item),
+        _ => markraft_doc::commands::command(|_| None),
     }
 }
 

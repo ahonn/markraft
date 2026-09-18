@@ -1,5 +1,4 @@
 use gpui::{Hsla, Pixels, px, rgb, rgba};
-use markraft_core::BlockKind;
 
 /// Editor presentation, independent of document semantics and host window policy.
 #[derive(Clone, Debug)]
@@ -128,13 +127,20 @@ impl EditorStyle {
         }
     }
 
-    pub(crate) fn font_size(&self, kind: &BlockKind) -> Pixels {
-        match kind {
-            BlockKind::Heading(1) => self.heading_sizes[0],
-            BlockKind::Heading(2) => self.heading_sizes[1],
-            BlockKind::Heading(_) => self.heading_sizes[2],
-            BlockKind::Code { .. } => self.body_size - px(2.),
-            _ => self.body_size,
+    /// The size a line's text is drawn at, from its heading level and whether it
+    /// is code.
+    pub(crate) fn font_size(&self, heading: Option<u8>, code: bool) -> Pixels {
+        match (heading, code) {
+            (Some(1), _) => self.heading_sizes[0],
+            (Some(2), _) => self.heading_sizes[1],
+            (Some(_), _) => self.heading_sizes[2],
+            (None, true) => self.body_size - px(2.),
+            (None, false) => self.body_size,
         }
+    }
+
+    /// The space above a heading of `level`, except at the top of the document.
+    pub(crate) fn heading_top_gap(&self, level: u8) -> Pixels {
+        self.heading_top_gaps[usize::from(level).clamp(1, 3) - 1]
     }
 }

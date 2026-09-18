@@ -22,7 +22,8 @@
 mod common;
 
 use common::{Codec, Rng};
-use markraft_doc::{Attrs, Mark, MarkSet, Node, Schema, attrs};
+use markraft_doc::{Attrs, Fragment, Mark, MarkSet, Node, Schema, attrs};
+use markraft_markdown::html::{HtmlParser, HtmlSerializer};
 use markraft_markdown::schema as md;
 
 /// Words with no whitespace at their edges, covering the characters a
@@ -387,5 +388,72 @@ fn random_documents_survive_a_round_trip() {
             written,
             "seed {seed} is not a fixed point"
         );
+    }
+}
+
+/// A run of whitespace as one space, which is all HTML can mean by one.
+fn collapse_whitespace(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut space = false;
+    for character in text.chars() {
+        if character.is_ascii_whitespace() {
+            if !space {
+                out.push(' ');
+            }
+            space = true;
+        } else {
+            out.push(character);
+            space = false;
+        }
+    }
+    out
+}
+
+/// The document an HTML round trip can give back.
+///
+/// HTML collapses a run of whitespace in inline content into one space, so a
+/// line ending inside a paragraph comes back as a space. Text inside `<pre>` —
+/// a code block's content, a raw block's source — is exempt and survives byte
+/// for byte. The generator writes no whitespace at a textblock's edges, so
+/// collapsing each leaf on its own is the whole of the difference.
+fn collapsed(schema: &Schema, node: &Node) -> Node {
+    let ty = schema.node_type(node.type_id());
+    if !node.is_container() || ty.is_code() {
+        return node.clone();
+    }
+    let children: Vec<Node> = node
+        .children()
+        .map(|child| match child.text() {
+            Some(text) if ty.has_inline_content() => child.with_text(&collapse_whitespace(text)),
+            _ => collapsed(schema, child),
+        })
+        .collect();
+    node.copy(Fragment::from_nodes(children))
+}
+
+#[test]
+fn random_documents_survive_an_html_round_trip() {
+    let codec = Codec::new();
+    let parser = HtmlParser::commonmark(codec.schema.clone());
+    let serializer = HtmlSerializer::commonmark(&codec.schema);
+    for seed in 1..2000u64 {
+        let mut generator = Gen {
+            schema: &codec.schema,
+            rng: Rng::new(seed),
+        };
+        let blocks = generator.blocks(2, false, 1, 4);
+        let doc = codec.schema.doc(blocks).expect("a document");
+        let written = serializer.serialize(&doc);
+        let back = parser
+            .parse(&written)
+            .unwrap_or_else(|error| panic!("seed {seed} did not parse: {error}\n{written}"));
+        back.check(&codec.schema).expect("a valid document");
+        let expected = collapsed(&codec.schema, &doc);
+        assert_eq!(
+            codec.describe(&back),
+            codec.describe(&expected),
+            "seed {seed} did not survive:\n{written}"
+        );
+        assert_eq!(back, expected, "seed {seed}: attributes differ\n{written}");
     }
 }

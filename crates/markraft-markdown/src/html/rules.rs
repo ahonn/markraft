@@ -265,6 +265,14 @@ fn task_state(target: HtmlTarget<'_>) -> Option<bool> {
         .map(|box_| box_.value().attr("checked").is_some())
 }
 
+/// Whether a list renders without `<p>` wrappers.
+///
+/// HTML has no element for it, so Markraft's own output says so and every other
+/// writer's is taken as tight, which is what a reader shows.
+fn is_tight(target: HtmlTarget<'_>) -> bool {
+    target.attr("data-tight") != Some("false")
+}
+
 /// The rule table for the CommonMark/GFM preset.
 pub fn commonmark_html_rules() -> HtmlRules {
     let mut rules = HtmlRules::new()
@@ -278,6 +286,20 @@ pub fn commonmark_html_rules() -> HtmlRules {
         .with("p", HtmlRule::block(md::PARAGRAPH))
         .with("blockquote", HtmlRule::block(md::BLOCKQUOTE))
         .with("hr", HtmlRule::block(md::HORIZONTAL_RULE))
+        // Before the general `<pre>`: a block whose source the model does not
+        // interpret is written as one, and has to come back as one.
+        .matching(
+            "pre",
+            html_match_fn(|target| target.attr("data-type") == Some("rawBlock")),
+            HtmlRule::block_with(
+                md::RAW_BLOCK,
+                html_attrs_fn(|target| {
+                    let text = target.text();
+                    let source = text.strip_suffix('\n').unwrap_or(&text).to_string();
+                    attrs! {"source" => source}
+                }),
+            ),
+        )
         .with(
             "pre",
             HtmlRule::TextBlock {
@@ -296,11 +318,29 @@ pub fn commonmark_html_rules() -> HtmlRules {
                         })
                         .unwrap_or("")
                         .to_string();
-                    attrs! {"language" => language, "fence_char" => "`", "fence_length" => 3i64}
+                    let fence = target.attr("data-fence").unwrap_or("`").to_string();
+                    let length: i64 = target
+                        .attr("data-fence-length")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(3);
+                    attrs! {
+                        "language" => language,
+                        "fence_char" => fence,
+                        "fence_length" => length,
+                    }
                 }),
             },
         )
-        .with("ul", HtmlRule::block(md::BULLET_LIST))
+        .with(
+            "ul",
+            HtmlRule::block_with(
+                md::BULLET_LIST,
+                html_attrs_fn(|target| {
+                    let bullet = target.attr("data-bullet").unwrap_or("-").to_string();
+                    attrs! {"bullet_char" => bullet, "tight" => is_tight(target)}
+                }),
+            ),
+        )
         .with(
             "ol",
             HtmlRule::block_with(
@@ -310,7 +350,12 @@ pub fn commonmark_html_rules() -> HtmlRules {
                         .attr("start")
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(1);
-                    attrs! {"start" => start, "delimiter" => ".", "tight" => true}
+                    let delimiter = target.attr("data-delimiter").unwrap_or(".").to_string();
+                    attrs! {
+                        "start" => start,
+                        "delimiter" => delimiter,
+                        "tight" => is_tight(target),
+                    }
                 }),
             ),
         )

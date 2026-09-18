@@ -59,14 +59,14 @@ impl NotesApp {
     fn format_items(&self, cx: &App) -> Vec<FormatItem> {
         let editor = self.editor().read(cx);
         let marks = editor.active_marks();
-        let kind = editor.active_block_kind();
+        let kind = doc::Block::active(editor.state(), &editor.projection());
         match self.format_menu {
             Some(FormatMenu::Block) => {
                 let mut items = vec![(
                     "Paragraph",
                     "⌥⌘0",
-                    Intent::Block(BlockKind::Paragraph),
-                    kind == Some(BlockKind::Paragraph),
+                    Intent::Block(doc::Block::Paragraph),
+                    kind == Some(doc::Block::Paragraph),
                 )];
                 for (level, label, shortcut) in [
                     (1, "Heading 1", "⌥⌘1"),
@@ -76,68 +76,81 @@ impl NotesApp {
                     items.push((
                         label,
                         shortcut,
-                        Intent::Block(BlockKind::Heading(level)),
-                        kind == Some(BlockKind::Heading(level)),
+                        Intent::Block(doc::Block::Heading(level)),
+                        kind == Some(doc::Block::Heading(level)),
                     ));
                 }
                 items.push((
                     "Quote",
                     "⇧⌘B",
-                    Intent::Block(BlockKind::Quote),
-                    kind == Some(BlockKind::Quote),
+                    Intent::Block(doc::Block::Quote),
+                    kind == Some(doc::Block::Quote),
                 ));
                 items.push((
                     "Code Block",
                     "⌥⌘C",
-                    Intent::Block(BlockKind::Code {
-                        language: String::new(),
-                    }),
-                    matches!(kind, Some(BlockKind::Code { .. })),
+                    Intent::Block(doc::Block::Code),
+                    kind == Some(doc::Block::Code),
                 ));
                 items
             }
             Some(FormatMenu::Inline) => vec![
-                ("Bold", "⌘B", Intent::Mark(Mark::Bold), marks.bold),
-                ("Italic", "⌘I", Intent::Mark(Mark::Italic), marks.italic),
+                (
+                    "Bold",
+                    "⌘B",
+                    Intent::Mark(doc::Inline::Bold),
+                    doc::Inline::Bold.is_active(&marks),
+                ),
+                (
+                    "Italic",
+                    "⌘I",
+                    Intent::Mark(doc::Inline::Italic),
+                    doc::Inline::Italic.is_active(&marks),
+                ),
                 (
                     "Strikethrough",
                     "⇧⌘S",
-                    Intent::Mark(Mark::Strikethrough),
-                    marks.strikethrough,
+                    Intent::Mark(doc::Inline::Strikethrough),
+                    doc::Inline::Strikethrough.is_active(&marks),
                 ),
                 (
                     "Underline",
                     "⌘U",
-                    Intent::Mark(Mark::Underline),
-                    marks.underline,
+                    Intent::Mark(doc::Inline::Underline),
+                    doc::Inline::Underline.is_active(&marks),
                 ),
-                ("Inline Code", "⌘E", Intent::Mark(Mark::Code), marks.code),
+                (
+                    "Inline Code",
+                    "⌘E",
+                    Intent::Mark(doc::Inline::Code),
+                    doc::Inline::Code.is_active(&marks),
+                ),
                 ("Link", "⌘L", Intent::Link, editor.active_link().is_some()),
             ],
             Some(FormatMenu::List) => vec![
                 (
                     "No List",
                     "",
-                    Intent::Block(BlockKind::Paragraph),
-                    kind == Some(BlockKind::Paragraph),
+                    Intent::Block(doc::Block::Paragraph),
+                    kind == Some(doc::Block::Paragraph),
                 ),
                 (
                     "Ordered List",
                     "⇧⌘7",
-                    Intent::Block(BlockKind::Ordered),
-                    kind == Some(BlockKind::Ordered),
+                    Intent::Block(doc::Block::Ordered),
+                    kind == Some(doc::Block::Ordered),
                 ),
                 (
                     "Bullet List",
                     "⇧⌘8",
-                    Intent::Block(BlockKind::Bullet),
-                    kind == Some(BlockKind::Bullet),
+                    Intent::Block(doc::Block::Bullet),
+                    kind == Some(doc::Block::Bullet),
                 ),
                 (
                     "Task List",
                     "⇧⌘9",
-                    Intent::Block(BlockKind::Task { checked: false }),
-                    matches!(kind, Some(BlockKind::Task { .. })),
+                    Intent::Block(doc::Block::Task),
+                    kind == Some(doc::Block::Task),
                 ),
             ],
             None => vec![],
@@ -224,7 +237,7 @@ impl NotesApp {
     pub(super) fn footer(&self, count: String, cx: &mut Context<Self>) -> Div {
         let editor = self.editor().read(cx);
         let marks = editor.active_marks();
-        let kind = editor.active_block_kind();
+        let kind = doc::Block::active(editor.state(), &editor.projection());
         div()
             .h(px(44.))
             .flex_shrink_0()
@@ -301,23 +314,32 @@ impl NotesApp {
                             "Text Style",
                             Icon::Heading,
                             Intent::FormatMenu(FormatMenu::Block),
-                            matches!(kind, Some(BlockKind::Heading(_))),
+                            matches!(kind, Some(doc::Block::Heading(_))),
                             cx,
                         ))
-                        .child(self.format_button(
-                            "format-inline-menu",
-                            "Text Formatting",
-                            Icon::Italic,
-                            Intent::FormatMenu(FormatMenu::Inline),
-                            marks.bold || marks.italic || marks.strikethrough || marks.underline,
-                            cx,
-                        ))
+                        .child(
+                            self.format_button(
+                                "format-inline-menu",
+                                "Text Formatting",
+                                Icon::Italic,
+                                Intent::FormatMenu(FormatMenu::Inline),
+                                [
+                                    doc::Inline::Bold,
+                                    doc::Inline::Italic,
+                                    doc::Inline::Strikethrough,
+                                    doc::Inline::Underline,
+                                ]
+                                .iter()
+                                .any(|inline| inline.is_active(&marks)),
+                                cx,
+                            ),
+                        )
                         .child(self.format_button(
                             "format-inline-code",
                             "Inline Code · ⌘E",
                             Icon::Code,
-                            Intent::Mark(Mark::Code),
-                            marks.code,
+                            Intent::Mark(doc::Inline::Code),
+                            doc::Inline::Code.is_active(&marks),
                             cx,
                         ))
                         .child(
@@ -331,16 +353,14 @@ impl NotesApp {
                             "format-list-menu",
                             "Lists",
                             match kind {
-                                Some(BlockKind::Task { .. }) => Icon::Task,
-                                Some(BlockKind::Ordered) => Icon::Ordered,
+                                Some(doc::Block::Task) => Icon::Task,
+                                Some(doc::Block::Ordered) => Icon::Ordered,
                                 _ => Icon::Bullet,
                             },
                             Intent::FormatMenu(FormatMenu::List),
                             matches!(
                                 kind,
-                                Some(
-                                    BlockKind::Bullet | BlockKind::Ordered | BlockKind::Task { .. }
-                                )
+                                Some(doc::Block::Bullet | doc::Block::Ordered | doc::Block::Task)
                             ),
                             cx,
                         )),

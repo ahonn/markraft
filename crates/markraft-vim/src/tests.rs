@@ -1,83 +1,111 @@
-//! The whole of vim driven over a bare `markraft_core::Editor`.
+//! The whole of vim driven over a bare [`EditorState`].
 //!
 //! [`Keys`] implements the same [`Host`] the GPUI layer implements and dispatches a
 //! keystroke to the same `command` functions the action handlers call, so these tests
 //! exercise the real command layer rather than a copy of it. Only two inputs cannot be
 //! reproduced without a window: `j` and `k` outside a linewise context move by visual
-//! row, which here is one block, and a repaint.
+//! row, which here is one line, and a repaint.
+//!
+//! A cursor is a document position; the assertions spell it as a line and a `char`
+//! offset into that line, which inside a line is the same number.
 
 use crate::{
     command::{self, InsertAt},
-    host::Host,
+    host::{self, Host},
     motion::Motion,
     state::{Mode, Operator, State},
 };
-use markraft_core::{
-    Document, Editor, Origin, Position, Selection, Transaction, TransactionOptions,
-};
+use markraft_doc::commands::Command;
+use markraft_doc::projection::{Projection, projection_of, slice_to_plain_text};
+use markraft_doc::{EditorState, EditorStateConfig, Extension, Selection, Slice, TransactionSpec};
+use markraft_markdown::{commonmark_extensions, commonmark_schema, from_markdown, to_markdown};
+use std::sync::Arc;
 
-/// An editor plus a clipboard, standing in for `EditorCx`.
+/// A state plus a clipboard, standing in for `EditorCx`.
 struct Editing {
-    editor: Editor,
-    clipboard: Option<Document>,
+    state: EditorState,
+    clipboard: Option<Slice>,
+    group_depth: usize,
 }
 
 impl Host for Editing {
-    fn document(&self) -> &Document {
-        self.editor.document()
+    fn state(&self) -> &EditorState {
+        &self.state
     }
-    fn selection(&self) -> Selection {
-        self.editor.selection()
+    fn projection(&self) -> Arc<Projection> {
+        projection_of(&self.state)
     }
     fn select(&mut self, selection: Selection, _: bool) {
-        self.editor.set_selection(selection);
+        self.dispatch(vec![TransactionSpec::new().selection(selection)]);
     }
-    fn edit(&mut self, action: &mut dyn FnMut(&mut Transaction<'_>)) {
-        self.editor.transact(
-            TransactionOptions {
-                group: None,
-                origin: Origin::Extension(crate::VIM),
+    fn dispatch(&mut self, specs: Vec<TransactionSpec>) -> bool {
+        match self.state.update_with_appended(specs) {
+            Ok(transactions) => match transactions.last() {
+                Some(last) => {
+                    self.state = last.state().clone();
+                    true
+                }
+                None => false,
             },
-            |tx| action(tx),
+            Err(_) => false,
+        }
+    }
+    fn run(&mut self, command: &Command) -> bool {
+        match command(&self.state) {
+            Some(spec) => self.dispatch(vec![spec]),
+            None => false,
+        }
+    }
+    /// No layout, so a visual row is a line; the column is kept as a `char` offset,
+    /// which is what an unwrapped line would do anyway.
+    fn rows(&mut self, rows: isize, extend: bool) {
+        let projection = self.projection();
+        let head = host::head(self);
+        let anchor = host::anchor(self);
+        let (line, offset) = projection.pos_to_line_offset(head).unwrap_or((0, 0));
+        let last = projection.line_count().saturating_sub(1);
+        let target = (line as isize).saturating_add(rows).clamp(0, last as isize) as usize;
+        let entry = &projection.lines()[target];
+        let head = entry.from + offset.min(entry.len());
+        self.select(
+            Selection::text(if extend { anchor } else { head }, head),
+            false,
         );
     }
-    /// No layout, so a visual row is a block; the column is kept as a byte offset, which
-    /// is what an unwrapped line would do anyway.
-    fn rows(&mut self, rows: isize, extend: bool) {
-        let selection = self.editor.selection();
-        let head = selection.head;
-        let blocks = self.editor.document().blocks.len() as isize;
-        let block = (head.block as isize)
-            .saturating_add(rows)
-            .clamp(0, blocks - 1) as usize;
-        let head = Position {
-            block,
-            byte: head.byte,
-        };
-        self.editor.set_selection(Selection {
-            anchor: if extend { selection.anchor } else { head },
-            head,
-        });
+    fn write_clipboard(&mut self, slice: &Slice) {
+        self.clipboard = Some(slice.clone());
     }
-    fn write_clipboard(&mut self, fragment: Document, _: String) {
-        self.clipboard = Some(fragment);
-    }
-    fn read_clipboard(&mut self) -> Option<Document> {
+    fn read_clipboard(&mut self) -> Option<Slice> {
         self.clipboard.clone()
     }
+    fn history(&mut self, undo: bool) -> bool {
+        let spec = if undo {
+            markraft_doc::undo(&self.state)
+        } else {
+            markraft_doc::redo(&self.state)
+        };
+        match spec {
+            Some(spec) => self.dispatch(vec![spec]),
+            None => false,
+        }
+    }
     fn begin_undo_group(&mut self) {
-        self.editor.begin_undo_group();
+        self.group_depth += 1;
+        self.dispatch(vec![
+            TransactionSpec::new()
+                .effect(markraft_doc::begin_undo_group().of(()))
+                .add_to_history(false),
+        ]);
     }
     fn end_undo_group(&mut self) {
-        self.editor.end_undo_group();
-    }
-    fn history(&mut self, undo: bool) -> bool {
-        if undo {
-            self.editor.undo()
-        } else {
-            self.editor.redo()
+        while self.group_depth > 0 {
+            self.group_depth -= 1;
+            self.dispatch(vec![
+                TransactionSpec::new()
+                    .effect(markraft_doc::end_undo_group().of(()))
+                    .add_to_history(false),
+            ]);
         }
-        .is_some()
     }
 }
 
@@ -90,19 +118,77 @@ struct Keys {
 
 impl Keys {
     fn new(markdown: &str) -> Self {
+        let schema = commonmark_schema();
+        let doc = from_markdown(&schema, markdown).expect("valid Markdown");
+        let state =
+            EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
+                Extension::all([
+                    markraft_doc::projection::projection(),
+                    markraft_doc::composition(),
+                    markraft_doc::history(Default::default()),
+                    commonmark_extensions(&schema),
+                ]),
+            ))
+            .expect("a valid state");
         Self {
             host: Editing {
-                editor: Editor::new(Document::from_markdown(markdown)),
+                state,
                 clipboard: None,
+                group_depth: 0,
             },
             state: State::default(),
         }
     }
 
-    fn at(mut self, block: usize, byte: usize) -> Self {
-        self.host
-            .editor
-            .set_selection(Selection::caret(Position { block, byte }));
+    /// A document of plain paragraphs holding exactly `lines`, for the cases where
+    /// the Markdown reader would strip the leading whitespace a test needs.
+    fn lines_of(lines: &[&str]) -> Self {
+        let schema = commonmark_schema();
+        let blocks: Vec<_> = lines
+            .iter()
+            .map(|text| {
+                let content = if text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![schema.text(text)]
+                };
+                schema
+                    .node("paragraph", content)
+                    .expect("text is valid paragraph content")
+            })
+            .collect();
+        let doc = schema.doc(blocks).expect("a valid document");
+        let mut keys = Self::new("");
+        keys.host.state =
+            EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
+                Extension::all([
+                    markraft_doc::projection::projection(),
+                    markraft_doc::composition(),
+                    markraft_doc::history(Default::default()),
+                    commonmark_extensions(&schema),
+                ]),
+            ))
+            .expect("a valid state");
+        keys
+    }
+
+    /// The Return key, which is the editor's own Enter chain.
+    fn enter(&mut self) -> &mut Self {
+        let command = markraft_gpui::commands::enter(&self.host.state.schema().clone());
+        self.host.run(&command);
+        self
+    }
+
+    /// The document position at `offset` `char`s into line `line`.
+    fn pos(&self, line: usize, offset: usize) -> usize {
+        let projection = self.host.projection();
+        let entry = &projection.lines()[line];
+        entry.from + offset.min(entry.len())
+    }
+
+    fn at(mut self, line: usize, offset: usize) -> Self {
+        let pos = self.pos(line, offset);
+        self.host.select(Selection::cursor(pos), false);
         self
     }
 
@@ -117,8 +203,8 @@ impl Keys {
                 continue;
             }
             if let Some(tail) = rest.strip_prefix("gg") {
-                let block = self.state.pending.count().map_or(0, |count| count - 1);
-                command::motion(&mut self.state, &mut self.host, Motion::Block(block));
+                let line = self.state.pending.count().map_or(0, |count| count - 1);
+                command::motion(&mut self.state, &mut self.host, Motion::Line(line));
                 rest = tail;
                 continue;
             }
@@ -161,9 +247,9 @@ impl Keys {
             'j' => command::vertical(state, host, 1),
             'k' => command::vertical(state, host, -1),
             'G' => {
-                let last = host.document().blocks.len() - 1;
-                let block = state.pending.count().map_or(last, |count| count - 1);
-                motion(state, host, Motion::Block(block));
+                let last = host.projection().line_count() - 1;
+                let line = state.pending.count().map_or(last, |count| count - 1);
+                motion(state, host, Motion::Line(line));
             }
             'd' => command::operator(state, host, Operator::Delete),
             'c' => command::operator(state, host, Operator::Change),
@@ -197,124 +283,145 @@ impl Keys {
     /// Text typed in Insert mode, exactly as the platform delivers it.
     fn typed(&mut self, text: &str) -> &mut Self {
         assert_eq!(self.state.mode, Mode::Insert, "typing outside Insert mode");
-        self.host.editor.insert_text(text);
+        command::typed(&mut self.host, text);
         self
     }
 
-    fn cursor(&self) -> Position {
+    fn cursor(&self) -> usize {
         command::cursor(&self.state, &self.host)
     }
 
+    /// The cursor as a line index and a `char` offset into that line.
+    fn line_col(&self) -> (usize, usize) {
+        self.host
+            .projection()
+            .pos_to_line_offset(self.cursor())
+            .expect("the cursor sits in a line")
+    }
+
+    /// The caret the editor actually holds, which in Insert mode may rest past the
+    /// last grapheme where `cursor` would pull it back.
+    fn caret(&self) -> (usize, usize) {
+        self.host
+            .projection()
+            .pos_to_line_offset(host::head(&self.host))
+            .expect("the caret sits in a line")
+    }
+
     fn text(&self) -> String {
-        self.host.editor.document().plain_text()
+        self.host.projection().plain_text().to_owned()
     }
 
     fn markdown(&self) -> String {
-        self.host.editor.document().to_markdown()
+        to_markdown(self.host.state.schema(), self.host.state.doc())
     }
 
     fn selected(&self) -> String {
-        let (start, end) = self.host.editor.selection().ordered();
-        self.host.editor.text_in(start..end)
+        let state = &self.host.state;
+        slice_to_plain_text(state.schema(), &state.selection().content(state.doc()))
     }
-}
 
-fn at(block: usize, byte: usize) -> Position {
-    Position { block, byte }
+    fn lines(&self) -> usize {
+        self.host.projection().line_count()
+    }
 }
 
 // ---------------------------------------------------------------- motions
 
 #[test]
 fn h_and_l_stay_inside_the_line_and_stop_on_its_last_grapheme() {
-    let mut keys = Keys::new("abc\ndef").at(0, 1);
-    assert_eq!(keys.keys("h").cursor(), at(0, 0));
-    assert_eq!(keys.keys("h").cursor(), at(0, 0));
-    assert_eq!(keys.keys("l").cursor(), at(0, 1));
+    let mut keys = Keys::new("abc\n\ndef").at(0, 1);
+    assert_eq!(keys.keys("h").line_col(), (0, 0));
+    assert_eq!(keys.keys("h").line_col(), (0, 0));
+    assert_eq!(keys.keys("l").line_col(), (0, 1));
     // Normal mode never rests past the last grapheme, so `l` stops there.
-    assert_eq!(keys.keys("lll").cursor(), at(0, 2));
-    assert_eq!(keys.keys("9l").cursor(), at(0, 2));
-    assert_eq!(keys.keys("9h").cursor(), at(0, 0));
+    assert_eq!(keys.keys("lll").line_col(), (0, 2));
+    assert_eq!(keys.keys("9l").line_col(), (0, 2));
+    assert_eq!(keys.keys("9h").line_col(), (0, 0));
 }
 
 #[test]
 fn motions_step_whole_grapheme_clusters() {
     // A family emoji, a combining acute, and CJK.
     let mut keys = Keys::new("👩‍👩‍👧e\u{0301}中").at(0, 0);
-    let family = "👩‍👩‍👧".len();
-    let combining = "e\u{0301}".len();
-    assert_eq!(keys.keys("l").cursor(), at(0, family));
-    assert_eq!(keys.keys("l").cursor(), at(0, family + combining));
-    assert_eq!(keys.keys("l").cursor(), at(0, family + combining));
-    assert_eq!(keys.keys("h").cursor(), at(0, family));
-    assert_eq!(keys.keys("h").cursor(), at(0, 0));
-    assert_eq!(keys.keys("$").cursor(), at(0, family + combining));
+    let family = "👩‍👩‍👧".chars().count();
+    let combining = "e\u{0301}".chars().count();
+    assert_eq!(keys.keys("l").line_col(), (0, family));
+    assert_eq!(keys.keys("l").line_col(), (0, family + combining));
+    assert_eq!(keys.keys("l").line_col(), (0, family + combining));
+    assert_eq!(keys.keys("h").line_col(), (0, family));
+    assert_eq!(keys.keys("h").line_col(), (0, 0));
+    assert_eq!(keys.keys("$").line_col(), (0, family + combining));
 }
 
 #[test]
-fn zero_caret_and_dollar_act_on_the_block_not_the_visual_row() {
-    let mut keys = Keys::new("  indented text").at(0, 8);
-    assert_eq!(keys.keys("0").cursor(), at(0, 0));
-    assert_eq!(keys.keys("^").cursor(), at(0, 2));
-    assert_eq!(keys.keys("$").cursor(), at(0, "  indented tex".len()));
+fn zero_caret_and_dollar_act_on_the_line_not_the_visual_row() {
+    let mut keys = Keys::lines_of(&["  indented text"]).at(0, 8);
+    assert_eq!(keys.keys("0").line_col(), (0, 0));
+    assert_eq!(keys.keys("^").line_col(), (0, 2));
+    assert_eq!(
+        keys.keys("$").line_col(),
+        (0, "  indented tex".chars().count())
+    );
     // A leading zero is the motion; a zero after a digit is a count.
-    let mut keys = Keys::new("abcdefghij\nsecond").at(0, 0);
-    assert_eq!(keys.keys("10l").cursor(), at(0, 9));
-    assert_eq!(keys.keys("0").cursor(), at(0, 0));
+    let mut keys = Keys::new("abcdefghij\n\nsecond").at(0, 0);
+    assert_eq!(keys.keys("10l").line_col(), (0, 9));
+    assert_eq!(keys.keys("0").line_col(), (0, 0));
 }
 
 #[test]
 fn word_motions_use_the_editors_boundaries_and_cross_lines() {
-    let mut keys = Keys::new("one two three\nfour").at(0, 0);
-    assert_eq!(keys.keys("w").cursor(), at(0, 4));
-    assert_eq!(keys.keys("w").cursor(), at(0, 8));
-    assert_eq!(keys.keys("w").cursor(), at(1, 0));
-    assert_eq!(keys.keys("b").cursor(), at(0, 8));
-    assert_eq!(keys.keys("2b").cursor(), at(0, 0));
-    assert_eq!(keys.keys("e").cursor(), at(0, 2));
-    assert_eq!(keys.keys("2e").cursor(), at(0, 12));
+    let mut keys = Keys::new("one two three\n\nfour").at(0, 0);
+    assert_eq!(keys.keys("w").line_col(), (0, 4));
+    assert_eq!(keys.keys("w").line_col(), (0, 8));
+    assert_eq!(keys.keys("w").line_col(), (1, 0));
+    assert_eq!(keys.keys("b").line_col(), (0, 8));
+    assert_eq!(keys.keys("2b").line_col(), (0, 0));
+    assert_eq!(keys.keys("e").line_col(), (0, 2));
+    assert_eq!(keys.keys("2e").line_col(), (0, 12));
     // A punctuation run is its own word, as in vim's `w`. Unicode joins a full stop to
     // the letters around it, so `a.b` is one word where vim would see three.
     let mut keys = Keys::new("foo(bar)").at(0, 0);
-    assert_eq!(keys.keys("w").cursor(), at(0, 3));
-    assert_eq!(keys.keys("w").cursor(), at(0, 4));
-    assert_eq!(keys.keys("w").cursor(), at(0, 7));
+    assert_eq!(keys.keys("w").line_col(), (0, 3));
+    assert_eq!(keys.keys("w").line_col(), (0, 4));
+    assert_eq!(keys.keys("w").line_col(), (0, 7));
     let mut keys = Keys::new("a.b").at(0, 0);
-    assert_eq!(keys.keys("w").cursor(), at(0, 2));
+    assert_eq!(keys.keys("w").line_col(), (0, 2));
 }
 
 #[test]
 fn word_motions_stop_on_a_blank_line_and_at_the_document_edges() {
-    let mut keys = Keys::new("one\n\ntwo").at(0, 0);
-    assert_eq!(keys.keys("w").cursor(), at(1, 0));
-    assert_eq!(keys.keys("w").cursor(), at(2, 0));
-    assert_eq!(keys.keys("w").cursor(), at(2, 2));
-    assert_eq!(keys.keys("9w").cursor(), at(2, 2));
-    assert_eq!(keys.keys("9b").cursor(), at(0, 0));
-    assert_eq!(keys.keys("9e").cursor(), at(2, 2));
+    let mut keys = Keys::new("one\n\n<br>\n\ntwo").at(0, 0);
+    assert_eq!(keys.lines(), 3);
+    assert_eq!(keys.keys("w").line_col(), (1, 0));
+    assert_eq!(keys.keys("w").line_col(), (2, 0));
+    assert_eq!(keys.keys("w").line_col(), (2, 2));
+    assert_eq!(keys.keys("9w").line_col(), (2, 2));
+    assert_eq!(keys.keys("9b").line_col(), (0, 0));
+    assert_eq!(keys.keys("9e").line_col(), (2, 2));
 }
 
 #[test]
-fn gg_and_g_go_to_a_block_and_land_on_its_first_non_blank() {
-    let mut keys = Keys::new("first\n  second\nthird").at(0, 0);
-    assert_eq!(keys.keys("G").cursor(), at(2, 0));
-    assert_eq!(keys.keys("gg").cursor(), at(0, 0));
-    assert_eq!(keys.keys("2gg").cursor(), at(1, 2));
-    assert_eq!(keys.keys("2G").cursor(), at(1, 2));
-    assert_eq!(keys.keys("99G").cursor(), at(2, 0));
+fn gg_and_g_go_to_a_line_and_land_on_its_first_non_blank() {
+    let mut keys = Keys::lines_of(&["first", "  second", "third"]).at(0, 0);
+    assert_eq!(keys.keys("G").line_col(), (2, 0));
+    assert_eq!(keys.keys("gg").line_col(), (0, 0));
+    assert_eq!(keys.keys("2gg").line_col(), (1, 2));
+    assert_eq!(keys.keys("2G").line_col(), (1, 2));
+    assert_eq!(keys.keys("99G").line_col(), (2, 0));
 }
 
 #[test]
 fn the_normal_mode_caret_is_clamped_after_every_command() {
-    let mut keys = Keys::new("longer line\nab").at(0, 10);
+    let mut keys = Keys::new("longer line\n\nab").at(0, 10);
     // Moving down onto a shorter line lands past its last grapheme; the clamp pulls back.
-    assert_eq!(keys.keys("j").cursor(), at(1, 1));
+    assert_eq!(keys.keys("j").line_col(), (1, 1));
     // An empty line has nowhere to clamp to.
-    let mut keys = Keys::new("ab\n\ncd").at(0, 1);
-    assert_eq!(keys.keys("j").cursor(), at(1, 0));
-    // A divider holds no text and the caret may rest on it.
-    let mut keys = Keys::new("ab\n***").at(0, 0);
-    assert_eq!(keys.keys("j").cursor(), at(1, 0));
+    let mut keys = Keys::new("ab\n\n<br>\n\ncd").at(0, 1);
+    assert_eq!(keys.keys("j").line_col(), (1, 0));
+    // A horizontal rule holds no text and the caret may rest on it.
+    let mut keys = Keys::new("ab\n\n***").at(0, 0);
+    assert_eq!(keys.keys("j").line_col(), (1, 0));
 }
 
 // ---------------------------------------------------------------- operators
@@ -333,10 +440,10 @@ fn dw_de_and_db_delete_what_the_motion_covers() {
 
 #[test]
 fn dw_on_the_last_word_of_a_line_stops_at_its_end() {
-    let mut keys = Keys::new("one two\nthree").at(0, 4);
+    let mut keys = Keys::new("one two\n\nthree").at(0, 4);
     keys.keys("dw");
     assert_eq!(keys.text(), "one \nthree");
-    assert_eq!(keys.cursor(), at(0, 3));
+    assert_eq!(keys.line_col(), (0, 3));
 }
 
 #[test]
@@ -347,7 +454,7 @@ fn d_with_the_line_motions_takes_the_right_half_of_the_line() {
     let mut keys = Keys::new("hello world").at(0, 6);
     keys.keys("d0");
     assert_eq!(keys.text(), "world");
-    let mut keys = Keys::new("  ab cd").at(0, 5);
+    let mut keys = Keys::lines_of(&["  ab cd"]).at(0, 5);
     keys.keys("d^");
     assert_eq!(keys.text(), "  cd");
 }
@@ -363,13 +470,13 @@ fn counts_on_the_operator_and_the_motion_multiply() {
 }
 
 #[test]
-fn dd_yy_and_cc_work_on_whole_blocks_of_mixed_kinds() {
-    let mut keys = Keys::new("# head\n- item\n> quote").at(1, 0);
+fn dd_yy_and_cc_work_on_whole_lines_of_mixed_kinds() {
+    let mut keys = Keys::new("# head\n\n- item\n\n> quote").at(1, 0);
     keys.keys("dd");
-    assert_eq!(keys.markdown(), "# head\n> quote");
-    assert_eq!(keys.cursor(), at(1, 0));
+    assert_eq!(keys.markdown(), "# head\n\n> quote");
+    assert_eq!(keys.line_col(), (1, 0));
 
-    let mut keys = Keys::new("# head\n- item\n> quote").at(0, 0);
+    let mut keys = Keys::new("# head\n\n- item\n\n> quote").at(0, 0);
     keys.keys("2dd");
     assert_eq!(keys.markdown(), "> quote");
 
@@ -381,36 +488,37 @@ fn dd_yy_and_cc_work_on_whole_blocks_of_mixed_kinds() {
 
 #[test]
 fn dj_and_dk_are_linewise_however_the_lines_wrap() {
-    let mut keys = Keys::new("one\ntwo\nthree\nfour").at(1, 1);
+    let mut keys = Keys::new("one\n\ntwo\n\nthree\n\nfour").at(1, 1);
     keys.keys("dj");
     assert_eq!(keys.text(), "one\nfour");
-    let mut keys = Keys::new("one\ntwo\nthree\nfour").at(2, 1);
+    let mut keys = Keys::new("one\n\ntwo\n\nthree\n\nfour").at(2, 1);
     keys.keys("dk");
     assert_eq!(keys.text(), "one\nfour");
 }
 
 #[test]
-fn dgg_and_dg_take_whole_blocks_to_the_document_edges() {
-    let mut keys = Keys::new("one\ntwo\nthree").at(1, 0);
+fn dgg_and_dg_take_whole_lines_to_the_document_edges() {
+    let mut keys = Keys::new("one\n\ntwo\n\nthree").at(1, 0);
     keys.keys("dG");
     assert_eq!(keys.text(), "one");
-    let mut keys = Keys::new("one\ntwo\nthree").at(1, 0);
+    let mut keys = Keys::new("one\n\ntwo\n\nthree").at(1, 0);
     keys.keys("dgg");
     assert_eq!(keys.text(), "three");
 }
 
 #[test]
-fn deleting_every_block_leaves_one_empty_paragraph() {
-    let mut keys = Keys::new("# one\n- two\n***").at(0, 0);
+fn deleting_every_line_leaves_the_smallest_valid_document() {
+    let mut keys = Keys::new("# one\n\n- two\n\n***").at(0, 0);
     keys.keys("dG");
-    assert_eq!(keys.host.editor.document(), &Document::default());
-    assert_eq!(keys.cursor(), at(0, 0));
+    assert_eq!(keys.text(), "");
+    assert_eq!(keys.lines(), 1);
+    assert_eq!(keys.line_col(), (0, 0));
     keys.keys("u");
-    assert_eq!(keys.markdown(), "# one\n- two\n---");
+    assert_eq!(keys.markdown(), "# one\n\n- two\n\n---");
 }
 
 #[test]
-fn x_takes_graphemes_within_the_line_and_never_touches_a_divider() {
+fn x_takes_graphemes_within_the_line_and_never_touches_a_rule() {
     let mut keys = Keys::new("héllo").at(0, 0);
     keys.keys("x");
     assert_eq!(keys.text(), "éllo");
@@ -418,9 +526,9 @@ fn x_takes_graphemes_within_the_line_and_never_touches_a_divider() {
     assert_eq!(keys.text(), "lo");
     keys.keys("9x");
     assert_eq!(keys.text(), "");
-    let mut keys = Keys::new("***\nafter").at(0, 0);
+    let mut keys = Keys::new("***\n\nafter").at(0, 0);
     keys.keys("x");
-    assert_eq!(keys.markdown(), "---\nafter");
+    assert_eq!(keys.markdown(), "---\n\nafter");
 }
 
 #[test]
@@ -435,34 +543,40 @@ fn shift_d_and_shift_c_clear_the_rest_of_the_line() {
     assert_eq!(keys.state.mode, Mode::Insert);
 }
 
+/// A code block is one line, so `dd` on it takes the whole block rather than a row of
+/// it. That is the model's own notion of a line and the closest thing to vim's.
 #[test]
-fn dd_inside_a_code_run_removes_one_code_line_and_keeps_the_run() {
-    let mut keys = Keys::new("```rust\na\nb\nc\n```").at(1, 0);
+fn dd_on_a_code_block_takes_the_whole_block() {
+    let mut keys = Keys::new("```rust\na\nb\n```\n\nafter").at(0, 0);
+    assert_eq!(keys.lines(), 2);
     keys.keys("dd");
-    assert_eq!(keys.markdown(), "```rust\na\nc\n```");
-    keys.keys("yyp");
-    assert_eq!(keys.markdown(), "```rust\na\nc\nc\n```");
+    assert_eq!(keys.markdown(), "after");
+    keys.keys("u");
+    keys.keys("yyGp");
+    assert_eq!(
+        keys.markdown(),
+        "```rust\na\nb\n```\n\nafter\n\n```rust\na\nb\n```"
+    );
 }
 
 #[test]
-fn dd_on_a_nested_list_keeps_the_depths_around_it() {
+fn dd_on_a_nested_list_item_keeps_the_nesting_around_it() {
     let mut keys = Keys::new("- a\n  - b\n  - c\n- d").at(1, 0);
     keys.keys("dd");
-    assert_eq!(keys.markdown(), "- a\n    - c\n- d");
-    assert_eq!(keys.host.editor.document().blocks[1].depth, 1);
+    assert_eq!(keys.markdown(), "- a\n  - c\n- d");
 }
 
 // ---------------------------------------------------------------- yank and paste
 
 #[test]
 fn a_linewise_yank_pastes_below_and_above_as_whole_lines() {
-    let mut keys = Keys::new("- **one**\ntwo").at(0, 0);
+    let mut keys = Keys::new("- **one**\n- two").at(0, 0);
     keys.keys("yy");
-    assert_eq!(keys.cursor(), at(0, 0));
+    assert_eq!(keys.line_col(), (0, 0));
     keys.keys("jp");
-    assert_eq!(keys.markdown(), "- **one**\ntwo\n- **one**");
+    assert_eq!(keys.markdown(), "- **one**\n- two\n- **one**");
     keys.keys("P");
-    assert_eq!(keys.markdown(), "- **one**\ntwo\n- **one**\n- **one**");
+    assert_eq!(keys.markdown(), "- **one**\n- two\n- **one**\n- **one**");
 }
 
 #[test]
@@ -470,7 +584,7 @@ fn a_charwise_yank_pastes_inline_after_and_at_the_cursor() {
     let mut keys = Keys::new("abcd").at(0, 0);
     keys.keys("ylp");
     assert_eq!(keys.text(), "aabcd");
-    assert_eq!(keys.cursor(), at(0, 1));
+    assert_eq!(keys.line_col(), (0, 1));
     let mut keys = Keys::new("abcd").at(0, 0);
     keys.keys("ylP");
     assert_eq!(keys.text(), "aabcd");
@@ -478,30 +592,32 @@ fn a_charwise_yank_pastes_inline_after_and_at_the_cursor() {
 
 #[test]
 fn a_delete_fills_the_register_so_dd_then_p_moves_a_line() {
-    let mut keys = Keys::new("one\ntwo\nthree").at(0, 0);
+    let mut keys = Keys::new("one\n\ntwo\n\nthree").at(0, 0);
     keys.keys("ddjp");
     assert_eq!(keys.text(), "two\nthree\none");
 }
 
 #[test]
 fn a_clipboard_from_elsewhere_pastes_inline_rather_than_as_lines() {
-    let mut keys = Keys::new("one\ntwo").at(0, 0);
+    let mut keys = Keys::new("one\n\ntwo").at(0, 0);
     keys.keys("yy");
     // Something else took the clipboard: the linewise flag no longer applies.
-    keys.host.clipboard = Some(Document::from_markdown("X"));
+    let schema = keys.host.state.schema().clone();
+    keys.host.clipboard =
+        Some(markraft_markdown::from_markdown_fragment(&schema, "X").expect("a fragment"));
     keys.keys("p");
     assert_eq!(keys.text(), "oXne\ntwo");
 }
 
 #[test]
-fn paste_of_a_multi_block_linewise_register_keeps_every_kind() {
-    let mut keys = Keys::new("# head\n- [ ] task\nlast").at(0, 0);
+fn paste_of_a_multi_line_linewise_register_keeps_every_kind() {
+    let mut keys = Keys::new("# head\n\n- [ ] task\n\nlast").at(0, 0);
     keys.keys("2yy");
     keys.keys("G");
     keys.keys("p");
     assert_eq!(
         keys.markdown(),
-        "# head\n- [ ] task\nlast\n# head\n- [ ] task"
+        "# head\n\n- [ ] task\n\nlast\n\n# head\n\n- [ ] task"
     );
 }
 
@@ -509,17 +625,17 @@ fn paste_of_a_multi_block_linewise_register_keeps_every_kind() {
 
 #[test]
 fn the_insert_commands_place_the_caret_where_vim_does() {
-    let mut keys = Keys::new("  hello").at(0, 4);
+    let mut keys = Keys::lines_of(&["  hello"]).at(0, 4);
     keys.keys("i");
-    assert_eq!(keys.host.editor.selection().head, at(0, 4));
+    assert_eq!(keys.caret(), (0, 4));
     keys.keys("<esc>");
-    assert_eq!(keys.cursor(), at(0, 3));
+    assert_eq!(keys.line_col(), (0, 3));
     keys.keys("a");
-    assert_eq!(keys.host.editor.selection().head, at(0, 4));
+    assert_eq!(keys.caret(), (0, 4));
     keys.keys("<esc>I");
-    assert_eq!(keys.host.editor.selection().head, at(0, 2));
+    assert_eq!(keys.caret(), (0, 2));
     keys.keys("<esc>A");
-    assert_eq!(keys.host.editor.selection().head, at(0, 7));
+    assert_eq!(keys.caret(), (0, 7));
 }
 
 #[test]
@@ -527,30 +643,30 @@ fn escape_from_insert_steps_left_but_not_off_the_start_of_the_line() {
     let mut keys = Keys::new("ab").at(0, 0);
     keys.keys("i").typed("XY").keys("<esc>");
     assert_eq!(keys.text(), "XYab");
-    assert_eq!(keys.cursor(), at(0, 1));
+    assert_eq!(keys.line_col(), (0, 1));
     let mut keys = Keys::new("ab").at(0, 0);
     keys.keys("<esc>");
-    assert_eq!(keys.cursor(), at(0, 0));
+    assert_eq!(keys.line_col(), (0, 0));
     // Appending leaves the caret past the last grapheme; escape still steps only one.
     let mut keys = Keys::new("ab").at(0, 0);
     keys.keys("A").typed("XY").keys("<esc>");
-    assert_eq!(keys.cursor(), at(0, 3));
+    assert_eq!(keys.line_col(), (0, 3));
     keys.keys("i").typed("Z").keys("<esc>");
     assert_eq!(keys.text(), "abXZY");
 }
 
 #[test]
 fn o_and_shift_o_open_the_line_enter_would_make() {
-    let mut keys = Keys::new("- [x] done\n# head").at(0, 0);
+    let mut keys = Keys::new("- [x] done\n\n# head").at(0, 0);
     keys.keys("o").typed("next").keys("<esc>");
-    assert_eq!(keys.markdown(), "- [x] done\n- [ ] next\n# head");
+    assert_eq!(keys.markdown(), "- [x] done\n- [ ] next\n\n# head");
     keys.keys("G");
     keys.keys("O").typed("above").keys("<esc>");
-    assert_eq!(keys.markdown(), "- [x] done\n- [ ] next\nabove\n# head");
+    assert_eq!(keys.markdown(), "- [x] done\n- [ ] next\n\nabove\n\n# head");
 }
 
 #[test]
-fn o_inside_a_code_run_opens_another_line_of_the_same_language() {
+fn o_inside_a_code_block_opens_another_row_of_it() {
     let mut keys = Keys::new("```python\nprint(1)\n```").at(0, 0);
     keys.keys("o").typed("print(2)").keys("<esc>");
     assert_eq!(keys.markdown(), "```python\nprint(1)\nprint(2)\n```");
@@ -565,7 +681,7 @@ fn a_visual_selection_includes_the_grapheme_under_the_cursor() {
     assert_eq!(keys.selected(), "b");
     keys.keys("ll");
     assert_eq!(keys.selected(), "bcd");
-    assert_eq!(keys.cursor(), at(0, 3));
+    assert_eq!(keys.line_col(), (0, 3));
     keys.keys("d");
     assert_eq!(keys.text(), "aef");
     assert_eq!(keys.state.mode, Mode::Normal);
@@ -576,9 +692,9 @@ fn a_backwards_visual_selection_covers_both_ends() {
     let mut keys = Keys::new("abcdef").at(0, 4);
     keys.keys("vhh");
     assert_eq!(keys.selected(), "cde");
-    assert_eq!(keys.cursor(), at(0, 2));
+    assert_eq!(keys.line_col(), (0, 2));
     keys.keys("y");
-    assert_eq!(keys.cursor(), at(0, 2));
+    assert_eq!(keys.line_col(), (0, 2));
     keys.keys("$p");
     assert_eq!(keys.text(), "abcdefcde");
 }
@@ -595,16 +711,16 @@ fn a_visual_selection_that_crosses_its_anchor_turns_round() {
 }
 
 #[test]
-fn visual_line_mode_takes_whole_blocks_in_both_directions() {
-    let mut keys = Keys::new("# one\ntwo\n- three\nfour").at(1, 0);
+fn visual_line_mode_takes_whole_lines_in_both_directions() {
+    let mut keys = Keys::new("# one\n\ntwo\n\n- three\n\nfour").at(1, 0);
     keys.keys("V");
     assert_eq!(keys.selected(), "two");
     keys.keys("j");
     assert_eq!(keys.selected(), "two\nthree");
     keys.keys("d");
-    assert_eq!(keys.markdown(), "# one\nfour");
+    assert_eq!(keys.markdown(), "# one\n\nfour");
 
-    let mut keys = Keys::new("one\ntwo\nthree").at(2, 0);
+    let mut keys = Keys::new("one\n\ntwo\n\nthree").at(2, 0);
     keys.keys("Vky");
     assert!(keys.state.register.as_ref().expect("a yank").linewise);
     keys.keys("Gp");
@@ -613,7 +729,7 @@ fn visual_line_mode_takes_whole_blocks_in_both_directions() {
 
 #[test]
 fn v_and_shift_v_toggle_off_and_switch_between_each_other() {
-    let mut keys = Keys::new("abc\ndef").at(0, 1);
+    let mut keys = Keys::new("abc\n\ndef").at(0, 1);
     keys.keys("v");
     assert_eq!(keys.state.mode, Mode::Visual);
     keys.keys("V");
@@ -624,7 +740,7 @@ fn v_and_shift_v_toggle_off_and_switch_between_each_other() {
     keys.keys("v");
     assert_eq!(keys.state.mode, Mode::Normal);
     // Visual Line mode tracks whole lines, so leaving it lands at the line's start.
-    assert_eq!(keys.cursor(), at(0, 0));
+    assert_eq!(keys.line_col(), (0, 0));
 }
 
 #[test]
@@ -633,7 +749,7 @@ fn escape_leaves_a_visual_mode_without_changing_the_document() {
     keys.keys("vl<esc>");
     assert_eq!(keys.state.mode, Mode::Normal);
     assert_eq!(keys.text(), "abc");
-    assert_eq!(keys.cursor(), at(0, 1));
+    assert_eq!(keys.line_col(), (0, 1));
 }
 
 #[test]
@@ -645,8 +761,8 @@ fn a_visual_change_leaves_insert_mode_with_the_selection_gone() {
 }
 
 #[test]
-fn a_visual_selection_spans_blocks() {
-    let mut keys = Keys::new("abc\ndef").at(0, 1);
+fn a_visual_selection_spans_lines() {
+    let mut keys = Keys::new("abc\n\ndef").at(0, 1);
     keys.keys("vjl");
     assert_eq!(keys.selected(), "bc\ndef");
     keys.keys("d");
@@ -661,17 +777,19 @@ fn an_insert_session_undoes_as_one_step() {
     let mut keys = Keys::new("- item").at(0, 0);
     keys.keys("A")
         .typed(" one")
-        .typed("\n")
+        .enter()
         .typed("two")
-        .typed("\n")
+        .enter()
         .typed("# ")
         .typed("head");
     keys.keys("<esc>");
-    assert_eq!(keys.markdown(), "- item one\n- two\n# head");
+    // The heading input rule sets the *block's* type, so inside a list item it makes
+    // a heading in the item rather than replacing the item.
+    assert_eq!(keys.markdown(), "- item one\n- two\n- # head");
     keys.keys("u");
     assert_eq!(keys.markdown(), "- item");
     keys.keys("r");
-    assert_eq!(keys.markdown(), "- item one\n- two\n# head");
+    assert_eq!(keys.markdown(), "- item one\n- two\n- # head");
 
     // The edit that opened the session belongs to it: `o` and `cw` with their text.
     let mut keys = Keys::new("one two").at(0, 0);
@@ -679,7 +797,9 @@ fn an_insert_session_undoes_as_one_step() {
     assert_eq!(keys.text(), "one two\nbelow");
     keys.keys("u");
     assert_eq!(keys.text(), "one two");
-    keys.keys("cw").typed("uno").keys("<esc>");
+    // Undo restores the selection from before the session, which is where `o` left
+    // it; `0` puts the cursor back on the word the change is meant to take.
+    keys.keys("0").keys("cw").typed("uno").keys("<esc>");
     assert_eq!(keys.text(), "uno two");
     keys.keys("u");
     assert_eq!(keys.text(), "one two");
@@ -722,8 +842,8 @@ fn a_count_repeats_undo_and_redo() {
 }
 
 #[test]
-fn a_linewise_change_is_one_step_even_across_several_blocks() {
-    let mut keys = Keys::new("one\ntwo\nthree").at(0, 0);
+fn a_linewise_change_is_one_step_even_across_several_lines() {
+    let mut keys = Keys::new("one\n\ntwo\n\nthree").at(0, 0);
     keys.keys("2cc");
     assert_eq!(keys.text(), "\nthree");
     keys.keys("<esc>u");
@@ -732,7 +852,7 @@ fn a_linewise_change_is_one_step_even_across_several_blocks() {
 
 #[test]
 fn a_paste_undoes_in_one_step() {
-    let mut keys = Keys::new("one\ntwo").at(0, 0);
+    let mut keys = Keys::new("one\n\ntwo").at(0, 0);
     keys.keys("yyp");
     assert_eq!(keys.text(), "one\none\ntwo");
     keys.keys("u");
@@ -748,7 +868,7 @@ fn escape_forgets_a_half_typed_command_without_moving() {
     assert!(!keys.state.pending.is_empty());
     keys.keys("<esc>");
     assert!(keys.state.pending.is_empty());
-    assert_eq!(keys.cursor(), at(0, 4));
+    assert_eq!(keys.line_col(), (0, 4));
     assert_eq!(keys.text(), "one two three");
     // The forgotten count does not leak into the next command.
     keys.keys("x");
@@ -785,20 +905,20 @@ fn operators_take_whole_grapheme_clusters() {
 #[test]
 fn cjk_text_moves_and_deletes_by_character() {
     let mut keys = Keys::new("中文字").at(0, 0);
-    assert_eq!(keys.keys("l").cursor(), at(0, 3));
-    assert_eq!(keys.keys("$").cursor(), at(0, 6));
+    assert_eq!(keys.keys("l").line_col(), (0, 1));
+    assert_eq!(keys.keys("$").line_col(), (0, 2));
     keys.keys("0");
     keys.keys("2x");
     assert_eq!(keys.text(), "字");
 }
 
 #[test]
-fn a_charwise_yank_across_blocks_keeps_its_marks_when_pasted_back() {
-    let mut keys = Keys::new("a **bold** c\nsecond").at(0, 2);
+fn a_charwise_yank_across_lines_keeps_its_marks_when_pasted_back() {
+    let mut keys = Keys::new("a **bold** c\n\nsecond").at(0, 2);
     keys.keys("v$y");
     assert_eq!(keys.state.register.as_ref().expect("a yank").text, "bold c");
     keys.keys("G$p");
-    assert_eq!(keys.markdown(), "a **bold** c\nsecond**bold** c");
+    assert_eq!(keys.markdown(), "a **bold** c\n\nsecond**bold** c");
 }
 
 #[test]
@@ -815,23 +935,23 @@ fn cw_leaves_insert_mode_ready_at_the_gap_it_made() {
 }
 
 #[test]
-fn dd_on_the_only_block_leaves_an_empty_paragraph_and_undoes() {
+fn dd_on_the_only_line_leaves_an_empty_document_and_undoes() {
     let mut keys = Keys::new("# only").at(0, 0);
     keys.keys("dd");
-    assert_eq!(keys.host.editor.document(), &Document::default());
+    assert_eq!(keys.text(), "");
+    assert_eq!(keys.lines(), 1);
     keys.keys("p");
-    assert_eq!(keys.markdown(), "\n# only");
+    assert_eq!(keys.markdown(), "<br>\n\n# only");
     keys.keys("u");
-    assert_eq!(keys.markdown(), "");
+    assert_eq!(keys.text(), "");
     keys.keys("u");
     assert_eq!(keys.markdown(), "# only");
 }
 
 #[test]
-fn a_paste_into_a_code_line_stays_literal() {
-    let mut keys = Keys::new("**bold**\n```rust\nx\n```").at(0, 0);
+fn a_paste_into_a_code_block_stays_literal() {
+    let mut keys = Keys::new("**bold**\n\n```rust\nx\n```").at(0, 0);
     keys.keys("v$y");
     keys.keys("j$p");
-    assert_eq!(keys.markdown(), "**bold**\n```rust\nxbold\n```");
-    assert!(!keys.host.editor.document().blocks[1].spans[0].marks.bold);
+    assert_eq!(keys.markdown(), "**bold**\n\n```rust\nxbold\n```");
 }

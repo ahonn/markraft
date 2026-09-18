@@ -1,5 +1,6 @@
 mod ui;
 
+use crate::doc;
 use crate::{
     instance::Instance,
     persistence::{Event, Persistence},
@@ -8,8 +9,8 @@ use crate::{
     vault::{External, Store},
 };
 use gpui::{prelude::*, *};
-use markraft_core::{BlockKind, Document, Mark};
-use markraft_gpui::{EditorEvent, EditorStyle, EditorView, ExtensionHandle};
+use markraft_doc::MarkSet;
+use markraft_gpui::{EditorEvent, EditorStyle, EditorView, ExtensionHandle, Setup};
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
@@ -99,7 +100,7 @@ pub struct NotesApp {
     format_menu: Option<FormatMenu>,
     link_popover: Option<LinkPopover>,
     format_selected: usize,
-    format_snapshot: Option<(markraft_core::Marks, Option<BlockKind>)>,
+    format_snapshot: Option<(MarkSet, Option<doc::Block>)>,
     dark: bool,
     // The pointer is over the window; toolbar chrome is hidden while it is away.
     pointer_inside: bool,
@@ -131,8 +132,7 @@ impl NotesApp {
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         ));
         let query = cx.new(|cx| {
-            EditorView::new(Document::default(), cx)
-                .with_single_line()
+            EditorView::single_line(cx)
                 .with_style(query_style(dark))
                 .with_placeholder("Search notes…")
         });
@@ -294,9 +294,14 @@ impl NotesApp {
         let document = self.library.active_note().document.clone();
         let style = notes_style(self.dark);
         let editor = cx.new(|cx| {
-            EditorView::new(document, cx)
-                .with_style(style)
-                .with_placeholder("Start writing…")
+            EditorView::new(
+                Setup::new(doc::schema().clone())
+                    .extensions(doc::extensions())
+                    .doc(document),
+                cx,
+            )
+            .with_style(style)
+            .with_placeholder("Start writing…")
         });
         // Only note editors get the menus; the host's query field gets no extension.
         // The `/` menu is registered first: the two typeaheads derive from the same
@@ -336,9 +341,9 @@ impl NotesApp {
                     }
                     return;
                 }
-                if let EditorEvent::CodeLanguageRequested { block } = event {
+                if let EditorEvent::CodeLanguageRequested { pos } = event {
                     if this.library.active_id == note_id && this.panel == Panel::Editor {
-                        this.open_code_language(*block, cx);
+                        this.open_code_language(*pos, cx);
                     }
                     return;
                 }
@@ -354,7 +359,7 @@ impl NotesApp {
                     this.link_popover = None;
                     this.code_language_block = None;
                 }
-                let document = editor.read(cx).committed_document().clone();
+                let document = editor.read(cx).doc().clone();
                 if this.library.set_document(&note_id, document) {
                     this.changed(cx);
                 }
@@ -365,7 +370,10 @@ impl NotesApp {
         let format_changes = cx.observe(&editor, move |this, editor, cx| {
             if this.format_toolbar && this.library.active_id == format_note_id {
                 let editor = editor.read(cx);
-                let snapshot = (editor.active_marks(), editor.active_block_kind());
+                let snapshot = (
+                    editor.active_marks(),
+                    doc::Block::active(editor.state(), &editor.projection()),
+                );
                 if this.format_snapshot.as_ref() != Some(&snapshot) {
                     this.format_snapshot = Some(snapshot);
                     cx.notify();
@@ -387,7 +395,7 @@ impl NotesApp {
     fn sync_documents(&mut self, cx: &App) {
         for (id, session) in &self.sessions {
             self.library
-                .set_document(id, session.editor.read(cx).committed_document().clone());
+                .set_document(id, session.editor.read(cx).doc().clone());
         }
     }
     /// Take over what other programs changed in the notes folder. Edits made here that
@@ -672,7 +680,7 @@ impl NotesApp {
         }
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
         self.sync_documents(cx);
-        self.library.new_note(Document::default());
+        self.library.new_note(doc::empty());
         self.ensure_session(window, cx);
         self.panel = Panel::Editor;
         self.focus_editor(window, cx);
@@ -743,7 +751,7 @@ impl NotesApp {
         }
         // Pinning reorders results; keep the same note selected.
         self.selected = self
-            .matching_notes(self.query.read(cx).document().plain_text().trim(), false)
+            .matching_notes(self.query.read(cx).text().trim(), false)
             .iter()
             .position(|note| note.id == id)
             .unwrap_or(0);
@@ -754,7 +762,7 @@ impl NotesApp {
         if self.library.delete(id) {
             self.sessions.remove(id);
             self.ensure_session(window, cx);
-            let query = self.query.read(cx).document().plain_text();
+            let query = self.query.read(cx).text().to_owned();
             self.selected = self.selected.min(
                 self.library
                     .search(query.trim(), false)
@@ -785,7 +793,7 @@ impl NotesApp {
             self.changed(cx);
             self.selected = self.selected.min(
                 self.library
-                    .search(&self.query.read(cx).document().plain_text(), true)
+                    .search(self.query.read(cx).text(), true)
                     .len()
                     .saturating_sub(1),
             );
@@ -813,13 +821,7 @@ impl NotesApp {
     /// The query field holds literal text, so it is never read as Markdown.
     fn set_query(&mut self, text: String, placeholder: &'static str, cx: &mut Context<Self>) {
         self.query.update(cx, |e, cx| {
-            let mut document = Document::default();
-            document.blocks[0].spans = vec![markraft_core::Span {
-                text,
-                marks: Default::default(),
-                link: None,
-            }];
-            e.replace_document(document, cx);
+            e.set_value(&text, cx);
             e.set_placeholder(placeholder, cx);
         });
     }
@@ -859,13 +861,7 @@ impl NotesApp {
         cx.notify();
     }
     fn apply_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let url = self
-            .query
-            .read(cx)
-            .committed_document()
-            .plain_text()
-            .trim()
-            .to_string();
+        let url = self.query.read(cx).text().trim().to_string();
         self.editor().update(cx, |editor, cx| {
             editor.set_link((!url.is_empty()).then_some(url.as_str()), cx)
         });
@@ -874,13 +870,7 @@ impl NotesApp {
         cx.notify();
     }
     fn apply_shortcut(&mut self, cx: &mut Context<Self>) {
-        let text = self
-            .query
-            .read(cx)
-            .committed_document()
-            .plain_text()
-            .trim()
-            .to_string();
+        let text = self.query.read(cx).text().trim().to_string();
         if let Some(platform) = &mut self.platform {
             match platform.set_shortcut(&text) {
                 Ok(()) => {
@@ -897,9 +887,9 @@ impl NotesApp {
         }
     }
     fn copy_markdown(&mut self, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(
-            self.editor().read(cx).committed_document().to_markdown(),
-        ));
+        cx.write_to_clipboard(ClipboardItem::new_string(doc::to_markdown(
+            self.editor().read(cx).doc(),
+        )));
         self.inform("Copied as Markdown", cx);
     }
     fn recover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -977,10 +967,10 @@ impl NotesApp {
     }
     fn save_copy(&mut self, cx: &mut Context<Self>) {
         self.sync_documents(cx);
-        let bytes = match serde_json::to_vec_pretty(&self.library) {
+        let bytes = match crate::vault::backup(&self.library) {
             Ok(bytes) => bytes,
             Err(e) => {
-                self.error = Some(e.to_string());
+                self.error = Some(e);
                 return;
             }
         };
@@ -1074,7 +1064,7 @@ impl NotesApp {
         let note = self.library.active_note();
         let title = note.title();
         let filename = format!("{}.md", title.replace(['/', ':'], "-"));
-        let document = self.editor().read(cx).committed_document().to_markdown();
+        let document = doc::to_markdown(self.editor().read(cx).doc());
         let directory = self.path.clone().unwrap_or_default();
         let prompt = cx.prompt_for_new_path(&directory, Some(&filename));
         cx.spawn(async move |this, cx| {
@@ -1114,10 +1104,12 @@ impl NotesApp {
                             .map(|path| {
                                 let text = std::fs::read_to_string(&path)
                                     .map_err(|e| format!("{}: {e}", path.display()))?;
+                                // A `.json` file is a backup an earlier version
+                                // wrote; everything else is Markdown.
                                 if path.extension().is_some_and(|e| e == "json") {
-                                    Document::from_json(&text).map_err(|e| e.to_string())
+                                    crate::legacy::read_document(&text)
                                 } else {
-                                    Ok(Document::from_markdown(&text))
+                                    Ok(doc::from_markdown(&text))
                                 }
                             })
                             .collect::<Result<Vec<_>, String>>()

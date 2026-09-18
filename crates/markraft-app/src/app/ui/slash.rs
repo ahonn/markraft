@@ -1,5 +1,5 @@
 use super::*;
-use markraft_core::Transaction;
+use markraft_doc::commands::{Command as EditCommand, command};
 use markraft_gpui::{Typeahead, TypeaheadItem, TypeaheadProvider};
 use std::{any::Any, rc::Rc};
 
@@ -26,10 +26,8 @@ pub(super) struct Command {
 /// How the `/` menu applies a command, once the trigger text has been deleted.
 #[derive(Clone)]
 pub(super) enum SlashEffect {
-    /// Re-kind the caret's block inside the accepting transaction.
-    Block(BlockKind),
-    /// Insert a rule and leave the caret on the line below it.
-    Divider,
+    /// Set the caret's block format inside the accepting transaction.
+    Block(doc::Block),
     /// Hand the command's intent back to the host, which runs it once the edit lands.
     Host,
 }
@@ -132,27 +130,27 @@ impl TypeaheadProvider for SlashProvider {
         Some(icon(entry.icon, color).into_any_element())
     }
 
-    fn accept(&self, item: &TypeaheadItem, tx: &mut Transaction<'_>) -> Option<Rc<dyn Any>> {
+    fn accept(&self, item: &TypeaheadItem) -> EditCommand {
+        let effect = self
+            .entries
+            .iter()
+            .find(|entry| entry.item.id == item.id)
+            .map(|entry| entry.effect.clone());
+        match effect {
+            Some(SlashEffect::Block(block)) => block.command(),
+            // A host command makes no edit of its own; the payload carries its intent.
+            _ => command(|_| None),
+        }
+    }
+
+    fn payload(&self, item: &TypeaheadItem) -> Option<Rc<dyn Any>> {
         let entry = self.entries.iter().find(|entry| entry.item.id == item.id)?;
         match &entry.effect {
-            SlashEffect::Block(kind) => {
-                tx.set_block_kind(kind.clone());
-                None
-            }
-            SlashEffect::Divider => {
-                // A rule owns its whole block, so it goes on a line of its own and the
-                // caret continues below it.
-                let caret = tx.selection().head;
-                let empty = tx.document().blocks[caret.block].is_empty();
-                tx.insert_text(if empty { "\n" } else { "\n\n" });
-                let below = tx.selection().head.block;
-                tx.set_block_kind_at(below - 1, BlockKind::Divider);
-                None
-            }
             SlashEffect::Host => entry
                 .intent
                 .clone()
                 .map(|intent| Rc::new(intent) as Rc<dyn Any>),
+            SlashEffect::Block(_) => None,
         }
     }
 }
@@ -188,7 +186,10 @@ impl NotesApp {
 mod tests {
     // Not `use super::*`: that would bring gpui's `test` macro in over the built-in one.
     use super::{Command, Intent, SlashEffect, SlashProvider, TypeaheadProvider};
-    use markraft_core::{BlockKind, Document, Editor, Origin, Position, TransactionOptions};
+    use crate::doc;
+    use markraft_doc::commands::delete_range;
+    use markraft_doc::projection::projection_of;
+    use markraft_doc::{EditorState, EditorStateConfig, Extension};
 
     fn provider() -> SlashProvider {
         SlashProvider::new(vec![
@@ -197,11 +198,16 @@ mod tests {
                 "format-heading",
                 "Heading 1",
                 "⌥⌘1",
-                Intent::Block(BlockKind::Heading(1)),
+                Intent::Block(doc::Block::Heading(1)),
             )
-            .slash(1, SlashEffect::Block(BlockKind::Heading(1))),
+            .slash(1, SlashEffect::Block(doc::Block::Heading(1))),
             Command::new("new-action", "New Note", "⌘N", Intent::New),
-            Command::editor("insert-divider", "Divider", 9, SlashEffect::Divider),
+            Command::editor(
+                "insert-divider",
+                "Divider",
+                9,
+                SlashEffect::Block(doc::Block::Divider),
+            ),
         ])
     }
 
@@ -223,28 +229,47 @@ mod tests {
         );
     }
 
-    /// The trigger run the extension deletes before the provider applies the item.
-    fn accept(provider: &SlashProvider, text: &str, trigger: usize, query: &str) -> Editor {
+    fn state_of(source: &str) -> EditorState {
+        EditorState::create(
+            EditorStateConfig::new(doc::schema().clone())
+                .doc(doc::from_markdown(source))
+                .extensions(Extension::all([
+                    markraft_doc::projection::projection(),
+                    markraft_doc::history(Default::default()),
+                    doc::extensions(),
+                ])),
+        )
+        .expect("a valid state")
+        .update([
+            markraft_doc::TransactionSpec::new().selection(markraft_doc::Selection::cursor(
+                doc::from_markdown(source).content_size() - 1,
+            )),
+        ])
+        .expect("a caret at the end")
+        .state()
+        .clone()
+    }
+
+    /// Exactly what the typeahead runs: the trigger text goes, then the provider's
+    /// command applies against what that leaves.
+    fn accept(provider: &SlashProvider, text: &str, trigger: usize, query: &str) -> EditorState {
         let item = provider.items(query).remove(0);
-        let mut editor = Editor::new(Document::default());
-        editor.insert_text_plain(text);
-        let caret = editor.selection().head;
-        editor.transact(
-            TransactionOptions {
-                group: None,
-                origin: Origin::Extension("slash-menu"),
-            },
-            |tx| {
-                tx.delete_range(
-                    Position {
-                        block: 0,
-                        byte: trigger,
-                    }..caret,
-                );
-                provider.accept(&item, tx);
-            },
-        );
-        editor
+        let state = state_of(text);
+        let caret = state.selection().head(state.doc());
+        let delete = delete_range(1 + trigger, caret)(&state).expect("a deletion");
+        let after = state
+            .update([delete.clone()])
+            .expect("the deletion applies");
+        let apply = provider.accept(&item)(after.state());
+        let mut specs = vec![delete];
+        if let Some(apply) = apply {
+            specs.push(apply.sequential());
+        }
+        state
+            .update(specs)
+            .expect("one transaction")
+            .state()
+            .clone()
     }
 
     #[test]
@@ -262,49 +287,29 @@ mod tests {
 
     #[test]
     fn a_block_item_is_applied_inside_the_transaction() {
-        let editor = accept(&provider(), "/head", 0, "head");
-        assert_eq!(editor.document().plain_text(), "");
-        assert_eq!(editor.document().blocks[0].kind, BlockKind::Heading(1));
+        let state = accept(&provider(), "/head", 0, "head");
+        assert_eq!(projection_of(&state).plain_text(), "");
+        assert_eq!(doc::to_markdown(state.doc()), "# ");
     }
 
     #[test]
     fn a_host_item_hands_its_intent_back_instead_of_editing() {
         let provider = provider();
         let item = provider.items("link").remove(0);
-        let mut editor = Editor::new(Document::default());
-        let payload = editor
-            .transact(TransactionOptions::default(), |tx| {
-                assert!(provider.accept(&item, tx).is_some());
-            })
-            .is_none();
-        assert!(payload, "a host item makes no edit of its own");
+        let state = state_of("");
+        assert!(
+            provider.accept(&item)(&state).is_none(),
+            "a host item makes no edit of its own"
+        );
+        assert!(provider.payload(&item).is_some());
     }
 
     #[test]
-    fn the_divider_takes_a_line_of_its_own_and_leaves_the_caret_below_it() {
-        let kinds = |editor: &Editor| {
-            editor
-                .document()
-                .blocks
-                .iter()
-                .map(|block| block.kind.clone())
-                .collect::<Vec<_>>()
-        };
-        let editor = accept(&provider(), "note /div", 5, "div");
-        assert_eq!(
-            kinds(&editor),
-            [
-                BlockKind::Paragraph,
-                BlockKind::Divider,
-                BlockKind::Paragraph
-            ]
-        );
-        assert_eq!(editor.document().blocks[0].text(), "note ");
-        assert_eq!(editor.selection().head, Position { block: 2, byte: 0 });
-
+    fn the_divider_takes_a_line_of_its_own() {
+        let state = accept(&provider(), "note /div", 5, "div");
+        assert_eq!(doc::to_markdown(state.doc()), "note \n\n---");
         // An empty line becomes the rule itself rather than leaving a blank above it.
-        let editor = accept(&provider(), "/div", 0, "div");
-        assert_eq!(kinds(&editor), [BlockKind::Divider, BlockKind::Paragraph]);
-        assert_eq!(editor.selection().head, Position { block: 1, byte: 0 });
+        let state = accept(&provider(), "/div", 0, "div");
+        assert_eq!(doc::to_markdown(state.doc()), "---");
     }
 }

@@ -1,5 +1,7 @@
 mod app;
+mod doc;
 mod instance;
+mod legacy;
 mod persistence;
 mod platform;
 mod storage;

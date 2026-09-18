@@ -1,9 +1,9 @@
 use super::*;
 
 impl NotesApp {
-    pub(in crate::app) fn open_code_language(&mut self, block: usize, cx: &mut Context<Self>) {
+    pub(in crate::app) fn open_code_language(&mut self, pos: usize, cx: &mut Context<Self>) {
         let editor = self.editor();
-        let Some(active) = editor.read(cx).code_language(block) else {
+        let Some(active) = editor.read(cx).code_language(pos) else {
             return;
         };
         let active = active.trim().to_lowercase();
@@ -15,7 +15,7 @@ impl NotesApp {
         self.link_popover = None;
         self.query
             .update(cx, |editor, cx| editor.cancel_composition(cx));
-        self.code_language_block = Some(block);
+        self.code_language_block = Some(pos);
         self.code_language_selected = selected;
         self.code_language_focus_pending = true;
         self.set_query(String::new(), "Search languages…", cx);
@@ -23,7 +23,7 @@ impl NotesApp {
     }
 
     fn matching_code_languages(&self, cx: &App) -> Vec<(&'static str, &'static str)> {
-        let query = self.query.read(cx).committed_document().plain_text();
+        let query = self.query.read(cx).text().to_owned();
         let query = query.trim().to_lowercase();
         markraft_gpui::code_languages()
             .iter()
@@ -37,9 +37,9 @@ impl NotesApp {
     }
 
     fn apply_code_language(&mut self, language: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(block) = self.code_language_block.take() {
+        if let Some(pos) = self.code_language_block.take() {
             self.editor().update(cx, |editor, cx| {
-                editor.set_code_language_at(block, language, cx)
+                editor.set_code_language_at(pos, language, cx)
             });
         }
         self.query
@@ -85,10 +85,10 @@ impl NotesApp {
         {
             self.code_language_block = None;
         }
-        let block = self.code_language_block?;
+        let pos = self.code_language_block?;
         let editor = self.editor().read(cx);
-        let active = editor.code_language(block)?.trim().to_lowercase();
-        let anchor = editor.code_header_bounds(block)?;
+        let active = editor.code_language(pos)?.trim().to_lowercase();
+        let anchor = editor.code_header_bounds(pos)?;
         let languages = self.matching_code_languages(cx);
         let empty = languages.is_empty();
         let viewport = window.bounds().size;

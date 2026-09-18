@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::Codec;
+use common::{Codec, judge};
 use markraft_doc::{Attrs, MarkSet, Node, attrs};
 use markraft_markdown::schema as md;
 use markraft_markdown::{commonmark_schema, commonmark_schema_spec};
@@ -561,4 +561,30 @@ let x = 1;
     let codec = Codec::new();
     let doc: Node = codec.parse(&once);
     doc.check(&codec.schema).expect("a valid document");
+}
+
+#[test]
+fn a_thematic_break_is_dashes_unless_that_would_read_as_something_else() {
+    let codec = Codec::new();
+    // On its own, and after a blank line, three dashes are a thematic break.
+    assert_eq!(codec.normalize("***"), "---");
+    assert_eq!(codec.normalize("a\n\n***\n\nb"), "a\n\n---\n\nb");
+    assert_eq!(codec.normalize("> a\n\n> ***"), "> a\n\n> ---");
+    // A `-` marker and three dashes are four dashes, which is a break itself.
+    // `* ***` is likewise all stars, so it is a break rather than an item.
+    assert_eq!(codec.normalize("- ***"), "- ***");
+    assert_eq!(codec.normalize("* ***"), "---");
+    assert_eq!(codec.normalize("+ ***"), "+ ---");
+    assert_eq!(codec.normalize("1. ***"), "1. ---");
+    // Directly under a line of text, three dashes underline it.
+    assert_eq!(codec.normalize("* a\n\n  ***"), "* a\n\n  ---");
+    assert_eq!(codec.normalize("* a\n  ***"), "* a\n  ***");
+    // And every one of them still reads back as a thematic break.
+    for source in ["---", "- ***", "+ ***", "* a\n  ***"] {
+        assert_eq!(
+            codec.normalize(source),
+            codec.normalize(&codec.normalize(source))
+        );
+        assert!(judge(&codec, source).is_ok(), "{source}");
+    }
 }

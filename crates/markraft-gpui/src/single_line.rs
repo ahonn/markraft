@@ -1,7 +1,34 @@
+//! A literal one-line input.
+//!
+//! A single-line editor runs on its own schema — `doc > paragraph > text`, with
+//! no marks at all — rather than on the host's schema with a filter that keeps
+//! one block. The schema is the simpler of the two options the design allowed:
+//! nothing can create a second block or a mark, so no correction, change filter
+//! or command chain has to undo one, and the commands the view binds fall
+//! through on their own because the schema offers them nothing to do.
+
 use gpui::{Pixels, px};
-use markraft_core::{Document, Span};
+use markraft_doc::projection::Projection;
+use markraft_doc::{Node, NodeTypeSpec, Schema, SchemaSpec};
+use std::sync::LazyLock;
 use std::{borrow::Cow, ops::Range};
 
+static SCHEMA: LazyLock<Schema> = LazyLock::new(|| {
+    Schema::new(
+        SchemaSpec::new()
+            .node(NodeTypeSpec::new("doc", "paragraph"))
+            .node(NodeTypeSpec::new("paragraph", "text*").group("block"))
+            .node(NodeTypeSpec::text("text").group("inline")),
+    )
+    .expect("the single-line schema spec is valid")
+});
+
+/// The schema a single-line editor runs on.
+pub(crate) fn schema() -> &'static Schema {
+    &SCHEMA
+}
+
+/// `text` with every line ending turned into a space, when `single_line`.
 pub(crate) fn text(text: &str, single_line: bool) -> Cow<'_, str> {
     if single_line && text.contains(['\r', '\n']) {
         Cow::Owned(text.replace("\r\n", "\n").replace(['\r', '\n'], " "))
@@ -10,17 +37,30 @@ pub(crate) fn text(text: &str, single_line: bool) -> Cow<'_, str> {
     }
 }
 
-pub(crate) fn document(document: Document) -> Document {
-    let mut result = Document::default();
-    result.blocks[0].spans.push(Span {
-        text: text(&document.plain_text(), true).into_owned(),
-        marks: Default::default(),
-        link: None,
-    });
-    result.normalize();
-    result
+/// `doc` flattened onto [`schema`]: its plain text, in one unmarked paragraph.
+pub(crate) fn document(doc: &Node, from: &Schema) -> Node {
+    let flat = text(Projection::of(doc, from).plain_text(), true).into_owned();
+    document_from_text(&flat)
 }
 
+/// A single-line document holding `value`.
+pub(crate) fn document_from_text(value: &str) -> Node {
+    let schema = schema();
+    let content = if value.is_empty() {
+        Vec::new()
+    } else {
+        vec![schema.text(value)]
+    };
+    let paragraph = schema
+        .node("paragraph", content)
+        .expect("text is valid paragraph content");
+    schema
+        .doc([paragraph])
+        .expect("one paragraph is a valid single-line document")
+}
+
+/// An input method's selected range, re-measured over the text the field will
+/// actually hold.
 pub(crate) fn selected_range(source: &str, selected: Option<Range<usize>>) -> Option<Range<usize>> {
     let offset = |requested| {
         let mut units = 0;
@@ -61,21 +101,32 @@ pub(crate) fn scroll_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use markraft_markdown::{commonmark_schema, from_markdown};
+
     #[test]
     fn single_line_preserves_literal_markers_and_maps_composition_offsets() {
         assert_eq!(text("# a\r\n[] b\rc\nd", true), "# a [] b c d");
         assert_eq!(text("# a\n", false), "# a\n");
         assert_eq!(selected_range("😀\r\n中", Some(4..5)), Some(3..4));
-        let flattened = document(Document::from_markdown("# Title\n**bold**"));
-        assert_eq!(flattened.plain_text(), "Title bold");
-        assert_eq!(flattened.blocks.len(), 1);
-        assert_eq!(flattened.blocks[0].kind, Default::default());
+    }
+
+    #[test]
+    fn a_rich_document_flattens_to_one_unmarked_paragraph() {
+        let rich = commonmark_schema();
+        let doc = from_markdown(&rich, "# Title\n\n**bold**").expect("valid Markdown");
+        let flattened = document(&doc, &rich);
+        let projection = Projection::of(&flattened, schema());
+        assert_eq!(projection.plain_text(), "Title bold");
+        assert_eq!(projection.line_count(), 1);
         assert!(
-            flattened.blocks[0]
-                .spans
+            projection.lines()[0]
+                .runs
                 .iter()
-                .all(|span| span.marks == Default::default())
+                .all(|run| run.marks.is_empty())
         );
+        // The schema itself is what keeps a second block out.
+        assert!(schema().node_id("heading").is_none());
+        assert!(schema().mark_types().is_empty());
     }
 
     #[test]

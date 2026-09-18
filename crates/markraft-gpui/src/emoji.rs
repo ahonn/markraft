@@ -3,12 +3,15 @@
 //! Both read the [`emojis`] table and nothing else, so they carry no host resources and
 //! a host only has to register them.
 
+use crate::types::DocTypes;
 use crate::{
     EditorCx, Extension, Typeahead, TypeaheadItem, TypeaheadProvider, Update, typeahead::is_trigger,
 };
 use emojis::Emoji;
-use markraft_core::{Block, BlockKind, Document, Mark, Origin, Position, Transaction};
-use std::{any::Any, ops::Range, rc::Rc};
+use markraft_doc::commands::{Command, command, insert_text};
+use markraft_doc::projection::Projection;
+use markraft_doc::{EditorState, Node};
+use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// The extension id of the `:` menu; it names the edits it makes.
@@ -45,11 +48,13 @@ impl TypeaheadProvider for EmojiProvider {
             .collect()
     }
 
-    fn accept(&self, item: &TypeaheadItem, tx: &mut Transaction<'_>) -> Option<Rc<dyn Any>> {
+    fn accept(&self, item: &TypeaheadItem) -> Command {
         // The trigger run is already gone, so this is the whole of the edit: the caret
         // lands after the emoji, on a grapheme boundary, with no trailing space.
-        tx.insert_text(emojis::get_by_shortcode(&item.id)?.as_str());
-        None
+        match emojis::get_by_shortcode(&item.id) {
+            Some(emoji) => insert_text(emoji.as_str()),
+            None => command(|_| None),
+        }
     }
 }
 
@@ -64,40 +69,60 @@ impl Extension for EmojiShortcodes {
         EMOJI_SHORTCODES
     }
 
-    /// Only the user's own typing arms the replacement. The edit it makes carries
-    /// `Origin::Extension`, so the next round leaves it alone and the fixed point is
-    /// reached; undoing it carries `Origin::History`, so the emoji does not come back.
+    /// Only the user's own typing arms the replacement. The edit it makes carries this
+    /// extension's origin, so the next round leaves it alone and the fixed point is
+    /// reached; undoing it is an `undo` user event, so the emoji does not come back.
     fn update(&mut self, update: &Update, cx: &mut EditorCx<'_>) {
-        let typed = update
-            .change
-            .as_ref()
-            .is_some_and(|change| change.origin == Origin::Typed);
-        let selection = cx.selection();
-        if !typed || cx.is_composing() || !selection.is_empty() {
+        let typed = update.is_user_event("input.type") && update.origin().is_none();
+        if !typed || cx.is_composing() || !cx.selection().is_cursor() {
             return;
         }
-        let Some((run, emoji)) = closing_shortcode(cx.committed_document(), selection.head) else {
-            return;
+        let spec = {
+            let state = cx.state();
+            let Some((run, emoji)) =
+                closing_shortcode(state, &cx.projection(), cx.types(), cx.head())
+            else {
+                return;
+            };
+            let slice = markraft_doc::Slice::from_fragment(markraft_doc::Fragment::from_node(
+                state.schema().text(emoji),
+            ));
+            markraft_doc::commands::changes_spec(
+                state,
+                vec![
+                    markraft_doc::Change::replace(run.start, run.end, slice)
+                        .with_fit(markraft_doc::Fit::Auto),
+                ],
+                "input.replace",
+            )
         };
-        cx.transact(|tx| tx.replace_range(run, emoji));
+        if let Some(spec) = spec {
+            cx.dispatch([spec]);
+        }
     }
 }
 
 /// The `:shortcode:` whose closing colon `caret` sits after, and the emoji it stands
-/// for. The opening colon must open the block or follow whitespace, so `10:30:` and
+/// for. The opening colon must open the line or follow whitespace, so `10:30:` and
 /// `a:b:` are text; the name must be a whole shortcode; and no part of the run may be
 /// inline code or lie in a code block.
 fn closing_shortcode(
-    document: &Document,
-    caret: Position,
-) -> Option<(Range<Position>, &'static str)> {
-    let caret = document.clamp_position(caret);
-    let block = document.blocks.get(caret.block)?;
-    if matches!(block.kind, BlockKind::Code { .. }) {
+    state: &EditorState,
+    projection: &Projection,
+    types: &DocTypes,
+    caret: usize,
+) -> Option<(Range<usize>, &'static str)> {
+    if types.in_code_block_at(state) {
         return None;
     }
-    let text = block.text();
-    let before = text.get(..caret.byte)?;
+    let (index, offset) = projection.pos_to_line_offset(caret)?;
+    let line = projection.line(index)?;
+    let text = projection.line_text(index)?;
+    let byte = text
+        .char_indices()
+        .nth(offset)
+        .map_or(text.len(), |(i, _)| i);
+    let before = text.get(..byte)?;
     let (closing, close) = before.grapheme_indices(true).next_back()?;
     if !is_trigger(close, &COLONS) {
         return None;
@@ -112,11 +137,9 @@ fn closing_shortcode(
         return None;
     }
     let emoji = shortcode(&before[opening + open.len()..closing])?;
-    let at = |byte| Position {
-        block: caret.block,
-        byte,
-    };
-    (!is_code(block, opening..caret.byte)).then(|| (at(opening)..at(caret.byte), emoji))
+    let at = |byte: usize| line.from + before[..byte.min(before.len())].chars().count();
+    let range = at(opening)..caret;
+    (!is_code(state, types, range.start, range.end)).then_some((range, emoji))
 }
 
 /// The emoji `name` spells exactly, case- and `-`/`_`-insensitively.
@@ -139,15 +162,23 @@ fn shortcode(name: &str) -> Option<&'static str> {
         .map(Emoji::as_str)
 }
 
-/// Whether any of `range` carries the code mark: an emoji must not replace text inside
-/// an inline code span.
-fn is_code(block: &Block, range: Range<usize>) -> bool {
-    let mut end = 0;
-    block.spans.iter().any(|span| {
-        let start = end;
-        end += span.text.len();
-        span.marks.has(Mark::Code) && start < range.end && range.start < end
-    })
+/// Whether any of `from..to` carries the code mark: an emoji must not replace text
+/// inside an inline code span.
+fn is_code(state: &EditorState, types: &DocTypes, from: usize, to: usize) -> bool {
+    let Some(code) = types.code else {
+        return false;
+    };
+    let mut found = false;
+    state
+        .doc()
+        .nodes_between(from, to, &mut |node: &Node, pos, _, _| {
+            let end = pos + node.node_size();
+            if node.marks().contains_type(code) && pos < to && from < end {
+                found = true;
+            }
+            true
+        });
+    found
 }
 
 /// The emoji whose shortcodes match `query`, best first: the whole shortcode, then its
@@ -210,21 +241,10 @@ fn matches_at(shortcode: &str, query: &[u8], start: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{EMOJI_SHORTCODES, MIN_QUERY, closing_shortcode, ranked};
+    use super::*;
     use crate::typeahead::open_match;
-    use markraft_core::{
-        Block, BlockKind, Document, Editor, Marks, Origin, Position, Selection, Span,
-        TransactionOptions,
-    };
-
-    const COLONS: [char; 2] = [':', '：'];
-    const CODE: Marks = Marks {
-        bold: false,
-        italic: false,
-        code: true,
-        strikethrough: false,
-        underline: false,
-    };
+    use crate::typeahead::tests::{at, run, state_of, text_state};
+    use markraft_doc::projection::projection_of;
 
     fn labels(query: &str) -> Vec<String> {
         ranked(query)
@@ -243,36 +263,17 @@ mod tests {
             .to_owned()
     }
 
-    fn doc(kind: BlockKind, spans: &[(&str, Marks)]) -> Document {
-        let mut document = Document {
-            blocks: vec![Block {
-                kind,
-                depth: 0,
-                spans: spans
-                    .iter()
-                    .map(|(text, marks)| Span {
-                        text: (*text).to_owned(),
-                        marks: *marks,
-                        link: None,
-                    })
-                    .collect(),
-            }],
-        };
-        document.normalize();
-        document
+    /// The replacement at the end of a plain paragraph holding `source`.
+    fn found_in(state: &EditorState, caret: usize) -> Option<(Range<usize>, &'static str)> {
+        let types = DocTypes::of(state.schema());
+        let state = at(state, caret);
+        closing_shortcode(&state, &projection_of(&state), &types, caret)
     }
 
-    /// The replacement at the end of a plain paragraph holding `text`.
     fn found(text: &str) -> Option<String> {
-        let document = doc(BlockKind::Paragraph, &[(text, Marks::default())]);
-        closing_shortcode(
-            &document,
-            Position {
-                block: 0,
-                byte: text.len(),
-            },
-        )
-        .map(|(_, emoji)| emoji.to_owned())
+        let state = text_state(text);
+        let caret = 1 + text.chars().count();
+        found_in(&state, caret).map(|(_, emoji)| emoji.to_owned())
     }
 
     #[test]
@@ -298,7 +299,7 @@ mod tests {
 
     #[test]
     fn the_list_is_capped_and_keeps_the_table_order_within_a_rank() {
-        assert_eq!(labels("a").len(), super::LIMIT);
+        assert_eq!(labels("a").len(), LIMIT);
         // All prefixes of equal rank, so the table's own order decides.
         assert_eq!(&labels("smil")[..2], ["smiley", "smile"]);
     }
@@ -364,111 +365,58 @@ mod tests {
 
     #[test]
     fn code_never_auto_replaces() {
-        let code = doc(
-            BlockKind::Code {
-                language: String::new(),
-            },
-            &[(":smile:", Marks::default())],
-        );
-        assert!(
-            closing_shortcode(
-                &code,
-                Position {
-                    block: 0,
-                    byte: ":smile:".len()
-                }
-            )
-            .is_none()
-        );
-        // An inline code span, whether it covers the whole run or only its closing colon.
-        let inline = doc(
-            BlockKind::Paragraph,
-            &[("x ", Marks::default()), (":smile:", CODE)],
-        );
-        assert!(
-            closing_shortcode(
-                &inline,
-                Position {
-                    block: 0,
-                    byte: "x :smile:".len()
-                }
-            )
-            .is_none()
-        );
-        let partial = doc(
-            BlockKind::Paragraph,
-            &[(":smile", Marks::default()), (":", CODE)],
-        );
-        assert!(
-            closing_shortcode(
-                &partial,
-                Position {
-                    block: 0,
-                    byte: ":smile:".len()
-                }
-            )
-            .is_none()
-        );
+        // A code block, and an inline code span covering the whole run or only its
+        // closing colon.
+        for source in ["```\n:smile:\n```", "x `:smile:`", "`:smile:`"] {
+            let state = state_of(source);
+            let caret = projection_of(&state)
+                .lines()
+                .last()
+                .map(|line| line.to)
+                .expect("a line");
+            assert!(found_in(&state, caret).is_none(), "{source}");
+        }
         // Code that merely abuts the run does not stop it.
-        let abutting = doc(
-            BlockKind::Paragraph,
-            &[("x", CODE), (" :smile:", Marks::default())],
-        );
-        assert_eq!(
-            closing_shortcode(
-                &abutting,
-                Position {
-                    block: 0,
-                    byte: "x :smile:".len()
-                }
-            )
-            .map(|(_, emoji)| emoji),
-            Some("😄")
-        );
+        let state = state_of("`x` :smile:");
+        let caret = projection_of(&state).lines()[0].to;
+        assert_eq!(found_in(&state, caret).map(|(_, emoji)| emoji), Some("😄"));
     }
 
-    /// The transaction [`EmojiShortcodes`] runs, driven directly on the core.
-    fn replace(text: &str) -> Editor {
-        let mut editor = Editor::new(Document::default());
-        editor.insert_text_plain(text);
-        let (run, emoji) = closing_shortcode(editor.document(), editor.selection().head)
+    /// The transaction [`EmojiShortcodes`] runs, driven directly on the state.
+    fn replace(text: &str) -> EditorState {
+        let state = run(&state_of(""), &insert_text(text));
+        let types = DocTypes::of(state.schema());
+        let caret = state.selection().head(state.doc());
+        let (run_range, emoji) = closing_shortcode(&state, &projection_of(&state), &types, caret)
             .expect("a shortcode at the caret");
-        editor.transact(
-            TransactionOptions {
-                group: None,
-                origin: Origin::Extension(EMOJI_SHORTCODES),
-            },
-            |tx| tx.replace_range(run, emoji),
-        );
-        editor
+        let slice = markraft_doc::Slice::from_fragment(markraft_doc::Fragment::from_node(
+            state.schema().text(emoji),
+        ));
+        let spec = markraft_doc::commands::changes_spec(
+            &state,
+            vec![
+                markraft_doc::Change::replace(run_range.start, run_range.end, slice)
+                    .with_fit(markraft_doc::Fit::Auto),
+            ],
+            "input.replace",
+        )
+        .expect("the replacement applies");
+        state
+            .update([spec])
+            .expect("one transaction")
+            .state()
+            .clone()
     }
 
     #[test]
     fn auto_replace_is_one_undo_step_that_restores_the_literal_text() {
-        let mut editor = replace("hi :smile:");
-        assert_eq!(editor.document().plain_text(), "hi 😄");
-        assert_eq!(
-            editor.selection(),
-            Selection::caret(Position {
-                block: 0,
-                byte: "hi 😄".len()
-            })
-        );
-        editor.undo();
-        assert_eq!(editor.document().plain_text(), "hi :smile:");
+        let state = replace("hi :smile:");
+        assert_eq!(projection_of(&state).plain_text(), "hi 😄");
+        let state = run(&state, &command(markraft_doc::undo));
+        assert_eq!(projection_of(&state).plain_text(), "hi :smile:");
         // The entry before it is the typing itself, so exactly one step was added.
-        editor.undo();
-        assert_eq!(editor.document().plain_text(), "");
-    }
-
-    #[test]
-    fn undoing_carries_history_and_leaves_no_shortcode_to_replace_again() {
-        let mut editor = replace(":smile:");
-        let change = editor.undo().expect("an undo");
-        assert_eq!(change.origin, Origin::History);
-        // The text is `:smile:` again, so only the origin keeps the replacement from
-        // firing on the undo's own change.
-        assert!(closing_shortcode(editor.document(), editor.selection().head).is_some());
+        let state = run(&state, &command(markraft_doc::undo));
+        assert_eq!(projection_of(&state).plain_text(), "");
     }
 
     #[test]
@@ -477,58 +425,59 @@ mod tests {
             (":south_africa:", "🇿🇦"),
             (":family_woman_woman_girl:", "👩‍👩‍👧"),
         ] {
-            let editor = replace(text);
-            assert_eq!(editor.document().plain_text(), emoji);
-            let caret = editor.selection().head;
-            assert_eq!(caret.byte, emoji.len());
-            assert_eq!(editor.previous_position(caret).byte, 0);
+            let state = replace(text);
+            let projection = projection_of(&state);
+            assert_eq!(projection.plain_text(), emoji);
+            let caret = state.selection().head(state.doc());
+            assert_eq!(caret, 1 + emoji.chars().count());
+            assert_eq!(projection.prev_grapheme_boundary(caret), Some(1));
         }
+    }
+
+    /// The literal text is back after an undo, so only the user event keeps the
+    /// replacement from firing again on the undo's own change.
+    #[test]
+    fn undoing_is_not_typing_and_leaves_no_shortcode_to_replace_again() {
+        let state = replace(":smile:");
+        let spec = markraft_doc::undo(&state).expect("an undo");
+        let tr = state.update([spec]).expect("the undo applies");
+        assert!(tr.is_user_event("undo"));
+        assert!(!tr.is_user_event("input.type"));
+        let state = tr.state().clone();
+        let caret = state.selection().head(state.doc());
+        assert!(found_in(&state, caret).is_some());
     }
 
     /// The replacement's own change must not arm it again.
     #[test]
     fn the_replacement_reaches_a_fixed_point() {
-        let editor = replace(":smile:");
-        assert!(closing_shortcode(editor.document(), editor.selection().head).is_none());
+        let state = replace(":smile:");
+        let caret = state.selection().head(state.doc());
+        assert!(found_in(&state, caret).is_none());
     }
 
     #[test]
     fn the_menu_stays_shut_until_the_query_is_long_enough() {
-        let document = doc(BlockKind::Paragraph, &[(":D", Marks::default())]);
-        let at = |byte, min| {
-            open_match(&document, Position { block: 0, byte }, &COLONS, min)
-                .map(|found| found.query)
-        };
-        assert_eq!(at(1, MIN_QUERY), None, "a lone colon opens nothing");
-        assert_eq!(at(2, MIN_QUERY), None, "`:D` keeps Return to itself");
-        assert_eq!(at(2, 0).as_deref(), Some("D"), "the `/` menu is unchanged");
-        let document = doc(BlockKind::Paragraph, &[(":👩‍👩‍👧x", Marks::default())]);
+        let state = state_of(":D");
+        let projection = projection_of(&state);
+        let at = |pos, min| open_match(&projection, false, pos, &COLONS, min).map(|f| f.query);
+        assert_eq!(at(2, MIN_QUERY), None, "a lone colon opens nothing");
+        assert_eq!(at(3, MIN_QUERY), None, "`:D` keeps Return to itself");
+        assert_eq!(at(3, 0).as_deref(), Some("D"), "the `/` menu is unchanged");
+        let family = "👩‍👩‍👧";
+        let state = state_of(&format!(":{family}x"));
+        let projection = projection_of(&state);
+        let chars = family.chars().count();
         // Graphemes, not bytes: one family plus one letter is two.
         assert_eq!(
-            open_match(
-                &document,
-                Position {
-                    block: 0,
-                    byte: ":👩‍👩‍👧".len()
-                },
-                &COLONS,
-                MIN_QUERY,
-            ),
+            open_match(&projection, false, 2 + chars, &COLONS, MIN_QUERY),
             None
         );
         assert_eq!(
-            open_match(
-                &document,
-                Position {
-                    block: 0,
-                    byte: ":👩‍👩‍👧x".len()
-                },
-                &COLONS,
-                MIN_QUERY,
-            )
-            .map(|found| found.query)
-            .as_deref(),
-            Some("👩‍👩‍👧x")
+            open_match(&projection, false, 3 + chars, &COLONS, MIN_QUERY)
+                .map(|found| found.query)
+                .as_deref(),
+            Some(format!("{family}x").as_str())
         );
     }
 
@@ -540,34 +489,25 @@ mod tests {
         for text in [
             "/head", "、head", ":smile", "：smile", "x /a", "x :ab", "/:ab", ":/ab", "plain",
         ] {
-            let document = doc(BlockKind::Paragraph, &[(text, Marks::default())]);
-            let caret = Position {
-                block: 0,
-                byte: text.len(),
-            };
-            let slash = open_match(&document, caret, &SLASHES, 0).is_some();
-            let emoji = open_match(&document, caret, &COLONS, MIN_QUERY).is_some();
+            let state = state_of(text);
+            let projection = projection_of(&state);
+            let caret = projection.lines()[0].to;
+            let slash = open_match(&projection, false, caret, &SLASHES, 0).is_some();
+            let emoji = open_match(&projection, false, caret, &COLONS, MIN_QUERY).is_some();
             assert!(!(slash && emoji), "{text:?} opened both menus");
         }
     }
 
     #[test]
-    fn a_marks_helper_covers_the_whole_run() {
-        // Guards `is_code`'s span walk against an off-by-one at the run's edges.
-        let block = &doc(
-            BlockKind::Paragraph,
-            &[
-                ("ab", Marks::default()),
-                ("cd", CODE),
-                ("ef", Marks::default()),
-            ],
-        )
-        .blocks[0];
-        assert!(!super::is_code(block, 0..2));
-        assert!(super::is_code(block, 1..3));
-        assert!(super::is_code(block, 2..4));
-        assert!(super::is_code(block, 3..6));
-        assert!(!super::is_code(block, 4..6));
+    fn the_code_mark_check_covers_the_whole_run() {
+        // Guards `is_code`'s walk against an off-by-one at the run's edges.
+        let state = state_of("ab`cd`ef");
+        let types = DocTypes::of(state.schema());
+        assert!(!is_code(&state, &types, 1, 3));
+        assert!(is_code(&state, &types, 2, 4));
+        assert!(is_code(&state, &types, 3, 5));
+        assert!(is_code(&state, &types, 4, 7));
+        assert!(!is_code(&state, &types, 5, 7));
     }
 
     #[test]

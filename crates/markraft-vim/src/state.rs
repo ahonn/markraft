@@ -2,7 +2,6 @@
 //! a window, so the whole of "what does this key mean right now" is testable on its own.
 
 use crate::{edit::Register, motion::MAX_COUNT};
-use markraft_core::Position;
 
 /// The editing mode, reported to the host through `EditorEvent::Extension` whenever it
 /// changes.
@@ -141,7 +140,7 @@ pub(crate) struct State {
     pub mode: Mode,
     pub pending: Pending,
     /// The grapheme `v` or `V` started on; the other end of a visual selection.
-    pub visual_anchor: Position,
+    pub visual_anchor: usize,
     /// The unnamed register. The clipboard carries the same content; the register is
     /// what remembers that it was linewise.
     pub register: Option<Register>,

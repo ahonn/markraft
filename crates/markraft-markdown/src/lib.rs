@@ -100,7 +100,10 @@ pub use comrak;
 
 pub use extensions::{commonmark_corrections, commonmark_extensions, commonmark_input_rules};
 pub use fragment::open_fragment;
-pub use html::{HtmlParser, HtmlRule, HtmlRules, commonmark_html_rules};
+pub use html::{
+    HtmlParser, HtmlRule, HtmlRules, HtmlSerializer, commonmark_html_rules,
+    commonmark_html_serializer,
+};
 pub use parse::{MarkdownParser, ParseError, commonmark_options};
 pub use preset::{commonmark_mark_rules, commonmark_node_rules, commonmark_serializer};
 pub use rules::{

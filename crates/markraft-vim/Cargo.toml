@@ -9,6 +9,9 @@ license.workspace = true
 
 [dependencies]
 gpui.workspace = true
-markraft-core.workspace = true
+markraft-doc.workspace = true
 markraft-gpui.workspace = true
 unicode-segmentation = "1.12"
+
+[dev-dependencies]
+markraft-markdown.workspace = true

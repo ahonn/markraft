@@ -8,8 +8,8 @@
 //! ```
 //!
 //! Preferences and the active note are per machine and live in a separate settings file.
+use crate::doc;
 use crate::storage::{Library, Note, Settings};
-use markraft_core::Document;
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
@@ -267,7 +267,7 @@ impl Store {
                 continue;
             }
             // A blank note that was never written stays in memory only.
-            if saved.is_none() && note.document.plain_text().trim().is_empty() {
+            if saved.is_none() && doc::plain_text(&note.document).trim().is_empty() {
                 continue;
             }
             if let Some(saved) = saved
@@ -362,11 +362,11 @@ impl Store {
         let blank = library
             .notes
             .iter()
-            .all(|note| note.document.plain_text().trim().is_empty());
+            .all(|note| doc::plain_text(&note.document).trim().is_empty());
         if self.settings.legacy_imported || !blank || !legacy.exists() {
             return library;
         }
-        let imported = crate::storage::read_legacy_library(legacy).and_then(|imported| {
+        let imported = crate::legacy::read_library(legacy).and_then(|imported| {
             self.update_settings(|settings| settings.legacy_imported = true)?;
             self.save(&imported)?;
             Ok(imported)
@@ -446,7 +446,7 @@ fn encode(note: &Note) -> String {
         text.push('\n');
     }
     text.push_str("---\n");
-    text.push_str(&note.document.to_markdown());
+    text.push_str(&doc::to_markdown(&note.document));
     text.push('\n');
     text
 }
@@ -457,7 +457,7 @@ fn decode(text: &str, modified: u64) -> Note {
     let text = text.replace("\r\n", "\n");
     let mut note = Note {
         id: String::new(),
-        document: Document::default(),
+        document: doc::empty(),
         created_at: modified,
         updated_at: modified,
         deleted_at: None,
@@ -492,8 +492,38 @@ fn decode(text: &str, modified: u64) -> Note {
             note.front_matter.push(line.to_owned());
         }
     }
-    note.document = Document::from_markdown(body.strip_suffix('\n').unwrap_or(body));
+    note.document = doc::from_markdown(body.strip_suffix('\n').unwrap_or(body));
     note
+}
+
+/// Every note as one self-describing JSON file, for the rescue path that runs when
+/// the notes folder itself cannot be written.
+///
+/// A note's body travels as Markdown rather than as a tree, so the file stays
+/// readable and every note in it can be dropped back into a folder as a `.md`.
+pub fn backup(library: &Library) -> Result<Vec<u8>, String> {
+    let notes: Vec<serde_json::Value> = library
+        .notes
+        .iter()
+        .map(|note| {
+            serde_json::json!({
+                "id": note.id,
+                "title": note.title(),
+                "created": iso(note.created_at),
+                "updated": iso(note.updated_at),
+                "deleted": note.deleted_at.map(iso),
+                "pinned": note.pinned,
+                "front_matter": note.front_matter,
+                "markdown": doc::to_markdown(&note.document),
+            })
+        })
+        .collect();
+    serde_json::to_vec_pretty(&serde_json::json!({
+        "format": "markraft-backup-v1",
+        "active_id": library.active_id,
+        "notes": notes,
+    }))
+    .map_err(|error| error.to_string())
 }
 
 /// Milliseconds since the epoch as (year, month, day, hour, minute, second, millisecond).
@@ -612,7 +642,7 @@ mod tests {
         let id = library.active_id.clone();
         library.set_document(
             &id,
-            Document::from_markdown("# Plan: a/b\n- [x] **done** 中文"),
+            doc::from_markdown("# Plan: a/b\n\n- [x] **done** 中文"),
         );
         library.notes[0].created_at = parse_iso("2026-09-17T10:02:03.123Z").unwrap();
         library.notes[0].pinned = true;
@@ -622,7 +652,10 @@ mod tests {
         assert!(text.starts_with(&format!(
             "---\nid: {id}\ncreated: 2026-09-17T10:02:03.123Z\nupdated: "
         )));
-        assert!(text.ends_with("pinned: true\n---\n# Plan: a/b\n- [x] **done** 中文\n"));
+        assert!(
+            text.ends_with("pinned: true\n---\n# Plan: a/b\n\n- [x] **done** 中文\n"),
+            "{text}"
+        );
         assert!(store.is_saved(&library));
 
         drop(store);
@@ -637,10 +670,10 @@ mod tests {
         let (mut store, mut library) = open(root.path());
         let id = library.active_id.clone();
         library.notes[0].created_at = 0;
-        library.set_document(&id, Document::from_markdown("First"));
+        library.set_document(&id, doc::from_markdown("First"));
         store.save(&library).unwrap();
-        library.set_document(&id, Document::from_markdown("Second"));
-        let other = library.new_note(Document::from_markdown("Second"));
+        library.set_document(&id, doc::from_markdown("Second"));
+        let other = library.new_note(doc::from_markdown("Second"));
         library.notes[1].created_at = 0;
         store.save(&library).unwrap();
         assert_eq!(
@@ -682,9 +715,9 @@ mod tests {
 
         // An edit that keeps the title keeps the name the user gave the file.
         let id = library.active_id.clone();
-        let mut document = library.active_note().document.clone();
-        document.blocks.push(Default::default());
-        library.set_document(&id, document);
+        let document = library.active_note().document.clone();
+        let extended = format!("{}\n\nmore", doc::to_markdown(&document));
+        library.set_document(&id, doc::from_markdown(&extended));
         store.save(&library).unwrap();
         assert_eq!(listing(root.path(), ""), ["todo.md"]);
         let text = fs::read_to_string(&path).unwrap();
@@ -722,17 +755,25 @@ mod tests {
     fn earlier_single_file_libraries_are_imported_once_and_left_in_place() {
         let root = tempfile::tempdir().unwrap();
         let legacy = root.path().join("notes.json");
-        let mut old = Library::default();
-        let id = old.active_id.clone();
-        old.set_document(&id, Document::from_markdown("# Kept\n~~old~~"));
-        old.preferences.hotkey = "Alt+M".into();
-        let bytes = serde_json::to_vec(&old).unwrap();
+        // The JSON an earlier version wrote, which no type in the workspace produces
+        // any more; `crate::legacy` is what reads it.
+        let bytes =
+            br#"{"version":2,"active_id":"kept","notes":[{"id":"kept","document":{"blocks":[
+            {"kind":{"Heading":1},"spans":[{"text":"Kept"}]},
+            {"kind":"Paragraph","spans":[{"text":"old","marks":{"strikethrough":true}}]}
+        ]},"created_at":1,"updated_at":2}],"preferences":{"hotkey":"Alt+M"}}"#
+                .to_vec();
         std::fs::write(&legacy, &bytes).unwrap();
 
         let open = || Store::open(root.path().join("notes"), root.path().join("settings.json"));
         let (mut store, library) = open().unwrap();
         let library = store.import_legacy(library, &legacy);
-        assert_eq!(library, old);
+        let old = library.clone();
+        assert_eq!(library.preferences.hotkey, "Alt+M");
+        assert_eq!(
+            doc::to_markdown(&library.notes[0].document),
+            "# Kept\n\n~~old~~"
+        );
         assert_eq!(std::fs::read(&legacy).unwrap(), bytes);
         drop(store);
 

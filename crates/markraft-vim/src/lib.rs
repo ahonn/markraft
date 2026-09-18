@@ -7,26 +7,27 @@
 //!
 //! # What a line is
 //!
-//! The editor has no lines, only blocks, so vim's "line" is a block. That decides the
-//! rest:
+//! Vim's "line" is a projection line: one textblock, or one block-level leaf such as a
+//! horizontal rule. That decides the rest:
 //!
-//! - `0`, `^` and `$` act on the block, not on the visual row a wrapped block occupies.
-//!   `j` and `k` do follow visual rows, as they do in vim with `wrap` set — except with
-//!   an operator pending and in Visual Line mode, where `dj` and `Vj` must take whole
-//!   blocks however they wrap.
-//! - A linewise yank keeps whole blocks: their kind, depth, marks and links. `p` and `P`
-//!   put those blocks below and above the cursor's block, so yanking a nested task and
-//!   pasting it gives back a nested task. A charwise yank keeps a rich fragment and
-//!   pastes it inline, after the cursor's grapheme for `p` and at it for `P`.
-//! - A `Divider` holds no text. The cursor may rest on it, `dd` removes it, `x` finds
-//!   nothing to delete, and `o` or `O` beside it opens a paragraph.
-//! - A code block is a run of consecutive `Code` blocks, and each of its lines is one.
-//!   `dd`, `yy` and `p` work on single code lines; `o` and `O` inside a run open another
-//!   line of the same language. No fence is ever written or stripped.
-//! - `o` and `O` repeat the line they open from exactly as Enter does: a list, task or
-//!   quote line at the same depth with a task left unchecked, a code line with the same
-//!   language, and a paragraph for a heading or a divider.
-//! - Deleting every block leaves the one empty paragraph the core normalizes to.
+//! - `0`, `^` and `$` act on the whole line, not on the visual row a wrapped line
+//!   occupies. `j` and `k` do follow visual rows, as they do in vim with `wrap` set —
+//!   except with an operator pending and in Visual Line mode, where `dj` and `Vj` must
+//!   take whole lines however they wrap.
+//! - A linewise yank takes the outermost node the lines fill completely, so yanking the
+//!   only paragraph of a nested task item takes the item and pasting it gives back a
+//!   nested task. `p` and `P` put those nodes below and above the cursor's own node at
+//!   the same depth. A charwise yank keeps a slice and pastes it inline, after the
+//!   cursor's grapheme for `p` and at it for `P`.
+//! - A horizontal rule holds no text. The cursor may rest on it, `dd` removes it, `x`
+//!   finds nothing to delete, and `o` or `O` beside it opens a paragraph.
+//! - A code block is one line whose text holds the newlines, so `dd` and `yy` on it take
+//!   the whole block; `o` and `O` inside it open another row of the same block. No fence
+//!   is ever written or stripped.
+//! - `o` and `O` are Enter: the caret goes to the end — or the start — of the line and
+//!   the editor's own Enter chain runs, so a list item repeats itself, a heading gives a
+//!   paragraph and a code block gains a row.
+//! - Deleting everything leaves the smallest document the schema allows.
 //! - In Normal mode the cursor sits on a grapheme, never past the last one of a
 //!   non-empty line; it is clamped after every command and whenever the editor moves it.
 //!
@@ -310,16 +311,16 @@ impl Extension for Vim {
             self.motion(VimLineEnd, Motion::LineEnd),
             self.handler(VimDown, |state, cx| command::vertical(state, cx, 1)),
             self.handler(VimUp, |state, cx| command::vertical(state, cx, -1)),
-            // `gg` and `G` read a count as the block to go to, counting from one, so it
+            // `gg` and `G` read a count as the line to go to, counting from one, so it
             // is not consumed as a repetition; `command::motion` takes the rest.
             self.handler(VimDocumentStart, |state, cx| {
-                let block = state.pending.count().map_or(0, |count| count - 1);
-                command::motion(state, cx, Motion::Block(block));
+                let line = state.pending.count().map_or(0, |count| count - 1);
+                command::motion(state, cx, Motion::Line(line));
             }),
             self.handler(VimDocumentEnd, |state, cx| {
-                let last = cx.document().blocks.len() - 1;
-                let block = state.pending.count().map_or(last, |count| count - 1);
-                command::motion(state, cx, Motion::Block(block));
+                let last = cx.projection().line_count().saturating_sub(1);
+                let line = state.pending.count().map_or(last, |count| count - 1);
+                command::motion(state, cx, Motion::Line(line));
             }),
             self.handler(VimDelete, |state, cx| {
                 command::operator(state, cx, Operator::Delete)

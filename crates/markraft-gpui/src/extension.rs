@@ -5,29 +5,40 @@
 //! editor through [`EditorCx`] rather than an `Entity<EditorView>`: hosts routinely call
 //! `editor.update` from inside their own update, so an extension holding a handle would
 //! re-enter it and panic.
+//!
+//! An extension never touches the tree. It dispatches a
+//! [`TransactionSpec`] or runs a [`Command`] from the catalogue, exactly as the
+//! editor's own key bindings do.
 
 use crate::{EditorEvent, EditorStyle, EditorView, clipboard};
 use gpui::{prelude::*, *};
-use markraft_core::{
-    Change, Document, Origin, Position, Selection, Transaction, TransactionOptions,
+use markraft_doc::commands::Command;
+use markraft_doc::projection::Projection;
+use markraft_doc::{
+    ChangeDesc, EditorState, Selection, Slice, TrackMode, Transaction, TransactionSpec,
 };
+use std::sync::Arc;
 use std::{any::Any, cell::Cell, collections::VecDeque, rc::Rc};
 
 /// How many rounds of [`Extension::update`] one editor update may run. An edit an
-/// extension makes from `update` is delivered as a further round with
-/// `Origin::Extension(id)`, so extensions must reach a fixed point; the budget only
+/// extension makes from `update` is delivered as a further round carrying the
+/// transaction it produced, so extensions must reach a fixed point; the budget only
 /// stops a runaway.
 const ROUNDS: usize = 8;
 
+/// The [`origin`](markraft_doc::origin) annotation every extension edit carries,
+/// so an extension can tell its own edits from the user's.
+pub const EXTENSION_ORIGIN_PREFIX: &str = "extension:";
+
 /// What one editor update did. It is a hint: extensions derive their state from the
 /// editor itself, so a detail missing here never leaves them stale.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Update {
-    /// The change the update published, carrying its origin and position mapping.
-    pub change: Option<Change>,
+    /// The transactions the update applied, in order.
+    pub transactions: Vec<Transaction>,
     pub selection_moved: bool,
-    /// [`EditorView::committed_document`] changed: an edit landed outside a
-    /// composition, or a composition was committed. Cancelling one does not set it.
+    /// The document changed outside a composition, or a composition was
+    /// committed. Cancelling one does not set it.
     pub committed: bool,
     /// An input-method composition is live, so no extension may edit.
     pub composing: bool,
@@ -35,8 +46,47 @@ pub struct Update {
     pub replaced: bool,
 }
 
+impl Update {
+    /// Whether any of the update's transactions changed the document.
+    pub fn changed(&self) -> bool {
+        self.transactions.iter().any(Transaction::doc_changed)
+    }
+
+    /// The shapes of this update's changes, in order.
+    pub fn changes(&self) -> Vec<ChangeDesc> {
+        self.transactions
+            .iter()
+            .map(|tr| tr.changes().desc())
+            .collect()
+    }
+
+    /// Follow a position an extension remembered through this update.
+    ///
+    /// `None` means the content it stood on is gone, which is how a dismissed
+    /// trigger is forgotten.
+    pub fn map_tracked(&self, pos: usize, assoc: i32, track: TrackMode) -> Option<usize> {
+        self.transactions
+            .iter()
+            .try_fold(pos, |pos, tr| tr.changes().map_pos(pos, assoc, track))
+    }
+
+    /// Whether any of the update's transactions carries `prefix` as its user event.
+    pub fn is_user_event(&self, prefix: &str) -> bool {
+        self.transactions.iter().any(|tr| tr.is_user_event(prefix))
+    }
+
+    /// The `origin` annotation of the update's first transaction.
+    pub fn origin(&self) -> Option<&str> {
+        self.transactions
+            .iter()
+            .find_map(|tr| tr.annotation(markraft_doc::origin()))
+            .map(String::as_str)
+    }
+}
+
 /// Whether the platform may put text into the editor. gpui asks one question of the
-/// input handler and uses the answer twice — see [`EditorView::accepts_text_input`] — so
+/// input handler and uses the answer twice — the editor gates inserted text with it
+/// and gpui reuses it for `prefers_ime_for_printable_keys` — so
 /// refusing text also keeps printable keys out of an active input method, which is what
 /// lets an unmodified letter reach a key binding while a Chinese or Japanese input
 /// source is selected.
@@ -67,7 +117,7 @@ pub enum CaretShape {
 /// An editor extension. Every hook is optional; a view with no extension behaves
 /// exactly as one that never learned about them.
 pub trait Extension: 'static {
-    /// Stable identity, used for `Origin::Extension` and [`EditorEvent::Extension`].
+    /// Stable identity, used for the edits' `origin` and [`EditorEvent::Extension`].
     fn id(&self) -> &'static str;
     /// Contribute identifiers to the editor's key context, merged every render.
     fn key_context(&self, _context: &mut KeyContext) {}
@@ -122,7 +172,7 @@ impl ActionHandler {
 
 /// A popup the editor draws over itself, hanging from the caret at `anchor`.
 pub struct Overlay {
-    pub anchor: Position,
+    pub anchor: usize,
     pub element: AnyElement,
     /// Space between the anchored line and the popup.
     pub gap: Pixels,
@@ -165,14 +215,14 @@ pub(crate) struct Registration {
 #[derive(Default)]
 struct Effects {
     events: Vec<EditorEvent>,
-    changes: Vec<Change>,
+    transactions: Vec<Transaction>,
     notify: bool,
     /// An extension moved the selection: the caret must be revealed, the blink restarted
     /// and the extensions told, the way the editor's own selection funnel does it.
     selected: bool,
 }
 
-/// The editor as an extension sees it: core reads, one editing funnel, layout queries
+/// The editor as an extension sees it: state reads, one editing funnel, layout queries
 /// and queued host effects.
 pub struct EditorCx<'a> {
     view: &'a mut EditorView,
@@ -192,14 +242,24 @@ impl<'a> EditorCx<'a> {
             effects: Effects::default(),
         }
     }
-    pub fn document(&self) -> &Document {
-        self.view.document()
+    /// The editor's state: document, selection and every extension field.
+    pub fn state(&self) -> &EditorState {
+        self.view.state()
     }
-    pub fn committed_document(&self) -> &Document {
-        self.view.committed_document()
+    /// The document's flattened, line-oriented view.
+    pub fn projection(&self) -> Arc<Projection> {
+        self.view.projection()
     }
-    pub fn selection(&self) -> Selection {
-        self.view.core.selection()
+    /// The node and mark types the editor's schema declares.
+    pub(crate) fn types(&self) -> &crate::types::DocTypes {
+        &self.view.types
+    }
+    pub fn selection(&self) -> &Selection {
+        self.view.state().selection()
+    }
+    /// The caret, or the moving end of a range.
+    pub fn head(&self) -> usize {
+        self.view.head()
     }
     pub fn is_composing(&self) -> bool {
         self.view.is_composing()
@@ -212,9 +272,9 @@ impl<'a> EditorCx<'a> {
     pub fn style(&self) -> &EditorStyle {
         &self.view.style
     }
-    /// Window bounds of the caret at `position`; see [`EditorView::caret_bounds`].
-    pub fn caret_bounds(&self, position: Position) -> Option<Bounds<Pixels>> {
-        self.view.caret_bounds(position)
+    /// Window bounds of the caret at `pos`; see [`EditorView::caret_bounds`].
+    pub fn caret_bounds(&self, pos: usize) -> Option<Bounds<Pixels>> {
+        self.view.caret_bounds(pos)
     }
     /// Redraw the editor. Extensions never call `cx.notify` themselves.
     pub fn notify(&mut self) {
@@ -227,59 +287,54 @@ impl<'a> EditorCx<'a> {
             payload: ExtensionPayload(payload),
         });
     }
-    /// Run `action` as one undo entry with `Origin::Extension(id)`. Returns `None` and
-    /// makes no edit while an input-method composition is live: the input method owns
-    /// the marked text, so an extension must never edit under it.
-    pub fn transact(&mut self, action: impl FnOnce(&mut Transaction<'_>)) -> Option<Change> {
-        if self.view.core.is_composing() {
+    /// Apply `specs` as one transaction tagged with this extension's origin.
+    ///
+    /// Returns `None` and makes no edit while an input-method composition is live:
+    /// the input method owns the marked text, so an extension must never edit under it.
+    pub fn dispatch(
+        &mut self,
+        specs: impl IntoIterator<Item = TransactionSpec>,
+    ) -> Option<Transaction> {
+        if self.view.is_composing() {
             return None;
         }
-        let change = self.view.core.transact(
-            TransactionOptions {
-                group: None,
-                origin: Origin::Extension(self.id),
-            },
-            action,
-        )?;
+        let origin = format!("{EXTENSION_ORIGIN_PREFIX}{}", self.id);
+        let specs: Vec<TransactionSpec> = specs
+            .into_iter()
+            .map(|spec| spec.annotate(markraft_doc::origin().of(origin.clone())))
+            .collect();
+        let applied = self.view.apply(specs)?;
         self.view.upstream = false;
-        self.view.last_typed_at = None;
         self.view.reveal = true;
-        self.effects.changes.push(change.clone());
-        Some(change)
+        self.effects.transactions.extend(applied.iter().cloned());
+        applied.into_iter().next_back()
+    }
+    /// Run a command from the catalogue. `false` when it does not apply.
+    pub fn run(&mut self, command: &Command) -> bool {
+        match command(self.view.state()) {
+            Some(spec) => self.dispatch([spec]).is_some(),
+            None => false,
+        }
     }
     /// Undo one entry, as ⌘Z does. `None` while a composition is live or when there is
     /// nothing left to undo.
-    pub fn undo(&mut self) -> Option<Change> {
-        self.history(true)
+    pub fn undo(&mut self) -> Option<Transaction> {
+        let spec = markraft_doc::undo(self.view.state())?;
+        self.dispatch([spec])
     }
-    pub fn redo(&mut self) -> Option<Change> {
-        self.history(false)
+    pub fn redo(&mut self) -> Option<Transaction> {
+        let spec = markraft_doc::redo(self.view.state())?;
+        self.dispatch([spec])
     }
-    fn history(&mut self, undo: bool) -> Option<Change> {
-        if self.view.core.is_composing() {
-            return None;
-        }
-        let change = if undo {
-            self.view.core.undo()
-        } else {
-            self.view.core.redo()
-        }?;
-        self.view.upstream = false;
-        self.view.last_typed_at = None;
-        self.view.reveal = true;
-        self.effects.changes.push(change.clone());
-        Some(change)
-    }
-    /// Set the selection, collapsed or ranged, outside any transaction. It goes through
-    /// the editor's own funnel: the position is clamped, the caret is revealed and every
-    /// extension is told once this hook has returned. Nothing is committed, and a live
-    /// composition refuses the move.
+    /// Set the selection, collapsed or ranged, without changing the document. It goes
+    /// through the editor's own funnel: the caret is revealed and every extension is
+    /// told once this hook has returned. A live composition refuses the move.
     ///
     /// `keep_column` retains the column a vertical move remembered, for a caller only
     /// correcting the caret within the row it just reached; any other move forgets it,
     /// the way a horizontal arrow key does.
     pub fn select(&mut self, selection: Selection, keep_column: bool) -> bool {
-        if self.view.core.is_composing() {
+        if self.view.is_composing() {
             return false;
         }
         let column = self.view.preferred_x;
@@ -293,41 +348,53 @@ impl<'a> EditorCx<'a> {
     /// from the way ↑ and ↓ do. `false` before the first paint, when no layout exists,
     /// and while composing.
     pub fn move_visual_rows(&mut self, rows: isize, extend: bool) -> bool {
-        if self.view.core.is_composing() {
+        if self.view.is_composing() {
             return false;
         }
         let Some((head, x, upstream)) = self.view.visual_row_target(rows) else {
             return false;
         };
         let anchor = if extend {
-            self.view.core.selection().anchor
+            self.view
+                .state()
+                .selection()
+                .anchor(self.view.state().doc())
         } else {
             head
         };
-        self.apply_selection(Selection { anchor, head }, upstream);
+        self.apply_selection(Selection::text(anchor, head), upstream);
         self.view.preferred_x = Some(x);
         true
     }
     /// Move the caret to the start or end of its visual row, the way Home and End do.
     /// A wrapped block has several of them.
     pub fn move_visual_line_edge(&mut self, end: bool, extend: bool) -> bool {
-        if self.view.core.is_composing() {
+        if self.view.is_composing() {
             return false;
         }
         let Some((head, upstream)) = self.view.line_edge_target(end) else {
             return false;
         };
         let anchor = if extend {
-            self.view.core.selection().anchor
+            self.view
+                .state()
+                .selection()
+                .anchor(self.view.state().doc())
         } else {
             head
         };
-        self.apply_selection(Selection { anchor, head }, upstream);
+        self.apply_selection(Selection::text(anchor, head), upstream);
         true
     }
     fn apply_selection(&mut self, selection: Selection, upstream: bool) {
-        self.view.last_typed_at = None;
-        self.view.core.set_selection(selection);
+        if let Some(applied) = self.view.apply([TransactionSpec::new()
+            .selection(selection)
+            .scroll_into_view()])
+        {
+            self.effects
+                .transactions
+                .extend(applied.into_iter().filter(|tr| tr.doc_changed()));
+        }
         self.view.upstream = upstream;
         self.view.preferred_x = None;
         self.view.reveal = true;
@@ -335,28 +402,30 @@ impl<'a> EditorCx<'a> {
     }
     /// Fold every undo entry made from now until [`Self::end_undo_group`] into one, so
     /// that a modal editor's insert session undoes as a whole. Undo, redo and the
-    /// extension's removal end it. See [`Editor::begin_undo_group`].
+    /// extension's removal end it.
     pub fn begin_undo_group(&mut self) {
-        self.view.core.begin_undo_group();
+        self.view.begin_undo_group();
     }
     pub fn end_undo_group(&mut self) {
-        self.view.core.end_undo_group();
+        self.view.end_undo_group();
     }
-    /// Put a rich fragment and its plain text on the system clipboard, exactly as ⌘C
-    /// does, so another application pastes the text and this one pastes the fragment.
-    pub fn write_clipboard(&mut self, fragment: Document, text: String) -> bool {
+    /// Put a slice and its Markdown on the system clipboard, exactly as ⌘C does, so
+    /// another application pastes the Markdown and this one pastes the slice.
+    pub fn write_clipboard(&mut self, slice: &Slice) -> bool {
+        let schema = self.view.state().schema().clone();
         let Some(app) = self.app.as_deref_mut() else {
             return false;
         };
-        clipboard::write(fragment, text, app);
+        clipboard::write(&schema, slice, app);
         true
     }
-    /// The rich fragment on the system clipboard, read as ⌘V reads it: this editor's own
-    /// fragment when it wrote one, otherwise HTML or Markdown from another application.
-    pub fn read_clipboard(&mut self) -> Option<Document> {
+    /// The slice on the system clipboard, read as ⌘V reads it: this editor's own
+    /// slice when it wrote one, otherwise HTML or Markdown from another application.
+    pub fn read_clipboard(&mut self) -> Option<Slice> {
+        let schema = self.view.state().schema().clone();
         let app = self.app.as_deref_mut()?;
         let item = app.read_from_clipboard()?;
-        clipboard::read_fragment(&item, clipboard::PasteMode::Formatted)
+        clipboard::read_fragment(&schema, &item, clipboard::PasteMode::Formatted)
     }
 }
 
@@ -377,12 +446,13 @@ impl EditorView {
         ExtensionHandle { alive }
     }
 
-    /// Window bounds of the caret at `position`, from the layout of the frame that last
+    /// Window bounds of the caret at `pos`, from the layout of the frame that last
     /// painted. `None` before the first paint.
-    pub fn caret_bounds(&self, position: Position) -> Option<Bounds<Pixels>> {
-        let row = self.layout.get(position.block)?;
+    pub fn caret_bounds(&self, pos: usize) -> Option<Bounds<Pixels>> {
+        let (index, offset) = self.projection().pos_to_line_offset(pos)?;
+        let row = self.layout.get(index)?;
         Some(Bounds::new(
-            row.caret(position.byte, false),
+            row.caret(offset, false),
             size(px(0.), row.line_height),
         ))
     }
@@ -394,7 +464,7 @@ impl EditorView {
         self.extensions
             .retain(|registration| registration.alive.get());
         if self.extensions.len() != before {
-            self.core.end_undo_group();
+            self.end_undo_group();
         }
     }
 
@@ -487,12 +557,12 @@ impl EditorView {
     }
 
     /// Tell the extensions what just happened. An extension that edits from `update` is
-    /// called again with the change it made; a fixed point must be reached within
+    /// called again with the transaction it made; a fixed point must be reached within
     /// [`ROUNDS`] rounds.
     pub(crate) fn run_extensions(&mut self, first: Update, cx: &mut Context<Self>) {
         self.prune_extensions();
         if self.extensions.is_empty() {
-            self.extension_selection = self.core.selection();
+            self.extension_selection = self.state().selection().clone();
             return;
         }
         let mut pending = VecDeque::from([first]);
@@ -500,9 +570,9 @@ impl EditorView {
             let Some(mut update) = pending.pop_front() else {
                 return;
             };
-            update.selection_moved = self.core.selection() != self.extension_selection;
-            update.composing = self.core.is_composing();
-            self.extension_selection = self.core.selection();
+            update.selection_moved = *self.state().selection() != self.extension_selection;
+            update.composing = self.is_composing();
+            self.extension_selection = self.state().selection().clone();
             let mut registrations = std::mem::take(&mut self.extensions);
             let effects = {
                 let mut ecx = EditorCx::new(self, "", Some(cx));
@@ -526,13 +596,17 @@ impl EditorView {
     fn flush_extension_effects(&mut self, effects: Effects, cx: &mut Context<Self>) -> Vec<Update> {
         let Effects {
             events,
-            changes,
+            transactions,
             notify,
             selected,
         } = effects;
+        let edits: Vec<Transaction> = transactions
+            .into_iter()
+            .filter(|tr| tr.doc_changed())
+            .collect();
         // The edit is published before the extension's own events, so a host that
         // closes its popovers on a document change cannot undo what the event asks for.
-        if changes.is_empty() {
+        if edits.is_empty() {
             if selected {
                 self.reset_caret_blink(cx);
             }
@@ -549,10 +623,10 @@ impl EditorView {
         for event in events {
             cx.emit(event);
         }
-        let mut updates: Vec<Update> = changes
+        let mut updates: Vec<Update> = edits
             .into_iter()
-            .map(|change| Update {
-                change: Some(change),
+            .map(|transaction| Update {
+                transactions: vec![transaction],
                 committed: true,
                 ..Update::default()
             })
@@ -571,7 +645,7 @@ impl EditorView {
 /// never trails the text it points at by a frame.
 pub(crate) struct AnchoredOverlay {
     pub(crate) editor: Entity<EditorView>,
-    pub(crate) anchor: Position,
+    pub(crate) anchor: usize,
     pub(crate) gap: Pixels,
     pub(crate) child: AnyElement,
 }

@@ -2,15 +2,17 @@
 //! filters as the query is typed.
 //!
 //! Everything but the selected row and a dismissed trigger is derived from the
-//! committed document on every update, so the menu closes by itself on blur, on a
-//! caret move, and on any edit that breaks the match.
+//! document on every update, so the menu closes by itself on blur, on a caret move, and
+//! on any edit that breaks the match.
 
 use crate::{
     ActionHandler, EditorCx, Extension, Overlay, Update, completion::CompletionList,
     extension::OVERLAY_MARGIN,
 };
 use gpui::*;
-use markraft_core::{Affinity, BlockKind, Change, Document, Position, Transaction};
+use markraft_doc::TrackMode;
+use markraft_doc::commands::{Command, delete_range};
+use markraft_doc::projection::Projection;
 use std::{any::Any, cell::RefCell, ops::Range, rc::Rc};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -97,38 +99,48 @@ pub trait TypeaheadProvider: 'static {
     fn leading(&self, _item: &TypeaheadItem, _color: Hsla) -> Option<AnyElement> {
         None
     }
-    /// Apply `item` inside the accepting transaction, after the trigger text has been
-    /// deleted and the caret left where the trigger stood. The returned value, if any,
-    /// reaches the host as [`crate::EditorEvent::Extension`] once the edit has landed.
-    fn accept(&self, item: &TypeaheadItem, tx: &mut Transaction<'_>) -> Option<Rc<dyn Any>>;
+    /// The command that applies `item`. It runs in the same transaction as the
+    /// deletion of the trigger text, against the document that deletion leaves,
+    /// so accepting is one undo step.
+    fn accept(&self, item: &TypeaheadItem) -> Command;
+    /// A value handed to the host as [`crate::EditorEvent::Extension`] once the
+    /// edit has landed.
+    fn payload(&self, _item: &TypeaheadItem) -> Option<Rc<dyn Any>> {
+        None
+    }
 }
 
 /// The trigger run the caret sits in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TriggerMatch {
-    /// The trigger character itself.
-    pub trigger: Range<Position>,
+    /// The trigger character itself, as a position range.
+    pub trigger: Range<usize>,
     /// The text between the trigger and the caret.
     pub query: String,
 }
 
 /// The trigger run ending at `caret`: the word the caret is in must start with a
 /// trigger. That is the same as scanning back to a trigger with no whitespace between
-/// it and the caret, where the trigger itself opens the block or follows whitespace, so
+/// it and the caret, where the trigger itself opens the line or follows whitespace, so
 /// a later trigger inside the run stays part of the query. A code block never matches.
 /// Callers additionally require a collapsed selection and no live composition.
 pub(crate) fn trigger_match(
-    document: &Document,
-    caret: Position,
+    projection: &Projection,
+    in_code: bool,
+    caret: usize,
     triggers: &[char],
 ) -> Option<TriggerMatch> {
-    let caret = document.clamp_position(caret);
-    let block = document.blocks.get(caret.block)?;
-    if matches!(block.kind, BlockKind::Code { .. }) {
+    if in_code {
         return None;
     }
-    let text = block.text();
-    let before = text.get(..caret.byte)?;
+    let (index, offset) = projection.pos_to_line_offset(caret)?;
+    let line = projection.line(index)?;
+    let text = projection.line_text(index)?;
+    let byte = text
+        .char_indices()
+        .nth(offset)
+        .map_or(text.len(), |(i, _)| i);
+    let before = text.get(..byte)?;
     let (start, trigger) = before
         .grapheme_indices(true)
         .rev()
@@ -137,10 +149,7 @@ pub(crate) fn trigger_match(
     if !is_trigger(trigger, triggers) {
         return None;
     }
-    let at = |byte| Position {
-        block: caret.block,
-        byte,
-    };
+    let at = |byte: usize| line.from + before[..byte.min(before.len())].chars().count();
     Some(TriggerMatch {
         trigger: at(start)..at(start + trigger.len()),
         query: before[start + trigger.len()..].to_owned(),
@@ -151,12 +160,13 @@ pub(crate) fn trigger_match(
 /// at least `min_query` grapheme clusters long. `None` keeps the instance closed, which
 /// is what also makes it deaf to the typeahead actions.
 pub(crate) fn open_match(
-    document: &Document,
-    caret: Position,
+    projection: &Projection,
+    in_code: bool,
+    caret: usize,
     triggers: &[char],
     min_query: usize,
 ) -> Option<TriggerMatch> {
-    let found = trigger_match(document, caret, triggers)?;
+    let found = trigger_match(projection, in_code, caret, triggers)?;
     (found.query.graphemes(true).count() >= min_query).then_some(found)
 }
 
@@ -168,21 +178,13 @@ pub(crate) fn is_trigger(grapheme: &str, triggers: &[char]) -> bool {
         .is_some_and(|first| triggers.contains(&first) && chars.next().is_none())
 }
 
-/// Follow a dismissed trigger through `change`. Both ends take [`Affinity::Before`], so
-/// text typed after the trigger leaves it alone. It is forgotten once the text it stood
-/// on is gone: the map drops an end, or the two ends meet.
-fn track_dismissed(
-    dismissed: &Range<Position>,
-    change: &Change,
-    after: &Document,
-) -> Option<Range<Position>> {
-    let start = change
-        .mapping
-        .map_tracked(dismissed.start, Affinity::Before)?;
-    let end = change
-        .mapping
-        .map_tracked(dismissed.end, Affinity::Before)?;
-    let (start, end) = (after.clamp_position(start), after.clamp_position(end));
+/// Follow a dismissed trigger through an update. Both ends take
+/// [`TrackMode::Before`], so text typed after the trigger leaves it alone. It is
+/// forgotten once the text it stood on is gone: the map drops an end, or the two
+/// ends meet.
+fn track_dismissed(dismissed: &Range<usize>, update: &Update) -> Option<Range<usize>> {
+    let start = update.map_tracked(dismissed.start, 1, TrackMode::Before)?;
+    let end = update.map_tracked(dismissed.end, 1, TrackMode::Before)?;
     (start != end).then_some(start..end)
 }
 
@@ -193,7 +195,7 @@ struct State {
     selected: usize,
     /// The trigger character a user dismissed with escape, tracked through later
     /// changes so that deleting it, or typing another one, opens the menu again.
-    dismissed: Option<Range<Position>>,
+    dismissed: Option<Range<usize>>,
 }
 
 /// What each of the four actions does, so that "an action a closed instance receives is
@@ -206,7 +208,7 @@ impl State {
         Some(self.selected.saturating_add_signed(delta).min(last))
     }
     /// Where the accepting transaction starts, and the item it applies there.
-    fn accepting(&self) -> Option<(Position, TypeaheadItem)> {
+    fn accepting(&self) -> Option<(usize, TypeaheadItem)> {
         let open = self.open.as_ref()?;
         Some((open.trigger.start, open.items.get(self.selected)?.clone()))
     }
@@ -228,13 +230,13 @@ impl State {
 }
 
 struct Open {
-    trigger: Range<Position>,
+    trigger: Range<usize>,
     query: String,
     items: Vec<TypeaheadItem>,
 }
 
 /// A typeahead over `triggers`. Several instances may share one editor; each owns its
-/// trigger set, its provider and its own `Origin::Extension(id)`.
+/// trigger set, its provider and its own extension origin.
 ///
 /// One caret, one menu: an instance opens only while the trigger run at the caret begins
 /// with one of *its* triggers, so instances whose trigger sets are disjoint are never
@@ -287,19 +289,20 @@ impl Extension for Typeahead {
         let mut state = self.state.borrow_mut();
         if update.replaced {
             state.dismissed = None;
-        } else if let (Some(change), Some(dismissed)) = (&update.change, state.dismissed.clone()) {
-            state.dismissed = track_dismissed(&dismissed, change, cx.committed_document());
+        } else if let Some(dismissed) = state.dismissed.clone() {
+            state.dismissed = track_dismissed(&dismissed, update);
         }
         let before = state
             .open
             .as_ref()
             .map(|open| (open.trigger.clone(), open.query.clone()));
         state.open = None;
-        let found = (cx.is_focused() && !cx.is_composing() && cx.selection().is_empty())
+        let found = (cx.is_focused() && !cx.is_composing() && cx.selection().is_cursor())
             .then(|| {
                 open_match(
-                    cx.committed_document(),
-                    cx.selection().head,
+                    &cx.projection(),
+                    cx.types().in_code_block_at(cx.state()),
+                    cx.head(),
                     &self.triggers,
                     self.min_query,
                 )
@@ -401,117 +404,150 @@ impl Extension for Typeahead {
     }
 }
 
-/// One transaction: the literal trigger text goes, then the provider applies the item,
-/// so a single undo brings the typed `/query` back.
+/// One transaction: the literal trigger text goes, then the provider's command
+/// runs against what that leaves, so a single undo brings the typed `/query` back.
 fn accept(state: &Rc<RefCell<State>>, provider: &Rc<dyn TypeaheadProvider>, cx: &mut EditorCx<'_>) {
     let accepting = state.borrow().accepting();
     let Some((start, item)) = accepting else {
         return;
     };
-    let caret = cx.selection().head;
-    let mut payload = None;
-    if cx
-        .transact(|tx| {
-            tx.delete_range(start..caret);
-            payload = provider.accept(&item, tx);
-        })
-        .is_none()
-    {
+    let caret = cx.head();
+    let specs = {
+        let Some(delete) = delete_range(start, caret)(cx.state()) else {
+            return;
+        };
+        let applied = cx
+            .state()
+            .update([delete.clone()])
+            .ok()
+            .and_then(|tr| provider.accept(&item)(tr.state()));
+        let mut specs = vec![delete];
+        if let Some(applied) = applied {
+            specs.push(applied.sequential());
+        }
+        specs
+    };
+    if cx.dispatch(specs).is_none() {
         return;
     }
-    if let Some(payload) = payload {
+    if let Some(payload) = provider.payload(&item) {
         cx.emit(payload);
     }
     state.borrow_mut().accepted();
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        Open, State, TriggerMatch, TypeaheadItem, open_match, track_dismissed, trigger_match,
+pub(crate) mod tests {
+    use super::{Open, State, TriggerMatch, Update, open_match, track_dismissed, trigger_match};
+    use crate::typeahead::TypeaheadItem;
+    use crate::types::DocTypes;
+    use markraft_doc::EditorState;
+    use markraft_doc::commands::{Command, delete_range, insert_text, run_command, set_block_type};
+    use markraft_doc::projection::projection_of;
+    use markraft_doc::{
+        Attrs, EditorStateConfig, Extension as DocExtension, Schema, Selection, TransactionSpec,
     };
-    use markraft_core::{
-        BlockKind, Document, Editor, Origin, Position, Selection, TransactionOptions,
+    use markraft_markdown::{
+        commonmark_extensions, commonmark_schema, from_markdown, schema as md,
     };
-    use std::ops::Range;
 
     const SLASH: [char; 2] = ['/', '、'];
 
-    fn doc(blocks: &[(BlockKind, &str)]) -> Document {
-        let mut document = Document {
-            blocks: blocks
-                .iter()
-                .map(|(kind, text)| markraft_core::Block {
-                    kind: kind.clone(),
-                    depth: 0,
-                    spans: vec![markraft_core::Span {
-                        text: (*text).to_owned(),
-                        marks: Default::default(),
-                        link: None,
-                    }],
-                })
-                .collect(),
+    /// A state on the CommonMark schema with the editor's own extensions.
+    pub(crate) fn state_of(source: &str) -> EditorState {
+        let schema = commonmark_schema();
+        let doc = from_markdown(&schema, source).expect("valid Markdown");
+        state_with(schema, doc)
+    }
+
+    fn state_with(schema: Schema, doc: markraft_doc::Node) -> EditorState {
+        EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
+            DocExtension::all([
+                markraft_doc::projection::projection(),
+                markraft_doc::composition(),
+                markraft_doc::history(Default::default()),
+                commonmark_extensions(&schema),
+            ]),
+        ))
+        .expect("a valid state")
+    }
+
+    /// A state whose only paragraph holds exactly `text`, for the cases where
+    /// the Markdown reader would normalise the literal away.
+    pub(crate) fn text_state(text: &str) -> EditorState {
+        let schema = commonmark_schema();
+        let content = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![schema.text(text)]
         };
-        document.normalize();
-        document
+        let paragraph = schema
+            .node(md::PARAGRAPH, content)
+            .expect("text is valid paragraph content");
+        let doc = schema.doc([paragraph]).expect("a valid document");
+        state_with(schema, doc)
     }
 
-    fn at(document: &Document, block: usize, byte: usize) -> Option<TriggerMatch> {
-        trigger_match(document, Position { block, byte }, &SLASH)
+    /// Move the caret to `pos`.
+    pub(crate) fn at(state: &EditorState, pos: usize) -> EditorState {
+        state
+            .update([TransactionSpec::new().selection(Selection::cursor(pos))])
+            .expect("a selection")
+            .state()
+            .clone()
     }
 
-    fn query(document: &Document, byte: usize) -> Option<String> {
-        at(document, 0, byte).map(|found| found.query)
+    pub(crate) fn run(state: &EditorState, command: &Command) -> EditorState {
+        run_command(state, command)
+            .expect("the command applies")
+            .expect("a transaction")
+            .state()
+            .clone()
     }
 
-    fn position(byte: usize) -> Position {
-        Position { block: 0, byte }
+    fn found(state: &EditorState, pos: usize) -> Option<TriggerMatch> {
+        let types = DocTypes::of(state.schema());
+        let state = at(state, pos);
+        trigger_match(
+            &projection_of(&state),
+            types.in_code_block_at(&state),
+            pos,
+            &SLASH,
+        )
     }
 
-    /// The trigger of the only match in `editor`, the way the extension derives it.
-    fn dismissed(editor: &Editor) -> Range<Position> {
-        trigger_match(editor.document(), editor.selection().head, &SLASH)
-            .expect("a match to dismiss")
-            .trigger
-    }
-
-    fn caret(editor: &mut Editor, byte: usize) {
-        editor.set_selection(Selection::caret(position(byte)));
+    fn query(state: &EditorState, pos: usize) -> Option<String> {
+        found(state, pos).map(|found| found.query)
     }
 
     #[test]
-    fn a_trigger_at_the_block_start_matches_everything_typed_after_it() {
-        let document = doc(&[(BlockKind::Paragraph, "/head")]);
-        assert_eq!(query(&document, 5).as_deref(), Some("head"));
-        assert_eq!(query(&document, 1).as_deref(), Some(""));
-        assert_eq!(
-            at(&document, 0, 5).map(|found| found.trigger),
-            Some(position(0)..position(1))
-        );
+    fn a_trigger_at_the_line_start_matches_everything_typed_after_it() {
+        let state = state_of("/head");
+        assert_eq!(query(&state, 6).as_deref(), Some("head"));
+        assert_eq!(query(&state, 2).as_deref(), Some(""));
+        assert_eq!(found(&state, 6).map(|f| f.trigger), Some(1..2));
     }
 
     #[test]
-    fn a_trigger_needs_whitespace_or_the_block_start_before_it() {
-        let document = doc(&[(BlockKind::Paragraph, "and/or")]);
-        assert_eq!(query(&document, 6), None);
-        let document = doc(&[(BlockKind::Paragraph, "and /or")]);
-        assert_eq!(query(&document, 7).as_deref(), Some("or"));
+    fn a_trigger_needs_whitespace_or_the_line_start_before_it() {
+        assert_eq!(query(&state_of("and/or"), 7), None);
+        assert_eq!(query(&state_of("and /or"), 8).as_deref(), Some("or"));
     }
 
     #[test]
     fn whitespace_after_the_trigger_ends_the_match() {
-        let document = doc(&[(BlockKind::Paragraph, "/two words")]);
-        assert_eq!(query(&document, 10), None);
-        assert_eq!(query(&document, 4).as_deref(), Some("two"));
+        let state = state_of("/two words");
+        assert_eq!(query(&state, 11), None);
+        assert_eq!(query(&state, 5).as_deref(), Some("two"));
     }
 
     #[test]
     fn a_second_trigger_inside_the_run_stays_part_of_the_query() {
-        let document = doc(&[(BlockKind::Paragraph, "/a/b")]);
+        let state = state_of("/a/b");
         assert_eq!(
-            at(&document, 0, 4),
+            found(&state, 5),
             Some(TriggerMatch {
-                trigger: position(0)..position(1),
+                trigger: 1..2,
                 query: "a/b".to_owned(),
             })
         );
@@ -519,33 +555,24 @@ mod tests {
 
     #[test]
     fn a_caret_on_plain_text_or_right_after_whitespace_never_matches() {
-        let document = doc(&[(BlockKind::Paragraph, "plain")]);
-        assert_eq!(query(&document, 5), None);
-        let document = doc(&[(BlockKind::Paragraph, "a ")]);
-        assert_eq!(query(&document, 2), None);
-        let document = doc(&[(BlockKind::Paragraph, "")]);
-        assert_eq!(query(&document, 0), None);
+        assert_eq!(query(&state_of("plain"), 6), None);
+        assert_eq!(query(&state_of("a "), 2), None);
+        assert_eq!(query(&state_of(""), 1), None);
     }
 
     #[test]
     fn a_code_block_never_matches() {
-        let document = doc(&[(
-            BlockKind::Code {
-                language: String::new(),
-            },
-            "/head",
-        )]);
-        assert_eq!(query(&document, 5), None);
+        let state = state_of("```\n/head\n```");
+        assert_eq!(query(&state, 6), None);
     }
 
     #[test]
     fn the_chinese_slash_triggers_too_and_carries_a_multibyte_query() {
-        let document = doc(&[(BlockKind::Paragraph, "、标题")]);
-        let bytes = "、标题".len();
+        let state = state_of("、标题");
         assert_eq!(
-            at(&document, 0, bytes),
+            found(&state, 4),
             Some(TriggerMatch {
-                trigger: position(0)..position("、".len()),
+                trigger: 1..2,
                 query: "标题".to_owned(),
             })
         );
@@ -554,122 +581,99 @@ mod tests {
     #[test]
     fn a_trigger_inside_a_grapheme_cluster_is_text() {
         // "/" followed by a combining acute accent is one cluster, not a trigger.
-        let document = doc(&[(BlockKind::Paragraph, "a /\u{0301}x")]);
-        assert_eq!(query(&document, "a /\u{0301}x".len()), None);
+        let state = state_of("a /\u{0301}x");
+        assert_eq!(query(&state, 6), None);
     }
 
     #[test]
     fn an_emoji_before_the_trigger_is_not_whitespace() {
-        let document = doc(&[(BlockKind::Paragraph, "👩‍👩‍👧/x")]);
-        assert_eq!(query(&document, "👩‍👩‍👧/x".len()), None);
-        let document = doc(&[(BlockKind::Paragraph, "👩‍👩‍👧 /x")]);
-        assert_eq!(query(&document, "👩‍👩‍👧 /x".len()).as_deref(), Some("x"));
+        let family = "👩‍👩‍👧";
+        let chars = family.chars().count();
+        let state = state_of(&format!("{family}/x"));
+        assert_eq!(query(&state, 1 + chars + 2), None);
+        let state = state_of(&format!("{family} /x"));
+        assert_eq!(query(&state, 1 + chars + 3).as_deref(), Some("x"));
     }
 
     #[test]
     fn an_emoji_query_is_returned_whole() {
-        let document = doc(&[(BlockKind::Paragraph, "/👩‍👩‍👧")]);
-        assert_eq!(query(&document, "/👩‍👩‍👧".len()).as_deref(), Some("👩‍👩‍👧"));
-    }
-
-    #[test]
-    fn an_insertion_before_the_dismissed_trigger_carries_it_along() {
-        let mut editor = Editor::new(Document::default());
-        editor.insert_text_plain("x /a");
-        let trigger = dismissed(&editor);
-        assert_eq!(trigger, position(2)..position(3));
-        caret(&mut editor, 0);
-        let change = editor.insert_text_plain("hello ").expect("an edit");
+        let family = "👩‍👩‍👧";
+        let state = state_of(&format!("/{family}"));
         assert_eq!(
-            track_dismissed(&trigger, &change, editor.document()),
-            Some(position(8)..position(9))
+            query(&state, 2 + family.chars().count()).as_deref(),
+            Some(family)
         );
-    }
-
-    #[test]
-    fn editing_after_the_dismissed_trigger_leaves_it_where_it_is() {
-        let mut editor = Editor::new(Document::default());
-        editor.insert_text_plain("/a");
-        let trigger = dismissed(&editor);
-        let change = editor.insert_text_plain("bc").expect("an edit");
-        assert_eq!(
-            track_dismissed(&trigger, &change, editor.document()),
-            Some(position(0)..position(1))
-        );
-    }
-
-    #[test]
-    fn deleting_the_dismissed_trigger_forgets_it() {
-        let mut editor = Editor::new(Document::default());
-        editor.insert_text_plain("/ab");
-        let trigger = dismissed(&editor);
-        // Backspacing over the trigger alone, and deleting a range that swallows it.
-        let change = editor
-            .delete_range(trigger.clone())
-            .expect("the trigger to go");
-        assert_eq!(track_dismissed(&trigger, &change, editor.document()), None);
-
-        let mut editor = Editor::new(Document::default());
-        editor.insert_text_plain("x /ab");
-        let trigger = dismissed(&editor);
-        let change = editor
-            .delete_range(position(0)..position(5))
-            .expect("the line to go");
-        assert_eq!(track_dismissed(&trigger, &change, editor.document()), None);
-    }
-
-    /// The accepting transaction the extension runs, driven directly on the core.
-    #[test]
-    fn accepting_is_one_undo_step_that_restores_the_typed_text() {
-        let mut editor = Editor::new(Document::default());
-        editor.insert_text_plain("/head");
-        let found = trigger_match(editor.document(), editor.selection().head, &SLASH)
-            .expect("a match at the caret");
-        let caret = editor.selection().head;
-        let change = editor
-            .transact(
-                TransactionOptions {
-                    group: None,
-                    origin: Origin::Extension("typeahead"),
-                },
-                |tx| {
-                    tx.delete_range(found.trigger.start..caret);
-                    tx.set_block_kind(BlockKind::Heading(1));
-                },
-            )
-            .expect("an edit");
-        assert_eq!(change.origin, Origin::Extension("typeahead"));
-        assert_eq!(editor.document().plain_text(), "");
-        assert_eq!(editor.document().blocks[0].kind, BlockKind::Heading(1));
-
-        editor.undo();
-        assert_eq!(editor.document().plain_text(), "/head");
-        assert_eq!(editor.document().blocks[0].kind, BlockKind::Paragraph);
-        // The entry before it is the typing itself, so exactly one step was added.
-        editor.undo();
-        assert_eq!(editor.document().plain_text(), "");
     }
 
     #[test]
     fn a_minimum_query_keeps_the_menu_shut_for_a_short_run() {
-        let document = doc(&[(BlockKind::Paragraph, "/ab")]);
-        let at = |byte, min| open_match(&document, position(byte), &SLASH, min).map(|f| f.query);
+        let state = state_of("/ab");
+        let projection = projection_of(&state);
+        let at = |pos, min| open_match(&projection, false, pos, &SLASH, min).map(|f| f.query);
         // The default opens on the bare trigger.
-        assert_eq!(at(1, 0).as_deref(), Some(""));
-        assert_eq!(at(1, 2), None);
+        assert_eq!(at(2, 0).as_deref(), Some(""));
         assert_eq!(at(2, 2), None);
-        assert_eq!(at(3, 2).as_deref(), Some("ab"));
+        assert_eq!(at(3, 2), None);
+        assert_eq!(at(4, 2).as_deref(), Some("ab"));
         // Grapheme clusters, not bytes or code points: one family is one.
-        let document = doc(&[(BlockKind::Paragraph, "/👩‍👩‍👧x")]);
-        let at = |byte, min| open_match(&document, position(byte), &SLASH, min).map(|f| f.query);
-        assert_eq!(at("/👩‍👩‍👧".len(), 2), None);
-        assert_eq!(at("/👩‍👩‍👧x".len(), 2).as_deref(), Some("👩‍👩‍👧x"));
+        let family = "👩‍👩‍👧";
+        let state = state_of(&format!("/{family}x"));
+        let projection = projection_of(&state);
+        let chars = family.chars().count();
+        let at = |pos, min| open_match(&projection, false, pos, &SLASH, min).map(|f| f.query);
+        assert_eq!(at(2 + chars, 2), None);
+        assert_eq!(
+            at(3 + chars, 2).as_deref(),
+            Some(format!("{family}x").as_str())
+        );
+    }
+
+    #[test]
+    fn the_match_is_scoped_to_the_caret_line() {
+        let state = state_of("/one\n\ntwo");
+        // The second paragraph's text holds no trigger of its own.
+        assert_eq!(query(&state, 10), None);
+        assert_eq!(query(&state, 5).as_deref(), Some("one"));
+    }
+
+    /// The accepting transaction the extension runs, driven directly on the state.
+    #[test]
+    fn accepting_is_one_undo_step_that_restores_the_typed_text() {
+        let schema = commonmark_schema();
+        let heading = schema.node_id(md::HEADING).unwrap();
+        let state = state_of("");
+        let state = run(&state, &insert_text("/head"));
+        let projection = projection_of(&state);
+        let found = trigger_match(&projection, false, 6, &SLASH).expect("a match at the caret");
+        let delete = delete_range(found.trigger.start, 6)(&state).expect("a deletion");
+        let after = state
+            .update([delete.clone()])
+            .expect("the deletion applies");
+        let apply = set_block_type(heading, Attrs::from_pairs([("level", 1i64)]))(after.state())
+            .expect("the heading applies");
+        let state = state
+            .update([delete, apply.sequential()])
+            .expect("one transaction")
+            .state()
+            .clone();
+        assert_eq!(projection_of(&state).plain_text(), "");
+        assert_eq!(state.doc().child(0).type_id(), heading);
+
+        let state = run(&state, &markraft_doc::commands::command(markraft_doc::undo));
+        assert_eq!(projection_of(&state).plain_text(), "/head");
+        assert_eq!(
+            state.doc().child(0).type_id(),
+            schema.node_id(md::PARAGRAPH).unwrap()
+        );
+        // The entry before it is the typing itself, so exactly one step was added.
+        let state = run(&state, &markraft_doc::commands::command(markraft_doc::undo));
+        assert_eq!(projection_of(&state).plain_text(), "");
     }
 
     fn open(rows: usize) -> State {
         State {
             open: Some(Open {
-                trigger: position(0)..position(1),
+                trigger: 1..2,
                 query: String::new(),
                 items: (0..rows)
                     .map(|row| TypeaheadItem::new(row.to_string(), row.to_string()))
@@ -700,25 +704,67 @@ mod tests {
         state.selected = 2;
         assert_eq!(state.stepped(1), Some(2));
         let accepting = state.accepting().expect("the selected row");
-        assert_eq!((accepting.0, accepting.1.id.as_ref()), (position(0), "2"));
+        assert_eq!((accepting.0, accepting.1.id.as_ref()), (1, "2"));
         assert!(state.dismiss());
-        assert_eq!(state.dismissed, Some(position(0)..position(1)));
+        assert_eq!(state.dismissed, Some(1..2));
         // Dismissing closes it, so the next action finds nothing to do.
         assert_eq!(state.stepped(1), None);
         assert_eq!(state.accepting(), None);
         assert!(!state.dismiss());
     }
 
+    /// The tracking a dismissed trigger goes through, expressed over transactions.
+    fn update_of(before: &EditorState, after: &markraft_doc::Transaction) -> Update {
+        let _ = before;
+        Update {
+            transactions: vec![after.clone()],
+            ..Update::default()
+        }
+    }
+
     #[test]
-    fn the_match_is_scoped_to_the_caret_block() {
-        let document = doc(&[
-            (BlockKind::Paragraph, "/one"),
-            (BlockKind::Paragraph, "two"),
-        ]);
-        assert_eq!(at(&document, 1, 3), None);
+    fn an_insertion_before_the_dismissed_trigger_carries_it_along() {
+        let state = state_of("x /a");
+        let trigger = 3..4;
+        let state = at(&state, 1);
+        let tr = state
+            .update([insert_text("hello ")(&state).expect("a spec")])
+            .expect("an edit");
         assert_eq!(
-            at(&document, 0, 4).map(|found| found.query).as_deref(),
-            Some("one")
+            track_dismissed(&trigger, &update_of(&state, &tr)),
+            Some(9..10)
         );
+    }
+
+    #[test]
+    fn editing_after_the_dismissed_trigger_leaves_it_where_it_is() {
+        let state = state_of("/a");
+        let trigger = 1..2;
+        let state = at(&state, 3);
+        let tr = state
+            .update([insert_text("bc")(&state).expect("a spec")])
+            .expect("an edit");
+        assert_eq!(
+            track_dismissed(&trigger, &update_of(&state, &tr)),
+            Some(1..2)
+        );
+    }
+
+    #[test]
+    fn deleting_the_dismissed_trigger_forgets_it() {
+        // Deleting the trigger alone, and deleting a range that swallows it.
+        let state = state_of("/ab");
+        let trigger = 1..2;
+        let tr = state
+            .update([delete_range(1, 2)(&state).expect("a spec")])
+            .expect("an edit");
+        assert_eq!(track_dismissed(&trigger, &update_of(&state, &tr)), None);
+
+        let state = state_of("x /ab");
+        let trigger = 3..4;
+        let tr = state
+            .update([delete_range(1, 6)(&state).expect("a spec")])
+            .expect("an edit");
+        assert_eq!(track_dismissed(&trigger, &update_of(&state, &tr)), None);
     }
 }

@@ -70,7 +70,7 @@ pub use input_rules::{
 };
 pub use list::{lift_list_item, sink_list_item, split_list_item, wrap_in_list};
 pub use marks::{mark_applies, range_has_mark, toggle_mark};
-pub use motion::{Direction, move_by_grapheme, move_by_word};
+pub use motion::{Direction, delete_by_grapheme, delete_by_word, move_by_grapheme, move_by_word};
 pub use text::{
     delete_range, delete_range_changes, insert_hard_break, insert_node, insert_text,
     replace_selection, replace_selection_changes,
@@ -176,8 +176,13 @@ pub(crate) fn resolve_rounds(
     Some((set, doc))
 }
 
-/// [`resolve_changes`], turned straight into a spec with a user event.
-pub(crate) fn changes_spec(
+/// A spec performing `changes`, or `None` when they cannot be expressed or
+/// would leave a document the schema rejects.
+///
+/// The escape hatch for a host whose edit has no command of its own — setting a
+/// link's href, ticking a task item's box — so that such an edit is still
+/// validated and annotated the way every catalogue command is.
+pub fn changes_spec(
     state: &EditorState,
     changes: Vec<Change>,
     event: &str,

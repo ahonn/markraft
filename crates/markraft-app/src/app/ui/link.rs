@@ -21,7 +21,7 @@ impl NotesApp {
             self.link_popover = None;
         }
         let editor = self.editor().read(cx);
-        let url = editor.active_link().map(str::to_owned);
+        let url = editor.active_link();
         if self.link_popover == Some(LinkPopover::View) && url.is_none() {
             self.link_popover = None;
         }

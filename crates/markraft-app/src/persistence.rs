@@ -150,7 +150,7 @@ fn watch(store: &Store, requests: Sender<Request>) -> Option<notify::Recommended
 #[cfg(test)]
 mod tests {
     use super::*;
-    use markraft_core::Document;
+    use crate::doc;
 
     fn saves(persistence: &Persistence) -> Vec<Saved> {
         persistence
@@ -186,16 +186,16 @@ mod tests {
         let (store, mut library) = open(directory.path());
         let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
-        library.set_document(&id, Document::from_markdown("Title\nFirst 中文"));
+        library.set_document(&id, doc::from_markdown("Title\n\nFirst 中文"));
         persistence.save(1, library.clone()).unwrap();
-        library.set_document(&id, Document::from_markdown("Title\nSecond 👩🏽‍💻"));
+        library.set_document(&id, doc::from_markdown("Title\n\nSecond 👩🏽‍💻"));
         persistence.save(2, library.clone()).unwrap();
-        library.set_document(&id, Document::from_markdown("Title\nFinal é"));
+        library.set_document(&id, doc::from_markdown("Title\n\nFinal é"));
         persistence.flush(library.clone()).unwrap();
         assert!(
             only_note(directory.path())
                 .1
-                .ends_with("---\nTitle\nFinal é\n")
+                .ends_with("---\nTitle\n\nFinal é\n")
         );
         let acknowledgments = saves(&persistence);
         assert_eq!(
@@ -215,13 +215,13 @@ mod tests {
         let (store, mut library) = open(directory.path());
         let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
-        library.set_document(&id, Document::from_markdown("Shared"));
+        library.set_document(&id, doc::from_markdown("Shared"));
         persistence.save(10, library.clone()).unwrap();
         persistence.flush(library.clone()).unwrap();
         let (path, _) = only_note(directory.path());
         std::fs::write(&path, b"external content").unwrap();
-        library.set_document(&id, Document::from_markdown("Shared, edited here"));
-        library.new_note(Document::from_markdown("Keep this local work"));
+        library.set_document(&id, doc::from_markdown("Shared, edited here"));
+        library.new_note(doc::from_markdown("Keep this local work"));
         persistence.save(11, library.clone()).unwrap();
         assert!(persistence.flush(library).is_err());
         let acknowledgments = saves(&persistence);
@@ -259,25 +259,22 @@ mod tests {
         let (store, mut local) = open(directory.path());
         let persistence = Persistence::start(store, false);
         let id = local.active_id.clone();
-        local.set_document(&id, Document::from_markdown("Original"));
+        local.set_document(&id, doc::from_markdown("Original"));
         persistence.flush(local.clone()).unwrap();
         let (path, text) = only_note(directory.path());
         std::fs::write(&path, text.replace("Original", "External text")).unwrap();
-        local.set_document(
-            &id,
-            Document::from_markdown("Discard this after confirmation"),
-        );
+        local.set_document(&id, doc::from_markdown("Discard this after confirmation"));
         persistence.save(1, local).unwrap();
         let mut reloaded = persistence.reload().unwrap();
         assert_eq!(
-            reloaded.note(&id).unwrap().document.plain_text(),
+            doc::plain_text(&reloaded.note(&id).unwrap().document),
             "External text"
         );
         let acknowledgments = saves(&persistence);
         assert_eq!(acknowledgments.len(), 1);
         assert_eq!(acknowledgments[0].revision, 1);
         assert!(acknowledgments[0].result.is_err());
-        reloaded.set_document(&id, Document::from_markdown("External text, continued"));
+        reloaded.set_document(&id, doc::from_markdown("External text, continued"));
         persistence.save(2, reloaded.clone()).unwrap();
         persistence.flush(reloaded).unwrap();
         assert!(saves(&persistence)[0].result.is_ok());
@@ -294,7 +291,7 @@ mod tests {
         let (store, mut library) = open(directory.path());
         let persistence = Persistence::new(store);
         let id = library.active_id.clone();
-        library.set_document(&id, Document::from_markdown("Original"));
+        library.set_document(&id, doc::from_markdown("Original"));
         persistence.flush(library.clone()).unwrap();
         let (path, text) = only_note(directory.path());
         std::fs::write(&path, text.replace("Original", "From another editor")).unwrap();
@@ -313,7 +310,7 @@ mod tests {
         let texts: Vec<_> = seen
             .iter()
             .map(|change| match change {
-                External::Updated { note, .. } => note.document.plain_text(),
+                External::Updated { note, .. } => doc::plain_text(&note.document),
                 External::Removed(_) => panic!("nothing was removed"),
             })
             .collect();
@@ -324,7 +321,7 @@ mod tests {
         assert!(texts.contains(&"Dropped in".to_owned()), "{texts:?}");
 
         // A snapshot taken before the change must not undo it.
-        library.set_document(&id, Document::from_markdown("Stale local edit"));
+        library.set_document(&id, doc::from_markdown("Stale local edit"));
         persistence.flush(library.clone()).unwrap();
         assert!(folder_text(directory.path()).contains("From another editor"));
         assert!(!folder_text(directory.path()).contains("Stale local edit"));

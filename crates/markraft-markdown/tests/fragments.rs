@@ -195,5 +195,5 @@ fn a_node_selection_copies_the_whole_node() {
         .expect("a paragraph");
     let doc = schema.doc([paragraph, rule]).expect("a document");
     let slice = Selection::node(3).content(&doc);
-    assert_eq!(codec.serializer.serialize_fragment(&slice), "***");
+    assert_eq!(codec.serializer.serialize_fragment(&slice), "---");
 }

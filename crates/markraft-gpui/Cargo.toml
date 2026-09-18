@@ -3,13 +3,14 @@ name = "markraft-gpui"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
-description = "Native GPUI editor view for markraft-core"
+description = "Native GPUI editor view for markraft-doc"
 repository.workspace = true
 license.workspace = true
 
 [dependencies]
 gpui.workspace = true
-markraft-core.workspace = true
+markraft-doc.workspace = true
+markraft-markdown.workspace = true
 unicode-segmentation = "1.12"
 serde_json = "1"
 syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }

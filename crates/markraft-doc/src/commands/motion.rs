@@ -1,14 +1,16 @@
-//! Caret motion by grapheme cluster and by word.
+//! Caret motion by grapheme cluster and by word, and the deletions that follow
+//! the same boundaries.
 //!
 //! Vertical motion and "to the start of the visual line" are deliberately
 //! absent: where a line wraps is a layout decision, and this crate has no
 //! layout. A view implements those on top of
 //! [`Projection`](crate::projection::Projection).
 
-use crate::projection::projection_of;
+use crate::projection::{Projection, projection_of};
 use crate::selection::Selection;
 use crate::state::{EditorState, TransactionSpec};
 
+use super::text::delete_range_changes;
 use super::{Command, command};
 
 /// Which way a motion command moves.
@@ -46,10 +48,65 @@ pub fn move_by_word(dir: Direction, extend: bool) -> Command {
     })
 }
 
+/// Delete one grapheme cluster in `dir`, or the selection when there is one.
+///
+/// Deliberately stops at a block boundary: the position before a textblock's
+/// first token is a boundary between two nodes, not a character, and joining
+/// those two blocks is [`join_backward`](super::join_backward)'s job. A chain
+/// that puts this before the join commands therefore deletes text inside a
+/// block and leaves structure to them.
+pub fn delete_by_grapheme(dir: Direction) -> Command {
+    command(move |state| {
+        delete_to(state, |projection, pos| match dir {
+            Direction::Forward => projection.next_grapheme_boundary(pos),
+            Direction::Backward => projection.prev_grapheme_boundary(pos),
+        })
+    })
+}
+
+/// Delete one word in `dir`. See [`delete_by_grapheme`].
+pub fn delete_by_word(dir: Direction) -> Command {
+    command(move |state| {
+        delete_to(state, |projection, pos| match dir {
+            Direction::Forward => projection.next_word_boundary(pos),
+            Direction::Backward => projection.prev_word_boundary(pos),
+        })
+    })
+}
+
+fn delete_to(
+    state: &EditorState,
+    step: impl Fn(&Projection, usize) -> Option<usize>,
+) -> Option<TransactionSpec> {
+    let doc = state.doc();
+    let selection = state.selection();
+    let (from, to) = if selection.is_empty(doc) {
+        let projection = projection_of(state);
+        let head = selection.head(doc);
+        let target = step(&projection, head)?;
+        // A step that leaves the line has crossed a block boundary.
+        if projection.line_at(target) != projection.line_at(head) {
+            return None;
+        }
+        (target.min(head), target.max(head))
+    } else {
+        let range = selection.replacement_range(doc);
+        (range.from, range.to)
+    };
+    if from == to {
+        return None;
+    }
+    super::changes_spec(
+        state,
+        delete_range_changes(state.schema(), doc, from, to),
+        "delete",
+    )
+}
+
 fn move_selection(
     state: &EditorState,
     extend: bool,
-    step: impl Fn(&crate::projection::Projection, usize) -> Option<usize>,
+    step: impl Fn(&Projection, usize) -> Option<usize>,
 ) -> Option<TransactionSpec> {
     let doc = state.doc();
     let selection = state.selection();

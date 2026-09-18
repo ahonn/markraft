@@ -1,168 +1,232 @@
-use markraft_core::{BlockKind, Editor, Marks};
+//! What the selection is formatted as, for a host drawing a toolbar.
 
-pub(crate) fn active_marks(editor: &Editor) -> Marks {
-    if editor.selection().is_empty() {
-        return editor.typing_marks();
-    }
-    let (start, end) = editor.selection().ordered();
-    let mut common: Option<Marks> = None;
-    for index in start.block..=end.block {
-        let block = &editor.document().blocks[index];
-        let start_byte = if index == start.block { start.byte } else { 0 };
-        let end_byte = if index == end.block {
-            end.byte
-        } else {
-            block.len()
-        };
-        let mut offset = 0;
-        for span in &block.spans {
-            let span_end = offset + span.text.len();
-            if offset.max(start_byte) < span_end.min(end_byte) {
-                common = Some(match common {
-                    None => span.marks,
-                    Some(previous) => Marks {
-                        bold: previous.bold && span.marks.bold,
-                        italic: previous.italic && span.marks.italic,
-                        code: previous.code && span.marks.code,
-                        strikethrough: previous.strikethrough && span.marks.strikethrough,
-                        underline: previous.underline && span.marks.underline,
-                    },
-                });
-            }
-            offset = span_end;
+use markraft_doc::projection::{Line, Projection};
+use markraft_doc::{Attrs, EditorState, MarkSet, NodeTypeId};
+
+/// The marks every part of the selection carries, or the marks new text would
+/// get at a cursor.
+///
+/// A cursor answers its stored marks when it has them and the marks of the
+/// content it sits in otherwise, which is what makes a toolbar light up the
+/// moment ⌘B is pressed in an empty paragraph. A range answers the intersection
+/// of the mark sets of the inline content it actually covers: a block whose
+/// covered stretch is empty contributes nothing, so selecting to the start of
+/// the next block does not clear the toolbar.
+pub(crate) fn active_marks(state: &EditorState) -> MarkSet {
+    let doc = state.doc();
+    let selection = state.selection();
+    if selection.is_cursor() {
+        if let Some(marks) = selection.stored_marks() {
+            return marks.clone();
         }
+        return doc
+            .resolve(selection.head(doc))
+            .map(|resolved| resolved.marks(state.schema()))
+            .unwrap_or_else(|_| MarkSet::empty());
     }
-    common.unwrap_or_default()
+    let (from, to) = (selection.from(doc), selection.to(doc));
+    let mut common: Option<MarkSet> = None;
+    doc.nodes_between(from, to, &mut |node, pos, _, _| {
+        if node.text().is_none() && !node.is_leaf() {
+            return true;
+        }
+        let end = pos + node.node_size();
+        if pos.max(from) >= end.min(to) {
+            return true;
+        }
+        common = Some(match common.take() {
+            None => node.marks().clone(),
+            Some(previous) => previous.filter(|mark| node.marks().contains(mark)),
+        });
+        true
+    });
+    common.unwrap_or_else(MarkSet::empty)
 }
 
-pub(crate) fn active_block_kind(editor: &Editor) -> Option<BlockKind> {
-    let (start, end) = editor.selection().ordered();
-    // Match core::set_block_kind: a selection ending at a following block's
-    // beginning does not format that block.
-    let last = if end.byte == 0 && end.block > start.block {
-        end.block - 1
-    } else {
-        end.block
+/// The type and attributes every textblock the selection touches shares, or
+/// `None` when they differ.
+///
+/// A selection ending exactly at the start of a following block does not count
+/// that block, matching what [`set_block_type`](markraft_doc::commands::set_block_type)
+/// would change.
+pub(crate) fn active_block_type(
+    state: &EditorState,
+    projection: &Projection,
+) -> Option<(NodeTypeId, Attrs)> {
+    let mut lines = touched_lines(state, projection).peekable();
+    let first = lines.next()?;
+    let own = first.ancestors.last()?;
+    let (ty, attrs) = (own.node_type, own.attrs.clone());
+    lines
+        .all(|line| {
+            line.ancestors
+                .last()
+                .is_some_and(|other| other.node_type == ty && other.attrs == attrs)
+        })
+        .then_some((ty, attrs))
+}
+
+/// The lines a block-level command would act on.
+pub(crate) fn touched_lines<'a>(
+    state: &EditorState,
+    projection: &'a Projection,
+) -> impl Iterator<Item = &'a Line> {
+    let doc = state.doc();
+    let selection = state.selection();
+    let (from, to) = (selection.from(doc), selection.to(doc));
+    let first = projection.line_at(from).unwrap_or(0);
+    let last = match projection.line_at(to) {
+        // A range that stops at a later block's start leaves that block alone.
+        Some(index) if index > first && projection.lines()[index].from == to => index - 1,
+        Some(index) => index,
+        None => projection.line_count().saturating_sub(1),
     };
-    let blocks = &editor.document().blocks[start.block..=last];
-    let kind = &blocks[0].kind;
-    blocks
-        .iter()
-        .all(|block| &block.kind == kind)
-        .then(|| kind.clone())
+    projection.lines()[first.min(last)..=last].iter()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use markraft_core::{Block, Document, Mark, Position, Selection, Span};
+    use markraft_doc::commands::{run_command, toggle_mark};
+    use markraft_doc::projection::projection_of;
+    use markraft_doc::{Attrs, EditorStateConfig, Extension, Schema, Selection};
+    use markraft_markdown::{commonmark_schema, from_markdown, schema as md};
 
-    fn select(editor: &mut Editor, anchor: (usize, usize), head: (usize, usize)) {
-        editor.set_selection(Selection {
-            anchor: Position {
-                block: anchor.0,
-                byte: anchor.1,
-            },
-            head: Position {
-                block: head.0,
-                byte: head.1,
-            },
-        });
+    fn state_of(source: &str) -> (Schema, EditorState) {
+        let schema = commonmark_schema();
+        let doc = from_markdown(&schema, source).expect("valid Markdown");
+        let state =
+            EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
+                Extension::all([
+                    markraft_doc::projection::projection(),
+                    markraft_doc::history(Default::default()),
+                ]),
+            ))
+            .expect("a valid state");
+        (schema, state)
     }
 
-    #[test]
-    fn collapsed_selection_reports_typing_marks_even_without_document_changes() {
-        let mut editor = Editor::new(Document::default());
-        editor.toggle_mark(Mark::Bold);
-        editor.toggle_mark(Mark::Code);
-        assert_eq!(
-            active_marks(&editor),
-            Marks {
-                bold: true,
-                code: true,
-                ..Marks::default()
-            }
-        );
-        assert_eq!(active_block_kind(&editor), Some(BlockKind::Paragraph));
-        assert_eq!(editor.document().plain_text(), "");
-    }
-
-    #[test]
-    fn selected_marks_intersect_only_overlapping_spans_in_either_direction() {
-        let mut editor = Editor::new(Document {
-            blocks: vec![Block {
-                kind: BlockKind::Paragraph,
-                depth: 0,
-                spans: vec![
-                    Span {
-                        text: "ab".into(),
-                        marks: Marks {
-                            bold: true,
-                            italic: true,
-                            ..Marks::default()
-                        },
-                        link: None,
-                    },
-                    Span {
-                        text: "cd".into(),
-                        marks: Marks {
-                            bold: true,
-                            ..Marks::default()
-                        },
-                        link: None,
-                    },
-                    Span {
-                        text: "ef".into(),
-                        marks: Marks::default(),
-                        link: None,
-                    },
-                ],
-            }],
-        });
-        let bold = Marks {
-            bold: true,
-            ..Marks::default()
+    /// Two strong paragraphs with an empty one between them. The Markdown reader
+    /// folds blank lines away, so this shape has to be built.
+    fn empty_middle_state() -> (Schema, EditorState) {
+        let schema = commonmark_schema();
+        let strong = schema.mark_id(md::STRONG).unwrap();
+        let bold = |text: &str| {
+            let marks = MarkSet::from_marks(&schema, [markraft_doc::Mark::new(strong)]);
+            schema
+                .node(md::PARAGRAPH, [schema.text_marked(text, marks)])
+                .expect("a paragraph")
         };
-        select(&mut editor, (0, 1), (0, 3));
-        assert_eq!(active_marks(&editor), bold);
-        select(&mut editor, (0, 3), (0, 1));
-        assert_eq!(active_marks(&editor), bold);
-        select(&mut editor, (0, 2), (0, 4));
-        assert_eq!(active_marks(&editor), bold);
-        select(&mut editor, (0, 4), (0, 6));
-        assert_eq!(active_marks(&editor), Marks::default());
-        select(&mut editor, (0, 0), (0, 2));
-        assert!(active_marks(&editor).italic);
-        select(&mut editor, (0, 0), (0, 6));
-        assert_eq!(active_marks(&editor), Marks::default());
+        let doc = schema
+            .doc([
+                bold("first"),
+                schema.node(md::PARAGRAPH, []).expect("an empty paragraph"),
+                bold("last"),
+            ])
+            .expect("a valid document");
+        let state =
+            EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
+                Extension::all([
+                    markraft_doc::projection::projection(),
+                    markraft_doc::history(Default::default()),
+                ]),
+            ))
+            .expect("a valid state");
+        (schema, state)
+    }
+
+    fn select(state: &EditorState, anchor: usize, head: usize) -> EditorState {
+        state
+            .update([markraft_doc::TransactionSpec::new().selection(Selection::text(anchor, head))])
+            .expect("a selection")
+            .state()
+            .clone()
+    }
+
+    fn has(marks: &MarkSet, schema: &Schema, name: &str) -> bool {
+        schema
+            .mark_id(name)
+            .is_some_and(|ty| marks.contains_type(ty))
     }
 
     #[test]
-    fn block_boundary_excludes_the_unselected_following_block() {
-        let mut editor = Editor::new(Document::from_markdown("# **你好**\nplain"));
-        select(&mut editor, (0, 0), (1, 0));
-        assert!(active_marks(&editor).bold);
-        assert_eq!(active_block_kind(&editor), Some(BlockKind::Heading(1)));
-        select(&mut editor, (1, 0), (0, 0));
-        assert_eq!(active_block_kind(&editor), Some(BlockKind::Heading(1)));
-        select(&mut editor, (0, 0), (1, 1));
-        assert_eq!(active_marks(&editor), Marks::default());
-        assert_eq!(active_block_kind(&editor), None);
-        select(&mut editor, (0, "你好".len()), (1, 0));
-        assert_eq!(active_marks(&editor), Marks::default());
-        assert_eq!(active_block_kind(&editor), Some(BlockKind::Heading(1)));
+    fn a_cursor_reports_stored_marks_without_changing_the_document() {
+        let (schema, state) = state_of("");
+        let strong = schema.mark_id(md::STRONG).unwrap();
+        let code = schema.mark_id(md::CODE).unwrap();
+        let state = run_command(&state, &toggle_mark(strong, Attrs::empty()))
+            .expect("strong applies")
+            .expect("a transaction")
+            .state()
+            .clone();
+        let state = run_command(&state, &toggle_mark(code, Attrs::empty()))
+            .expect("code applies")
+            .expect("a transaction")
+            .state()
+            .clone();
+        let marks = active_marks(&state);
+        assert!(has(&marks, &schema, md::STRONG));
+        assert!(has(&marks, &schema, md::CODE));
+        assert_eq!(state.doc().content_size(), 2);
     }
 
     #[test]
-    fn empty_blocks_do_not_invent_inline_marks_but_count_for_block_format() {
-        let mut editor = Editor::new(Document::from_markdown("**first**\n\n**last**"));
-        editor.move_document_end(true);
-        assert!(active_marks(&editor).bold);
-        assert_eq!(active_block_kind(&editor), Some(BlockKind::Paragraph));
-        select(&mut editor, (1, 0), (1, 0));
-        assert_eq!(active_marks(&editor), Marks::default());
-        editor.set_block_kind(BlockKind::Heading(2));
-        select(&mut editor, (0, 0), (2, 4));
-        assert_eq!(active_block_kind(&editor), None);
+    fn a_range_intersects_only_the_content_it_covers_in_either_direction() {
+        // `**ab**` then `cd` strong, then plain `ef`: positions 1..7 hold "abcdef".
+        let (schema, state) = state_of("***ab***cd*ef*");
+        let em = schema.mark_id(md::EM).unwrap();
+        let strong = schema.mark_id(md::STRONG).unwrap();
+        // "ab" carries em+strong, "cd" nothing, "ef" em.
+        let both = select(&state, 1, 3);
+        assert!(active_marks(&both).contains_type(em));
+        assert!(active_marks(&both).contains_type(strong));
+        assert!(active_marks(&select(&state, 3, 1)).contains_type(strong));
+        assert!(!active_marks(&select(&state, 1, 5)).contains_type(strong));
+        assert!(active_marks(&select(&state, 5, 7)).contains_type(em));
+        assert!(active_marks(&select(&state, 7, 5)).contains_type(em));
+    }
+
+    #[test]
+    fn a_range_stopping_at_the_next_block_keeps_the_first_blocks_format() {
+        let (schema, state) = state_of("# **你好**\n\nplain");
+        let heading = schema.node_id(md::HEADING).unwrap();
+        let strong = schema.mark_id(md::STRONG).unwrap();
+        let projection = projection_of(&state);
+        // The heading holds 1..3, the paragraph starts at 5.
+        let to_next_block = select(&state, 1, 5);
+        assert!(active_marks(&to_next_block).contains_type(strong));
+        assert_eq!(
+            active_block_type(&to_next_block, &projection).map(|(ty, _)| ty),
+            Some(heading)
+        );
+        let backwards = select(&state, 5, 1);
+        assert_eq!(
+            active_block_type(&backwards, &projection).map(|(ty, _)| ty),
+            Some(heading)
+        );
+        // One character into the paragraph and the two formats differ.
+        let into_next = select(&state, 1, 6);
+        assert!(!active_marks(&into_next).contains_type(strong));
+        assert_eq!(active_block_type(&into_next, &projection), None);
+    }
+
+    #[test]
+    fn an_empty_block_invents_no_marks_but_still_counts_for_the_block_format() {
+        // The Markdown reader folds blank lines away, so the empty paragraph in
+        // the middle is built rather than parsed.
+        let (schema, state) = empty_middle_state();
+        let strong = schema.mark_id(md::STRONG).unwrap();
+        let paragraph = schema.node_id(md::PARAGRAPH).unwrap();
+        let projection = projection_of(&state);
+        let all = select(&state, 0, state.doc().content_size());
+        assert!(active_marks(&all).contains_type(strong));
+        assert_eq!(
+            active_block_type(&all, &projection).map(|(ty, _)| ty),
+            Some(paragraph)
+        );
+        // A cursor in the empty middle paragraph carries nothing.
+        let empty_line = projection.lines()[1].from;
+        let cursor = select(&state, empty_line, empty_line);
+        assert!(active_marks(&cursor).is_empty());
     }
 }

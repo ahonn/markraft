@@ -8,8 +8,11 @@
 //!   trailing whitespace where the two-space spelling does not. A hard break
 //!   with nothing after it, or one inside a heading, cannot be expressed in
 //!   CommonMark: the first is dropped and the second becomes a space.
-//! * A thematic break is `***`, not `---`: inside a list item `- ---` is itself
-//!   a thematic break, whereas `- ***` is an item holding one.
+//! * A thematic break is `---`, which is what an author writes, except where a
+//!   reader would take those three dashes for something else: directly under a
+//!   line of text they are that line's setext underline, and after a `-` marker
+//!   `- ---` is a run of four dashes and so a thematic break in its own right.
+//!   `***` is used in both of those places.
 //! * An empty paragraph is a line holding only `<br>`.
 //! * A code block is always fenced, with a fence longer than any run of the
 //!   fence character inside it.
@@ -140,20 +143,30 @@ pub fn commonmark_node_rules() -> NodeRules {
     rules
 }
 
-/// The spelling of a thematic break that the marker before it cannot join.
+/// The spelling of a thematic break that reads as one where it sits.
 ///
-/// A thematic break is a line of three or more of the same character with
-/// nothing else on it, so `- ---` and `* ***` are themselves thematic breaks
-/// rather than list items holding one. Whichever character the marker uses, the
-/// break uses the other.
+/// `---` is the usual spelling, and the one already in a user's files. Two
+/// places need `***` instead:
+///
+/// * after a marker of the same character — a thematic break is three or more
+///   of one character with nothing else on the line, so `- ---` is four dashes
+///   rather than an item holding a break;
+/// * directly under a line that already has text on it, where `---` is that
+///   paragraph's setext underline. Only a tight list writes a block there.
 fn thematic_break(state: &SerializerState<'_>) -> &'static str {
+    // A block waiting to be separated from this one says what will sit above:
+    // one line ending — a tight list — puts the break directly under the line
+    // before, where three dashes would underline it instead.
+    if state.closed().is_some() {
+        return if state.flush_size() > 1 { "---" } else { "***" };
+    }
+    // Nothing above, so what shares the line is a list marker, if any.
     let out = state.out();
-    let line = &out[out.rfind('\n').map_or(0, |index| index + 1)..];
-    let marker = line.trim();
-    if !marker.is_empty() && marker.chars().all(|c| c == '*') {
-        "---"
-    } else {
+    let marker = out[out.rfind('\n').map_or(0, |index| index + 1)..].trim();
+    if !marker.is_empty() && marker.chars().all(|c| c == '-') {
         "***"
+    } else {
+        "---"
     }
 }
 

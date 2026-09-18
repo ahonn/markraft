@@ -444,3 +444,56 @@ fn backspace_removes_an_empty_paragraph_before_the_cursor() {
     let after = run(&at(&start, 3), &join_backward());
     assert_eq!(schema.describe(after.doc()), r#"doc(paragraph("ab"))"#);
 }
+
+// --- deleting by grapheme and by word -------------------------------------
+
+#[test]
+fn delete_by_grapheme_takes_one_cluster_and_stops_at_a_block_boundary() {
+    let schema = shared_schema();
+    let start = state(
+        doc(
+            &schema,
+            [
+                n(
+                    &schema,
+                    "paragraph",
+                    [t(&schema, "a👩\u{200d}👩\u{200d}👧")],
+                ),
+                n(&schema, "paragraph", [t(&schema, "b")]),
+            ],
+        ),
+        crate::projection::projection(),
+    );
+    // The whole cluster goes, not one scalar of it.
+    let end = at(&start, 1 + "a👩\u{200d}👩\u{200d}👧".chars().count());
+    let after = run(&end, &delete_by_grapheme(Direction::Backward));
+    assert_eq!(
+        schema.describe(after.doc()),
+        r#"doc(paragraph("a"), paragraph("b"))"#
+    );
+    // At the start of the second block there is no character to delete: joining
+    // the two blocks is `join_backward`'s job, so the command does not apply.
+    let block_start = at(&start, 1 + "a👩\u{200d}👩\u{200d}👧".chars().count() + 2);
+    assert!(try_run(&block_start, &delete_by_grapheme(Direction::Backward)).is_none());
+    // Forward from the end of the first block likewise.
+    assert!(try_run(&end, &delete_by_grapheme(Direction::Forward)).is_none());
+}
+
+#[test]
+fn delete_by_word_takes_a_word_and_a_selection_wins_over_both() {
+    let schema = shared_schema();
+    let start = state(
+        doc(&schema, [n(&schema, "paragraph", [t(&schema, "one two")])]),
+        crate::projection::projection(),
+    );
+    let end = at(&start, 8);
+    let after = run(&end, &delete_by_word(Direction::Backward));
+    assert_eq!(schema.describe(after.doc()), r#"doc(paragraph("one "))"#);
+    let begin = at(&start, 1);
+    let after = run(&begin, &delete_by_word(Direction::Forward));
+    assert_eq!(schema.describe(after.doc()), r#"doc(paragraph(" two"))"#);
+    // With a range selected, the range goes whatever the direction.
+    let selected = text_selection(&start, 2, 5);
+    let after = run(&selected, &delete_by_word(Direction::Backward));
+    assert_eq!(schema.describe(after.doc()), r#"doc(paragraph("otwo"))"#);
+}

@@ -1,5 +1,6 @@
 //! Local note-library persistence owned by the application, never by the editor.
-use markraft_core::Document;
+use crate::doc;
+use markraft_doc::Node;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
@@ -36,24 +37,24 @@ impl Default for Preferences {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// One note. The library is only ever built from the notes folder or from the
+/// legacy import, so it carries no serde of its own: a document is a tree, and
+/// what is written to disk is the Markdown [`crate::vault`] encodes.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Note {
     pub id: String,
-    pub document: Document,
+    pub document: Node,
     pub created_at: u64,
     pub updated_at: u64,
     pub deleted_at: Option<u64>,
-    #[serde(default)]
     pub pinned: bool,
     /// Front matter lines Markraft does not own, kept verbatim.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub front_matter: Vec<String>,
 }
 
 impl Note {
     pub fn title(&self) -> String {
-        self.document
-            .plain_text()
+        doc::plain_text(&self.document)
             .lines()
             .map(str::trim)
             .find(|line| !line.is_empty())
@@ -64,12 +65,11 @@ impl Note {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Library {
     pub version: u32,
     pub active_id: String,
     pub notes: Vec<Note>,
-    #[serde(default)]
     pub preferences: Preferences,
 }
 
@@ -81,7 +81,7 @@ impl Default for Library {
             notes: Vec::new(),
             preferences: Preferences::default(),
         };
-        library.new_note(Document::default());
+        library.new_note(doc::empty());
         library
     }
 }
@@ -96,8 +96,7 @@ impl Library {
         self.notes.iter().find(|note| note.id == id)
     }
 
-    pub fn new_note(&mut self, mut document: Document) -> String {
-        document.normalize();
+    pub fn new_note(&mut self, document: Node) -> String {
         let id = Uuid::new_v4().to_string();
         let now = timestamp();
         self.notes.push(Note {
@@ -114,7 +113,7 @@ impl Library {
     }
 
     /// Add a note without opening it.
-    pub fn keep_copy(&mut self, document: Document) {
+    pub fn keep_copy(&mut self, document: Node) {
         let active = self.active_id.clone();
         self.new_note(document);
         self.active_id = active;
@@ -150,7 +149,7 @@ impl Library {
         match self.search("", false).first().map(|note| note.id.clone()) {
             Some(id) => self.active_id = id,
             None => {
-                self.new_note(Document::default());
+                self.new_note(doc::empty());
             }
         }
     }
@@ -176,7 +175,7 @@ impl Library {
             if let Some(next) = self.search("", false).first() {
                 self.active_id = next.id.clone();
             } else {
-                self.new_note(Document::default());
+                self.new_note(doc::empty());
             }
         }
         true
@@ -194,8 +193,7 @@ impl Library {
         true
     }
 
-    pub fn set_document(&mut self, id: &str, mut document: Document) -> bool {
-        document.normalize();
+    pub fn set_document(&mut self, id: &str, document: Node) -> bool {
         let Some(note) = self.notes.iter_mut().find(|note| note.id == id) else {
             return false;
         };
@@ -215,7 +213,9 @@ impl Library {
             .filter(|note| {
                 note.deleted_at.is_some() == deleted
                     && (query.is_empty()
-                        || note.document.plain_text().to_lowercase().contains(&query))
+                        || doc::plain_text(&note.document)
+                            .to_lowercase()
+                            .contains(&query))
             })
             .collect();
         notes.sort_by(|a, b| {
@@ -227,7 +227,7 @@ impl Library {
         notes
     }
 
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), String> {
         if self.version != LIBRARY_VERSION {
             return Err(format!("Unsupported library version: {}", self.version));
         }
@@ -297,19 +297,6 @@ impl Settings {
     }
 }
 
-/// Read the single-file library written by earlier versions.
-pub fn read_legacy_library(path: &Path) -> Result<Library, String> {
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    let value: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    let mut library: Library = serde_json::from_value(value).map_err(|error| error.to_string())?;
-    library.validate()?;
-    for note in &mut library.notes {
-        note.document.normalize();
-    }
-    Ok(library)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,7 +305,7 @@ mod tests {
     fn notes_can_be_created_searched_deleted_and_restored_without_losing_unicode() {
         let mut library = Library::default();
         let initial = library.active_id.clone();
-        let document = Document::from_markdown("# 中文 👩🏽‍💻\n- [x] **Idea** é");
+        let document = doc::from_markdown("# 中文 👩🏽‍💻\n\n- [x] **Idea** é");
         let id = library.new_note(document.clone());
         assert_eq!(library.active_note().title(), "中文 👩🏽‍💻");
         assert_eq!(library.search("IDEA", false)[0].document, document);
@@ -332,6 +319,6 @@ mod tests {
         assert!(library.delete(&id));
         assert_eq!(library.search("", false).len(), 1);
         assert_eq!(library.search("", true).len(), 2);
-        assert_eq!(library.active_note().document, Document::default());
+        assert_eq!(library.active_note().document, doc::empty());
     }
 }

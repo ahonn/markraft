@@ -3636,8 +3636,9 @@ dependencies = [
  "global-hotkey",
  "gpui-pre",
  "gpui-pre-platform",
- "markraft-core",
+ "markraft-doc",
  "markraft-gpui",
+ "markraft-markdown",
  "markraft-vim",
  "notify",
  "objc2 0.6.4",
@@ -3648,18 +3649,6 @@ dependencies = [
  "tray-icon",
  "unicode-segmentation",
  "uuid",
-]
-
-[[package]]
-name = "markraft-core"
-version = "0.1.0"
-dependencies = [
- "comrak",
- "finl_unicode",
- "scraper",
- "serde",
- "serde_json",
- "unicode-segmentation",
 ]
 
 [[package]]
@@ -3678,7 +3667,8 @@ version = "0.1.0"
 dependencies = [
  "emojis",
  "gpui-pre",
- "markraft-core",
+ "markraft-doc",
+ "markraft-markdown",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "serde_json",
@@ -3704,8 +3694,9 @@ name = "markraft-vim"
 version = "0.1.0"
 dependencies = [
  "gpui-pre",
- "markraft-core",
+ "markraft-doc",
  "markraft-gpui",
+ "markraft-markdown",
  "unicode-segmentation",
 ]
 
