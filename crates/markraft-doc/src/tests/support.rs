@@ -33,9 +33,28 @@ pub fn test_schema() -> Schema {
                     .defining(true)
                     .marks(""),
             )
-            .node(NodeTypeSpec::new("bullet_list", "list_item+").group("block"))
-            .node(NodeTypeSpec::new("ordered_list", "list_item+").group("block"))
-            .node(NodeTypeSpec::new("list_item", "paragraph block*").defining(true))
+            .node(NodeTypeSpec::new("bullet_list", "item+").group("block"))
+            .node(NodeTypeSpec::new("ordered_list", "item+").group("block"))
+            .node(
+                NodeTypeSpec::new("list_item", "paragraph block*")
+                    .group("item")
+                    .defining(true),
+            )
+            .node(
+                NodeTypeSpec::new("task_item", "paragraph block*")
+                    .group("item")
+                    .defining(true)
+                    .attr(AttrSpec::new(
+                        "checked",
+                        AttrKind::Bool,
+                        AttrValue::Bool(false),
+                    )),
+            )
+            .node(
+                NodeTypeSpec::leaf("horizontal_rule")
+                    .group("block")
+                    .selectable(true),
+            )
             .node(NodeTypeSpec::text("text").group("inline"))
             .node(
                 NodeTypeSpec::leaf("image")
@@ -47,10 +66,11 @@ pub fn test_schema() -> Schema {
             .node(
                 NodeTypeSpec::leaf("hard_break")
                     .inline(true)
-                    .group("inline"),
+                    .group("inline line_break"),
             )
             .mark(MarkTypeSpec::new("strong").rank(20).group("style"))
             .mark(MarkTypeSpec::new("em").rank(30).group("style"))
+            .mark(MarkTypeSpec::new("code").rank(40).excludes("_"))
             .mark(
                 MarkTypeSpec::new("link")
                     .rank(60)

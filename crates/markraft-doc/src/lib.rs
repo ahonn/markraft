@@ -95,6 +95,17 @@
 //! [`transaction_appender`] reacts to a finished transaction with another one;
 //! [`EditorState::update_with_appended`] is what returns the whole chain.
 //!
+//! # Editing, presentation and layout
+//!
+//! Three namespaced modules sit on top of that:
+//!
+//! * [`commands`] — the catalogue of editing operations, as pure functions
+//!   from a state to a [`TransactionSpec`], plus input rules.
+//! * [`decorations`] — presentation attached to ranges, points and node types
+//!   without changing the document.
+//! * [`projection`] — a flat, line-oriented view of a document for renderers
+//!   and for the platform text APIs that think in lines and UTF-16.
+//!
 //! # Known limitations
 //!
 //! * Repairing a change can widen it ([`Fit`]). When the widened range reaches
@@ -105,8 +116,10 @@
 mod attr;
 mod build;
 mod change;
+pub mod commands;
 mod composition;
 mod corrections;
+pub mod decorations;
 mod error;
 mod fit;
 mod fragment;
@@ -115,6 +128,7 @@ mod json;
 mod mark;
 mod node;
 mod pos;
+pub mod projection;
 mod schema;
 mod selection;
 mod slice;

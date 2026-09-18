@@ -26,8 +26,8 @@ fn accepts(schema: &Schema, parent: &str, children: &[&str]) -> bool {
 #[test]
 fn compiles_the_test_schema() {
     let schema = test_schema();
-    assert_eq!(schema.node_types().len(), 11);
-    assert_eq!(schema.mark_types().len(), 3);
+    assert_eq!(schema.node_types().len(), 13);
+    assert_eq!(schema.mark_types().len(), 4);
     let paragraph = schema.node_id("paragraph").expect("known");
     assert!(schema.node_type(paragraph).is_textblock());
     assert!(!schema.node_type(paragraph).is_leaf());
