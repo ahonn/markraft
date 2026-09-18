@@ -1934,3 +1934,204 @@ fn an_undo_group_folds_a_committed_composition() {
     assert_eq!(editor.document().plain_text(), "");
     assert!(!editor.can_undo());
 }
+
+#[test]
+fn blank_lines_come_back_as_empty_blocks_at_every_nesting() {
+    let source = "# h\n\n\npara\n\n- a\n\n- b\n\n> q\n> \n> r";
+    let document = Document::from_markdown(source);
+    // A blank line inside a quote stays quoted; one between list items does not, so the
+    // list keeps the blank line that separates its items.
+    let kinds: Vec<_> = document.blocks.iter().map(|block| &block.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            &BlockKind::Heading(1),
+            &BlockKind::Paragraph,
+            &BlockKind::Paragraph,
+            &BlockKind::Paragraph,
+            &BlockKind::Paragraph,
+            &BlockKind::Bullet,
+            &BlockKind::Paragraph,
+            &BlockKind::Bullet,
+            &BlockKind::Paragraph,
+            &BlockKind::Quote,
+            &BlockKind::Quote,
+            &BlockKind::Quote,
+        ]
+    );
+    assert_eq!(document.plain_text(), "h\n\n\npara\n\na\n\nb\n\nq\n\nr");
+    assert_eq!(document.to_markdown(), source);
+}
+
+#[test]
+fn every_source_line_is_its_own_block_however_the_lines_join() {
+    // Soft breaks, hard breaks and a trailing backslash all end a block.
+    let document = Document::from_markdown("one\ntwo  \nthree\\\nfour");
+    assert_eq!(document.plain_text(), "one\ntwo\nthree\nfour");
+    assert!(
+        document
+            .blocks
+            .iter()
+            .all(|block| block.kind == BlockKind::Paragraph)
+    );
+    // A line that repeats none of its container's markers leaves the container, where
+    // CommonMark would read it as part of the block above.
+    let source = "> quote\nlazy\n- item\ncontinued";
+    let document = Document::from_markdown(source);
+    let kinds: Vec<_> = document.blocks.iter().map(|block| &block.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            &BlockKind::Quote,
+            &BlockKind::Paragraph,
+            &BlockKind::Bullet,
+            &BlockKind::Paragraph,
+        ]
+    );
+    assert_eq!(document.to_markdown(), source);
+}
+
+#[test]
+fn a_list_and_a_quote_inside_each_other_keep_the_outer_one_and_read_the_rest() {
+    let document = Document::from_markdown("> - item\n> - two\n- > quoted\n  - > deep");
+    let shape: Vec<_> = document
+        .blocks
+        .iter()
+        .map(|block| (&block.kind, block.depth, block.text()))
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            (&BlockKind::Quote, 0, "- item".to_owned()),
+            (&BlockKind::Quote, 0, "- two".to_owned()),
+            (&BlockKind::Bullet, 0, "> quoted".to_owned()),
+            (&BlockKind::Bullet, 1, "> deep".to_owned()),
+        ]
+    );
+    assert_eq!(Document::from_markdown(&document.to_markdown()), document);
+}
+
+#[test]
+fn an_indented_code_block_imports_as_code_lines_without_a_language() {
+    let document = Document::from_markdown("    indented\n    more\n\ntext");
+    let code = BlockKind::Code {
+        language: String::new(),
+    };
+    assert!(document.blocks[..2].iter().all(|block| block.kind == code));
+    assert_eq!(document.plain_text(), "indented\nmore\ntext");
+    // A code block inside a list item keeps its content and loses the nesting.
+    let document = Document::from_markdown("- item\n\n  ```rust\n  code\n  ```");
+    assert_eq!(document.to_markdown(), "- item\n\n```rust\ncode\n```");
+}
+
+#[test]
+fn escapes_entities_and_edge_whitespace_survive_a_round_trip() {
+    let document = Document::from_markdown("a \\* b &amp; c &copy;");
+    assert_eq!(document.plain_text(), "a * b & c ©");
+    assert_eq!(Document::from_markdown(&document.to_markdown()), document);
+    let kinds = [
+        BlockKind::Paragraph,
+        BlockKind::Bullet,
+        BlockKind::Quote,
+        BlockKind::Heading(2),
+    ];
+    let block = |kind: &BlockKind, text: &str| {
+        let mut document = Document {
+            blocks: vec![Block {
+                kind: kind.clone(),
+                depth: 0,
+                spans: vec![Span {
+                    text: text.to_owned(),
+                    marks: Marks::default(),
+                    link: None,
+                }],
+            }],
+        };
+        document.normalize();
+        document
+    };
+    // Text a reader would take for a character reference or an indented code block is
+    // written so it comes back unchanged.
+    for text in ["    four", "\tfour", "   \tfour", "&amp; &#32; \\* a"] {
+        for kind in &kinds {
+            let document = block(kind, text);
+            let markdown = document.to_markdown();
+            assert!(!markdown.contains("\n"), "{text:?} as {markdown:?}");
+            assert_eq!(
+                Document::from_markdown(&markdown),
+                document,
+                "{text:?} as {markdown:?}"
+            );
+        }
+    }
+    // Trailing whitespace is not worth an entity in the file: a reader strips it, and
+    // nothing else about the block changes.
+    for (text, kept) in [
+        ("trail  ", "trail"),
+        ("both\t", "both"),
+        (" ", ""),
+        ("  ", ""),
+    ] {
+        for kind in &kinds {
+            let document = block(kind, text);
+            let reloaded = Document::from_markdown(&document.to_markdown());
+            assert_eq!(reloaded.plain_text(), kept, "{text:?} as {kind:?}");
+            assert_eq!(reloaded.blocks[0].kind, *kind, "{text:?}");
+        }
+    }
+    // Lesser indentation survives on a paragraph, which owns its line, and is stripped
+    // inside a container, which owns the space after its marker.
+    assert_eq!(
+        block(&BlockKind::Paragraph, "  lead").to_markdown(),
+        "  lead"
+    );
+    assert_eq!(Document::from_markdown("  lead").plain_text(), "  lead");
+    assert_eq!(Document::from_markdown("-   lead").plain_text(), "lead");
+}
+
+#[test]
+fn constructs_with_no_model_keep_their_source_text() {
+    for source in [
+        "| a | b |\n|---|---|\n| c | d |",
+        "<div>\nraw\n</div>",
+        "[ref]: https://example.com",
+        "![alt](image.png)",
+        "term\n: definition",
+        "[^1]: a footnote",
+        "<br>",
+        "$$\nx = 1\n$$",
+    ] {
+        let document = Document::from_markdown(source);
+        assert_eq!(document.plain_text(), source, "{source:?}");
+        assert_eq!(
+            Document::from_markdown(&document.to_markdown()),
+            document,
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
+fn canonical_markdown_survives_a_round_trip_unchanged() {
+    for source in [
+        "# h\n\n\npara\n\n- a\n\n- b\n\n> q\n> \n> r",
+        "- first\n- \n- [ ] \n1. \n",
+        "- first\n    - child\n        - grandchild",
+        "1. one\n2. two\nbreak\n1. again",
+        "> first\n> second\n",
+        "see [the **docs**](https://example.com/a_(b)) and [x](<a b>)",
+        "~~gone~~ and <u>**kept**</u>",
+        "# Title\n- **bold** and *italic* and `code`\n- [ ] todo\n- [x] done\n\n***both***",
+        "```rust\ncode\n\nmore\n```",
+        "text\n---\nmore",
+        "Title\n=====",
+    ] {
+        let document = Document::from_markdown(source);
+        assert_eq!(document.to_markdown(), source, "{source:?}");
+        assert_eq!(
+            Document::from_markdown(&document.to_markdown()),
+            document,
+            "{source:?}"
+        );
+    }
+}

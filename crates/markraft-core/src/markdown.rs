@@ -1,100 +1,15 @@
-use crate::{
-    Block, BlockKind, Document, Mark, Marks, Span, push_like, push_linked_span, push_span,
-};
+//! Markdown for the flat block model: [`import`] reads CommonMark and
+//! [`Document::to_markdown`] writes the subset the model can express.
+
+mod import;
+
+use crate::{Block, BlockKind, Document, Span};
 
 impl Document {
-    /// Import the supported Markdown subset. Each physical line is one block and blank
-    /// lines are retained as empty paragraphs. Unsupported block syntax stays literal.
+    /// Import CommonMark. Each physical line is one block and blank lines are retained as
+    /// empty paragraphs. Syntax the model cannot hold stays literal.
     pub fn from_markdown(source: &str) -> Self {
-        let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
-        // The open fence's marker and the index of the first block it produced.
-        let mut fence: Option<(String, BlockKind, usize)> = None;
-        let mut blocks = Vec::new();
-        let mut list_indents = vec![0usize];
-        for line in normalized.split('\n') {
-            if let Some((marker, kind, first)) = &fence {
-                let trimmed = line.trim();
-                if trimmed.starts_with(marker.as_str())
-                    && trimmed.trim_start_matches(&marker[..1]).is_empty()
-                {
-                    if blocks.len() == *first {
-                        blocks.push(Block {
-                            depth: 0,
-                            kind: kind.clone(),
-                            spans: vec![],
-                        });
-                    }
-                    fence = None;
-                    continue;
-                }
-                let mut spans = vec![];
-                push_span(&mut spans, line, Marks::default());
-                blocks.push(Block {
-                    depth: 0,
-                    kind: kind.clone(),
-                    spans,
-                });
-                continue;
-            }
-            if let Some((marker, language)) = parse_fence(line) {
-                let kind = BlockKind::Code {
-                    language: language.to_owned(),
-                };
-                fence = Some((marker.to_owned(), kind, blocks.len()));
-                continue;
-            }
-            let indentation = line
-                .chars()
-                .take_while(|c| matches!(c, ' ' | '\t'))
-                .map(|c| if c == '\t' { 4 } else { 1 })
-                .sum::<usize>();
-            let trimmed = line.trim_start_matches([' ', '\t']);
-            let (nested_kind, nested_text) = parse_block(trimmed);
-            let (kind, text) = if nested_kind.is_list() {
-                (nested_kind, nested_text)
-            } else {
-                parse_block(line)
-            };
-            let mut depth: u8 = 0;
-            let text = if kind == BlockKind::Quote {
-                let mut text = text;
-                while let Some(rest) = text.strip_prefix('>') {
-                    depth = depth.saturating_add(1u8);
-                    text = rest.strip_prefix(' ').unwrap_or(rest);
-                }
-                list_indents.truncate(1);
-                text
-            } else if kind.is_list() {
-                while list_indents.len() > 1 && *list_indents.last().unwrap() > indentation {
-                    list_indents.pop();
-                }
-                if indentation > *list_indents.last().unwrap() {
-                    list_indents.push(indentation);
-                }
-                depth = (list_indents.len() - 1).min(usize::from(u8::MAX)) as u8;
-                text
-            } else {
-                list_indents.truncate(1);
-                text
-            };
-            blocks.push(Block {
-                depth,
-                kind,
-                spans: parse_inline(text, Marks::default()),
-            });
-        }
-        if let Some((_, kind, first)) = fence
-            && blocks.len() == first
-        {
-            blocks.push(Block {
-                depth: 0,
-                kind,
-                spans: vec![],
-            });
-        }
-        let mut document = Self { blocks };
-        document.normalize();
-        document
+        import::document(source)
     }
 
     pub fn to_markdown(&self) -> String {
@@ -150,20 +65,16 @@ impl Document {
                     continue;
                 }
             };
-            let mut line = if block.kind.is_list() {
-                format!("{}{prefix}", "    ".repeat(usize::from(block.depth)))
-            } else {
-                prefix
-            };
+            let mut content = String::new();
             let mut link: Option<&str> = None;
-            for span in &block.spans {
+            for (position, span) in block.spans.iter().enumerate() {
                 if link != span.link.as_deref() {
                     if let Some(url) = link {
-                        line.push_str(&link_close(url));
+                        content.push_str(&link_close(url));
                     }
                     link = span.link.as_deref();
                     if link.is_some() {
-                        line.push('[');
+                        content.push('[');
                     }
                 }
                 let mut text = if span.marks.code {
@@ -171,214 +82,115 @@ impl Document {
                 } else {
                     escape(&span.text)
                 };
-                if span.marks.italic {
-                    text = format!("*{text}*");
-                }
-                if span.marks.bold {
-                    text = format!("**{text}**");
+                let edges = (
+                    content.chars().next_back(),
+                    lead(span, block.spans.get(position + 1)),
+                );
+                // A mark written as a tag puts punctuation around the marks inside it,
+                // whatever the span's own neighbours are.
+                let wrapped = |outer: bool| if outer { (Some('>'), Some('<')) } else { edges };
+                let emphasis = usize::from(span.marks.italic) + 2 * usize::from(span.marks.bold);
+                if emphasis > 0 {
+                    // One run of asterisks, so bold and italic together read as `***`.
+                    let run = "*".repeat(emphasis);
+                    let (before, after) = wrapped(span.marks.strikethrough || span.marks.underline);
+                    text = if flanks(&text, before, after, '*') {
+                        format!("{run}{text}{run}")
+                    } else {
+                        let text = tagged(&text, "em", span.marks.italic);
+                        tagged(&text, "strong", span.marks.bold)
+                    };
                 }
                 if span.marks.strikethrough {
-                    text = format!("~~{text}~~");
+                    let (before, after) = wrapped(span.marks.underline);
+                    text = if flanks(&text, before, after, '~') {
+                        format!("~~{text}~~")
+                    } else {
+                        tagged(&text, "del", true)
+                    };
                 }
                 if span.marks.underline {
-                    text = format!("<u>{text}</u>");
+                    text = tagged(&text, "u", true);
                 }
-                line.push_str(&text);
+                content.push_str(&text);
             }
             if let Some(url) = link {
-                line.push_str(&link_close(url));
+                content.push_str(&link_close(url));
             }
+            let mut line = if block.kind.is_list() {
+                format!("{}{prefix}", "    ".repeat(usize::from(block.depth)))
+            } else {
+                prefix
+            };
+            line.push_str(&protect_indent(&content));
             lines.push(line);
         }
         lines.join("\n")
     }
 }
 
-/// An opening fence: its marker and info string. Inline code written as
-/// "```text```" on one line is not a fence.
-fn parse_fence(line: &str) -> Option<(&str, &str)> {
-    let trimmed = line.trim();
-    let character = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'))?;
-    let length = trimmed.chars().take_while(|c| *c == character).count();
-    let info = trimmed[length..].trim();
-    (length >= 3 && !(character == '`' && info.contains('`'))).then(|| {
-        (
-            &trimmed[..length],
-            info.split_whitespace().next().unwrap_or(""),
-        )
-    })
+fn tagged(text: &str, tag: &str, wrap: bool) -> String {
+    if wrap {
+        format!("<{tag}>{text}</{tag}>")
+    } else {
+        text.to_owned()
+    }
 }
 
-fn parse_block(line: &str) -> (BlockKind, &str) {
-    for (prefix, checked) in [
-        ("- [ ] ", false),
-        ("- [x] ", true),
-        ("- [X] ", true),
-        ("* [ ] ", false),
-        ("* [x] ", true),
-    ] {
-        if let Some(rest) = line.strip_prefix(prefix) {
-            return (BlockKind::Task { checked }, rest);
-        }
-    }
-    let rule = line.trim();
-    if rule.len() >= 3
-        && ["-", "*", "_"]
-            .iter()
-            .any(|c| rule.trim_start_matches(c).is_empty())
-    {
-        return (BlockKind::Divider, "");
-    }
-    if let Some(rest) = line.strip_prefix('>') {
-        return (BlockKind::Quote, rest.strip_prefix(' ').unwrap_or(rest));
-    }
-    for prefix in ["- ", "* ", "+ "] {
-        if let Some(rest) = line.strip_prefix(prefix) {
-            return (BlockKind::Bullet, rest);
-        }
-    }
-    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
-    if (1..=9).contains(&digits)
-        && let Some(rest) = line[digits..]
-            .strip_prefix(". ")
-            .or_else(|| line[digits..].strip_prefix(") "))
-    {
-        return (BlockKind::Ordered, rest);
-    }
-    let hashes = line.bytes().take_while(|b| *b == b'#').count();
-    if (1..=6).contains(&hashes) && line.as_bytes().get(hashes) == Some(&b' ') {
-        return (BlockKind::Heading(hashes as u8), &line[hashes + 1..]);
-    }
-    (BlockKind::Paragraph, line)
+/// Whether a run of `delimiter` wrapped around `text` would both open and close emphasis
+/// where it sits. CommonMark only lets a run open when nothing but a word follows it, or
+/// the punctuation that follows is matched by whitespace or punctuation before it, and
+/// mirrors that for closing. A run that touches another delimiter run merges with it, so
+/// neither may be read as emphasis. A span the rule turns down is written as inline HTML.
+fn flanks(text: &str, before: Option<char>, after: Option<char>, delimiter: char) -> bool {
+    let punctuation = |c: char| !c.is_alphanumeric() && !c.is_whitespace();
+    let boundary = |edge: Option<char>| {
+        edge.is_none_or(|c| (c.is_whitespace() || punctuation(c)) && !matches!(c, '*' | '~'))
+    };
+    let opens = text
+        .chars()
+        .next()
+        .is_some_and(|c| !c.is_whitespace() && (!punctuation(c) || boundary(before)));
+    let closes = text
+        .chars()
+        .next_back()
+        .is_some_and(|c| !c.is_whitespace() && (!punctuation(c) || boundary(after)));
+    opens && closes && before != Some(delimiter)
 }
 
-fn parse_inline(source: &str, marks: Marks) -> Vec<Span> {
-    let mut spans = Vec::new();
-    let mut index = 0;
-    while index < source.len() {
-        let rest = &source[index..];
-        if rest.starts_with('\\')
-            && let Some(next) = rest[1..].chars().next()
-            && next.is_ascii_punctuation()
-        {
-            push_span(&mut spans, &next.to_string(), marks);
-            index += 1 + next.len_utf8();
-            continue;
-        }
-        if rest.starts_with('`') {
-            let count = rest.bytes().take_while(|b| *b == b'`').count();
-            let delimiter = "`".repeat(count);
-            if let Some(close) = find_code_close(rest, count) {
-                let mut content = &rest[count..close];
-                if content.starts_with(' ')
-                    && content.ends_with(' ')
-                    && content.chars().any(|c| c != ' ')
-                {
-                    content = &content[1..content.len() - 1];
-                }
-                push_span(
-                    &mut spans,
-                    content,
-                    Marks {
-                        code: true,
-                        ..marks
-                    },
-                );
-                index += close + delimiter.len();
-                continue;
-            }
-        }
-        // Images have no model; keep them literal rather than reading a link after "!".
-        if rest.starts_with("![")
-            && let Some((_, _, length)) = parse_link(&rest[1..])
-        {
-            push_span(&mut spans, &rest[..1 + length], marks);
-            index += 1 + length;
-            continue;
-        }
-        if let Some((text, url, length)) = parse_link(rest) {
-            for span in parse_inline(text, marks) {
-                push_linked_span(&mut spans, &span.text, span.marks, Some(url));
-            }
-            index += length;
-            continue;
-        }
-        let mut parsed = false;
-        for (open, close, mark) in INLINE_DELIMITERS {
-            if !rest.starts_with(open) {
-                continue;
-            }
-            if let Some(end) = find_delimiter(rest, open.len(), close) {
-                let mut inner = marks;
-                for mark in *mark {
-                    inner.set(*mark, true);
-                }
-                for span in parse_inline(&rest[open.len()..end], inner) {
-                    push_like(&mut spans, &span.text, &span);
-                }
-                index += end + close.len();
-                parsed = true;
-                break;
-            }
-        }
-        if parsed {
-            continue;
-        }
-        let character = rest.chars().next().unwrap();
-        push_span(&mut spans, &character.to_string(), marks);
-        index += character.len_utf8();
+/// The first character the span after this one writes, which is all [`flanks`] needs of it.
+/// Every mark and every link edge writes punctuation first.
+fn lead(span: &Span, next: Option<&Span>) -> Option<char> {
+    let next = next?;
+    if next.link != span.link {
+        return Some('[');
     }
-    spans
+    let marked = [
+        (next.marks.underline, '<'),
+        (next.marks.strikethrough, '~'),
+        (next.marks.bold || next.marks.italic, '*'),
+        (next.marks.code, '`'),
+    ];
+    if let Some((_, character)) = marked.iter().find(|(set, _)| *set) {
+        return Some(*character);
+    }
+    let first = next.text.chars().next()?;
+    Some(if ESCAPED.contains(first) { '\\' } else { first })
 }
 
-/// `[text](url)` or `[text](<url>)` at the start of `source`: the text, the URL and
-/// the length of the whole construct.
-fn parse_link(source: &str) -> Option<(&str, &str, usize)> {
-    let mut depth = 0;
-    let mut close = None;
-    let mut characters = source.char_indices();
-    while let Some((index, character)) = characters.next() {
-        match character {
-            '\\' => {
-                characters.next();
-            }
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(index);
-                    break;
-                }
-            }
-            _ if depth == 0 => return None,
-            _ => {}
-        }
+/// Four columns of indentation would make a reader take the content for an indented code
+/// block, so its first space or tab travels as an entity instead. Lesser indentation and
+/// trailing whitespace are left alone: a reader may strip them, which changes no structure.
+fn protect_indent(content: &str) -> String {
+    if content.trim().is_empty() || import::indent_width(content) < 4 {
+        return content.to_owned();
     }
-    let close = close.filter(|close| *close > 1)?;
-    let target = source[close + 1..].strip_prefix('(')?;
-    let start = close + 2;
-    if let Some(bracketed) = target.strip_prefix('<') {
-        let end = bracketed.find('>')?;
-        bracketed[end + 1..].starts_with(')').then_some(())?;
-        return Some((&source[1..close], &bracketed[..end], start + end + 3));
-    }
-    let mut depth = 0;
-    for (index, character) in target.char_indices() {
-        match character {
-            '(' => depth += 1,
-            ')' if depth == 0 => {
-                return (index > 0).then_some((
-                    &source[1..close],
-                    &target[..index],
-                    start + index + 1,
-                ));
-            }
-            ')' => depth -= 1,
-            _ if character.is_whitespace() => return None,
-            _ => {}
-        }
-    }
-    None
+    let entity = if content.starts_with('\t') {
+        "&#9;"
+    } else {
+        "&#32;"
+    };
+    format!("{entity}{}", &content[1..])
 }
 
 fn link_close(url: &str) -> String {
@@ -394,63 +206,6 @@ fn link_close(url: &str) -> String {
     }
 }
 
-/// Longer delimiters come first so `***` is not read as `**` followed by `*`.
-/// Underline has no Markdown syntax and round-trips as inline HTML.
-const INLINE_DELIMITERS: &[(&str, &str, &[Mark])] = &[
-    ("***", "***", &[Mark::Bold, Mark::Italic]),
-    ("___", "___", &[Mark::Bold, Mark::Italic]),
-    ("**", "**", &[Mark::Bold]),
-    ("__", "__", &[Mark::Bold]),
-    ("~~", "~~", &[Mark::Strikethrough]),
-    ("<u>", "</u>", &[Mark::Underline]),
-    ("*", "*", &[Mark::Italic]),
-    ("_", "_", &[Mark::Italic]),
-];
-
-fn find_delimiter(source: &str, open_len: usize, delimiter: &str) -> Option<usize> {
-    let mut index = open_len;
-    while index < source.len() {
-        let rest = &source[index..];
-        if rest.starts_with('\\') {
-            index += 1;
-            if index < source.len() {
-                index += source[index..].chars().next().unwrap().len_utf8();
-            }
-        } else if rest.starts_with('`') {
-            let count = rest.bytes().take_while(|b| *b == b'`').count();
-            if let Some(close) = find_code_close(rest, count) {
-                index += close + count;
-            } else {
-                index += count;
-            }
-        } else if rest.starts_with(delimiter) {
-            if index > open_len {
-                return Some(index);
-            }
-            index += delimiter.len();
-        } else {
-            index += rest.chars().next().unwrap().len_utf8();
-        }
-    }
-    None
-}
-
-fn find_code_close(source: &str, count: usize) -> Option<usize> {
-    let mut index = count;
-    while index < source.len() {
-        if source.as_bytes()[index] == b'`' {
-            let run = source[index..].bytes().take_while(|b| *b == b'`').count();
-            if run == count {
-                return Some(index);
-            }
-            index += run;
-        } else {
-            index += source[index..].chars().next().unwrap().len_utf8();
-        }
-    }
-    None
-}
-
 fn code_text(source: &str) -> String {
     let longest = source.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     let delimiter = "`".repeat(longest + 1);
@@ -464,10 +219,14 @@ fn code_text(source: &str) -> String {
     }
 }
 
+/// Every character a reader could take for syntax. `&` is included because a reader
+/// resolves character references, so `&amp;` has to come back as itself.
+const ESCAPED: &str = "\\`*_{}[]<>()#+-.!>|~&";
+
 fn escape(source: &str) -> String {
     let mut result = String::new();
     for character in source.chars() {
-        if "\\`*_{}[]<>()#+-.!>|~".contains(character) {
+        if ESCAPED.contains(character) {
             result.push('\\');
         }
         result.push(character);
