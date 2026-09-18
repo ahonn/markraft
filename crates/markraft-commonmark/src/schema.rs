@@ -55,6 +55,19 @@
 //! An emptied item of either kind is repaired by the
 //! [`fill_required_content`](markraft_core::fill_required_content) correction
 //! that [`commonmark_extensions`](crate::commonmark_extensions) registers.
+//!
+//! # Why a table has no header type
+//!
+//! GFM gives a table exactly one header row and it is always the first, so
+//! [`TABLE`] holds plain [`TABLE_ROW`]s and *the first row is the header*. A
+//! header flag on the row could describe a table with two header rows, or with
+//! none, and neither can be written down. The column count lives in the
+//! table's `alignments` attribute for the same reason: one place to read it,
+//! and no row can disagree with it.
+//!
+//! [`TABLE`] and [`TABLE_CELL`] are `isolating`, as they are in ProseMirror: a
+//! deletion at a cell boundary must not merge two cells, and a table's
+//! structure is not something the text around it may dissolve.
 
 use markraft_core::{
     AttrKind, AttrSpec, AttrValue, MarkTypeSpec, NodeTypeSpec, Schema, SchemaSpec,
@@ -102,11 +115,28 @@ pub const LIST_ITEM: &str = "list_item";
 pub const TASK_ITEM: &str = "task_item";
 /// A thematic break. A selectable block leaf.
 pub const HORIZONTAL_RULE: &str = "horizontal_rule";
-/// Source text for a block construct the model does not interpret — a table, an
-/// HTML block, a footnote definition — held verbatim in the required `source`
+/// Source text for a block construct the model does not interpret — an HTML
+/// block, a footnote definition — held verbatim in the required `source`
 /// attribute (`Str`). A selectable block leaf that takes no marks and is
 /// written back unchanged.
 pub const RAW_BLOCK: &str = "raw_block";
+/// A GFM table: `table_row+`, attribute `alignments` (`Str`, default `""`).
+///
+/// `alignments` is a comma-separated list with one entry per column, each
+/// `left`, `center`, `right` or `none` — `"none,center,right"` for a table of
+/// three columns. Its length **is** the column count, and every row holds
+/// exactly that many cells; both importers normalise to that invariant, GFM
+/// style: a surplus cell is dropped and a missing one arrives empty.
+pub const TABLE: &str = "table";
+/// One row of a [`TABLE`]: `table_cell+`.
+///
+/// There is no header type. GFM has exactly one header row and it is always
+/// the first, so *the first row of a table is its header row* and nothing has
+/// to be recorded for it.
+pub const TABLE_ROW: &str = "table_row";
+/// One cell of a [`TABLE_ROW`]: `inline*`, a textblock allowing the marks a
+/// paragraph allows. Neither `colspan` nor `rowspan` is modelled.
+pub const TABLE_CELL: &str = "table_cell";
 /// The text type, group `inline`.
 pub const TEXT: &str = "text";
 /// An image: an inline atom with `src` (`Str`, required), `alt` (`Str`,
@@ -244,6 +274,14 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                 .atom(true)
                 .attr(AttrSpec::required("source", AttrKind::Str)),
         )
+        .node(
+            NodeTypeSpec::new(TABLE, "table_row+")
+                .group(BLOCK_GROUP)
+                .isolating(true)
+                .attr(str_attr("alignments", "")),
+        )
+        .node(NodeTypeSpec::new(TABLE_ROW, "table_cell+"))
+        .node(NodeTypeSpec::new(TABLE_CELL, "inline*").isolating(true))
         .node(NodeTypeSpec::text(TEXT).group(INLINE_GROUP))
         .node(
             NodeTypeSpec::new(INLINE_SPAN, "inline*")

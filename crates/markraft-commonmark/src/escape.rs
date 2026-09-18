@@ -16,6 +16,11 @@
 //!   and only in the shapes that actually open a block there.
 //! * `.`, `(`, `)`, `!`, `|`, `{` and `}` are never escaped: none of them opens
 //!   anything on its own, and `![` cannot form because `[` is escaped already.
+//!   A `|` inside a table cell is the exception, and has [`escape_pipes`] of
+//!   its own because it is resolved before the cell's content is read at all.
+//! * Text that no link encloses has the one character that would start a GFM
+//!   autolink escaped as well, so a URL a reader would link does not gain a
+//!   link the document does not have. See [`escape_unlinked_text`].
 
 use finl_unicode::categories::CharacterCategories;
 
@@ -28,6 +33,21 @@ const ALWAYS: &[char] = &['\\', '`', '*', '[', ']', '~'];
 /// block prefix such as `> ` or `- `, where the block-opening characters mean
 /// something.
 pub fn escape_text(text: &str, at_line_start: bool) -> String {
+    escape(text, at_line_start, false)
+}
+
+/// [`escape_text`] for text that no link encloses, which also keeps a URL in
+/// it from being read as an autolink.
+///
+/// GFM links a bare `https://…`, `www.…` or e-mail address, so text that only
+/// looks like one would come back carrying a link the document never had.
+/// Inside a link there is nothing to protect: a reader reads no autolink in a
+/// label, and the URL of a link written bare *is* that link.
+pub fn escape_unlinked_text(text: &str, at_line_start: bool) -> String {
+    escape(text, at_line_start, true)
+}
+
+fn escape(text: &str, at_line_start: bool, unlinked: bool) -> String {
     let mut out = String::with_capacity(text.len());
     let chars: Vec<char> = text.chars().collect();
     let line_escapes = if at_line_start {
@@ -47,13 +67,91 @@ pub fn escape_text(text: &str, at_line_start: bool) -> String {
             || ALWAYS.contains(&ch)
             || (ch == '_' && !intraword(&chars, index))
             || (ch == '<' && opens_tag(&chars, index))
-            || (ch == '&' && opens_reference(&chars, index));
+            || (ch == '&' && opens_reference(&chars, index))
+            || (unlinked && opens_autolink(&chars, index));
         if escape {
             out.push('\\');
         }
         out.push(ch);
     }
     out
+}
+
+/// Whether the character at `index` is the one that starts a GFM autolink,
+/// which a backslash before it is the narrowest way to prevent.
+///
+/// There are three: the `:` of an `http://`, `https://` or `ftp://` URL, the
+/// `.` of a `www.` address, and the `@` of an e-mail address. Each needs a host
+/// with a dot in it, which is what keeps ordinary prose — `see: //x`, `a@b` —
+/// out of this. The test is a little wider than the extension's, because a
+/// backslash before a `:` a reader would not have linked anyway costs one
+/// character and changes nothing it renders.
+fn opens_autolink(chars: &[char], index: usize) -> bool {
+    match chars[index] {
+        ':' => {
+            scheme_before(chars, index)
+                && chars[index + 1..].starts_with(&['/', '/'])
+                && dotted_host(&chars[index + 3..])
+        }
+        '.' => www_before(chars, index) && dotted_host(&chars[index + 1..]),
+        '@' => local_part_before(chars, index) && dotted_host(&chars[index + 1..]),
+        _ => false,
+    }
+}
+
+/// Whether the whole run of letters before `index` is a scheme the extension
+/// links. A reader reads the run back to its start, so `xhttp://a.b` is no URL.
+fn scheme_before(chars: &[char], index: usize) -> bool {
+    let start = chars[..index]
+        .iter()
+        .rposition(|c| !c.is_ascii_alphabetic())
+        .map_or(0, |at| at + 1);
+    let scheme: String = chars[start..index].iter().collect();
+    matches!(scheme.as_str(), "http" | "https" | "ftp")
+}
+
+/// Whether `index` is the dot of a `www.` address: a `www` that starts the
+/// text or follows whitespace or one of the delimiters a reader allows there.
+fn www_before(chars: &[char], index: usize) -> bool {
+    let Some(start) = index.checked_sub(3) else {
+        return false;
+    };
+    chars[start..index] == ['w', 'w', 'w']
+        && start.checked_sub(1).is_none_or(|at| {
+            chars[at].is_whitespace() || matches!(chars[at], '*' | '_' | '~' | '(' | '[')
+        })
+}
+
+/// Whether an e-mail local part sits directly before `index`.
+fn local_part_before(chars: &[char], index: usize) -> bool {
+    index.checked_sub(1).is_some_and(|at| {
+        chars[at].is_ascii_alphanumeric() || matches!(chars[at], '.' | '+' | '-' | '_')
+    })
+}
+
+/// Whether `rest` opens with a host name holding a dot, which every autolink
+/// the extension reads has to have.
+fn dotted_host(rest: &[char]) -> bool {
+    let mut dotted = false;
+    let mut length = 0;
+    for (offset, c) in rest.iter().copied().enumerate() {
+        if c == '.' {
+            // A dot only separates labels when another one follows it.
+            if offset == 0 || !rest.get(offset + 1).is_some_and(|next| host_char(*next)) {
+                break;
+            }
+            dotted = true;
+        } else if !host_char(c) && c != '-' && c != '_' {
+            break;
+        }
+        length = offset + 1;
+    }
+    dotted && length > 0
+}
+
+/// What a reader takes for part of a host name.
+fn host_char(c: char) -> bool {
+    !(c.is_whitespace() || c.is_punctuation() || c.is_symbol())
 }
 
 /// Whether `_` at `index` sits between two alphanumerics, where CommonMark's
@@ -201,6 +299,16 @@ pub fn link_title(title: &str) -> String {
         return String::new();
     }
     format!(" \"{}\"", escape_inside(title, &['"', '\\']))
+}
+
+/// Protect the pipes of a table cell, whose text is otherwise escaped already.
+///
+/// GFM splits a row on its unescaped pipes *before* it reads the cell's inline
+/// content, so a `|` has to be escaped wherever it sits — inside a code span,
+/// inside raw HTML — and a reader resolves the escape everywhere too. That is
+/// why this runs over the written text rather than over the source characters.
+pub fn escape_pipes(text: &str) -> String {
+    text.replace('|', "\\|")
 }
 
 /// Escape the label of a link or an image.

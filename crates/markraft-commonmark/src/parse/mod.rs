@@ -21,9 +21,15 @@
 //! * **Link reference definitions** are resolved by comrak, so a reference link
 //!   arrives as an ordinary link and is written back inline; the definition
 //!   itself is not part of the document.
-//! * Anything else — tables, footnote definitions, HTML blocks, whatever a
-//!   comrak extension produces — is kept as source text: a `raw_block` where a
-//!   block is expected. Inline HTML has its own raw primitive.
+//! * A **bare URL**, a `www.` address or an e-mail address is a link too, as
+//!   GFM's autolink extension says, and is written back bare.
+//! * A **GFM table** becomes a `table` of `table_row`s of `table_cell`s, with
+//!   the delimiter row's alignments on the table. The first row is the header
+//!   row, and every row is squared off to the column count the alignments
+//!   declare — see [`crate::table`].
+//! * Anything else — footnote definitions, HTML blocks, whatever a comrak
+//!   extension produces — is kept as source text: a `raw_block` where a block
+//!   is expected. Inline HTML has its own raw primitive.
 //!
 //! # Repair
 //!
@@ -85,10 +91,12 @@ impl From<NodeError> for ParseError {
 
 /// The comrak options this codec parses with.
 ///
-/// `strikethrough` and `tasklist` back schema features. `table` is on so a
-/// table arrives as a node of its own and can be kept verbatim; with it off a
-/// table would arrive as a paragraph full of pipes and be reflowed into one
-/// line.
+/// `strikethrough`, `tasklist` and `table` back schema features; with `table`
+/// off a table would arrive as a paragraph full of pipes and be reflowed into
+/// one line. `autolink` is on so the URL an author typed plain becomes a link mark
+/// rather than text that only *looks* like one; the serialiser writes such a
+/// link back as the bare URL. `relaxed_autolinks` stays off: it reads a URL
+/// inside brackets as a link too, which is not what GFM does.
 ///
 /// `footnotes` is deliberately **off**: comrak drops a footnote definition that
 /// nothing refers to, and losing text is worse than reading `[^1]: note` as the
@@ -107,6 +115,7 @@ pub fn commonmark_options() -> Options<'static> {
     options.extension.strikethrough = true;
     options.extension.tasklist = true;
     options.extension.table = true;
+    options.extension.autolink = true;
     options
 }
 
@@ -185,6 +194,7 @@ impl MarkdownParser {
         };
         let blocks = walk.blocks(root)?;
         let doc = walk.fit(self.schema.top_type(), Attrs::empty(), blocks)?;
+        let doc = crate::table::normalize_tables(&self.schema, &doc).unwrap_or(doc);
         doc.check(&self.schema)?;
         Ok(doc)
     }

@@ -1,7 +1,9 @@
 //! The CommonMark spec examples, judged by the HTML they render to.
 //!
 //! `tests/data/commonmark-spec-0.31.2.json` is the example set published with
-//! CommonMark 0.31.2, vendored so the suite does not reach the network.
+//! CommonMark 0.31.2, vendored so the suite does not reach the network, and
+//! `tests/data/gfm-tables-0.29.json` is the table section of the GFM spec in
+//! the same shape — the one extension with a structure of its own.
 //!
 //! Each serialized example is compared directly with the official expected
 //! HTML, using strict CommonMark parsing/rendering. There is no failure allowlist.
@@ -11,6 +13,7 @@
 mod common;
 
 use common::{Codec, judge, normalize_html};
+use markraft_commonmark::commonmark_options;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -32,11 +35,17 @@ fn commonmark_spec_examples_render_the_same() {
     options.render.r#unsafe = true;
     codec.parser = codec.parser.with_options(options.clone());
     // The application preset is GFM. Strict CommonMark spells a del mark as
-    // HTML, since its ~~ delimiter belongs to the GFM extension.
+    // HTML, since its ~~ delimiter belongs to the GFM extension, and spells
+    // every link with brackets, since a bare URL is only text without the
+    // autolink extension.
     let mut marks = markraft_commonmark::commonmark_mark_rules();
     marks.insert(
         markraft_commonmark::schema::STRIKETHROUGH.to_string(),
         markraft_commonmark::MarkRule::fixed("<del>", "</del>"),
+    );
+    marks.insert(
+        markraft_commonmark::schema::LINK.to_string(),
+        markraft_commonmark::inline_link_mark_rule(),
     );
     codec.serializer = markraft_commonmark::MarkdownSerializer::new(
         codec.schema.clone(),
@@ -84,6 +93,31 @@ fn every_spec_example_parses_and_normalises_to_a_fixed_point() {
             once, twice,
             "example {} ({}) does not settle:\n{:?}",
             example.example, example.section, example.markdown
+        );
+    }
+}
+
+#[test]
+fn gfm_table_examples_render_the_same_and_settle() {
+    let raw = include_str!("data/gfm-tables-0.29.json");
+    let examples: Vec<Example> = serde_json::from_str(raw).expect("the vendored examples parse");
+    let codec = Codec::new();
+    let mut options = commonmark_options();
+    options.render.r#unsafe = true;
+    for example in &examples {
+        let written = codec.normalize(&example.markdown);
+        let expected = normalize_html(&example.html);
+        let actual = normalize_html(&comrak::markdown_to_html(&written, &options));
+        assert_eq!(
+            expected, actual,
+            "example {} ({}): {:?} was written as {written:?}",
+            example.example, example.section, example.markdown
+        );
+        assert_eq!(
+            written,
+            codec.normalize(&written),
+            "example {} does not settle",
+            example.example
         );
     }
 }

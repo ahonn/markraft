@@ -48,7 +48,7 @@ fn html_mark_transitions_keep_the_ordered_common_prefix() {
 }
 
 #[test]
-fn raw_tables_resolve_links_and_images_before_definitions_disappear() {
+fn a_cell_resolves_links_and_images_before_definitions_disappear() {
     let codec = Codec::new();
     for source in [
         "| a |\n| - |\n| [foo][ref] |\n\n[ref]: https://example.com \"title\"",

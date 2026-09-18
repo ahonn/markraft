@@ -13,7 +13,14 @@
 //!   one block always reads back tight;
 //! * two lists of the same kind side by side, which a reader joins;
 //! * a fence character run inside a code block, which forces the fence to grow;
-//! * a line ending inside a code span, which CommonMark turns into a space.
+//! * a line ending inside a code span, which CommonMark turns into a space;
+//! * a hard break inside a table cell, which a row of one source line cannot
+//!   hold, and a table inside a list item, whose blank lines decide the list's
+//!   tightness for it — `cases.rs` pins both.
+//!
+//! It does generate the two shapes GFM's autolink extension reads: a link
+//! whose text is its own URL, which is written back bare, and plain text that
+//! only looks like one, which has to be kept from becoming a link.
 //!
 //! Every one of those is pinned by a test of its own in `cases.rs`, with the
 //! behaviour the codec falls back to. Nothing else is excepted: attributes,
@@ -70,9 +77,20 @@ const WORDS: &[&str] = &[
     "<",
     "&",
     "\\",
+    // Text a reader would autolink if the serialiser let it.
+    "https://example.com",
+    "a@b.example",
 ];
 
 const LANGUAGES: &[&str] = &["", "rust", "js", "text"];
+/// A bare URL and the href a reader gives it, which is the link the serialiser
+/// has to be able to write back without brackets.
+const AUTOLINKS: &[(&str, &str)] = &[
+    ("https://example.com", "https://example.com"),
+    ("https://example.com/a/b", "https://example.com/a/b"),
+    ("www.example.com", "http://www.example.com"),
+    ("someone@example.com", "mailto:someone@example.com"),
+];
 const HREFS: &[&str] = &[
     "https://example.com",
     "/relative",
@@ -81,11 +99,8 @@ const HREFS: &[&str] = &[
     "a b",
     "",
 ];
-const RAW_SOURCES: &[&str] = &[
-    "| a | b |\n| --- | --- |\n| 1 | 2 |",
-    "<div>\nraw\n</div>",
-    "<!-- a comment -->",
-];
+const RAW_SOURCES: &[&str] = &["<div>\nraw\n</div>", "<!-- a comment -->"];
+const ALIGNMENTS: &[&str] = &["none", "left", "center", "right"];
 
 struct Gen<'a> {
     schema: &'a Schema,
@@ -146,6 +161,13 @@ impl Gen<'_> {
                 out.push(self.schema.node(md::HARD_BREAK, []).expect("a hard break"));
                 continue;
             }
+            if self.rng.one_in(9) {
+                let (text, href) = *self.rng.pick(AUTOLINKS);
+                let mark = self.mark(md::LINK, attrs! {"href" => href, "title" => ""});
+                let marks = MarkSet::from_marks(self.schema, [mark]);
+                out.push(self.schema.text_marked(text, marks));
+                continue;
+            }
             if breaks && self.rng.one_in(8) {
                 let src = *self.rng.pick(HREFS);
                 out.push(
@@ -190,7 +212,7 @@ impl Gen<'_> {
     }
 
     fn block(&mut self, depth: usize, in_item: bool) -> Node {
-        let choices = if depth == 0 { 4 } else { 8 };
+        let choices = if depth == 0 { 4 } else { 9 };
         match self.rng.below(choices) {
             0 | 1 => self
                 .schema
@@ -233,7 +255,8 @@ impl Gen<'_> {
                     .node_with(md::RAW_BLOCK, attrs! {"source" => source}, [])
                     .expect("a raw block")
             }
-            6 => {
+            6 if !in_item => self.table(),
+            7 => {
                 let blocks = self.blocks(depth - 1, false, 1, 2);
                 self.schema
                     .node(md::BLOCKQUOTE, blocks)
@@ -241,6 +264,39 @@ impl Gen<'_> {
             }
             _ => self.list(depth),
         }
+    }
+
+    /// A small table, honouring the column invariant: the `alignments` attribute
+    /// has one entry per column and every row holds exactly that many cells.
+    fn table(&mut self) -> Node {
+        let columns = self.rng.range(1, 3);
+        let alignments: Vec<&str> = (0..columns).map(|_| *self.rng.pick(ALIGNMENTS)).collect();
+        let rows = self.rng.range(1, 3);
+        let mut children = Vec::with_capacity(rows);
+        for _ in 0..rows {
+            let cells: Vec<Node> = (0..columns)
+                .map(|_| {
+                    // A row is one source line, so a hard break cannot travel
+                    // in a cell; an empty cell is a shape of its own.
+                    let content = if self.rng.one_in(5) {
+                        Vec::new()
+                    } else {
+                        self.inline(false)
+                    };
+                    self.schema
+                        .node(md::TABLE_CELL, content)
+                        .expect("a table cell")
+                })
+                .collect();
+            children.push(self.schema.node(md::TABLE_ROW, cells).expect("a table row"));
+        }
+        self.schema
+            .node_with(
+                md::TABLE,
+                attrs! {"alignments" => alignments.join(",")},
+                children,
+            )
+            .expect("a table")
     }
 
     fn list(&mut self, depth: usize) -> Node {

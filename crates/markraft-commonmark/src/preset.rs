@@ -14,23 +14,34 @@
 //!   `- ---` is a run of four dashes and so a thematic break in its own right.
 //!   `***` is used in both of those places.
 //! * An empty paragraph is a line holding only `<br>`.
+//! * A link whose text is its own URL is the bare URL — what an author typed
+//!   and what GFM's autolink extension reads back — rather than `[url](url)`
+//!   or `<url>`, wherever a reader would still give that link back. Where it
+//!   would not, the brackets stay. [`inline_link_mark_rule`] is the rule for a
+//!   dialect that has no autolink extension at all.
 //! * A code block is always fenced, with a fence longer than any run of the
 //!   fence character inside it.
 //! * Two lists of the same type in a row would be read as one list, so the
 //!   second one takes a different bullet character or ordered delimiter.
+//! * A table is a pipe table whose columns are padded to a uniform display
+//!   width, so the source lines up in a fixed-width editor. Re-padding on the
+//!   way out is a cosmetic change, which is all this codec promises about
+//!   spelling. See [`table`].
 
 use std::sync::Arc;
 
 use markraft_core::{Mark, Node, Schema};
 
 use crate::escape::{
-    code_span_delimiters, escape_label, escape_text, flanks, link_destination, link_title,
+    code_span_delimiters, escape_label, escape_pipes, escape_text, flanks, link_destination,
+    link_title,
 };
 use crate::schema as md;
 use crate::serialize::{
     MarkRule, MarkRules, MarkStringFn, MarkTarget, MarkdownSerializer, NodeRule, NodeRules,
     SerializerState,
 };
+use crate::table::{Alignment, alignments_of, cell_width};
 
 fn rule(
     f: impl Fn(&mut SerializerState<'_>, &Node, Option<&Node>, usize) + Send + Sync + 'static,
@@ -123,6 +134,7 @@ pub fn commonmark_node_rules() -> NodeRules {
             state.close_block(node);
         }),
     );
+    rules.insert(md::TABLE.to_string(), rule(table));
     rules.insert(
         md::TEXT.to_string(),
         rule(|state, node, _, _| state.text(node.text().unwrap_or_default(), true)),
@@ -248,9 +260,95 @@ fn code_block(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _:
     state.close_block(node);
 }
 
+/// The narrowest column a delimiter cell still reads well in. GFM needs only
+/// one dash, but `---` is what an author writes and what every other writer
+/// produces.
+const MIN_COLUMN_WIDTH: usize = 3;
+
+/// A GFM pipe table: the header row, the delimiter row that carries the
+/// alignments, and the body.
+///
+/// Every column is padded to one width so the source lines up. The width is a
+/// *display* width, so a CJK or emoji cell — two columns per character in a
+/// fixed-width font — does not pull the pipes out of line.
+fn table(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: usize) {
+    let alignments = alignments_of(node);
+    if alignments.is_empty() {
+        state.close_block(node);
+        return;
+    }
+    let rows: Vec<Vec<String>> = node
+        .children()
+        .map(|row| {
+            (0..alignments.len())
+                .map(|column| match row.maybe_child(column) {
+                    // A hard break has no spelling inside a row, which is one
+                    // source line; `<br>` is what GFM renders as the break the
+                    // author made, and comes back as a raw inline primitive.
+                    Some(cell) => escape_pipes(&state.capture_inline(cell, "<br>")),
+                    None => String::new(),
+                })
+                .collect()
+        })
+        .collect();
+    let widths: Vec<usize> = (0..alignments.len())
+        .map(|column| {
+            rows.iter()
+                .filter_map(|row| row.get(column))
+                .map(|cell| cell_width(cell))
+                .max()
+                .unwrap_or(0)
+                .max(MIN_COLUMN_WIDTH)
+        })
+        .collect();
+    let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 1);
+    let mut rows = rows.into_iter();
+    // A table with no rows cannot be built, and one with only a header is a
+    // table with no body — both are what the header line below writes.
+    lines.push(pipe_row(&rows.next().unwrap_or_default(), &widths));
+    lines.push(delimiter_row(&alignments, &widths));
+    lines.extend(rows.map(|row| pipe_row(&row, &widths)));
+    state.text(&lines.join("\n"), false);
+    state.close_block(node);
+}
+
+/// `| a   | b |`, each cell padded out to its column's width.
+fn pipe_row(cells: &[String], widths: &[usize]) -> String {
+    let mut line = String::from("|");
+    for (index, width) in widths.iter().enumerate() {
+        let cell = cells.get(index).map(String::as_str).unwrap_or_default();
+        line.push(' ');
+        line.push_str(cell);
+        line.push_str(&" ".repeat(width.saturating_sub(cell_width(cell))));
+        line.push_str(" |");
+    }
+    line
+}
+
+/// `| --- | :-: |`: the row that separates the header from the body and says
+/// how each column is aligned.
+fn delimiter_row(alignments: &[Alignment], widths: &[usize]) -> String {
+    let mut line = String::from("|");
+    for (alignment, width) in alignments.iter().zip(widths) {
+        let (left, right) = match alignment {
+            Alignment::None => ("", ""),
+            Alignment::Left => (":", ""),
+            Alignment::Center => (":", ":"),
+            Alignment::Right => ("", ":"),
+        };
+        let dashes = width.saturating_sub(left.len() + right.len()).max(1);
+        line.push(' ');
+        line.push_str(left);
+        line.push_str(&"-".repeat(dashes));
+        line.push_str(right);
+        line.push_str(" |");
+    }
+    line
+}
+
 fn hard_break(state: &mut SerializerState<'_>, node: &Node, parent: Option<&Node>, index: usize) {
     if state.is_single_line() {
-        state.text(" ", false);
+        state.text(state.line_break(), false);
         return;
     }
     // CommonMark has no way to end a block with a line break, so a trailing run
@@ -348,17 +446,29 @@ fn tight_attr(node: &Node) -> bool {
 /// that may interrupt a paragraph, so a list whose item holds two paragraphs is
 /// written loose however its `tight` attribute reads. The alternative — a blank
 /// line inside a list the model calls tight — would not survive being read back.
+///
+/// A table is stricter still, because the first line after it that is not blank
+/// is read as one more of its rows. It has to be the last block of its item;
+/// what the *next* item's marker starts is a new item, not a row. What may come
+/// before it is the ordinary rule's business: a table cannot interrupt a
+/// paragraph either.
 fn writable_tight(state: &SerializerState<'_>, list: &Node) -> bool {
     list.children().all(|item| {
+        let last = item.child_count().saturating_sub(1);
         let mut previous: Option<&Node> = None;
-        item.children().all(|block| {
-            let ok = previous.is_none_or(|before| {
-                !is_open_paragraph(state, before) || interrupts_paragraph(state, block)
-            });
+        item.children().enumerate().all(|(index, block)| {
+            let ok = (index == last || !is_table(state, block))
+                && previous.is_none_or(|before| {
+                    !is_open_paragraph(state, before) || interrupts_paragraph(state, block)
+                });
             previous = Some(block);
             ok
         })
     })
+}
+
+fn is_table(state: &SerializerState<'_>, node: &Node) -> bool {
+    state.schema().node_id(md::TABLE) == Some(node.type_id())
 }
 
 fn is_open_paragraph(state: &SerializerState<'_>, node: &Node) -> bool {
@@ -409,7 +519,7 @@ fn escape_trailing_hashes(state: &mut SerializerState<'_>) {
 /// The CommonMark/GFM mark rules, keyed by schema type name.
 pub fn commonmark_mark_rules() -> MarkRules {
     let mut rules = MarkRules::new();
-    rules.insert(md::LINK.to_string(), link_rule());
+    rules.insert(md::LINK.to_string(), autolink_link_rule());
     rules.insert(md::STRONG.to_string(), emphasis_rule("**", '*', "strong"));
     rules.insert(md::EM.to_string(), emphasis_rule("*", '*', "em"));
     rules.insert(
@@ -424,22 +534,14 @@ pub fn commonmark_mark_rules() -> MarkRules {
     rules
 }
 
-fn link_rule() -> MarkRule {
-    let close: MarkStringFn = Arc::new(|_, target: &MarkTarget<'_>| {
-        let href = target
-            .mark
-            .attrs
-            .get("href")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
-        let title = target
-            .mark
-            .attrs
-            .get("title")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
-        format!("]({}{})", link_destination(href), link_title(title))
-    });
+/// The link written `[text](href "title")`, whatever its text says.
+///
+/// [`commonmark_mark_rules`] writes a link whose text is its own URL as the
+/// bare URL, because GFM's autolink extension reads that back as the same
+/// link. A serialiser for strict CommonMark, where a bare URL is only text,
+/// takes this rule instead.
+pub fn inline_link_mark_rule() -> MarkRule {
+    let close: MarkStringFn = Arc::new(|_, target: &MarkTarget<'_>| closing_brackets(target));
     MarkRule {
         open: Arc::new(|_, _| "[".to_string()),
         close,
@@ -453,6 +555,111 @@ fn link_rule() -> MarkRule {
         lead: Some('['),
         trail: Some(')'),
     }
+}
+
+/// The link of [`inline_link_mark_rule`], written bare where the URL is its
+/// own text and a reader gives the link back from that alone.
+fn autolink_link_rule() -> MarkRule {
+    let open: MarkStringFn = Arc::new(|state: &mut SerializerState<'_>, target| {
+        // Flush the pending block separation first: until it is out, the
+        // output still ends with the block before this one, and where the URL
+        // lands is half of what decides whether a reader links it back.
+        state.write("");
+        let bare = writes_bare_url(state, target);
+        state.set_tagged(target.mark.ty, bare);
+        if bare { String::new() } else { "[".to_string() }
+    });
+    let close: MarkStringFn = Arc::new(|state: &mut SerializerState<'_>, target| {
+        if state.tagged(target.mark.ty) {
+            String::new()
+        } else {
+            closing_brackets(target)
+        }
+    });
+    MarkRule {
+        open,
+        close,
+        ..inline_link_mark_rule()
+    }
+}
+
+fn mark_str<'a>(mark: &'a Mark, name: &str) -> &'a str {
+    mark.attrs
+        .get(name)
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+}
+
+fn closing_brackets(target: &MarkTarget<'_>) -> String {
+    format!(
+        "]({}{})",
+        link_destination(mark_str(target.mark, "href")),
+        link_title(mark_str(target.mark, "title"))
+    )
+}
+
+/// Whether the link opening here is the one a reader builds from its own text.
+///
+/// The marked run has to be a single text leaf carrying the link and nothing
+/// else: another mark writes its delimiter between the URL and what surrounds
+/// it, and a bare URL is only a URL where it sits. What surrounds it is then
+/// exactly what the output already holds and what the nodes after it will
+/// write, which is what [`crate::autolink::writes_bare`] is asked about.
+fn writes_bare_url(state: &SerializerState<'_>, target: &MarkTarget<'_>) -> bool {
+    let Some(text) = target
+        .parent
+        .maybe_child(target.index)
+        .filter(|node| node.marks().len() == 1)
+        .and_then(|node| node.text())
+    else {
+        return false;
+    };
+    // The run ends at this leaf, or the URL is not all of the link's text.
+    if target
+        .parent
+        .maybe_child(target.index + 1)
+        .is_some_and(|next| next.marks().contains(target.mark))
+    {
+        return false;
+    }
+    let before = (!state.at_line_start())
+        .then(|| state.out().chars().next_back())
+        .flatten();
+    let Some(after) = following_text(state, target.parent, target.index + 1) else {
+        return false;
+    };
+    crate::autolink::writes_bare(
+        text,
+        mark_str(target.mark, "href"),
+        mark_str(target.mark, "title"),
+        before,
+        &after,
+    )
+}
+
+/// The text written directly after the marked run, escaped as it will be
+/// written and cut at the first whitespace: everything a reader could still
+/// pull into a bare URL.
+///
+/// `None` where what follows is not plain text — an image, a hard break, a
+/// marked run — and so cannot be shown to stay out of the URL.
+fn following_text(state: &SerializerState<'_>, parent: &Node, from: usize) -> Option<String> {
+    let mut out = String::new();
+    for index in from..parent.child_count() {
+        let child = parent.child(index);
+        // A source line ending is whitespace wherever it is written.
+        if state.schema().node_type(child.type_id()).name() == md::SOFT_BREAK {
+            break;
+        }
+        let text = child.text().filter(|_| child.marks().is_empty())?;
+        out.push_str(&escape_text(text, false));
+        if out.contains(char::is_whitespace) {
+            break;
+        }
+    }
+    let end = out.find(char::is_whitespace).unwrap_or(out.len());
+    out.truncate(end);
+    Some(out)
 }
 
 fn code_rule() -> MarkRule {

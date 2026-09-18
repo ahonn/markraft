@@ -18,6 +18,12 @@
 //! the block closes. A non-breaking space is not whitespace and survives, and
 //! the text inside `<pre>` is taken exactly as written.
 //!
+//! # Blocks inside a textblock
+//!
+//! A `<td>` or an `<h1>` takes inline content, so a block element inside one
+//! has nowhere to start a block of its own: its content is flattened in place,
+//! with a space where the line a browser draws would have been.
+//!
 //! # Blocks that are not there
 //!
 //! Text that is not inside any block element still has to become one, so the
@@ -80,7 +86,7 @@ impl HtmlParser {
     /// Read `source` into a document. No resources are loaded and no script is
     /// run: this walks the parsed tree and nothing else.
     pub fn parse(&self, source: &str) -> Result<Node, ParseError> {
-        Ok(fit_document(&self.schema, self.blocks(source)?)?)
+        self.document(source)
     }
 
     /// Read `source` as a fragment to paste into existing content.
@@ -88,11 +94,17 @@ impl HtmlParser {
     /// Opened by [`crate::fragment::open_fragment`], like the Markdown fragment
     /// parser.
     pub fn parse_fragment(&self, source: &str) -> Result<Slice, ParseError> {
-        let blocks = self.blocks(source)?;
+        let document = self.document(source)?;
         Ok(open_fragment(
             &self.schema,
-            Fragment::from_nodes(fit_document(&self.schema, blocks)?.children().cloned()),
+            Fragment::from_nodes(document.children().cloned()),
         ))
+    }
+
+    /// The blocks of `source` as a document, with every table squared off.
+    fn document(&self, source: &str) -> Result<Node, ParseError> {
+        let document = fit_document(&self.schema, self.blocks(source)?)?;
+        Ok(crate::table::normalize_tables(&self.schema, &document).unwrap_or(document))
     }
 
     fn blocks(&self, source: &str) -> Result<Vec<Node>, ParseError> {
@@ -103,6 +115,7 @@ impl HtmlParser {
             blocks: Vec::new(),
             inline: InlineContent::new(&self.schema),
             leading_space: true,
+            inline_only: false,
         };
         build.children(html.root_element(), &[])?;
         build.flush()?;
@@ -116,6 +129,9 @@ struct Build<'s> {
     blocks: Vec<Node>,
     inline: InlineContent<'s>,
     leading_space: bool,
+    /// Whether the builder is filling a textblock's inline content, where a
+    /// block element has nowhere to start a block of its own.
+    inline_only: bool,
 }
 
 impl<'s> Build<'s> {
@@ -167,6 +183,12 @@ impl<'s> Build<'s> {
             None => self.leading_space,
             Some(node) => ends_in_space(self.schema, node),
         }
+    }
+
+    /// Separate a flattened block from its neighbours, which is what the line
+    /// break a browser would draw between them amounts to inline.
+    fn block_separator(&mut self) {
+        self.text(" ", &[]);
     }
 
     /// Add text, collapsing whitespace the way a browser lays it out.
@@ -254,6 +276,20 @@ impl<'s> Build<'s> {
                     self.inline
                         .push_node(atom(format!("</{}>", target.tag()))?, set);
                 }
+            }
+            // A block met where only inline content can go — inside a table
+            // cell, inside a heading — has nowhere to start a block of its
+            // own, so its content lands in place instead of being lost.
+            HtmlRule::Block { .. } | HtmlRule::Boundary if self.inline_only => {
+                self.block_separator();
+                self.children(element, &marks)?;
+                self.block_separator();
+            }
+            HtmlRule::TextBlock { .. } if self.inline_only => {
+                self.block_separator();
+                let text = target.text();
+                self.text(&text, &marks);
+                self.block_separator();
             }
             HtmlRule::Boundary => {
                 self.flush()?;
@@ -343,6 +379,7 @@ impl<'s> Build<'s> {
             blocks: Vec::new(),
             inline: InlineContent::new(self.schema),
             leading_space: true,
+            inline_only: false,
         };
         inner.children(element, marks)?;
         inner.flush()?;
@@ -363,6 +400,7 @@ impl<'s> Build<'s> {
             blocks: Vec::new(),
             inline: InlineContent::new(self.schema),
             leading_space: true,
+            inline_only: true,
         };
         inner.children(element, marks)?;
         inner.inline.trim_end();

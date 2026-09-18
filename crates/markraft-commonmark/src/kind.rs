@@ -31,6 +31,9 @@ pub fn commonmark_doc_type_names() -> DocTypeNames {
         task_item: Some(schema::TASK_ITEM),
         horizontal_rule: Some(schema::HORIZONTAL_RULE),
         raw_block: Some(schema::RAW_BLOCK),
+        table: Some(schema::TABLE),
+        table_row: Some(schema::TABLE_ROW),
+        table_cell: Some(schema::TABLE_CELL),
         hard_break: Some(schema::HARD_BREAK),
         image: Some(schema::IMAGE),
         strong: Some(schema::STRONG),
@@ -145,6 +148,24 @@ mod tests {
     }
 
     #[test]
+    fn a_copied_table_survives_every_flavour() {
+        let codecs = codecs();
+        let markup = "| a | b |\n| :- | --: |\n| 1 |  |";
+        let slice = codecs.from_markup(markup).expect("a fragment");
+        assert_eq!(
+            codecs.to_markup(&slice).as_deref(),
+            Some("| a   | b   |\n| :-- | --: |\n| 1   |     |")
+        );
+        // The plain flavour is what a spreadsheet reads.
+        assert_eq!(codecs.to_text(&slice), "a\tb\n1\t");
+        // And both rich flavours read their own output back as the same slice.
+        let written = codecs.to_markup(&slice).expect("Markdown");
+        assert_eq!(codecs.from_markup(&written).as_ref(), Some(&slice));
+        let html = codecs.to_html(&slice).expect("HTML");
+        assert_eq!(codecs.from_html(&html).as_ref(), Some(&slice));
+    }
+
+    #[test]
     fn a_reader_answers_none_rather_than_an_empty_slice() {
         let codecs = codecs();
         assert_eq!(codecs.from_markup(""), None);
@@ -181,6 +202,9 @@ mod tests {
             names.task_item,
             names.horizontal_rule,
             names.raw_block,
+            names.table,
+            names.table_row,
+            names.table_cell,
             names.hard_break,
             names.image,
         ] {

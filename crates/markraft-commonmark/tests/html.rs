@@ -341,13 +341,13 @@ fn the_cosmetic_attributes_travel_in_data_attributes_and_default_without_them() 
 #[test]
 fn a_raw_block_survives_a_round_trip_and_reads_as_a_pre_elsewhere() {
     let codec = Codec::new();
-    let doc = codec.parse("| a | b |\n| --- | --- |");
+    let doc = codec.parse("<div>\nraw <b>text</b>\n</div>");
     let written = serializer().serialize(&doc);
     assert!(
         written.starts_with("<pre data-type=\"rawBlock\">"),
         "{written}"
     );
-    assert!(written.contains("| a | b |"), "{written}");
+    assert!(written.contains("raw &lt;b&gt;text&lt;/b&gt;"), "{written}");
     assert_eq!(parser().parse(&written).expect("parses"), doc);
 }
 
@@ -406,6 +406,86 @@ fn a_cut_inside_one_paragraph_writes_as_bare_inline_html() {
     let empty = markraft_core::Selection::cursor(2).content(&doc);
     assert!(empty.is_empty());
     assert_eq!(serializer().serialize_fragment(&empty), "");
+}
+
+#[test]
+fn a_table_with_a_header_row_imports_as_one() {
+    assert_eq!(
+        shape(
+            "<table><thead><tr><th align='center'>a</th><th>b</th></tr></thead>\
+             <tbody><tr><td>1</td><td>2</td></tr></tbody></table>"
+        ),
+        concat!(
+            r#"doc(table[alignments=Str("center,none")]("#,
+            r#"table_row(table_cell("a"), table_cell("b")), "#,
+            r#"table_row(table_cell("1"), table_cell("2"))))"#
+        )
+    );
+    assert_eq!(
+        markdown(
+            "<table><thead><tr><th align='right'>a</th></tr></thead><tbody><tr><td>1</td></tr></tbody></table>"
+        ),
+        "| a   |\n| --: |\n| 1   |"
+    );
+}
+
+#[test]
+fn a_table_with_no_header_row_promotes_its_first_row() {
+    // The model has no header type: the first row *is* the header row, so a
+    // `<tbody>`-only table needs nothing done to it.
+    assert_eq!(
+        shape("<table><tr><td>a</td><td>b</td></tr><tr><td>1</td><td>2</td></tr></table>"),
+        concat!(
+            r#"doc(table[alignments=Str("none,none")]("#,
+            r#"table_row(table_cell("a"), table_cell("b")), "#,
+            r#"table_row(table_cell("1"), table_cell("2"))))"#
+        )
+    );
+    // An alignment a body cell declares in CSS counts for its whole column.
+    assert_eq!(
+        markdown(
+            "<table><tr><td>a</td></tr><tr><td style='text-align: center'>1</td></tr></table>"
+        ),
+        "| a   |\n| :-: |\n| 1   |"
+    );
+}
+
+#[test]
+fn a_table_cell_flattens_the_blocks_inside_it_and_squares_its_rows() {
+    assert_eq!(
+        shape("<table><tr><td><p>one</p><p>two</p></td><td>b</td></tr><tr><td>1</td></tr></table>"),
+        concat!(
+            r#"doc(table[alignments=Str("none,none")]("#,
+            r#"table_row(table_cell("one two"), table_cell("b")), "#,
+            r#"table_row(table_cell("1"), table_cell())))"#
+        )
+    );
+    // A column group is presentation and carries nothing the model wants.
+    assert_eq!(
+        shape("<table><colgroup><col></colgroup><tr><td>a</td></tr></table>"),
+        r#"doc(table[alignments=Str("none")](table_row(table_cell("a"))))"#
+    );
+}
+
+#[test]
+fn a_table_the_model_cannot_describe_stays_a_raw_block() {
+    let codec = Codec::new();
+    for source in [
+        // A cell that spans two columns.
+        "<table><tr><th colspan='2'>Title</th></tr><tr><td>x</td><td>y</td></tr></table>",
+        // A table inside a cell.
+        "<table><tr><td><table><tr><td>n</td></tr></table></td></tr></table>",
+        // A caption, which has no node of its own.
+        "<table><caption>cap</caption><tr><td>a</td></tr></table>",
+    ] {
+        let doc = parser().parse(source).unwrap();
+        assert_eq!(
+            codec.schema.node_type(doc.child(0).type_id()).name(),
+            "raw_block",
+            "{source}"
+        );
+        assert_eq!(codec.parse(&codec.write(&doc)), doc, "{source}");
+    }
 }
 
 #[test]

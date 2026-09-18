@@ -6,9 +6,9 @@
 //! and every other `<li>` is a plain one.
 //!
 //! A custom empty table passes unknown elements' children through. The preset
-//! additionally preserves unknown inline boundaries as raw primitives and keeps
-//! tables as complete raw HTML blocks, so clipboard import does not flatten
-//! structures the schema cannot yet edit directly.
+//! additionally preserves unknown inline boundaries as raw primitives, and keeps
+//! a `<table>` whose structure the schema cannot describe as one raw HTML block,
+//! so clipboard import does not flatten what it cannot yet edit directly.
 
 use std::sync::Arc;
 
@@ -16,6 +16,7 @@ use markraft_core::{Attrs, Schema, attrs};
 use scraper::ElementRef;
 
 use crate::schema as md;
+use crate::table::{Alignment, format_alignments};
 
 /// What a rule is given about the element it is building from.
 #[derive(Clone, Copy)]
@@ -308,13 +309,30 @@ pub fn commonmark_html_rules() -> HtmlRules {
             HtmlRule::Ignore,
         )
         .with("input", HtmlRule::Ignore)
-        .with(
+        // Before the general `<table>`: a table the schema cannot describe is
+        // kept whole rather than flattened into one the reader would misread.
+        .matching(
             "table",
+            html_match_fn(|target| !is_modelled_table(target)),
             HtmlRule::block_with(
                 md::RAW_BLOCK,
                 html_attrs_fn(|target| attrs! {"source" => target.element.html()}),
             ),
         )
+        .with(
+            "table",
+            HtmlRule::block_with(
+                md::TABLE,
+                html_attrs_fn(|target| attrs! {"alignments" => table_alignments(target)}),
+            ),
+        )
+        // A table's sections are not part of the model: the first row is the
+        // header row wherever the markup puts it, so the rows pass straight
+        // through. Column groups carry nothing but presentation.
+        .with_all(&["thead", "tbody", "tfoot"], HtmlRule::Inline)
+        .with_all(&["colgroup", "col"], HtmlRule::Ignore)
+        .with("tr", HtmlRule::block(md::TABLE_ROW))
+        .with_all(&["th", "td"], HtmlRule::block(md::TABLE_CELL))
         .with("label", HtmlRule::Inline)
         .matching("span", html_match_fn(fully_modelled_span), HtmlRule::Inline)
         .with("p", HtmlRule::block(md::PARAGRAPH))
@@ -449,7 +467,6 @@ pub fn commonmark_html_rules() -> HtmlRules {
                 "footer",
                 "figure",
                 "figcaption",
-                "tr",
                 "dt",
                 "dd",
             ],
@@ -470,6 +487,87 @@ pub fn commonmark_html_rules() -> HtmlRules {
     rules.fallback(HtmlRule::RawInline {
         node_type: md::RAW_INLINE.to_string(),
     })
+}
+
+/// Whether a `<table>` is one the schema can describe.
+///
+/// The model is GFM's: a rectangle of single cells, its first row the header.
+/// Three things fall outside it and keep the whole element as a raw block,
+/// where nothing is lost and the source still round trips:
+///
+/// * a nested table, which has nowhere to go inside a cell's inline content;
+/// * a `colspan` or `rowspan` that covers more than one cell;
+/// * a `<caption>`, which the model has no node for.
+///
+/// A `<th>` in a body row is *not* one of them. GFM has no row header either,
+/// so such a cell imports as an ordinary one and is written back as `<td>`.
+fn is_modelled_table(target: HtmlTarget<'_>) -> bool {
+    let table = target.element;
+    !table
+        .descendants()
+        .filter_map(ElementRef::wrap)
+        .any(|element| match element.value().name() {
+            "table" => element.id() != table.id(),
+            "caption" => true,
+            "th" | "td" => ["colspan", "rowspan"]
+                .iter()
+                .any(|name| spans_more_than_one(element.value().attr(name))),
+            _ => false,
+        })
+}
+
+fn spans_more_than_one(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim().parse::<u32>().is_ok_and(|span| span > 1))
+}
+
+/// The alignment of every column of a `<table>`, as the `alignments` attribute
+/// spells it.
+///
+/// A writer may put the alignment on the header cell, on every body cell, or on
+/// neither, so each column takes the first alignment any of its cells declares.
+fn table_alignments(target: HtmlTarget<'_>) -> String {
+    let mut columns: Vec<Alignment> = Vec::new();
+    for row in target
+        .element
+        .descendants()
+        .filter_map(ElementRef::wrap)
+        .filter(|element| element.value().name() == "tr")
+    {
+        for (index, cell) in row
+            .children()
+            .filter_map(ElementRef::wrap)
+            .filter(|element| matches!(element.value().name(), "th" | "td"))
+            .enumerate()
+        {
+            if columns.len() <= index {
+                columns.resize(index + 1, Alignment::None);
+            }
+            if columns[index] == Alignment::None {
+                columns[index] = cell_alignment(cell);
+            }
+        }
+    }
+    format_alignments(&columns)
+}
+
+/// The alignment one cell declares, in its `align` attribute or its inline CSS.
+fn cell_alignment(cell: ElementRef<'_>) -> Alignment {
+    if let Some(value) = cell.value().attr("align") {
+        let alignment = Alignment::from_name(&value.trim().to_ascii_lowercase());
+        if alignment != Alignment::None {
+            return alignment;
+        }
+    }
+    let Some(style) = cell.value().attr("style") else {
+        return Alignment::None;
+    };
+    style
+        .split(';')
+        .filter_map(|declaration| declaration.split_once(':'))
+        .filter(|(property, _)| property.trim().eq_ignore_ascii_case("text-align"))
+        .map(|(_, value)| Alignment::from_name(&value.trim().to_ascii_lowercase()))
+        .find(|alignment| *alignment != Alignment::None)
+        .unwrap_or(Alignment::None)
 }
 
 /// A plain span, or a span whose entire styling is represented by marks. Other

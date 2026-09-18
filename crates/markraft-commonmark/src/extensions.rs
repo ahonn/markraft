@@ -35,7 +35,9 @@ pub fn commonmark_extensions(schema: &Schema) -> Extension {
 }
 
 /// The corrections the preset needs: merge adjacent identical lists, and fill
-/// in the block a container's content rule requires.
+/// in the block a container's content rule requires — an emptied table gets a
+/// row back, and an emptied row a cell, so neither can be left describing
+/// something the format cannot write.
 pub fn commonmark_corrections(schema: &Schema) -> Vec<Correction> {
     let containers = [
         md::DOC,
@@ -44,6 +46,8 @@ pub fn commonmark_corrections(schema: &Schema) -> Vec<Correction> {
         md::TASK_ITEM,
         md::BULLET_LIST,
         md::ORDERED_LIST,
+        md::TABLE,
+        md::TABLE_ROW,
     ];
     let mut out = Vec::new();
     for name in containers {

@@ -107,9 +107,20 @@ impl SerializerState<'_> {
                 let close = self.mark_string(&mark, false, parent, index);
                 self.text(&format!("{open}{text}{close}"), false);
             }
+            // A URL in text that no link encloses has to stay text: GFM reads
+            // a bare one back as a link the document never had.
+            (_, Some(text)) if !self.inside_link(&current) => self.unlinked_text(text),
             (_, Some(text)) => self.text(text, true),
             (_, None) => self.render(&current, Some(parent), index),
         }
+    }
+
+    /// Whether a link already encloses the node, so a reader reads no autolink
+    /// out of a URL in its text.
+    fn inside_link(&self, node: &Node) -> bool {
+        node.marks()
+            .iter()
+            .any(|mark| self.schema().mark_type(mark.ty).name() == crate::schema::LINK)
     }
 
     /// The marks of an inline node that this serialiser can write.

@@ -3,7 +3,7 @@
 use comrak::nodes::{
     LineColumn, ListDelimType, ListType, NodeCode, NodeCodeBlock, NodeFootnoteDefinition,
     NodeFootnoteReference, NodeHeading, NodeHtmlBlock, NodeLink, NodeList, NodeTable, NodeTaskItem,
-    NodeValue, Sourcepos,
+    NodeValue, Sourcepos, TableAlignment,
 };
 use markraft_core::{Attrs, attrs};
 
@@ -11,13 +11,14 @@ use super::{
     ParseRule, ParseRules, ParseTarget, attrs_fn, fixed, inline_text, no_attrs, text_fn, type_fn,
 };
 use crate::schema as md;
+use crate::table::{Alignment, format_alignments};
 
 /// The rule set for the CommonMark/GFM preset.
 ///
-/// Everything the preset does not name — tables, footnote definitions, HTML
-/// blocks, and any construct a comrak extension this crate does not enable
-/// might produce — falls through to [`ParseRule::Raw`], so it survives as
-/// source text rather than being dropped.
+/// Everything the preset does not name — footnote definitions, HTML blocks,
+/// and any construct a comrak extension this crate does not enable might
+/// produce — falls through to [`ParseRule::Raw`], so it survives as source
+/// text rather than being dropped.
 pub fn commonmark_rules() -> ParseRules {
     ParseRules::new(md::RAW_BLOCK)
         .with(&NodeValue::FrontMatter(String::new()), ParseRule::Ignore)
@@ -107,13 +108,15 @@ pub fn commonmark_rules() -> ParseRules {
             &NodeValue::Image(Box::<NodeLink>::default()),
             ParseRule::atom_with(md::IMAGE, attrs_fn(image_attrs)),
         )
-        // Named so a consumer can see the fallback is deliberate for these.
         .with(
             &NodeValue::Table(Box::<NodeTable>::default()),
-            ParseRule::Raw {
-                node_type: fixed(md::RAW_BLOCK),
-            },
+            ParseRule::block_with(md::TABLE, attrs_fn(table_attrs)),
         )
+        // comrak's header flag is not read: GFM has exactly one header row and
+        // it is always the first, which is what the schema says too.
+        .with(&NodeValue::TableRow(false), ParseRule::block(md::TABLE_ROW))
+        .with(&NodeValue::TableCell, ParseRule::block(md::TABLE_CELL))
+        // Named so a consumer can see the fallback is deliberate for these.
         .with(
             &NodeValue::FootnoteDefinition(NodeFootnoteDefinition::default()),
             ParseRule::Raw {
@@ -145,6 +148,25 @@ fn empty_sourcepos() -> Sourcepos {
         start: LineColumn::default(),
         end: LineColumn::default(),
     }
+}
+
+/// A table's `alignments`, one entry per column, from the delimiter row comrak
+/// read.
+fn table_attrs(target: ParseTarget<'_>) -> Attrs {
+    let NodeValue::Table(table) = &*target.value() else {
+        return Attrs::empty();
+    };
+    let alignments: Vec<Alignment> = table
+        .alignments
+        .iter()
+        .map(|alignment| match alignment {
+            TableAlignment::Left => Alignment::Left,
+            TableAlignment::Center => Alignment::Center,
+            TableAlignment::Right => Alignment::Right,
+            TableAlignment::None => Alignment::None,
+        })
+        .collect();
+    attrs! {"alignments" => format_alignments(&alignments)}
 }
 
 fn heading_attrs(target: ParseTarget<'_>) -> Attrs {

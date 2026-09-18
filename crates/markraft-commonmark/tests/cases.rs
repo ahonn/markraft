@@ -5,7 +5,7 @@ mod common;
 use common::{Codec, judge};
 use markraft_commonmark::schema as md;
 use markraft_commonmark::{commonmark_schema, commonmark_schema_spec};
-use markraft_core::{Attrs, MarkSet, Node, attrs};
+use markraft_core::{Attrs, MarkSet, MarkTypeId, Node, attrs};
 
 /// `parse` then `serialize`, which is the normalisation the codec promises.
 fn round(source: &str) -> String {
@@ -139,20 +139,217 @@ fn an_empty_paragraph_that_is_all_its_parent_holds_writes_as_nothing() {
     assert_eq!(shape(">"), "doc(blockquote(paragraph()))");
 }
 
-// -- constructs with no model of their own --------------------------------
+// -- tables ---------------------------------------------------------------
 
 #[test]
-fn a_table_is_kept_verbatim() {
+fn a_table_is_rows_of_cells_with_the_alignments_on_the_table() {
     let source = "| a | b |\n| --- | --- |\n| 1 | 2 |";
     assert_eq!(
         shape(source),
-        r#"doc(raw_block[source=Str("| a | b |\n| --- | --- |\n| 1 | 2 |")])"#
+        concat!(
+            r#"doc(table[alignments=Str("none,none")]("#,
+            r#"table_row(table_cell("a"), table_cell("b")), "#,
+            r#"table_row(table_cell("1"), table_cell("2"))))"#
+        )
     );
-    assert_eq!(round(source), source);
-    // Including inside a container, where the prefix is put back on the way out.
+    // The columns are padded to one width, which is the only change a table
+    // that is already square goes through.
+    assert_eq!(round(source), "| a   | b   |\n| --- | --- |\n| 1   | 2   |");
+    // Inside a container, where the prefix is put back on the way out.
     let quoted = "> | a | b |\n> | --- | --- |\n> | 1 | 2 |";
-    assert_eq!(round(quoted), quoted);
+    assert_eq!(
+        round(quoted),
+        "> | a   | b   |\n> | --- | --- |\n> | 1   | 2   |"
+    );
+    // A header with no body is a table of one row.
+    assert_eq!(
+        shape("| a |\n| - |"),
+        r#"doc(table[alignments=Str("none")](table_row(table_cell("a"))))"#
+    );
+    assert_eq!(round("| a |\n| - |"), "| a   |\n| --- |");
 }
+
+#[test]
+fn every_alignment_survives_in_both_directions() {
+    let source = "| l | c | r | n |\n| :-- | :-: | --: | --- |\n| 1 | 2 | 3 | 4 |";
+    let codec = Codec::new();
+    let doc = codec.parse(source);
+    assert_eq!(
+        doc.child(0)
+            .attrs()
+            .get("alignments")
+            .and_then(|value| value.as_str()),
+        Some("left,center,right,none")
+    );
+    assert_eq!(
+        codec.write(&doc),
+        "| l   | c   | r   | n   |\n| :-- | :-: | --: | --- |\n| 1   | 2   | 3   | 4   |"
+    );
+    assert!(judge(&codec, source).is_ok());
+}
+
+#[test]
+fn a_pipe_in_a_cell_is_escaped_even_inside_a_code_span() {
+    // GFM splits the row on its pipes before it reads a cell at all, so the
+    // escape is resolved everywhere — code span included.
+    let source = "| a\\|b | `c\\|d` |\n| - | - |\n| x | y |";
+    assert_eq!(
+        shape(source),
+        concat!(
+            r#"doc(table[alignments=Str("none,none")]("#,
+            r#"table_row(table_cell("a|b"), table_cell("c|d"{code})), "#,
+            r#"table_row(table_cell("x"), table_cell("y"))))"#
+        )
+    );
+    assert_eq!(
+        round(source),
+        "| a\\|b | `c\\|d` |\n| ---- | ------ |\n| x    | y      |"
+    );
+    let codec = Codec::new();
+    assert!(judge(&codec, source).is_ok());
+}
+
+#[test]
+fn an_empty_cell_keeps_its_place() {
+    let source = "|  | b |\n| - | - |\n| 1 |  |";
+    assert_eq!(
+        shape(source),
+        concat!(
+            r#"doc(table[alignments=Str("none,none")]("#,
+            r#"table_row(table_cell(), table_cell("b")), "#,
+            r#"table_row(table_cell("1"), table_cell())))"#
+        )
+    );
+    // A cell is always a pair of spaces between pipes, never `||`, and the
+    // column is still padded to the width the delimiter row needs.
+    assert_eq!(round(source), "|     | b   |\n| --- | --- |\n| 1   |     |");
+}
+
+#[test]
+fn a_ragged_table_is_squared_off_the_way_a_reader_squares_it() {
+    // The delimiter row fixes the column count: a surplus cell is dropped and
+    // a row that stops short is filled with empty cells.
+    let source = "| a | b |\n| - | - |\n| 1 | 2 | 3 |\n| only |";
+    assert_eq!(
+        shape(source),
+        concat!(
+            r#"doc(table[alignments=Str("none,none")]("#,
+            r#"table_row(table_cell("a"), table_cell("b")), "#,
+            r#"table_row(table_cell("1"), table_cell("2")), "#,
+            r#"table_row(table_cell("only"), table_cell())))"#
+        )
+    );
+    let codec = Codec::new();
+    assert!(judge(&codec, source).is_ok());
+}
+
+#[test]
+fn a_cell_holds_the_marks_links_and_images_a_paragraph_holds() {
+    let source = "| **b** *i* `c` [l](u) ![alt](p) |\n| - |\n| <u>u</u> |";
+    assert_eq!(
+        shape(source),
+        concat!(
+            r#"doc(table[alignments=Str("none")](table_row(table_cell("#,
+            r#""b"{strong}, " ", "i"{em}, " ", "c"{code}, " ", "l"{link}, " ", "#,
+            r#"image[alt=Str("alt"),src=Str("p"),title=Str("")])), "#,
+            r#"table_row(table_cell("u"{underline}))))"#
+        )
+    );
+    let codec = Codec::new();
+    assert!(judge(&codec, source).is_ok());
+    assert_eq!(round(source), round(&round(source)));
+}
+
+#[test]
+fn a_column_is_padded_to_its_display_width_not_its_character_count() {
+    // A CJK character is two columns wide in a fixed-width font, so padding by
+    // character count would leave the pipes out of line.
+    let written = round("| 中文 | b |\n| - | - |\n| x | 😀 |");
+    assert_eq!(written, "| 中文 | b   |\n| ---- | --- |\n| x    | 😀  |");
+    for line in written.lines() {
+        assert_eq!(
+            line.split('|').count(),
+            3 + 1,
+            "{line:?} has the wrong number of cells"
+        );
+    }
+}
+
+#[test]
+fn a_list_holding_a_table_is_written_loose() {
+    // A table needs a blank line before it — it cannot interrupt a paragraph —
+    // and a blank line after it, or the next line is read as one more row.
+    let source = "- item\n\n  | a |\n  | - |\n  | 1 |\n\n- next";
+    assert_eq!(
+        shape(source),
+        concat!(
+            r#"doc(bullet_list[bullet_char=Str("-"),tight=Bool(false)]("#,
+            r#"list_item(paragraph("item"), table[alignments=Str("none")]("#,
+            r#"table_row(table_cell("a")), table_row(table_cell("1")))), "#,
+            r#"list_item(paragraph("next"))))"#
+        )
+    );
+    let codec = Codec::new();
+    assert!(judge(&codec, source).is_ok());
+    let once = round(source);
+    assert_eq!(once, round(&once));
+    assert!(once.contains("  | a   |"), "{once}");
+}
+
+#[test]
+fn a_list_item_that_is_only_a_table_stays_tight() {
+    // Nothing follows the table inside the item, and the next item's marker
+    // starts an item rather than one more row, so the list needs no blank line.
+    let codec = Codec::new();
+    for source in [
+        "- a\n- | a |\n  | - |",
+        "- | a |\n  | - |\n  | 1 |",
+        "> - | a |\n>   | - |",
+    ] {
+        let once = round(source);
+        assert_eq!(once, round(&once), "{source:?} does not settle");
+        assert!(judge(&codec, source).is_ok(), "{source:?}");
+        assert!(
+            !once.contains("\n\n"),
+            "{source:?} was written loose: {once}"
+        );
+    }
+}
+
+#[test]
+fn a_hard_break_in_a_cell_is_a_break_tag() {
+    // A row is one source line, so the break travels as the tag GFM renders.
+    // It comes back as a raw inline primitive, which writes itself again.
+    let codec = Codec::new();
+    let schema = &codec.schema;
+    let cell = schema
+        .node(
+            md::TABLE_CELL,
+            [
+                schema.text("a"),
+                schema.node(md::HARD_BREAK, []).expect("a break"),
+                schema.text("b"),
+            ],
+        )
+        .expect("a cell");
+    let row = schema.node(md::TABLE_ROW, [cell]).expect("a row");
+    let table = schema
+        .node_with(md::TABLE, attrs! {"alignments" => "none"}, [row])
+        .expect("a table");
+    let doc = schema.doc([table]).expect("a document");
+    let written = codec.write(&doc);
+    assert_eq!(written, "| a<br>b |\n| ------ |");
+    assert_eq!(
+        codec.describe(&codec.parse(&written)),
+        concat!(
+            r#"doc(table[alignments=Str("none")](table_row(table_cell("#,
+            r#""a", raw_inline[source=Str("<br>")], "b"))))"#
+        )
+    );
+    assert_eq!(codec.normalize(&written), written);
+}
+
+// -- constructs with no model of their own --------------------------------
 
 #[test]
 fn an_html_block_and_a_footnote_definition_are_kept_verbatim() {
@@ -525,6 +722,206 @@ fn a_link_reference_definition_is_resolved_into_an_inline_link() {
         shape("[foo]\n\n[foo]: /url"),
         r#"doc(paragraph("foo"{link}))"#
     );
+}
+
+// -- autolinks ------------------------------------------------------------
+
+/// The `href` of the first link mark in the document, which is the half of an
+/// autolink that `describe` does not show.
+fn first_href(source: &str) -> String {
+    fn find(node: &Node, ty: MarkTypeId) -> Option<String> {
+        node.children().find_map(
+            |child| match child.marks().iter().find(|mark| mark.ty == ty) {
+                Some(mark) => mark
+                    .attrs
+                    .get("href")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                None => find(child, ty),
+            },
+        )
+    }
+    let codec = Codec::new();
+    let ty = codec.schema.mark_id(md::LINK).expect("the link mark");
+    find(&codec.parse(source), ty).unwrap_or_else(|| panic!("no link in {source:?}"))
+}
+
+#[test]
+fn a_bare_url_is_a_link_and_is_written_back_bare() {
+    assert_eq!(
+        round("See https://example.com now"),
+        "See https://example.com now"
+    );
+    assert_eq!(
+        shape("See https://example.com now"),
+        r#"doc(paragraph("See ", "https://example.com"{link}, " now"))"#
+    );
+    assert_eq!(
+        first_href("See https://example.com now"),
+        "https://example.com"
+    );
+    // A `www.` address and an e-mail address carry the scheme the extension
+    // gives them and still travel as the text the author typed.
+    assert_eq!(
+        round("Visit www.example.com today"),
+        "Visit www.example.com today"
+    );
+    assert_eq!(
+        first_href("Visit www.example.com today"),
+        "http://www.example.com"
+    );
+    assert_eq!(
+        round("Mail foo@bar.example now"),
+        "Mail foo@bar.example now"
+    );
+    assert_eq!(
+        first_href("Mail foo@bar.example now"),
+        "mailto:foo@bar.example"
+    );
+    // An angle-bracket autolink is the same link, and reads back as the URL.
+    assert_eq!(
+        round("See <https://example.com> ok"),
+        "See https://example.com ok"
+    );
+    // A URL is bare wherever a line can start, and inside a container.
+    assert_eq!(round("# https://example.com"), "# https://example.com");
+    assert_eq!(round("> https://example.com"), "> https://example.com");
+    assert_eq!(round("- https://example.com"), "- https://example.com");
+}
+
+#[test]
+fn punctuation_after_a_bare_url_stays_outside_the_link() {
+    for (source, url) in [
+        ("https://a.example/c. next", "https://a.example/c"),
+        ("https://a.example, next", "https://a.example"),
+        ("(https://a.example) next", "https://a.example"),
+        ("https://a.example) next", "https://a.example"),
+        // Parentheses that balance are part of the URL, so they stay in it.
+        ("https://a.example/a(b)c next", "https://a.example/a(b)c"),
+    ] {
+        assert_eq!(round(source), source, "{source}");
+        assert_eq!(first_href(source), url, "{source}");
+    }
+}
+
+#[test]
+fn a_url_under_another_mark_is_not_a_link_of_its_own() {
+    // Emphasis around a link nests the other way round from the mark ranks, so
+    // it keeps a container of its own; the URL inside it is still written bare.
+    assert_eq!(round("*https://a.example*"), "<em>https://a.example</em>");
+    assert_eq!(
+        shape("*https://a.example*"),
+        r#"doc(paragraph(inline_span{em}("https://a.example"{link})))"#
+    );
+    // A code span is literal, so there is no link in it at all.
+    assert_eq!(round("`https://a.example`"), "`https://a.example`");
+    assert_eq!(
+        shape("`https://a.example`"),
+        r#"doc(paragraph("https://a.example"{code}))"#
+    );
+    // A URL inside a label is that label, not a second link.
+    let source = "[https://a.example](https://b.example)";
+    assert_eq!(round(source), source);
+    assert_eq!(
+        shape(source),
+        r#"doc(paragraph("https://a.example"{link}))"#
+    );
+    assert_eq!(first_href(source), "https://b.example");
+}
+
+#[test]
+fn a_link_keeps_its_brackets_where_a_bare_url_would_not_read_back() {
+    // A bare URL has nowhere to carry a title.
+    let titled = "[https://a.example](https://a.example \"t\")";
+    assert_eq!(round(titled), titled);
+    // A host with no dot in it is no autolink, and neither is a label that
+    // only happens to equal its destination.
+    assert_eq!(
+        round("<http://localhost>"),
+        "[http://localhost](http://localhost)"
+    );
+    assert_eq!(round("[foo](foo)"), "[foo](foo)");
+    // A URL the escaper has to touch would come back with the backslash in it.
+    assert_eq!(
+        round("https://a.example/a_(b) x"),
+        "[https://a.example/a\\_(b)](https://a.example/a_(b)) x"
+    );
+    // A hard break writes a backslash a reader would pull into the URL.
+    let codec = Codec::new();
+    let schema = &codec.schema;
+    let mark = schema
+        .mark(
+            md::LINK,
+            attrs! {"href" => "https://a.example", "title" => ""},
+        )
+        .expect("a link mark");
+    let paragraph = schema
+        .node(
+            md::PARAGRAPH,
+            [
+                schema.text_marked("https://a.example", MarkSet::from_marks(schema, [mark])),
+                schema.node(md::HARD_BREAK, []).expect("a hard break"),
+                schema.text("x"),
+            ],
+        )
+        .expect("a paragraph");
+    assert_eq!(
+        codec.write(&schema.doc([paragraph]).expect("a document")),
+        "[https://a.example](https://a.example)\\\nx"
+    );
+}
+
+#[test]
+fn text_that_only_looks_like_a_url_is_kept_from_becoming_one() {
+    // The escape in the source keeps the address out of a link, and the text
+    // it leaves has to be written so that it stays out.
+    assert_eq!(
+        round("<foo\\+@bar.example.com>"),
+        "\\<foo+\\@bar.example.com>"
+    );
+    assert_eq!(
+        shape("<foo\\+@bar.example.com>"),
+        r#"doc(paragraph("<foo+@bar.example.com>"))"#
+    );
+    let codec = Codec::new();
+    // Each of the three shapes the extension reads keeps its escape.
+    for source in [
+        "http\\://example.com",
+        "www\\.example.com",
+        "foo\\@bar.example",
+    ] {
+        assert_eq!(round(source), source, "{source}");
+        assert!(!shape(source).contains("{link}"), "{source}");
+        assert!(judge(&codec, source).is_ok(), "{source}");
+    }
+    assert!(judge(&codec, "<foo\\+@bar.example.com>").is_ok());
+}
+
+#[test]
+fn every_autolink_shape_renders_the_same_and_settles() {
+    let codec = Codec::new();
+    for source in [
+        "See https://example.com now",
+        "Visit www.example.com today",
+        "Mail foo@bar.example now",
+        "See <https://example.com> ok",
+        "https://a.example/c. next",
+        "(https://a.example) next",
+        "https://a.example/a(b)c next",
+        "*https://a.example*",
+        "`https://a.example`",
+        "[https://a.example](https://b.example)",
+        "[https://a.example](https://a.example \"t\")",
+        "<http://localhost>",
+        "https://a.example/a_(b) x",
+        "# https://example.com",
+        "> https://example.com",
+        "- https://example.com",
+    ] {
+        assert!(judge(&codec, source).is_ok(), "{source}");
+        let once = round(source);
+        assert_eq!(once, round(&once), "{source} does not settle");
+    }
 }
 
 // -- the whole thing ------------------------------------------------------

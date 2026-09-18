@@ -17,11 +17,14 @@
 //! **Semantic fidelity, not byte fidelity.** A document that survives a round
 //! trip renders the same HTML; it does not come back as the same source text.
 //! Headings become ATX, code blocks become fenced, reference links become
-//! inline links; soft breaks preserve whitespace semantics around raw HTML.
+//! inline links, an autolink becomes the bare URL GFM reads back; soft breaks
+//! preserve whitespace semantics around raw HTML.
 //!
 //! **Nothing is silently lost.** Every construct either has a node type, or is
 //! kept in a `raw_block` or `raw_inline` primitive. Inline nesting that cannot
-//! fit a flat mark set is carried by an editable `inline_span` container.
+//! fit a flat mark set is carried by an editable `inline_span` container, and
+//! an HTML table whose structure the model cannot describe stays a `raw_block`
+//! holding its markup.
 //!
 //! # The three pieces
 //!
@@ -75,10 +78,24 @@
 //! * `tight` is honoured where the shape allows it. A list whose items hold
 //!   blocks that need a blank line between them is written loose, and a list
 //!   with nowhere to put a blank line — one item holding one block — always
-//!   reads back tight.
+//!   reads back tight. A table has to be the last block of its item, or the
+//!   list is written loose: the first line after a table that is not blank is
+//!   read as one more of its rows.
+//! * A table's columns are re-padded to a uniform display width, and its
+//!   delimiter row is rewritten from the `alignments` attribute. A `|` inside
+//!   a cell travels as `\|`, which is the only spelling GFM reads back.
+//! * A `hard_break` inside a table cell is written `<br>`, because a row is one
+//!   source line. It renders as the break the author made and comes back as a
+//!   `raw_inline` holding `<br>`, which writes itself again unchanged; only the
+//!   HTML flavour gives the `hard_break` node itself back.
+//! * An HTML table with a nested table, a `colspan`/`rowspan` over more than
+//!   one cell, or a `<caption>` is kept whole as a `raw_block`. One with a
+//!   `<th>` in a body row imports as an ordinary cell, because GFM has no row
+//!   header either. Block content inside a cell is flattened to inline.
 
 #![forbid(unsafe_code)]
 
+mod autolink;
 pub mod escape;
 mod extensions;
 mod fit;
@@ -91,6 +108,7 @@ mod preset;
 pub mod rules;
 pub mod schema;
 pub mod serialize;
+pub mod table;
 mod text;
 
 /// The comrak version this codec parses with, re-exported so a consumer
@@ -105,7 +123,9 @@ pub use html::{
 };
 pub use kind::{CommonMarkCodecs, commonmark_doc_type_names};
 pub use parse::{MarkdownParser, ParseError, commonmark_options};
-pub use preset::{commonmark_mark_rules, commonmark_node_rules, commonmark_serializer};
+pub use preset::{
+    commonmark_mark_rules, commonmark_node_rules, commonmark_serializer, inline_link_mark_rule,
+};
 pub use rules::{
     NodeKind, ParseCx, ParseRule, ParseRules, ParseTarget, commonmark_rules, inline_text,
 };

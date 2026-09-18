@@ -24,6 +24,10 @@
 //! Each is written only when it differs from what the reader would assume, so
 //! the common shapes stay plain.
 //!
+//! A table needs no private attribute at all: its first row is its header row,
+//! which is what `<thead>` says, and its alignments are the `align` attribute
+//! every reader already understands — written only where a column is aligned.
+//!
 //! # Known losses
 //!
 //! HTML collapses whitespace, so a run of spaces or a line ending *inside*
@@ -41,6 +45,7 @@ use std::sync::Arc;
 use markraft_core::{Mark, MarkTypeId, Node, NodeTypeId, Schema, Slice};
 
 use crate::schema as md;
+use crate::table::{Alignment, alignments_of};
 
 /// Writes one node, and whatever of its content the rule decides to visit.
 ///
@@ -363,6 +368,28 @@ pub fn commonmark_html_node_rules() -> HtmlNodeRules {
         }),
     );
     rules.insert(md::TASK_ITEM.to_string(), rule(task_item));
+    rules.insert(md::TABLE.to_string(), rule(table));
+    // A row or a cell only reaches a rule of its own when something writes one
+    // outside its table; inside one the table's rule places every tag, because
+    // a cell's tag and its `align` depend on where it sits.
+    rules.insert(
+        md::TABLE_ROW.to_string(),
+        rule(|state, node, _| {
+            state.write("<tr>");
+            for cell in node.children() {
+                state.render(cell, Some(node));
+            }
+            state.write("</tr>");
+        }),
+    );
+    rules.insert(
+        md::TABLE_CELL.to_string(),
+        rule(|state, node, _| {
+            state.write("<td>");
+            state.render_inline(node);
+            state.write("</td>");
+        }),
+    );
     rules.insert(
         md::HORIZONTAL_RULE.to_string(),
         rule(|state, _, _| state.write("<hr>")),
@@ -483,6 +510,46 @@ fn task_item(state: &mut HtmlState<'_>, node: &Node, _: Option<&Node>) {
     state.write(" disabled>");
     state.render_content(node);
     state.write("</li>");
+}
+
+/// `<table><thead><tr><th>…` — the shape every reader knows, with the header
+/// row in its `<thead>` and the alignments on the cells that have one.
+fn table(state: &mut HtmlState<'_>, node: &Node, _: Option<&Node>) {
+    let alignments = alignments_of(node);
+    let mut rows = node.children();
+    state.write("<table>\n<thead>\n");
+    if let Some(header) = rows.next() {
+        table_row(state, header, &alignments, "th");
+        state.write("\n");
+    }
+    state.write("</thead>");
+    let body: Vec<&Node> = rows.collect();
+    if !body.is_empty() {
+        state.write("\n<tbody>\n");
+        for (index, row) in body.iter().enumerate() {
+            if index > 0 {
+                state.write("\n");
+            }
+            table_row(state, row, &alignments, "td");
+        }
+        state.write("\n</tbody>");
+    }
+    state.write("\n</table>");
+}
+
+fn table_row(state: &mut HtmlState<'_>, row: &Node, alignments: &[Alignment], tag: &str) {
+    state.write("<tr>");
+    for (index, cell) in row.children().enumerate() {
+        let alignment = alignments.get(index).copied().unwrap_or_default();
+        state.write(&format!("<{tag}"));
+        if alignment != Alignment::None {
+            state.attr("align", alignment.name());
+        }
+        state.write(">");
+        state.render_inline(cell);
+        state.write(&format!("</{tag}>"));
+    }
+    state.write("</tr>");
 }
 
 fn tags(open: &'static str, close: &'static str) -> HtmlMarkRule {

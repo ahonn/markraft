@@ -33,7 +33,7 @@ use markraft_core::{Mark, MarkTypeId, Node, NodeTypeId, Schema, Slice};
 
 mod inline;
 
-use crate::escape::{escape_text, protect_indent};
+use crate::escape::{escape_text, escape_unlinked_text, protect_indent};
 
 /// Writes one node. Receives the state, the node, its parent and its index in
 /// that parent.
@@ -176,6 +176,7 @@ impl MarkdownSerializer {
             in_tight_list: false,
             line_start: true,
             single_line: false,
+            line_break: " ",
             after_mark_close: false,
             tagged: vec![false; self.marks.len()],
         };
@@ -193,6 +194,7 @@ pub struct SerializerState<'a> {
     in_tight_list: bool,
     line_start: bool,
     single_line: bool,
+    line_break: &'static str,
     after_mark_close: bool,
     tagged: Vec<bool>,
 }
@@ -240,6 +242,15 @@ impl<'a> SerializerState<'a> {
         std::mem::replace(&mut self.single_line, value)
     }
 
+    /// What a hard break writes while the one-line constraint is in force,
+    /// where a line ending cannot go.
+    ///
+    /// A space in an ATX heading, which has no other spelling for it; `<br>` in
+    /// a table cell, where GFM reads the tag back as the break the author made.
+    pub fn line_break(&self) -> &'static str {
+        self.line_break
+    }
+
     /// Whether the content being written sits in a tight list, where blocks are
     /// separated by a single newline rather than a blank line.
     pub fn in_tight_list(&self) -> bool {
@@ -247,7 +258,8 @@ impl<'a> SerializerState<'a> {
     }
 
     /// Record that the mark is currently open in its alternative spelling — an
-    /// HTML tag rather than a delimiter run — so the closing rule matches.
+    /// HTML tag rather than a delimiter run, a bare URL rather than brackets —
+    /// so the closing rule matches.
     pub fn set_tagged(&mut self, ty: MarkTypeId, tagged: bool) {
         if let Some(slot) = self.tagged.get_mut(ty.index()) {
             *slot = tagged;
@@ -393,12 +405,26 @@ impl<'a> SerializerState<'a> {
     /// written as the caller spelled it, one output line per line, each with
     /// the current prefix — which is what a code block and a raw block need.
     pub fn text(&mut self, text: &str, escape: bool) {
+        self.write_text(text, escape, false);
+    }
+
+    /// [`SerializerState::text`], escaped, for inline text that no link
+    /// encloses: a URL in it is protected from being read back as an autolink.
+    pub(crate) fn unlinked_text(&mut self, text: &str) {
+        self.write_text(text, true, true);
+    }
+
+    fn write_text(&mut self, text: &str, escape: bool, unlinked: bool) {
         self.after_mark_close = false;
         if escape {
             self.flush_close(self.flush_size());
             self.write_delim();
             let at_start = self.line_start;
-            let mut piece = escape_text(text, at_start);
+            let mut piece = if unlinked {
+                escape_unlinked_text(text, at_start)
+            } else {
+                escape_text(text, at_start)
+            };
             if at_start {
                 piece = protect_indent(&piece);
             }
@@ -478,6 +504,39 @@ impl<'a> SerializerState<'a> {
             }
             None => self.render_without_rule(node),
         }
+    }
+
+    /// Write the inline content of `node` into a string of its own, without
+    /// touching the output.
+    ///
+    /// A rule that has to measure what it writes before it writes it — a table
+    /// padding its columns — renders into a buffer with no line prefix and no
+    /// pending block separation, on one line, with `line_break` standing in for
+    /// a hard break. The buffer starts mid-line, because that is where a cell
+    /// lands: the characters that only open a block at the start of one need no
+    /// escaping there.
+    pub fn capture_inline(&mut self, node: &Node, line_break: &'static str) -> String {
+        let out = std::mem::take(&mut self.out);
+        let delim = std::mem::take(&mut self.delim);
+        let closed = self.closed.take();
+        let tight = std::mem::replace(&mut self.in_tight_list, false);
+        let line_start = std::mem::replace(&mut self.line_start, false);
+        let single_line = std::mem::replace(&mut self.single_line, true);
+        let previous_break = std::mem::replace(&mut self.line_break, line_break);
+        let after_mark_close = std::mem::replace(&mut self.after_mark_close, false);
+        let fresh = vec![false; self.tagged.len()];
+        let tagged = std::mem::replace(&mut self.tagged, fresh);
+        self.render_inline(node);
+        let captured = std::mem::replace(&mut self.out, out);
+        self.delim = delim;
+        self.closed = closed;
+        self.in_tight_list = tight;
+        self.line_start = line_start;
+        self.single_line = single_line;
+        self.line_break = previous_break;
+        self.after_mark_close = after_mark_close;
+        self.tagged = tagged;
+        captured
     }
 
     /// Write every child of `parent`.

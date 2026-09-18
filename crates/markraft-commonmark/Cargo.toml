@@ -12,6 +12,7 @@ markraft-core = { workspace = true }
 comrak = { version = "0.55.0", default-features = false }
 scraper = { version = "0.24", default-features = false }
 finl_unicode = { version = "1.4.0", default-features = false, features = ["categories"] }
+unicode-width = { version = "0.2", default-features = false }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

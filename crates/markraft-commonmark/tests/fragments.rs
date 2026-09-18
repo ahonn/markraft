@@ -35,11 +35,21 @@ fn plain_text_is_one_line_per_block_and_per_break() {
 #[test]
 fn plain_text_reads_an_atom_as_the_text_it_stands_for() {
     let codec = Codec::new();
-    let doc = codec.parse("![a diagram](x.png)\n\n| a |\n| - |");
+    let doc = codec.parse("![a diagram](x.png)\n\n<div>\nraw\n</div>");
     assert_eq!(
         to_plain_text(&codec.schema, &doc),
-        "a diagram\n| a |\n| - |"
+        "a diagram\n<div>\nraw\n</div>"
     );
+}
+
+#[test]
+fn plain_text_reads_a_table_as_tab_separated_rows() {
+    let codec = Codec::new();
+    let doc = codec.parse("| a | b |\n| - | - |\n| 1 |  |");
+    assert_eq!(to_plain_text(&codec.schema, &doc), "a\tb\n1\t");
+    // And so does a copied one, which is what a spreadsheet pastes.
+    let slice = doc.slice(0, doc.content_size()).expect("a slice");
+    assert_eq!(slice_to_plain_text(&codec.schema, &slice), "a\tb\n1\t");
 }
 
 #[test]
