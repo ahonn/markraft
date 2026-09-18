@@ -3669,6 +3669,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -3684,6 +3685,18 @@ dependencies = [
  "syntect",
  "two-face",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "markraft-markdown"
+version = "0.1.0"
+dependencies = [
+ "comrak",
+ "finl_unicode",
+ "markraft-doc",
+ "scraper",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
