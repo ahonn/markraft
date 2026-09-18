@@ -22,7 +22,7 @@ pub(crate) fn write(fragment: Document, text: String, cx: &mut App) {
 pub(crate) fn read_fragment(item: &ClipboardItem, mode: PasteMode) -> Option<Document> {
     let text = item.text();
     if matches!(mode, PasteMode::Markdown) {
-        return text.map(|text| Document::from_markdown(&text));
+        return text.map(|text| Document::from_markdown_fragment(&text));
     }
     if let Some(fragment) = item
         .metadata()
@@ -37,7 +37,7 @@ pub(crate) fn read_fragment(item: &ClipboardItem, mode: PasteMode) -> Option<Doc
             return Some(document);
         }
     }
-    text.map(|text| Document::from_markdown(&text))
+    text.map(|text| Document::from_markdown_fragment(&text))
 }
 
 #[cfg(target_os = "macos")]

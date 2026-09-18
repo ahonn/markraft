@@ -3,6 +3,8 @@
 
 mod import;
 
+use finl_unicode::categories::CharacterCategories;
+
 use crate::{Block, BlockKind, Document, Span};
 
 impl Document {
@@ -10,6 +12,12 @@ impl Document {
     /// empty paragraphs. Syntax the model cannot hold stays literal.
     pub fn from_markdown(source: &str) -> Self {
         import::document(source)
+    }
+
+    /// Import Markdown for insertion into existing text. Unlike document import, this
+    /// keeps trailing spaces and tabs in the final paragraph so pasted words stay apart.
+    pub fn from_markdown_fragment(source: &str) -> Self {
+        import::fragment(source)
     }
 
     pub fn to_markdown(&self) -> String {
@@ -143,7 +151,7 @@ fn tagged(text: &str, tag: &str, wrap: bool) -> String {
 /// mirrors that for closing. A run that touches another delimiter run merges with it, so
 /// neither may be read as emphasis. A span the rule turns down is written as inline HTML.
 fn flanks(text: &str, before: Option<char>, after: Option<char>, delimiter: char) -> bool {
-    let punctuation = |c: char| !c.is_alphanumeric() && !c.is_whitespace();
+    let punctuation = |c: char| c.is_ascii_punctuation() || c.is_punctuation() || c.is_symbol();
     let boundary = |edge: Option<char>| {
         edge.is_none_or(|c| (c.is_whitespace() || punctuation(c)) && !matches!(c, '*' | '~'))
     };
@@ -199,10 +207,26 @@ fn link_close(url: &str) -> String {
         ')' => (depth > 0).then_some(depth - 1),
         _ => Some(depth),
     }) == Some(0);
+    // The parser decodes escapes and entities in destinations. Protect their literal
+    // characters so each save/load cycle resolves to the same URL.
+    let mut escaped = String::new();
+    for (index, character) in url.char_indices() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            c if c.is_ascii_control() || (c == ' ' && (index == 0 || index + 1 == url.len())) => {
+                escaped.push_str(&format!("&#{};", u32::from(c)));
+            }
+            '\\' | '<' | '>' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            _ => escaped.push(character),
+        }
+    }
     if url.is_empty() || url.contains(char::is_whitespace) || !balanced {
-        format!("](<{url}>)")
+        format!("](<{escaped}>)")
     } else {
-        format!("]({url})")
+        format!("]({escaped})")
     }
 }
 

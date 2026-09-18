@@ -3655,6 +3655,7 @@ name = "markraft-core"
 version = "0.1.0"
 dependencies = [
  "comrak",
+ "finl_unicode",
  "scraper",
  "serde",
  "serde_json",

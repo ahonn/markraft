@@ -351,11 +351,11 @@ mod tests {
         let mut editor = Editor::new(Document::from_markdown("tail"));
         editor
             .transact(TransactionOptions::default(), |tx| {
-                tx.insert_fragment(Document::from_markdown("**bold** and "));
+                tx.insert_fragment(Document::from_markdown_fragment("**bold** "));
                 tx.set_block_kind(BlockKind::Heading(2));
             })
             .expect("an edit");
-        assert_eq!(editor.document().to_markdown(), "## **bold** andtail");
+        assert_eq!(editor.document().to_markdown(), "## **bold** tail");
         editor.undo();
         assert_eq!(editor.document().to_markdown(), "tail");
     }

@@ -2135,3 +2135,109 @@ fn canonical_markdown_survives_a_round_trip_unchanged() {
         );
     }
 }
+
+#[test]
+fn link_destinations_survive_repeated_markdown_round_trips() {
+    for url in [
+        "https://example.com/?q=&copy;",
+        "https://example.com/?q=&amp;&#32;",
+        r"https://example.com/a\(b)",
+        "https://example.com/<tag>",
+        "https://example.com/a b&copy;",
+        "https://example.com/a(b",
+        "a\nb",
+        "a\rb",
+        "a\u{1}b",
+        "a\u{7f}b",
+        "  a b  ",
+        "",
+    ] {
+        let document = Document {
+            blocks: vec![Block {
+                kind: BlockKind::Paragraph,
+                depth: 0,
+                spans: vec![Span {
+                    text: "link".into(),
+                    marks: Marks::default(),
+                    link: Some(url.into()),
+                }],
+            }],
+        };
+        let mut reloaded = document.clone();
+        for _ in 0..3 {
+            let markdown = reloaded.to_markdown();
+            reloaded = Document::from_markdown(&markdown);
+            assert_eq!(reloaded, document, "{url:?} as {markdown:?}");
+        }
+    }
+    let source = "[x](https://example.com/?q=&amp;copy;)";
+    let document = Document::from_markdown(source);
+    assert_eq!(
+        document.blocks[0].spans[0].link.as_deref(),
+        Some("https://example.com/?q=&copy;")
+    );
+    assert_eq!(Document::from_markdown(&document.to_markdown()), document);
+}
+
+#[test]
+fn formatting_next_to_unicode_marks_and_symbols_round_trips() {
+    for neighbour in ["a\u{301}", "\u{200d}", "中", "。", "©", "👩"] {
+        for text in ["!", "!word", "word!", "&"] {
+            for bits in 1..32 {
+                let formatted = Span {
+                    text: text.into(),
+                    marks: Marks {
+                        bold: bits & 1 != 0,
+                        italic: bits & 2 != 0,
+                        code: bits & 4 != 0,
+                        strikethrough: bits & 8 != 0,
+                        underline: bits & 16 != 0,
+                    },
+                    link: None,
+                };
+                let plain = Span {
+                    text: neighbour.into(),
+                    marks: Marks::default(),
+                    link: None,
+                };
+                for spans in [
+                    vec![plain.clone(), formatted.clone()],
+                    vec![formatted.clone(), plain.clone()],
+                ] {
+                    let document = Document {
+                        blocks: vec![Block {
+                            kind: BlockKind::Paragraph,
+                            depth: 0,
+                            spans,
+                        }],
+                    };
+                    let markdown = document.to_markdown();
+                    assert_eq!(
+                        Document::from_markdown(&markdown),
+                        document,
+                        "{bits}: {markdown:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn markdown_fragment_paste_keeps_word_separators_and_undoes_atomically() {
+    for (source, expected) in [
+        ("hello ", "hello tail"),
+        ("**bold** ", "bold tail"),
+        ("hello\t", "hello\ttail"),
+        (" \t", " \ttail"),
+        ("hello\n  ", "hello\n  tail"),
+    ] {
+        let mut editor = Editor::new(Document::from_markdown("tail"));
+        editor.insert_fragment(Document::from_markdown_fragment(source));
+        assert_eq!(editor.document().plain_text(), expected, "{source:?}");
+        editor.undo();
+        assert_eq!(editor.document().plain_text(), "tail");
+        editor.redo();
+        assert_eq!(editor.document().plain_text(), expected);
+    }
+}

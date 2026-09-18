@@ -9,6 +9,14 @@ use comrak::{Arena, Options, parse_document};
 use crate::{Block, BlockKind, Document, Mark, Marks, Span, push_linked_span, push_span};
 
 pub(super) fn document(source: &str) -> Document {
+    import(source, false)
+}
+
+pub(super) fn fragment(source: &str) -> Document {
+    import(source, true)
+}
+
+fn import(source: &str, preserve_trailing_space: bool) -> Document {
     let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
     let arena = Arena::new();
     let root = parse_document(&arena, &normalized, &options());
@@ -18,6 +26,7 @@ pub(super) fn document(source: &str) -> Document {
         lines,
         blocks: Vec::new(),
         next_line: 1,
+        preserve_trailing_space,
     };
     import.children(root, &Context::root(), end);
     let mut document = Document {
@@ -43,6 +52,7 @@ struct Import<'s> {
     blocks: Vec<Block>,
     /// The first source line, counting from one, that no block covers yet.
     next_line: usize,
+    preserve_trailing_space: bool,
 }
 
 /// What the containers around a leaf make of it. The model carries a single `depth`, so a
@@ -198,14 +208,21 @@ impl<'s> Import<'s> {
         let content = node
             .first_child()
             .map(|child| child.data.borrow().sourcepos.start.line);
-        // An item whose content starts below its marker opens with an empty line.
+        // Reference definitions are absent from the AST. Preserve any source on the
+        // marker line before consuming it, even when no child covers that line.
         if content != Some(sourcepos.start.line) {
             let (kind, depth) = inner.block();
-            self.blocks.push(Block {
-                kind,
-                depth,
-                spans: Vec::new(),
-            });
+            let text = slice(
+                self.line(sourcepos.start.line),
+                inner.literal_from.unwrap_or(sourcepos.start.column),
+                usize::MAX,
+            );
+            let text = if inner.literal_from.is_some() {
+                text
+            } else {
+                item_text(text, matches!(kind, BlockKind::Task { .. }))
+            };
+            self.plain(kind, depth, text);
             self.consume(sourcepos.start.line);
         }
         self.children(node, &inner, sourcepos.end.line);
@@ -223,6 +240,17 @@ impl<'s> Import<'s> {
         if context.literal_from.is_some() && own_kind.is_some() {
             return self.literal_source(sourcepos, context);
         }
+        // Comrak removes a leading reference definition from a paragraph without
+        // updating its inline source positions. Preserve that paragraph as source rather
+        // than attach its remaining inlines to the definition's line and discard text.
+        let first_line = slice(
+            self.line(sourcepos.start.line),
+            sourcepos.start.column,
+            usize::MAX,
+        );
+        if own_kind.is_none() && is_reference_definition(first_line) {
+            return self.literal_paragraph(sourcepos, context);
+        }
         let mut segments = inlines(&self.lines, node);
         // A paragraph at the top level keeps the indentation of each of its lines: the
         // model has nowhere else to put it and the editor lets the user type it. Inside a
@@ -235,7 +263,9 @@ impl<'s> Import<'s> {
                 // The markers of the containers the model cannot nest stay as text.
                 Some(column) if offset == 0 => slice(text, column, sourcepos.start.column),
                 Some(_) => "",
-                None if indented => &text[..text.len() - text.trim_start().len()],
+                None if indented => {
+                    &text[..text.len() - text.trim_start_matches([' ', '\t']).len()]
+                }
                 None => "",
             };
             if !prefix.is_empty() {
@@ -243,6 +273,18 @@ impl<'s> Import<'s> {
                 push_span(&mut prefixed, prefix, Marks::default());
                 prefixed.append(spans);
                 *spans = prefixed;
+            }
+        }
+        // Pasted text must keep a final separator before existing text. Only paragraph
+        // content loses these spaces: heading markers and fence padding are syntax.
+        if self.preserve_trailing_space
+            && own_kind.is_none()
+            && sourcepos.end.line == self.lines.len()
+        {
+            let text = self.line(sourcepos.end.line);
+            let trailing = &text[text.trim_end_matches([' ', '\t']).len()..];
+            if let Some(spans) = segments.last_mut() {
+                push_span(spans, trailing, Marks::default());
             }
         }
         for (offset, spans) in segments.into_iter().enumerate() {
@@ -350,6 +392,37 @@ impl<'s> Import<'s> {
         self.consume(sourcepos.end.line);
     }
 
+    /// A paragraph may have lazy continuation lines without its opening indentation or
+    /// container markers. Remove only prefixes actually present on each source line.
+    fn literal_paragraph(&mut self, sourcepos: Sourcepos, context: &Context) {
+        let from = context.literal_from.unwrap_or(sourcepos.start.column);
+        for line in sourcepos.start.line..=sourcepos.end.line {
+            let source = self.line(line);
+            let first = line == sourcepos.start.line;
+            let (kind, depth) = if first {
+                context.block()
+            } else {
+                self.continuation(line, context, sourcepos.start.column)
+            };
+            let text = match context.family {
+                Family::Root => source,
+                _ if first => slice(source, from, usize::MAX),
+                Family::Quote => &source[quote_markers(source).1..],
+                Family::List if kind != BlockKind::Paragraph => {
+                    let padding = source
+                        .bytes()
+                        .take(from.saturating_sub(1))
+                        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                        .count();
+                    &source[padding..]
+                }
+                Family::List => source,
+            };
+            self.plain(kind, depth, text);
+        }
+        self.consume(sourcepos.end.line);
+    }
+
     /// Lines no node covers: blank ones, which stay as empty blocks, and whatever the
     /// parser drops, such as a link reference definition, which stays literal.
     fn fill(&mut self, up_to: usize, context: &Context) {
@@ -366,7 +439,17 @@ impl<'s> Import<'s> {
                 },
                 _ => (BlockKind::Paragraph, 0, source.trim_start()),
             };
-            let text = if text.trim().is_empty() { "" } else { text };
+            let text = if self.preserve_trailing_space
+                && self.next_line == self.lines.len()
+                && context.family == Family::Root
+                && source.bytes().all(|byte| matches!(byte, b' ' | b'\t'))
+            {
+                source
+            } else if text.trim().is_empty() {
+                ""
+            } else {
+                text
+            };
             self.plain(kind, depth, text);
             self.next_line += 1;
         }
@@ -387,6 +470,37 @@ fn list_kind(list_type: ListType) -> BlockKind {
     match list_type {
         ListType::Ordered => BlockKind::Ordered,
         _ => BlockKind::Bullet,
+    }
+}
+
+fn is_reference_definition(line: &str) -> bool {
+    if !line.starts_with('[') {
+        return false;
+    }
+    let arena = Arena::new();
+    parse_document(&arena, line, &options())
+        .first_child()
+        .is_none()
+}
+
+/// The content after the marker of an already parsed list item.
+fn item_text(text: &str, task: bool) -> &str {
+    let marker_end = if text.starts_with(['-', '*', '+']) {
+        1
+    } else {
+        text.bytes().take_while(u8::is_ascii_digit).count() + 1
+    };
+    let content = text
+        .get(marker_end..)
+        .unwrap_or("")
+        .trim_start_matches([' ', '\t']);
+    if task {
+        content
+            .get(3..)
+            .unwrap_or("")
+            .trim_start_matches([' ', '\t'])
+    } else {
+        content
     }
 }
 
@@ -535,7 +649,14 @@ fn mark_tags<'a>(node: &'a AstNode<'a>) -> Vec<Tag> {
                     None => Tag::Literal,
                 });
             }
-            collect(child, tags);
+            // Match `Inlines::walk`: opaque nodes such as images keep their source and
+            // never visit their descendants, including HTML inside an image label.
+            if matches!(
+                child.data.borrow().value,
+                NodeValue::Emph | NodeValue::Strong | NodeValue::Strikethrough | NodeValue::Link(_)
+            ) {
+                collect(child, tags);
+            }
         }
     }
     let mut tags = Vec::new();
@@ -601,7 +722,9 @@ impl Inlines<'_> {
                     },
                     link,
                 ),
-                NodeValue::Link(target) => self.walk(child, marks, Some(&target.url)),
+                NodeValue::Link(target) if child.first_child().is_some() => {
+                    self.walk(child, marks, Some(&target.url));
+                }
                 // A hard break is a line of its own here, like a soft one.
                 NodeValue::SoftBreak | NodeValue::LineBreak => self.segments.push(Vec::new()),
                 NodeValue::HtmlInline(html) => {
@@ -636,6 +759,156 @@ impl Inlines<'_> {
             }
             let spans = self.segments.last_mut().expect("a segment is always open");
             push_linked_span(spans, part, marks, link);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leading_unicode_whitespace_is_not_duplicated() {
+        for source in [
+            "\u{3000}你好",
+            "\u{a0}hello",
+            "  \u{3000}你好",
+            "first\n\u{3000}second",
+        ] {
+            let imported = document(source);
+            assert_eq!(imported.plain_text(), source);
+            let mut reloaded = imported.clone();
+            for _ in 0..3 {
+                reloaded = document(&reloaded.to_markdown());
+                assert_eq!(reloaded, imported);
+            }
+        }
+    }
+
+    #[test]
+    fn reference_definitions_on_item_marker_lines_stay_literal() {
+        for source in [
+            "- [ref]: https://example.com",
+            "1. [ref]: https://example.com",
+            "- [ref]: https://example.com\n  text",
+            "- parent\n  - [ref]: https://example.com",
+        ] {
+            let imported = document(source);
+            let definition = imported
+                .blocks
+                .iter()
+                .find(|block| block.text().starts_with("[ref]:"))
+                .unwrap_or_else(|| {
+                    panic!("the reference definition must survive import: {source:?}: {imported:?}")
+                });
+            assert_eq!(definition.text(), "[ref]: https://example.com");
+            assert!(matches!(
+                definition.kind,
+                BlockKind::Bullet | BlockKind::Ordered
+            ));
+            assert_eq!(document(&imported.to_markdown()), imported);
+        }
+    }
+
+    #[test]
+    fn reference_definition_fallback_keeps_lazy_continuation_text() {
+        for (source, expected, last_kind) in [
+            (
+                "- [ref]: url\ntext",
+                "[ref]: url\ntext",
+                BlockKind::Paragraph,
+            ),
+            (
+                "  [ref]: url\ntext",
+                "  [ref]: url\ntext",
+                BlockKind::Paragraph,
+            ),
+            (
+                "- [ref]: url\n  text",
+                "[ref]: url\ntext",
+                BlockKind::Bullet,
+            ),
+            (
+                "> [ref]: url\ntext",
+                "[ref]: url\ntext",
+                BlockKind::Paragraph,
+            ),
+            ("> [ref]: url\n> text", "[ref]: url\ntext", BlockKind::Quote),
+            ("- [ref]: url\n你", "[ref]: url\n你", BlockKind::Paragraph),
+            ("- [ref]: url\n x", "[ref]: url\n x", BlockKind::Paragraph),
+        ] {
+            let imported = document(source);
+            assert_eq!(imported.plain_text(), expected, "{source:?}");
+            assert_eq!(
+                imported.blocks.last().unwrap().kind,
+                last_kind,
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn html_tags_inside_opaque_images_do_not_change_following_marks() {
+        for source in [
+            "![<u>x</u>](url) <strong>z</strong>",
+            "*![<u>x</u>](url)* <strong>z</strong>",
+            "![<u>x](url) <strong>z</strong>",
+        ] {
+            let imported = document(source);
+            let span = imported.blocks[0]
+                .spans
+                .iter()
+                .find(|span| span.text == "z")
+                .unwrap();
+            assert!(span.marks.bold);
+            assert!(!span.marks.underline);
+            assert!(!span.marks.italic);
+            assert_eq!(document(&imported.to_markdown()), imported);
+        }
+    }
+
+    #[test]
+    fn empty_links_stay_literal() {
+        for source in [
+            "before [](https://example.com) after",
+            "before []() after",
+            "[](https://example.com \"title\")",
+        ] {
+            let imported = document(source);
+            assert_eq!(imported.plain_text(), source);
+            assert_eq!(document(&imported.to_markdown()), imported);
+        }
+    }
+
+    #[test]
+    fn fragments_keep_trailing_paragraph_whitespace() {
+        for (source, expected) in [
+            ("hello ", "hello "),
+            ("**hello** \t", "hello \t"),
+            ("hello\n \t", "hello\n \t"),
+            (" \t", " \t"),
+            ("- hello ", "hello "),
+            ("> hello ", "hello "),
+        ] {
+            assert_eq!(fragment(source).plain_text(), expected, "{source:?}");
+        }
+        assert_eq!(document("hello ").plain_text(), "hello");
+    }
+
+    #[test]
+    fn fragments_do_not_duplicate_literal_whitespace_or_marker_padding() {
+        for source in [
+            "# heading #   ",
+            "#   ",
+            "-   ",
+            "- [ ]   ",
+            "```\ncode  \n```   ",
+            "    code  ",
+            "<div>literal  ",
+            "<!-- literal -->  ",
+            "[ref]: https://example.com  ",
+        ] {
+            assert_eq!(fragment(source), document(source), "{source:?}");
         }
     }
 }
