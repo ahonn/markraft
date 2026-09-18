@@ -18,12 +18,24 @@ pub struct EditorStyle {
     pub muted_text: Hsla,
     pub marker: Hsla,
     pub link: Hsla,
+    /// The selection fill, painted under the text: the first while the editor
+    /// holds focus, the second while it does not. Both are translucent, so the
+    /// text has to stay readable over what they composite to.
+    pub selection: Hsla,
+    pub selection_inactive: Hsla,
     pub code_background: Hsla,
     /// Inline code is a pill: its own, slightly stronger fill and quieter text.
     pub inline_code_background: Hsla,
     pub inline_code_text: Hsla,
     pub code_radius: Pixels,
-    /// Quote bars and horizontal rules.
+    /// The fill behind a table's header row, which is its first row.
+    ///
+    /// A band rather than a tint of the text: the grid lines are drawn in
+    /// [`EditorStyle::rule`] over it, so a light theme keeps the band close to
+    /// the background and a dark one darkens it, which is the direction that
+    /// keeps a 3:1 line against both.
+    pub table_header_background: Hsla,
+    /// Quote bars, horizontal rules and table grid lines.
     pub rule: Hsla,
     pub quote_indent: Pixels,
     pub draw_markers: bool,
@@ -53,13 +65,16 @@ impl Default for EditorStyle {
             list_indent: px(28.),
             background: rgb(0xfcfbf8).into(),
             text: rgb(0x24282e).into(),
-            muted_text: rgb(0x24282e).into(),
+            muted_text: rgb(0x6a6c64).into(),
             marker: rgb(0x74766e).into(),
             link: rgb(0x2a6fdb).into(),
+            selection: rgba(0xb9d5efb0).into(),
+            selection_inactive: rgba(0xd4d9de90).into(),
             code_background: rgb(0xedece7).into(),
             inline_code_background: rgb(0xedece7).into(),
             inline_code_text: rgb(0x24282e).into(),
             code_radius: px(0.),
+            table_header_background: rgb(0xf4f2ec).into(),
             rule: rgb(0xd9d7d0).into(),
             quote_indent: px(18.),
             draw_markers: false,
@@ -79,23 +94,28 @@ impl EditorStyle {
         Self {
             padding: px(24.),
             body_size: px(14.),
-            heading_sizes: [px(22.), px(18.), px(16.)],
+            heading_sizes: [px(24.), px(19.), px(16.)],
             line_height_ratio: 1.5,
             paragraph_gap: px(7.),
             list_gap: px(7.),
-            heading_top_gaps: [px(19.), px(8.), px(7.)],
+            // A heading belongs to the text under it, so the space above it has
+            // to beat the gap below it at every level.
+            heading_top_gaps: [px(18.), px(14.), px(10.)],
             heading_bottom_gap: px(6.),
             list_indent: px(22.),
             background: rgb(0xefefef).into(),
             text: rgb(0x1c1d21).into(),
-            muted_text: rgb(0x92959b).into(),
-            marker: rgb(0x2f7cf6).into(),
-            link: rgb(0x2f7cf6).into(),
+            muted_text: rgb(0x686b71).into(),
+            marker: rgb(0x1f63d6).into(),
+            link: rgb(0x1f63d6).into(),
+            selection: rgba(0xb9d5efb0).into(),
+            selection_inactive: rgba(0xd4d9de90).into(),
             code_background: rgb(0xe3e3e4).into(),
             inline_code_background: rgb(0xdbdbdd).into(),
             inline_code_text: rgb(0x55575c).into(),
             code_radius: px(6.),
-            rule: rgb(0xc4c5c9).into(),
+            table_header_background: rgb(0xe6e6e7).into(),
+            rule: rgb(0x86888d).into(),
             quote_indent: px(12.),
             draw_markers: true,
             top_overlay: px(0.),
@@ -115,10 +135,13 @@ impl EditorStyle {
             muted_text: rgb(0x93979e).into(),
             marker: rgb(0x4c9bff).into(),
             link: rgb(0x4c9bff).into(),
+            selection: rgba(0x3a6fb08c).into(),
+            selection_inactive: rgba(0x5a5e6690).into(),
             code_background: rgb(0x34363b).into(),
             inline_code_background: rgb(0x3c3e44).into(),
             inline_code_text: rgb(0xb9bcc2).into(),
-            rule: rgb(0x46484e).into(),
+            table_header_background: rgb(0x1d1e21).into(),
+            rule: rgb(0x6e717a).into(),
             scrollbar: rgba(0xffffff4d).into(),
             popup_background: rgb(0x2e2f33).into(),
             popup_border: rgb(0x383a40).into(),
@@ -142,5 +165,156 @@ impl EditorStyle {
     /// The space above a heading of `level`, except at the top of the document.
     pub(crate) fn heading_top_gap(&self, level: u8) -> Pixels {
         self.heading_top_gaps[usize::from(level).clamp(1, 3) - 1]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EditorStyle;
+    use gpui::{Hsla, Rgba};
+
+    /// WCAG relative luminance of an opaque colour.
+    fn luminance(color: Hsla) -> f32 {
+        let channel = |c: f32| {
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let rgb: Rgba = color.into();
+        0.2126 * channel(rgb.r) + 0.7152 * channel(rgb.g) + 0.0722 * channel(rgb.b)
+    }
+
+    /// WCAG contrast ratio between two opaque colours.
+    fn contrast(a: Hsla, b: Hsla) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// What a translucent fill composites to over an opaque background, which is
+    /// what the text drawn on top of it actually contrasts against.
+    fn over(fill: Hsla, background: Hsla) -> Hsla {
+        let (fill, background): (Rgba, Rgba) = (fill.into(), background.into());
+        let blend = |f: f32, b: f32| f * fill.a + b * (1. - fill.a);
+        Rgba {
+            r: blend(fill.r, background.r),
+            g: blend(fill.g, background.g),
+            b: blend(fill.b, background.b),
+            a: 1.,
+        }
+        .into()
+    }
+
+    fn assert_at_least(ratio: f32, floor: f32, what: &str) {
+        assert!(ratio >= floor, "{what} is {ratio:.2}:1, below {floor}:1");
+    }
+
+    /// Every pairing a note draws text or a line in, so a palette edit cannot
+    /// quietly drop one below its floor.
+    fn assert_readable(style: &EditorStyle, theme: &str) {
+        let body = style.text;
+        for (what, color, background, floor) in [
+            ("text", body, style.background, 4.5),
+            ("muted text", style.muted_text, style.background, 4.5),
+            ("marker", style.marker, style.background, 4.5),
+            ("link", style.link, style.background, 4.5),
+            ("code text", body, style.code_background, 4.5),
+            (
+                "inline code text",
+                style.inline_code_text,
+                style.inline_code_background,
+                4.5,
+            ),
+            (
+                "table header text",
+                body,
+                style.table_header_background,
+                4.5,
+            ),
+            // A rule is a graphic, not text, so it answers to the 3:1 floor.
+            ("rule", style.rule, style.background, 3.0),
+            (
+                "text on the selection",
+                body,
+                over(style.selection, style.background),
+                4.5,
+            ),
+            (
+                "text on the inactive selection",
+                body,
+                over(style.selection_inactive, style.background),
+                4.5,
+            ),
+        ] {
+            assert_at_least(
+                contrast(color, background),
+                floor,
+                &format!("{theme}: {what}"),
+            );
+        }
+    }
+
+    #[test]
+    fn the_light_note_palette_is_readable() {
+        assert_readable(&EditorStyle::notes(), "notes");
+    }
+
+    #[test]
+    fn the_dark_note_palette_is_readable() {
+        assert_readable(&EditorStyle::notes_dark(), "notes_dark");
+    }
+
+    /// A heading used to sit closer to the paragraph above it than to its own
+    /// body, which read as if it belonged to the wrong block.
+    /// A table's grid is drawn in `rule`, over the background and over the
+    /// header band alike, so the band may not cost the lines their 3:1 floor.
+    /// Dark is the theme where a lighter band would: its `rule` sits only just
+    /// above the floor against the background, so the band goes the other way.
+    #[test]
+    fn table_grid_lines_stay_legible_over_the_header_band() {
+        let style = EditorStyle::notes_dark();
+        assert_at_least(
+            contrast(style.rule, style.background),
+            3.0,
+            "notes_dark: grid lines on the background",
+        );
+        assert_at_least(
+            contrast(style.rule, style.table_header_background),
+            3.0,
+            "notes_dark: grid lines on the header band",
+        );
+        assert_ne!(
+            style.table_header_background, style.background,
+            "the header band has to be visible as a band"
+        );
+    }
+
+    #[test]
+    fn a_note_heading_is_bound_to_the_text_under_it() {
+        for style in [EditorStyle::notes(), EditorStyle::notes_dark()] {
+            for level in 1..=3u8 {
+                assert!(
+                    style.heading_top_gap(level) > style.heading_bottom_gap,
+                    "h{level} is not bound to its body"
+                );
+            }
+            assert!(style.heading_sizes[0] > style.heading_sizes[1]);
+            assert!(style.heading_sizes[1] > style.heading_sizes[2]);
+            assert!(style.heading_sizes[2] > style.body_size);
+        }
+    }
+
+    /// The default preset's muted text once matched its body text, which left
+    /// placeholders and list markers indistinguishable from content.
+    #[test]
+    fn the_default_palette_has_readable_muted_text() {
+        let style = EditorStyle::default();
+        assert_ne!(style.muted_text, style.text);
+        assert_at_least(
+            contrast(style.muted_text, style.background),
+            4.5,
+            "default: muted text",
+        );
     }
 }

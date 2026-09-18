@@ -86,6 +86,38 @@ pub fn code_languages() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
+/// The menu label a code block's `language` attribute is drawn as. A fence
+/// alias reads as the language it names; anything the table does not list is
+/// shown exactly as the document spells it.
+pub fn language_label(language: &str) -> &str {
+    let canonical = canonical_language(language);
+    code_languages()
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(canonical))
+        .map_or(language, |(_, label)| *label)
+}
+
+/// The [`code_languages`] entry a fence alias names, or the alias unchanged.
+fn canonical_language(language: &str) -> &str {
+    let lower = language.to_ascii_lowercase();
+    match lower.as_str() {
+        "text" | "txt" | "plaintext" | "plain" => "",
+        "rs" => "rust",
+        "js" | "mjs" | "cjs" | "node" | "nodejs" => "javascript",
+        "ts" => "typescript",
+        "py" => "python",
+        "rb" => "ruby",
+        "golang" => "go",
+        "kt" | "kts" => "kotlin",
+        "c++" | "cxx" | "hpp" => "cpp",
+        "c#" | "csharp" => "cs",
+        "sh" | "shell" | "zsh" => "bash",
+        "yml" => "yaml",
+        "md" => "markdown",
+        _ => language,
+    }
+}
+
 pub(crate) type HighlightedLines = Vec<Vec<(usize, Style)>>;
 
 struct CacheEntry {
@@ -179,6 +211,28 @@ mod tests {
                 "Plain Text",
                 "missing grammar for {label}"
             );
+        }
+    }
+
+    /// A fence carries whatever the author typed. The chip reads as the
+    /// language, not as the abbreviation, and never hides an unknown one.
+    #[test]
+    fn a_fence_alias_reads_as_the_language_it_names() {
+        for (attr, label) in [
+            ("", "Plain Text"),
+            ("js", "JavaScript"),
+            ("JS", "JavaScript"),
+            ("ts", "TypeScript"),
+            ("py", "Python"),
+            ("rs", "Rust"),
+            ("zsh", "Shell"),
+            ("yml", "YAML"),
+            ("md", "Markdown"),
+            ("txt", "Plain Text"),
+            ("rust", "Rust"),
+            ("wgsl", "wgsl"),
+        ] {
+            assert_eq!(language_label(attr), label, "for {attr:?}");
         }
     }
 

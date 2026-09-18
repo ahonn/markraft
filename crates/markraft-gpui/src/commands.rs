@@ -25,13 +25,13 @@ pub fn backspace(types: &DocTypes) -> Command {
 }
 
 /// Forward delete.
-pub fn delete_forward() -> Command {
-    keymap::delete_forward()
+pub fn delete_forward(types: &DocTypes) -> Command {
+    keymap::delete_forward(types)
 }
 
 /// Delete one word in `dir`, or the selection.
-pub fn delete_word(dir: Direction) -> Command {
-    keymap::delete_word(dir)
+pub fn delete_word(types: &DocTypes, dir: Direction) -> Command {
+    keymap::delete_word(types, dir)
 }
 
 /// Tab: sink a list item, or indent inside a code block.

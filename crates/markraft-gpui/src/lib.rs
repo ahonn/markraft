@@ -27,6 +27,7 @@ pub use extension::{
     ActionHandler, CaretShape, EXTENSION_ORIGIN_PREFIX, EditorCx, Extension, ExtensionHandle,
     ExtensionPayload, InputPolicy, Overlay, Update,
 };
+pub use markraft_core::commands::ColumnAlignment;
 pub use style::EditorStyle;
 pub use syntax::code_languages;
 pub use typeahead::{Typeahead, TypeaheadItem, TypeaheadProvider};
@@ -45,6 +46,9 @@ use surface::{EditorSurface, LayoutLine, ShapeInput};
 
 /// How long a pause splits one typing session from the next, in milliseconds.
 const TYPING_GROUP_DELAY: u64 = 750;
+
+/// What an editor calls itself until its host gives it a name of its own.
+const DEFAULT_ARIA_LABEL: &str = "Text editor";
 
 // All bindings are scoped so embedding hosts retain their own shortcuts.
 actions!(
@@ -200,6 +204,27 @@ pub enum EditorEvent {
     },
 }
 
+/// The table the caret sits in, as a host's table controls need it.
+///
+/// Every field is geometry or position from the frame the editor last painted,
+/// so this is only meaningful after a paint — as
+/// [`EditorView::code_header_bounds`] is.
+#[derive(Clone, Copy, Debug)]
+pub struct TableInfo {
+    /// Window bounds of the whole grid, for anchoring a toolbar to the table.
+    pub bounds: Bounds<Pixels>,
+    /// Window bounds of the cell the caret is in, for anchoring to the column.
+    pub cell_bounds: Bounds<Pixels>,
+    /// The caret's row. Row 0 is the header row.
+    pub row: usize,
+    /// The caret's column.
+    pub column: usize,
+    pub rows: usize,
+    pub columns: usize,
+    /// The alignment of the caret's own column.
+    pub alignment: ColumnAlignment,
+}
+
 /// How to build an [`EditorView`]: the host's document kind and its extensions.
 ///
 /// The view is schema-agnostic. Everything that names a concrete document kind
@@ -264,6 +289,9 @@ pub struct EditorView {
     pub(crate) extension_selection: Selection,
     pub(crate) style: EditorStyle,
     pub(crate) placeholder: SharedString,
+    /// What the editor calls itself to assistive technology. A host that lends one
+    /// editor to several surfaces renames it as it hands it over.
+    pub(crate) aria_label: SharedString,
     pub(crate) single_line: bool,
     pub(crate) single_line_scroll_x: Pixels,
     pub(crate) focus: FocusHandle,
@@ -342,6 +370,7 @@ impl EditorView {
             extensions: Vec::new(),
             style: EditorStyle::default(),
             placeholder: SharedString::default(),
+            aria_label: DEFAULT_ARIA_LABEL.into(),
             single_line: false,
             single_line_scroll_x: px(0.),
             focus: cx.focus_handle(),
@@ -382,6 +411,15 @@ impl EditorView {
     pub fn with_placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
         self
+    }
+    /// Name this editor for assistive technology, in place of the generic default.
+    pub fn with_aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = label.into();
+        self
+    }
+    pub fn set_aria_label(&mut self, label: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.aria_label = label.into();
+        cx.notify();
     }
     pub fn set_placeholder(
         &mut self,
@@ -688,6 +726,103 @@ impl EditorView {
         }
     }
 
+    /// Where the caret's table is, or `None` outside one. Valid after a paint.
+    pub fn table_at_caret(&self) -> Option<TableInfo> {
+        let head = self.head();
+        let line = self.layout.iter().find(|line| line.contains(head))?;
+        let cell = line.table?;
+        let bounds = self
+            .layout
+            .iter()
+            .filter(|line| line.table.is_some_and(|other| other.table == cell.table))
+            .filter_map(LayoutLine::cell_bounds)
+            .reduce(|all, bounds| all.union(&bounds))?;
+        Some(TableInfo {
+            bounds,
+            cell_bounds: line.cell_bounds()?,
+            row: cell.row,
+            column: cell.column,
+            rows: cell.rows,
+            columns: cell.columns,
+            alignment: cell.alignment,
+        })
+    }
+
+    /// Run one of the catalogue's table commands.
+    ///
+    /// `false` where the schema declares no table types, and where the command
+    /// does not apply — which, for all but [`EditorView::insert_table`], means
+    /// the caret is not in a table.
+    fn table_command(
+        &mut self,
+        build: impl FnOnce(markraft_core::commands::TableTypes) -> Command,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.single_line {
+            return false;
+        }
+        let Some(types) = self.types.table_types() else {
+            return false;
+        };
+        self.run_command(&build(types), cx)
+    }
+
+    /// Insert a `rows` by `columns` table of empty cells, caret in the first.
+    pub fn insert_table(&mut self, rows: usize, columns: usize, cx: &mut Context<Self>) -> bool {
+        self.table_command(
+            |types| markraft_core::commands::insert_table(types, rows, columns),
+            cx,
+        )
+    }
+
+    /// Insert an empty row above the caret's row. A row inserted above the
+    /// header becomes the new header.
+    pub fn table_add_row_before(&mut self, cx: &mut Context<Self>) -> bool {
+        self.table_command(markraft_core::commands::add_row_before, cx)
+    }
+
+    /// Insert an empty row below the caret's row.
+    pub fn table_add_row_after(&mut self, cx: &mut Context<Self>) -> bool {
+        self.table_command(markraft_core::commands::add_row_after, cx)
+    }
+
+    /// Insert an empty column to the left of the caret's column.
+    pub fn table_add_column_before(&mut self, cx: &mut Context<Self>) -> bool {
+        self.table_command(markraft_core::commands::add_column_before, cx)
+    }
+
+    /// Insert an empty column to the right of the caret's column.
+    pub fn table_add_column_after(&mut self, cx: &mut Context<Self>) -> bool {
+        self.table_command(markraft_core::commands::add_column_after, cx)
+    }
+
+    /// Delete the caret's row, or the table when it is the only one.
+    pub fn table_delete_row(&mut self, cx: &mut Context<Self>) -> bool {
+        self.table_command(markraft_core::commands::delete_row, cx)
+    }
+
+    /// Delete the caret's column, or the table when it is the only one.
+    pub fn table_delete_column(&mut self, cx: &mut Context<Self>) -> bool {
+        self.table_command(markraft_core::commands::delete_column, cx)
+    }
+
+    /// Delete the whole table the caret is in.
+    pub fn table_delete_table(&mut self, cx: &mut Context<Self>) -> bool {
+        self.table_command(markraft_core::commands::delete_table, cx)
+    }
+
+    /// Set the alignment of the caret's column.
+    pub fn table_set_alignment(
+        &mut self,
+        alignment: ColumnAlignment,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.table_command(
+            move |types| markraft_core::commands::set_column_alignment(types, alignment),
+            cx,
+        )
+    }
+
     /// Window bounds of the first line of the selection, or of the link touching the
     /// caret, for anchoring host popovers. Valid after the editor has painted.
     pub fn anchor_bounds(&self) -> Option<Bounds<Pixels>> {
@@ -783,7 +918,7 @@ impl EditorView {
             self.caret_focused,
             self.is_composing(),
             self.state.selection().is_empty(doc),
-            self.extension_caret() != CaretShape::Bar,
+            self.extension_caret() != CaretShape::Bar || cx.reduce_motion(),
         ) {
             return;
         }
@@ -843,6 +978,13 @@ impl EditorView {
             .iter()
             .find(|row| point.y < row.origin.y + row.height)
             .unwrap_or(&self.layout[0]);
+        // A grid's cells share one band of y, and only the last of a row
+        // carries the row's height, so the search above lands on that one
+        // whatever column the point was in. The grid picks the column.
+        let row = match row.table.map(|cell| cell.table) {
+            Some(table) => surface::cell_under(&self.layout, table, point).unwrap_or(row),
+            None => row,
+        };
         let local = gpui::point(point.x - row.origin.x, point.y - row.origin.y);
         row.hit_position(row.char_at(local), &self.projection)
     }
@@ -864,15 +1006,18 @@ impl EditorView {
         (pos, upstream)
     }
 
-    /// Every visual row's vertical centre, across the whole laid-out document.
+    /// Every visual row's vertical centre, across the whole laid-out document,
+    /// each one listed once however many lines sit on it.
     fn visual_row_centers(&self) -> Vec<Pixels> {
-        self.layout
-            .iter()
-            .flat_map(|row| {
-                (0..row.visual_rows())
-                    .map(move |i| row.origin.y + row.line_height * (i as f32 + 0.5))
-            })
-            .collect()
+        surface::merge_row_centers(
+            self.layout
+                .iter()
+                .flat_map(|row| {
+                    (0..row.visual_rows())
+                        .map(move |i| row.origin.y + row.line_height * (i as f32 + 0.5))
+                })
+                .collect(),
+        )
     }
 
     /// The caret `delta` visual rows away and the column to keep there. `None` before the
@@ -1132,7 +1277,7 @@ impl Render for EditorView {
             } else {
                 Role::MultilineTextInput
             })
-            .aria_label("Text editor")
+            .aria_label(self.aria_label.clone())
             .aria_placeholder(self.placeholder.clone())
             .a11y_synthetic_children(move |builder| accessible_text.borrow_mut().write(builder))
             .size_full()
@@ -1188,27 +1333,36 @@ impl Render for EditorView {
         // scroll with the content. It is an indicator only and takes no pointer input.
         let active = self.scrollbar_active;
         let color = self.style.scrollbar;
+        // Reduced motion keeps the fade's two end states and drops the travel
+        // between them.
+        let reduce_motion = cx.reduce_motion();
         let editor = cx.entity();
         div()
             .size_full()
             .relative()
             .child(root)
             .when_some(self.scrollbar_thumb(), |this, (top, height)| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top(top)
-                        .right(px(3.))
-                        .w(px(6.))
-                        .h(height)
-                        .rounded_full()
-                        .bg(color)
+                let thumb = div()
+                    .absolute()
+                    .top(top)
+                    .right(px(3.))
+                    .w(px(6.))
+                    .h(height)
+                    .rounded_full()
+                    .bg(color);
+                this.child(if reduce_motion {
+                    thumb
+                        .opacity(if active { 1. } else { 0. })
+                        .into_any_element()
+                } else {
+                    thumb
                         .with_spring(
                             "scrollbar-fade",
                             SpringAnimation::new(SpringConfig::new(500., 45., 1.)).to(active),
                             |s, phase| s.opacity(phase.interpolate_clamped(0., 1.)),
-                        ),
-                )
+                        )
+                        .into_any_element()
+                })
             })
             // Deferred so it draws over the note and is positioned after the surface has
             // published this frame's rows.
@@ -1255,7 +1409,7 @@ impl EditorView {
             };
         }
         run!(Backspace, keymap::backspace);
-        run!(Delete, |_: &DocTypes| keymap::delete_forward());
+        run!(Delete, keymap::delete_forward);
         root = root.on_action(cx.listener(|this, _: &Enter, _, cx| {
             if this.single_line {
                 cx.propagate();
@@ -1300,10 +1454,12 @@ impl EditorView {
             Direction::Forward,
             true
         ));
-        run!(DeleteWordBackward, |_: &DocTypes| keymap::delete_word(
+        run!(DeleteWordBackward, |types: &DocTypes| keymap::delete_word(
+            types,
             Direction::Backward
         ));
-        run!(DeleteWordForward, |_: &DocTypes| keymap::delete_word(
+        run!(DeleteWordForward, |types: &DocTypes| keymap::delete_word(
+            types,
             Direction::Forward
         ));
         run!(DocumentStart, |_: &DocTypes| keymap::move_document_edge(

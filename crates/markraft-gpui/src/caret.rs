@@ -5,8 +5,9 @@ pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 /// A composition or selected range pauses blinking, and a caret that covers the
 /// grapheme it rests on never blinks at all: a block or underline caret is a
 /// modal editor's cursor, which is steady, and blinking one hides the character
-/// under it. Restarting an input session always exposes the caret before waiting
-/// for the first timer tick.
+/// under it. `steady` also carries the reduced-motion setting, which holds every
+/// caret shape still. Restarting an input session always exposes the caret before
+/// waiting for the first timer tick.
 #[derive(Default)]
 pub(crate) struct CaretBlink {
     pub(crate) visible: bool,

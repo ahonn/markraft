@@ -22,6 +22,14 @@ struct TextRun {
     /// Document positions for each selectable unit boundary in `offsets`.
     positions: Vec<usize>,
     bounds: accesskit::Rect,
+    /// The run's row and column, when it sits in a table cell.
+    ///
+    /// Announced on the run itself rather than through a `Role::Cell`
+    /// container: the subtree builder appends leaves under the editor's own
+    /// node and has no way to nest one, and a container between the editor and
+    /// its runs would break the flat run sequence its text selection is
+    /// expressed in.
+    cell: Option<(usize, usize)>,
 }
 
 // AccessKit uses u8 for each selectable unit's UTF-8 length. An unusually long
@@ -103,6 +111,7 @@ impl AccessibleText {
                         x1: f64::from(x + f32::from(row.width) * scale),
                         y1: f64::from(y + f32::from(row.line_height) * scale),
                     },
+                    cell: row.table.map(|cell| (cell.row, cell.column)),
                 });
             }
         }
@@ -123,6 +132,10 @@ impl AccessibleText {
                     .collect::<Vec<_>>(),
             );
             node.set_bounds(run.bounds);
+            if let Some((row, column)) = run.cell {
+                node.set_row_index(row);
+                node.set_column_index(column);
+            }
             builder.push_child(id, node);
         }
         if let (Some(anchor), Some(focus)) = (
@@ -205,6 +218,7 @@ mod tests {
                 offsets,
                 positions: positions.clone(),
                 bounds: accesskit::Rect::ZERO,
+                cell: None,
             }],
             selection: (line.from, line.to),
         };
@@ -229,6 +243,7 @@ mod tests {
                 .map(|byte| (from + text[..byte].chars().count()).min(end))
                 .collect(),
             bounds: accesskit::Rect::ZERO,
+            cell: None,
         };
         // Two visual rows of one line holding "你好", then the next block.
         let text = AccessibleText {

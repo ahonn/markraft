@@ -7,11 +7,13 @@
 
 use crate::types::DocTypes;
 use markraft_core::commands::{
-    Command, Direction, chain, command, create_paragraph_near, delete_by_grapheme, delete_by_word,
-    delete_selection, exit_code, join_backward, join_forward, lift, lift_empty_block,
-    lift_list_item, move_by_grapheme, move_by_word, new_line_in_code, select_node_backward,
-    select_node_forward, set_block_type, sink_list_item, split_block_keep_marks, split_list_item,
-    toggle_mark, undo_input_rule, wrap_in, wrap_in_list,
+    Command, Direction, add_row_after, chain, command, create_paragraph_near, delete_by_grapheme,
+    delete_by_word, delete_empty_table, delete_selection, exit_code, goto_cell_below,
+    goto_next_cell, goto_prev_cell, guard_cell_boundary, guard_cell_range, guard_cell_split,
+    join_backward, join_forward, lift, lift_empty_block, lift_list_item, move_by_grapheme,
+    move_by_word, new_line_in_code, select_node_backward, select_node_forward, set_block_type,
+    sink_list_item, split_block_keep_marks, split_list_item, toggle_mark, undo_input_rule, wrap_in,
+    wrap_in_list,
 };
 use markraft_core::projection::projection_of;
 use markraft_core::{
@@ -147,6 +149,13 @@ impl DocTypes {
             .find(|ty| self.is_list(*ty))
     }
 
+    /// Whether the cursor sits in a table cell.
+    fn in_table_cell(&self, state: &EditorState) -> bool {
+        self.table_types()
+            .and_then(|types| markraft_core::commands::cell_at(types, state))
+            .is_some()
+    }
+
     /// The innermost list item the cursor sits in, with the position before it.
     fn item_at_cursor(&self, state: &EditorState) -> Option<(NodeTypeId, Attrs, usize)> {
         let doc = state.doc();
@@ -162,6 +171,11 @@ impl DocTypes {
 /// Enter.
 pub(crate) fn enter(types: &DocTypes) -> Command {
     let mut list: Vec<Option<Command>> = vec![
+        // Inside a table Enter moves down a row and appends one at the bottom.
+        // The guard behind it is the invariant written down: a cell that split
+        // would leave its row one cell wider than the rest.
+        types.table_types().map(goto_cell_below),
+        types.table_types().map(guard_cell_split),
         types.list_item.map(split_list_item),
         types.task_item.map(|item| split_task_item(types, item)),
     ];
@@ -182,34 +196,43 @@ pub(crate) fn backspace(types: &DocTypes) -> Command {
         let inner = some(per_item(&types, lift_list_item));
         when(move |state| types.at_item_start(state), inner)
     };
-    chain([
-        undo_input_rule(),
-        delete_selection(),
-        delete_by_grapheme(Direction::Backward),
-        outdent,
-        join_backward(),
-        select_node_backward(),
+    some([
+        // An edit reaching from one cell into another is refused outright; the
+        // boundary guard then stops the chain before anything joins two cells.
+        types.table_types().map(guard_cell_range),
+        Some(undo_input_rule()),
+        Some(delete_selection()),
+        Some(delete_by_grapheme(Direction::Backward)),
+        types.table_types().map(delete_empty_table),
+        types.table_types().map(guard_cell_boundary),
+        Some(outdent),
+        Some(join_backward()),
+        Some(select_node_backward()),
     ])
 }
 
 /// Forward delete.
-pub(crate) fn delete_forward() -> Command {
-    chain([
-        delete_selection(),
-        delete_by_grapheme(Direction::Forward),
-        join_forward(),
-        select_node_forward(),
+pub(crate) fn delete_forward(types: &DocTypes) -> Command {
+    some([
+        types.table_types().map(guard_cell_range),
+        Some(delete_selection()),
+        Some(delete_by_grapheme(Direction::Forward)),
+        types.table_types().map(guard_cell_boundary),
+        Some(join_forward()),
+        Some(select_node_forward()),
     ])
 }
 
-pub(crate) fn delete_word(dir: Direction) -> Command {
-    chain([
-        delete_selection(),
-        delete_by_word(dir),
-        match dir {
+pub(crate) fn delete_word(types: &DocTypes, dir: Direction) -> Command {
+    some([
+        types.table_types().map(guard_cell_range),
+        Some(delete_selection()),
+        Some(delete_by_word(dir)),
+        types.table_types().map(guard_cell_boundary),
+        Some(match dir {
             Direction::Backward => join_backward(),
             Direction::Forward => join_forward(),
-        },
+        }),
     ])
 }
 
@@ -244,7 +267,11 @@ pub(crate) fn move_document_edge(end: bool, extend: bool) -> Command {
     })
 }
 
-/// Tab: sink a list item, or indent inside a code block.
+/// Tab: step to the next table cell, sink a list item, or indent inside a code
+/// block.
+///
+/// A cell holds inline content, so no code block can sit in one and the two
+/// never compete.
 pub(crate) fn indent(types: &DocTypes) -> Command {
     let code = {
         let types = types.clone();
@@ -253,16 +280,26 @@ pub(crate) fn indent(types: &DocTypes) -> Command {
             markraft_core::commands::insert_text("\t"),
         )
     };
-    let mut list = per_item(types, sink_list_item);
+    let mut list = vec![types.table_types().map(goto_next_cell)];
+    list.extend(per_item(types, sink_list_item));
     list.push(Some(code));
     some(list)
 }
 
-/// Shift-Tab: lift a list item, or lift a block out of its wrapper.
+/// Shift-Tab: step to the previous table cell, lift a list item, or lift a
+/// block out of its wrapper.
+///
+/// [`goto_prev_cell`] does not apply in the first cell, and lifting a cell out
+/// of its row would leave that row short, so inside a table the rest of the
+/// chain is skipped rather than run.
 pub(crate) fn outdent(types: &DocTypes) -> Command {
-    let mut list = per_item(types, lift_list_item);
-    list.push(Some(lift()));
-    some(list)
+    let mut tail = per_item(types, lift_list_item);
+    tail.push(Some(lift()));
+    let outside = {
+        let types = types.clone();
+        when(move |state| !types.in_table_cell(state), some(tail))
+    };
+    some([types.table_types().map(goto_prev_cell), Some(outside)])
 }
 
 /// Undo or redo, through the history extension.
@@ -401,10 +438,14 @@ fn convert_items(types: &DocTypes, item: NodeTypeId) -> Command {
     })
 }
 
-/// ⌘⏎: tick or clear the task box the cursor sits in, else leave a code block.
+/// ⌘⏎: add a row below in a table, tick or clear the task box the cursor sits
+/// in, else leave a code block.
 pub(crate) fn toggle_task(types: &DocTypes) -> Command {
     let types = types.clone();
     command(move |state| {
+        if let Some(table) = types.table_types().filter(|_| types.in_table_cell(state)) {
+            return add_row_after(table)(state);
+        }
         let task = types.task_item?;
         let Some((ty, attrs, before)) = types.item_at_cursor(state) else {
             return exit_code()(state);
@@ -434,9 +475,10 @@ pub(crate) fn toggle_task(types: &DocTypes) -> Command {
 /// first and last paragraphs merge with the block the caret sits in exactly as
 /// a paste of the same shape would.
 pub(crate) fn insert_plain(types: &DocTypes, text: &str) -> Command {
+    let guard = types.table_types().map(guard_cell_range);
     let types = types.clone();
     let text = text.to_owned();
-    command(move |state| {
+    let insert = command(move |state| {
         if !text.contains('\n') || types.in_code_block(state) {
             return markraft_core::commands::insert_text(&text)(state);
         }
@@ -463,7 +505,10 @@ pub(crate) fn insert_plain(types: &DocTypes, text: &str) -> Command {
             .collect();
         let slice = markraft_core::Slice::new(markraft_core::Fragment::from_nodes(nodes?), 1, 1);
         markraft_core::commands::replace_selection(slice)(state)
-    })
+    });
+    // Typing over a selection that reaches out of one cell would merge the
+    // cells it spans, so that edit is refused before anything else is tried.
+    some([guard, Some(insert)])
 }
 
 /// ⌘A: the code block the cursor sits in first, then the whole document.
@@ -503,6 +548,29 @@ mod tests {
     fn after(state: &EditorState, command: &Command) -> Option<String> {
         let tr = run_command(state, command)?.expect("a transaction");
         Some(to_markdown(state.schema(), tr.state().doc()))
+    }
+
+    /// The state a command leaves, or `None` when it does not apply.
+    fn applied(state: &EditorState, command: &Command) -> Option<EditorState> {
+        Some(
+            run_command(state, command)?
+                .expect("a transaction")
+                .state()
+                .clone(),
+        )
+    }
+
+    /// The row and column the caret sits at, or `None` outside a table.
+    fn cell_of(state: &EditorState) -> Option<(usize, usize)> {
+        let types = types_of(state).table_types()?;
+        markraft_core::commands::cell_at(types, state).map(|at| (at.row, at.column))
+    }
+
+    /// A two-by-two table, and the Markdown it reads back as.
+    fn table_state() -> (EditorState, String) {
+        let state = state_of("| a | b |\n| - | - |\n| c | d |");
+        let markdown = to_markdown(state.schema(), state.doc());
+        (state, markdown)
     }
 
     /// The caret at the start of the line holding `needle`.
@@ -583,6 +651,98 @@ mod tests {
         let state = at(&state, caret_in(&state, "two"));
         let lifted = after(&state, &outdent(&types_of(&state))).expect("the lift applies");
         assert_eq!(lifted, "- one\n- two");
+    }
+
+    /// Tab walks a table in row-major order and grows it rather than falling
+    /// out of it, which is what it does in Typora and Bear.
+    #[test]
+    fn tab_walks_the_cells_and_appends_a_row_past_the_last_one() {
+        let (state, markdown) = table_state();
+        let types = types_of(&state);
+        let lines = projection_of(&state);
+        let (first, last) = (lines.lines()[0].from, lines.lines()[3].to);
+        let stepped = applied(&at(&state, first), &indent(&types)).expect("Tab steps right");
+        assert_eq!(to_markdown(state.schema(), stepped.doc()), markdown);
+        assert_eq!(cell_of(&stepped), Some((0, 1)));
+        let grown = applied(&at(&state, last), &indent(&types)).expect("Tab grows the table");
+        assert_eq!(projection_of(&grown).lines().len(), 6, "a row was appended");
+        assert_eq!(cell_of(&grown), Some((2, 0)));
+        // ⇧Tab steps back, and stops rather than lifting the first cell out of
+        // its row, which would leave that row one cell short.
+        let back =
+            applied(&at(&state, lines.lines()[1].from), &outdent(&types)).expect("⇧Tab steps left");
+        assert_eq!(cell_of(&back), Some((0, 0)));
+        let stopped = applied(&at(&state, first), &outdent(&types));
+        assert!(stopped.is_none(), "⇧Tab in the first cell does nothing");
+    }
+
+    /// A cell that split would leave its row one cell wider than the rest, so
+    /// Enter moves down a row instead, appending one at the bottom.
+    #[test]
+    fn enter_moves_down_a_row_and_never_splits_a_cell() {
+        let (state, markdown) = table_state();
+        let types = types_of(&state);
+        let lines = projection_of(&state);
+        let inside = lines.lines()[0].to;
+        let moved = applied(&at(&state, inside), &enter(&types)).expect("Enter applies");
+        assert_eq!(
+            to_markdown(state.schema(), moved.doc()),
+            markdown,
+            "nothing was split"
+        );
+        assert_eq!(cell_of(&moved), Some((1, 0)));
+        let grown = applied(&at(&state, lines.lines()[3].to), &enter(&types)).expect("Enter");
+        assert_eq!(projection_of(&grown).lines().len(), 6, "a row was appended");
+        assert_eq!(cell_of(&grown), Some((2, 1)));
+        // ⌘⏎ adds a row under the caret's own row rather than at the bottom,
+        // and leaves the caret in the cell it was typing in.
+        let added = applied(&at(&state, inside), &toggle_task(&types)).expect("⌘⏎ adds a row");
+        assert_eq!(projection_of(&added).lines().len(), 6);
+        assert_eq!(cell_of(&added), Some((0, 0)));
+    }
+
+    /// Joining across a cell boundary would merge two cells and leave their
+    /// rows short, so a deletion that reaches one stops there.
+    #[test]
+    fn backspace_stops_at_a_cell_boundary_but_still_deletes_inside_one() {
+        let (state, markdown) = table_state();
+        let types = types_of(&state);
+        let lines = projection_of(&state);
+        let (start, end) = (lines.lines()[1].from, lines.lines()[1].to);
+        let stopped = applied(&at(&state, start), &backspace(&types)).expect("the guard applies");
+        assert_eq!(to_markdown(state.schema(), stopped.doc()), markdown);
+        assert_eq!(cell_of(&stopped), Some((0, 1)), "and the caret stays put");
+        // Forward delete stops at the other edge of the same cell.
+        let stopped =
+            applied(&at(&state, end), &delete_forward(&types)).expect("the guard applies");
+        assert_eq!(to_markdown(state.schema(), stopped.doc()), markdown);
+        // Inside the cell both still take a character.
+        let deleted = applied(&at(&state, end), &backspace(&types)).expect("a grapheme goes");
+        assert_ne!(to_markdown(state.schema(), deleted.doc()), markdown);
+        let deleted = applied(&at(&state, start), &delete_forward(&types)).expect("one goes");
+        assert_ne!(to_markdown(state.schema(), deleted.doc()), markdown);
+        // A selection reaching out of the cell is refused outright.
+        let across = state
+            .update([TransactionSpec::new()
+                .selection(Selection::text(lines.lines()[0].from, lines.lines()[1].to))])
+            .expect("a selection")
+            .state()
+            .clone();
+        let refused = applied(&across, &backspace(&types)).expect("the guard applies");
+        assert_eq!(to_markdown(state.schema(), refused.doc()), markdown);
+        let typed = applied(&across, &insert_plain(&types, "x")).expect("the guard applies");
+        assert_eq!(to_markdown(state.schema(), typed.doc()), markdown);
+    }
+
+    /// Backspace at the start of a table nobody has typed in yet takes the
+    /// table, which is the one case where it means the grid and not a letter.
+    #[test]
+    fn backspace_at_the_start_of_an_empty_table_takes_it() {
+        let state = state_of("|   |   |\n| - | - |");
+        let types = types_of(&state);
+        let start = projection_of(&state).lines()[0].from;
+        let taken = applied(&at(&state, start), &backspace(&types)).expect("the table goes");
+        assert_eq!(to_markdown(state.schema(), taken.doc()), "");
     }
 
     #[test]

@@ -5,8 +5,14 @@
 //! none of them and draws plain text. What a missing role costs is written on
 //! the field.
 
+use markraft_core::commands::{ALIGNMENTS_ATTR, ColumnAlignment, TableTypes};
 use markraft_core::projection::{Ancestor, Line};
 use markraft_core::{Attrs, DocTypeNames, MarkTypeId, NodeTypeId, Schema};
+
+/// The conventional schema names of the two roles [`DocTypeNames`] has no
+/// entry for.
+const RAW_INLINE: &str = "raw_inline";
+const INLINE_SPAN: &str = "inline_span";
 
 /// The roles the view, its key bindings and its extensions know about, as the
 /// ids one schema gives them.
@@ -44,13 +50,30 @@ pub struct DocTypes {
     /// Source text kept verbatim. Without it such a block is drawn as ordinary
     /// text rather than in the monospaced style that marks it as unparsed.
     pub raw_block: Option<NodeTypeId>,
+    /// A table, carrying an `alignments` attribute. All three table roles have
+    /// to be present for any of them to do anything: without them a table's
+    /// cells are drawn as ordinary stacked blocks with no grid, Tab and Enter
+    /// keep their plain-block behaviour inside one, and nothing stops a general
+    /// edit from leaving one row narrower than the rest.
+    pub table: Option<NodeTypeId>,
+    /// One row of a table. See [`DocTypes::table`].
+    pub table_row: Option<NodeTypeId>,
+    /// One cell of a table row, which is a textblock. See [`DocTypes::table`].
+    pub table_cell: Option<NodeTypeId>,
     /// A hard line break. The view finds breaks through the projection's
     /// `line_break` group rather than here, so this names the type for hosts
     /// and extensions that insert one.
     pub hard_break: Option<NodeTypeId>,
-    /// An image. The view draws every inline atom the same way, so this names
-    /// the type for hosts and extensions that insert one.
+    /// An image, carrying `src`, `alt` and `title` attributes. Without it an
+    /// image is drawn as a bare object-replacement character, which is blank.
     pub image: Option<NodeTypeId>,
+    /// One inline HTML primitive, kept verbatim in a `source` attribute.
+    /// Without it such an atom is drawn as a bare object-replacement
+    /// character, which is blank.
+    pub raw_inline: Option<NodeTypeId>,
+    /// A transparent inline container. Without it the view cannot tell that a
+    /// run carries structure nothing else in the line shows.
+    pub inline_span: Option<NodeTypeId>,
     /// Strong emphasis. Without it ⌘B does nothing.
     pub strong: Option<MarkTypeId>,
     /// Emphasis. Without it ⌘I does nothing.
@@ -76,6 +99,12 @@ impl DocTypes {
 
     /// Resolve every name in `names` against `schema`. A name the schema does
     /// not declare leaves its role unset.
+    ///
+    /// [`DocTypes::raw_inline`] and [`DocTypes::inline_span`] have no entry in
+    /// [`DocTypeNames`], so they are looked up under the names the CommonMark
+    /// preset gives them. A schema that spells them differently sets the two
+    /// fields itself; leaving them unset only costs the decoration each one
+    /// draws.
     pub fn from_schema_names(schema: &Schema, names: &DocTypeNames) -> DocTypes {
         let node = |name: Option<&str>| name.and_then(|name| schema.node_id(name));
         let mark = |name: Option<&str>| name.and_then(|name| schema.mark_id(name));
@@ -90,8 +119,13 @@ impl DocTypes {
             task_item: node(names.task_item),
             horizontal_rule: node(names.horizontal_rule),
             raw_block: node(names.raw_block),
+            table: node(names.table),
+            table_row: node(names.table_row),
+            table_cell: node(names.table_cell),
             hard_break: node(names.hard_break),
             image: node(names.image),
+            raw_inline: node(Some(RAW_INLINE)),
+            inline_span: node(Some(INLINE_SPAN)),
             strong: mark(names.strong),
             em: mark(names.em),
             code: mark(names.code),
@@ -127,6 +161,20 @@ impl DocTypes {
     pub(crate) fn is_code_block(&self, line: &Line) -> bool {
         line.node_type()
             .is_some_and(|ty| Some(ty) == self.code_block)
+    }
+
+    /// Whether the line's own block is a raw block, whose source is drawn
+    /// verbatim.
+    pub(crate) fn is_raw_block(&self, line: &Line) -> bool {
+        line.node_type()
+            .is_some_and(|ty| Some(ty) == self.raw_block)
+    }
+
+    /// Whether the line is the first block of a ticked task item.
+    pub(crate) fn in_checked_item(&self, line: &Line) -> bool {
+        self.item_of(line).is_some_and(|(item, _)| {
+            Some(item.node_type) == self.task_item && DocTypes::task_checked(&item.attrs)
+        })
     }
 
     /// The language attribute of a code block line.
@@ -167,6 +215,68 @@ impl DocTypes {
             .iter()
             .filter(|ancestor| Some(ancestor.node_type) == self.blockquote)
             .count()
+    }
+
+    /// The three table types, for the catalogue's table commands.
+    ///
+    /// `None` unless the schema declares all three: every one of those commands
+    /// maintains the shape all three describe, so a partial set cannot keep it.
+    pub(crate) fn table_types(&self) -> Option<TableTypes> {
+        Some(TableTypes::new(
+            self.table?,
+            self.table_row?,
+            self.table_cell?,
+        ))
+    }
+
+    /// Where a line sits in a table: the position before the table node, which
+    /// identifies the grid, and the line's row and column within it.
+    ///
+    /// The projection gives a cell one line of its own, so this doubles as the
+    /// test for "is this line a table cell".
+    pub(crate) fn table_cell_of(&self, line: &Line) -> Option<(usize, usize, usize)> {
+        let cell = line.ancestors.last()?;
+        if Some(cell.node_type) != self.table_cell {
+            return None;
+        }
+        let row = line.ancestors.iter().nth_back(1)?;
+        let table = line.ancestors.iter().nth_back(2)?;
+        (Some(row.node_type) == self.table_row && Some(table.node_type) == self.table).then_some((
+            table.before,
+            row.index,
+            cell.index,
+        ))
+    }
+
+    /// Whether a line sits in a table's header row, which is its first row.
+    pub(crate) fn is_table_header(&self, line: &Line) -> bool {
+        matches!(self.table_cell_of(line), Some((_, 0, _)))
+    }
+
+    /// The alignments the table holding `line` declares, one per column.
+    ///
+    /// Read off the projection's own ancestor rather than the document: the
+    /// layout pass holds lines, not the tree, and the ancestor carries the
+    /// table's attributes verbatim. A missing, short or over-long attribute is
+    /// padded and trimmed to `columns`, exactly as
+    /// [`column_alignments`](markraft_core::commands::column_alignments) does,
+    /// so a caller never has to bounds-check the result.
+    pub(crate) fn column_alignments(&self, line: &Line, columns: usize) -> Vec<ColumnAlignment> {
+        let declared = line
+            .ancestors
+            .iter()
+            .nth_back(2)
+            .filter(|table| Some(table.node_type) == self.table)
+            .and_then(|table| table.attrs.get(ALIGNMENTS_ATTR))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let mut alignments: Vec<ColumnAlignment> = declared
+            .split(',')
+            .filter(|name| !name.is_empty())
+            .map(ColumnAlignment::from_name)
+            .collect();
+        alignments.resize(columns, ColumnAlignment::None);
+        alignments
     }
 
     /// Whether a task item's box is ticked.
