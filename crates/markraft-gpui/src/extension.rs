@@ -333,6 +333,15 @@ impl<'a> EditorCx<'a> {
         self.view.reveal = true;
         self.effects.selected = true;
     }
+    /// Fold every undo entry made from now until [`Self::end_undo_group`] into one, so
+    /// that a modal editor's insert session undoes as a whole. Undo, redo and the
+    /// extension's removal end it. See [`Editor::begin_undo_group`].
+    pub fn begin_undo_group(&mut self) {
+        self.view.core.begin_undo_group();
+    }
+    pub fn end_undo_group(&mut self) {
+        self.view.core.end_undo_group();
+    }
     /// Put a rich fragment and its plain text on the system clipboard, exactly as ⌘C
     /// does, so another application pastes the text and this one pastes the fragment.
     pub fn write_clipboard(&mut self, fragment: Document, text: String) -> bool {
@@ -378,10 +387,15 @@ impl EditorView {
         ))
     }
 
-    /// Forget the extensions whose handle has been dropped.
+    /// Forget the extensions whose handle has been dropped. One of them may have left
+    /// an undo group open, which nothing else would ever close.
     pub(crate) fn prune_extensions(&mut self) {
+        let before = self.extensions.len();
         self.extensions
             .retain(|registration| registration.alive.get());
+        if self.extensions.len() != before {
+            self.core.end_undo_group();
+        }
     }
 
     /// The first live extension's answer, or the default when none has one. Called from

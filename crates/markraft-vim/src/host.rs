@@ -22,6 +22,10 @@ pub(crate) trait Host {
     fn read_clipboard(&mut self) -> Option<Document>;
     /// Undo or redo one entry, reporting whether there was one.
     fn history(&mut self, undo: bool) -> bool;
+    /// Bracket an insert session so that it undoes as one step; see
+    /// [`markraft_core::Editor::begin_undo_group`].
+    fn begin_undo_group(&mut self);
+    fn end_undo_group(&mut self);
 }
 
 impl Host for EditorCx<'_> {
@@ -48,5 +52,11 @@ impl Host for EditorCx<'_> {
     }
     fn history(&mut self, undo: bool) -> bool {
         if undo { self.undo() } else { self.redo() }.is_some()
+    }
+    fn begin_undo_group(&mut self) {
+        EditorCx::begin_undo_group(self);
+    }
+    fn end_undo_group(&mut self) {
+        EditorCx::end_undo_group(self);
     }
 }

@@ -123,6 +123,15 @@ fn step(document: &Document, from: Position, motion: Motion) -> Position {
     }
 }
 
+/// Whether the grapheme at `at` is whitespace, or `at` is past the end of its block.
+pub(crate) fn on_whitespace(document: &Document, at: Position) -> bool {
+    let text = document.blocks[at.block.min(last_block(document))].text();
+    text[at.byte.min(text.len())..]
+        .graphemes(true)
+        .next()
+        .is_none_or(|grapheme| grapheme.chars().all(char::is_whitespace))
+}
+
 /// The first non-whitespace grapheme of `block`, or its start when it has none. A
 /// `Divider` holds no text, so it always answers zero.
 pub(crate) fn first_non_blank(document: &Document, block: usize) -> Position {

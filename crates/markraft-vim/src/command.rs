@@ -121,6 +121,16 @@ pub(crate) fn motion(state: &mut State, cx: &mut impl Host, motion: Motion) {
     let operator = state.pending.operator();
     let count = state.pending.take();
     let from = cursor(state, cx);
+    // vim's special case: `cw` on a word changes to its end, like `ce`, leaving the
+    // whitespace after it alone.
+    let motion = if operator == Some(Operator::Change)
+        && motion == Motion::WordForward
+        && !motion::on_whitespace(cx.document(), from)
+    {
+        Motion::WordEnd
+    } else {
+        motion
+    };
     let mut target = motion::target(cx.document(), from, motion, count);
     // vim's `dw` on the last word of a line stops at the line's end instead of pulling
     // the next line up; the same rule keeps `cw` and `yw` inside one block.
@@ -202,8 +212,8 @@ fn charwise(state: &mut State, cx: &mut impl Host, operator: Operator, range: Ra
             state.mode = Mode::Normal;
         }
         Operator::Change => {
+            enter_insert(state, cx);
             cx.edit(&mut |tx| edit::delete_charwise(tx, range.clone()));
-            state.mode = Mode::Insert;
         }
     }
 }
@@ -222,8 +232,8 @@ fn linewise(state: &mut State, cx: &mut impl Host, operator: Operator, blocks: R
             state.mode = Mode::Normal;
         }
         Operator::Change => {
+            enter_insert(state, cx);
             cx.edit(&mut |tx| edit::change_linewise(tx, blocks.clone()));
-            state.mode = Mode::Insert;
         }
     }
 }
@@ -350,7 +360,7 @@ pub(crate) fn insert(state: &mut State, cx: &mut impl Host, at: InsertAt) {
         InsertAt::LineEnd => text.len(),
     };
     // The mode changes first, so the Normal-mode clamp does not pull `A` back a grapheme.
-    state.mode = Mode::Insert;
+    enter_insert(state, cx);
     cx.select(
         Selection::caret(Position {
             block: from.block,
@@ -364,8 +374,15 @@ pub(crate) fn insert(state: &mut State, cx: &mut impl Host, at: InsertAt) {
 pub(crate) fn open_line(state: &mut State, cx: &mut impl Host, below: bool) {
     state.pending.clear();
     let from = cursor(state, cx);
-    state.mode = Mode::Insert;
+    enter_insert(state, cx);
     cx.edit(&mut |tx| edit::open_line(tx, from, below));
+}
+
+/// Insert mode, with an undo group open so that the edit that opened it, everything
+/// typed and any input rules undo as one step, the way vim undoes an insert session.
+fn enter_insert(state: &mut State, cx: &mut impl Host) {
+    state.mode = Mode::Insert;
+    cx.begin_undo_group();
 }
 
 /// `v` and `V`, which toggle their own mode off and switch between each other.
@@ -393,6 +410,9 @@ pub(crate) fn visual(state: &mut State, cx: &mut impl Host, linewise: bool) {
 pub(crate) fn normal(state: &mut State, cx: &mut impl Host) {
     state.pending.clear();
     let leaving_insert = state.mode == Mode::Insert;
+    if leaving_insert {
+        cx.end_undo_group();
+    }
     // Insert mode may rest past the last grapheme, where `cursor` would already pull it
     // back onto one; stepping left from there would then move two.
     let from = if leaving_insert {

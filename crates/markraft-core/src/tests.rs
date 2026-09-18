@@ -1862,3 +1862,75 @@ fn a_transaction_commits_an_active_composition_exactly_once() {
     assert_eq!(editor.document().plain_text(), "ab");
     assert!(!editor.can_undo());
 }
+
+#[test]
+fn an_undo_group_folds_structural_edits_and_typing_into_one_entry() {
+    let mut editor = editor("- item");
+    caret(&mut editor, 0, 4);
+    editor.begin_undo_group();
+    assert!(editor.is_undo_grouping());
+    editor.insert_text_grouped(" one", 1);
+    // Enter opens a new list item: a block-count change no typing group may cross.
+    editor.insert_text("\n");
+    editor.insert_text_grouped("two", 2);
+    // A heading input rule owns its own boundary outside a group.
+    editor.insert_text("\n");
+    editor.insert_text_grouped("#", 3);
+    editor.insert_text_grouped(" ", 3);
+    editor.insert_text_grouped("head", 4);
+    let end = editor.selection().head;
+    editor.end_undo_group();
+    assert!(!editor.is_undo_grouping());
+    assert_eq!(editor.document().to_markdown(), "- item one\n- two\n# head");
+
+    let change = editor.undo().unwrap();
+    assert_eq!(editor.document().to_markdown(), "- item");
+    assert_eq!(editor.selection().head, at(0, 4));
+    assert_eq!(change.mapping.map(end, Affinity::After), at(0, 4));
+    assert!(!editor.can_undo());
+    let change = editor.redo().unwrap();
+    assert_eq!(editor.document().to_markdown(), "- item one\n- two\n# head");
+    assert_eq!(change.mapping.map(at(0, 4), Affinity::After), end);
+    assert!(!editor.can_redo());
+}
+
+#[test]
+fn an_undo_group_starts_at_its_first_edit_and_ends_on_history() {
+    let mut editor = editor("ab");
+    caret(&mut editor, 0, 2);
+    editor.insert_text_plain("c");
+    // Grouping does not reach back to entries made before it opened.
+    editor.begin_undo_group();
+    editor.insert_text_plain("d");
+    editor.insert_text_plain("\n");
+    editor.insert_text_plain("e");
+    // Undo closes the group and takes the whole of it in one step.
+    editor.undo();
+    assert_eq!(editor.document().plain_text(), "abc");
+    assert!(!editor.is_undo_grouping());
+    editor.insert_text_plain("f");
+    editor.insert_text_plain("g");
+    editor.undo();
+    assert_eq!(editor.document().plain_text(), "abcf");
+
+    // An empty group leaves nothing behind.
+    let mut empty = super::tests::editor("x");
+    empty.begin_undo_group();
+    empty.end_undo_group();
+    assert!(!empty.can_undo());
+}
+
+#[test]
+fn an_undo_group_folds_a_committed_composition() {
+    let mut editor = editor("");
+    editor.begin_undo_group();
+    editor.insert_text_plain("a");
+    editor.set_composition(None, "ni", None);
+    editor.commit_composition(None, "你");
+    editor.insert_text_plain("b");
+    editor.end_undo_group();
+    assert_eq!(editor.document().plain_text(), "a你b");
+    editor.undo();
+    assert_eq!(editor.document().plain_text(), "");
+    assert!(!editor.can_undo());
+}

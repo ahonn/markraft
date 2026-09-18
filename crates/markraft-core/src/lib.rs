@@ -682,6 +682,8 @@ pub struct Editor {
     revision: u64,
     history_limits: HistoryLimits,
     input_group: Option<(u64, Selection, Marks)>,
+    /// An open undo group, and whether it already owns the last undo entry.
+    undo_group: Option<bool>,
 }
 
 impl Editor {
@@ -700,6 +702,7 @@ impl Editor {
             revision: 0,
             history_limits: HistoryLimits::default(),
             input_group: None,
+            undo_group: None,
         }
     }
 
@@ -740,7 +743,42 @@ impl Editor {
         }
         if self.undo.is_empty() {
             self.input_group = None;
+            self.undo_group = self.undo_group.map(|_| false);
         }
+    }
+
+    /// Coalesce every undo entry made from now until [`Self::end_undo_group`] into one,
+    /// whatever happens to the document's structure in between, so that a modal
+    /// editor's insert session undoes as a whole. Undo and redo end the group; a group
+    /// that never sees an edit leaves no entry.
+    pub fn begin_undo_group(&mut self) {
+        self.undo_group = Some(false);
+    }
+
+    pub fn end_undo_group(&mut self) {
+        self.undo_group = None;
+    }
+
+    pub fn is_undo_grouping(&self) -> bool {
+        self.undo_group.is_some()
+    }
+
+    /// Record `entry`, folding it into the previous one when the caller asks or an undo
+    /// group is open: the earlier snapshot stays the restore point and the mapping runs
+    /// on to the new document.
+    fn push_history(&mut self, entry: HistoryEntry, merge: bool) {
+        let merge = merge || self.undo_group == Some(true);
+        if merge && let Some(previous) = self.undo.last_mut() {
+            previous.mapping.after = entry.mapping.after;
+            previous.mapping.steps.extend(entry.mapping.steps);
+        } else {
+            self.undo.push(entry);
+        }
+        if self.undo_group.is_some() {
+            self.undo_group = Some(true);
+        }
+        self.redo.clear();
+        self.trim_history();
     }
     pub fn selection(&self) -> Selection {
         self.state.selection
@@ -881,24 +919,14 @@ impl Editor {
                         .zip(&self.document().blocks)
                         .all(|(a, b)| a.kind == b.kind)
             });
-            if merge
-                && group.is_some()
-                && let Some(previous) = self.undo.last_mut()
-            {
-                previous.mapping.after = change.mapping.after.clone();
-                previous
-                    .mapping
-                    .steps
-                    .extend(change.mapping.steps.iter().cloned());
-            } else {
-                self.undo.push(HistoryEntry {
+            self.push_history(
+                HistoryEntry {
                     state: before,
                     mapping: change.mapping.clone(),
-                });
-            }
-            self.redo.clear();
+                },
+                merge && group.is_some(),
+            );
             self.input_group = group.map(|id| (id, self.selection(), self.typing_marks()));
-            self.trim_history();
         }
         change
     }
@@ -1475,6 +1503,7 @@ impl Editor {
     pub fn undo(&mut self) -> Option<Change> {
         self.input_group = None;
         self.finish_composition();
+        self.undo_group = None;
         let previous = self.undo.pop()?;
         let current = std::mem::replace(&mut self.state, previous.state);
         self.revision += 1;
@@ -1494,6 +1523,7 @@ impl Editor {
     pub fn redo(&mut self) -> Option<Change> {
         self.input_group = None;
         self.finish_composition();
+        self.undo_group = None;
         let next = self.redo.pop()?;
         let current = std::mem::replace(&mut self.state, next.state);
         self.revision += 1;
@@ -1742,12 +1772,13 @@ impl Editor {
             after: BlockOffsets::of(self.document()),
             steps: composition.steps,
         };
-        self.undo.push(HistoryEntry {
-            state: composition.before,
-            mapping,
-        });
-        self.redo.clear();
-        self.trim_history();
+        self.push_history(
+            HistoryEntry {
+                state: composition.before,
+                mapping,
+            },
+            false,
+        );
         true
     }
 

@@ -65,6 +65,12 @@ impl Host for Editing {
     fn read_clipboard(&mut self) -> Option<Document> {
         self.clipboard.clone()
     }
+    fn begin_undo_group(&mut self) {
+        self.editor.begin_undo_group();
+    }
+    fn end_undo_group(&mut self) {
+        self.editor.end_undo_group();
+    }
     fn history(&mut self, undo: bool) -> bool {
         if undo {
             self.editor.undo()
@@ -650,6 +656,42 @@ fn a_visual_selection_spans_blocks() {
 // ---------------------------------------------------------------- history
 
 #[test]
+fn an_insert_session_undoes_as_one_step() {
+    // Typing, Return and an input rule inside one session: still one step.
+    let mut keys = Keys::new("- item").at(0, 0);
+    keys.keys("A")
+        .typed(" one")
+        .typed("\n")
+        .typed("two")
+        .typed("\n")
+        .typed("# ")
+        .typed("head");
+    keys.keys("<esc>");
+    assert_eq!(keys.markdown(), "- item one\n- two\n# head");
+    keys.keys("u");
+    assert_eq!(keys.markdown(), "- item");
+    keys.keys("r");
+    assert_eq!(keys.markdown(), "- item one\n- two\n# head");
+
+    // The edit that opened the session belongs to it: `o` and `cw` with their text.
+    let mut keys = Keys::new("one two").at(0, 0);
+    keys.keys("o").typed("below").keys("<esc>");
+    assert_eq!(keys.text(), "one two\nbelow");
+    keys.keys("u");
+    assert_eq!(keys.text(), "one two");
+    keys.keys("cw").typed("uno").keys("<esc>");
+    assert_eq!(keys.text(), "uno two");
+    keys.keys("u");
+    assert_eq!(keys.text(), "one two");
+
+    // Two sessions are two steps.
+    keys.keys("A").typed(" three").keys("<esc>");
+    keys.keys("A").typed(" four").keys("<esc>");
+    keys.keys("u");
+    assert_eq!(keys.text(), "one two three");
+}
+
+#[test]
 fn every_normal_mode_command_is_one_undo_step() {
     let mut keys = Keys::new("one two three").at(0, 0);
     keys.keys("dw");
@@ -764,8 +806,9 @@ fn cw_leaves_insert_mode_ready_at_the_gap_it_made() {
     let mut keys = Keys::new("one two").at(0, 0);
     keys.keys("cw");
     assert_eq!(keys.state.mode, Mode::Insert);
-    assert_eq!(keys.text(), "two");
-    keys.typed("ONE ");
+    // Like vim, `cw` on a word acts as `ce`: the space after it stays.
+    assert_eq!(keys.text(), " two");
+    keys.typed("ONE");
     assert_eq!(keys.text(), "ONE two");
     keys.keys("<esc>");
     assert_eq!(keys.state.mode, Mode::Normal);
