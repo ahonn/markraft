@@ -1,4 +1,4 @@
-//! The inline half of the parser: comrak's inline nodes into marked content.
+//! The inline half of the parser: marked leaves and semantic inline containers.
 //!
 //! Two things here need more context than the rule table can carry. Paired
 //! inline HTML — `<u>`, `<em>`, `<strong>`, `<del>` — becomes a mark, which
@@ -6,6 +6,7 @@
 //! is read. And adjacent text with equal marks has to be one leaf, which means
 //! merging as the content is built.
 
+use crate::inline::wrap_mark;
 use comrak::nodes::{AstNode, NodeValue};
 use markraft_core::{Fragment, Mark, MarkSet, MarkTypeId, Node, Schema};
 
@@ -44,10 +45,22 @@ impl<'a> Walk<'a> {
                     }
                     Some((mark, false)) => {
                         let id = self.mark_id(&mark)?;
-                        builder.close_html(id);
+                        builder.close_html(id)?;
                         continue;
                     }
-                    None => {}
+                    None => {
+                        if let NodeValue::HtmlInline(html) = &*self.value(child) {
+                            let ty = self.node_id(crate::schema::RAW_INLINE)?;
+                            let node = self.schema.create(
+                                ty,
+                                markraft_core::attrs! {"source" => html.clone()},
+                                MarkSet::empty(),
+                                Fragment::empty(),
+                            )?;
+                            builder.push_node(node, marks);
+                            continue;
+                        }
+                    }
                 }
             }
             let rule = self.rules.rule(&self.value(child)).clone();
@@ -71,18 +84,13 @@ impl<'a> Walk<'a> {
                     builder.push_node(node, marks);
                 }
                 ParseRule::Mark { mark_type, attrs } => {
-                    // A construct with no content — `[](url)` — has no inline to
-                    // carry the mark, so it travels as the text it reads as.
-                    if child.first_child().is_none() {
-                        builder.push_text(&target.source(), marks);
-                        continue;
-                    }
                     let id = self.mark_id(&mark_type(target))?;
                     let mark =
                         Mark::with_attrs(id, self.schema.build_mark_attrs(id, &attrs(target))?);
-                    let mut inner = marks.to_vec();
-                    inner.push(mark);
-                    self.walk_inlines(child, &inner, builder)?;
+                    let children = self.inlines(child)?;
+                    for node in wrap_mark(self.schema, mark, children)? {
+                        builder.push_node(node, marks);
+                    }
                 }
                 // A block rule or an unknown construct met inline: the source
                 // text, which is exactly how a reader sees it.
@@ -97,9 +105,9 @@ impl<'a> Walk<'a> {
     /// What each inline HTML tag of this block does, in the order
     /// [`Walk::walk_inlines`] meets them.
     ///
-    /// Only tags that pair up carry a mark; a stray one stays literal text, as
-    /// it reads. A pair that straddles another pair's opening tag makes the
-    /// inner one literal, because marks are a set and cannot interleave.
+    /// Only tags paired within this Markdown scope become marks. Unpaired or
+    /// overlapping tags stay raw primitives; guessing a DOM tree would change
+    /// the source semantics.
     fn mark_tags(&self, parent: &'a AstNode<'a>) -> Vec<Tag> {
         let mut tags = Vec::new();
         self.collect_tags(parent, &mut tags);
@@ -139,13 +147,6 @@ impl<'a> Walk<'a> {
                     Some((name, false)) => Tag::Close(name),
                     None => Tag::Literal,
                 });
-            }
-            // Descend exactly where `walk_inlines` does, so an image's opaque
-            // label cannot shift the marks of the text after it.
-            if matches!(self.rules.rule(&self.value(child)), ParseRule::Mark { .. })
-                && child.first_child().is_some()
-            {
-                self.collect_tags(child, tags);
             }
         }
     }
@@ -187,7 +188,7 @@ pub(crate) fn is_break_tag(literal: &str) -> bool {
 struct Inlines<'s> {
     schema: &'s Schema,
     out: Vec<Node>,
-    html: Vec<Mark>,
+    html: Vec<(Mark, Vec<Node>)>,
     tags: Vec<Tag>,
     seen: usize,
 }
@@ -204,15 +205,24 @@ impl Inlines<'_> {
     }
 
     fn open_html(&mut self, mark: Mark) {
-        self.html.push(mark);
+        let before = std::mem::take(&mut self.out);
+        self.html.push((mark, before));
     }
 
-    fn close_html(&mut self, ty: MarkTypeId) {
-        self.html.retain(|mark| mark.ty != ty);
+    fn close_html(&mut self, ty: MarkTypeId) -> Result<(), ParseError> {
+        if self.html.last().is_some_and(|(mark, _)| mark.ty == ty) {
+            let children = std::mem::take(&mut self.out);
+            let (mark, before) = self.html.pop().expect("matched open tag");
+            self.out = before;
+            for node in wrap_mark(self.schema, mark, children)? {
+                self.push_node(node, &[]);
+            }
+        }
+        Ok(())
     }
 
     fn mark_set(&self, marks: &[Mark]) -> MarkSet {
-        MarkSet::from_marks(self.schema, marks.iter().chain(self.html.iter()).cloned())
+        MarkSet::from_marks(self.schema, marks.iter().cloned())
     }
 
     fn push_text(&mut self, text: &str, marks: &[Mark]) {
@@ -232,7 +242,14 @@ impl Inlines<'_> {
     }
 
     fn push_node(&mut self, node: Node, marks: &[Mark]) {
-        let set = self.mark_set(marks);
-        self.out.push(node.mark(set));
+        let set = marks.iter().fold(node.marks().clone(), |set, mark| {
+            set.add(self.schema, mark.clone())
+        });
+        let node = node.mark(set);
+        if let Some(text) = node.text() {
+            self.push_text(text, &node.marks().iter().cloned().collect::<Vec<_>>());
+        } else {
+            self.out.push(node);
+        }
     }
 }

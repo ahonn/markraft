@@ -32,6 +32,11 @@ impl<'s> InlineContent<'s> {
         std::mem::take(&mut self.nodes)
     }
 
+    /// Restore a suspended outer scope without cloning its preceding siblings.
+    pub(crate) fn restore(&mut self, nodes: Vec<Node>) {
+        self.nodes = nodes;
+    }
+
     pub(crate) fn push_text(&mut self, text: &str, marks: MarkSet) {
         if text.is_empty() {
             return;
@@ -73,4 +78,40 @@ impl<'s> InlineContent<'s> {
             break;
         }
     }
+}
+
+/// Keep flat marks when their ranks exactly describe the source nesting. A
+/// repeated mark, reversed nesting order, or empty label needs a real node.
+pub(crate) fn wrap_mark(
+    schema: &Schema,
+    mark: Mark,
+    children: Vec<Node>,
+) -> Result<Vec<Node>, markraft_core::NodeError> {
+    let rank = schema.mark_type(mark.ty).rank();
+    let flat = !children.is_empty()
+        && children.iter().all(|node| {
+            !node.is_container()
+                && node
+                    .marks()
+                    .iter()
+                    .all(|inner| inner.ty != mark.ty && schema.mark_type(inner.ty).rank() > rank)
+        });
+    if flat || schema.node_id(crate::schema::INLINE_SPAN).is_none() {
+        return Ok(children
+            .into_iter()
+            .map(|node| {
+                let marks = node.marks().add(schema, mark.clone());
+                node.mark(marks)
+            })
+            .collect());
+    }
+    let ty = schema
+        .node_id(crate::schema::INLINE_SPAN)
+        .expect("checked above");
+    Ok(vec![schema.create(
+        ty,
+        markraft_core::Attrs::empty(),
+        MarkSet::from_marks(schema, [mark]),
+        markraft_core::Fragment::from_nodes(children),
+    )?])
 }

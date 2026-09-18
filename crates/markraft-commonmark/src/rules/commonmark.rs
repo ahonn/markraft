@@ -71,7 +71,10 @@ pub fn commonmark_rules() -> ParseRules {
                 _ => String::new(),
             })),
         )
-        .with(&NodeValue::SoftBreak, ParseRule::literal(" "))
+        .with(
+            &NodeValue::SoftBreak,
+            ParseRule::atom_with(md::SOFT_BREAK, no_attrs()),
+        )
         .with(
             &NodeValue::LineBreak,
             ParseRule::Atom {

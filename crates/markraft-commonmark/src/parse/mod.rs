@@ -6,17 +6,16 @@
 //!
 //! # What the mapping decides
 //!
-//! * A **soft line break** becomes a single space. A paragraph is one run of
-//!   inline content, not a set of source lines, so where the author wrapped
-//!   their prose is not recorded.
+//! * A **soft line break** stays a primitive, displayed as a space. Its source
+//!   newline is retained because raw HTML can make whitespace significant.
 //! * A **hard line break** becomes a `hard_break` atom.
 //! * An **HTML block holding only `<br>`** becomes an empty paragraph, which is
 //!   how this codec spells "a blank line the author meant to keep". Runs of
 //!   blank lines in the source are separators, as CommonMark says, and produce
 //!   nothing.
 //! * **Inline HTML** that pairs up as `<u>`, `<em>`, `<strong>` or `<del>`
-//!   becomes the matching mark; an unpaired tag stays literal text, which is
-//!   how it reads.
+//!   becomes the matching mark or nested span; other tags stay raw inline
+//!   primitives and are written without escaping.
 //! * An **indented code block** becomes an ordinary `code_block` and is written
 //!   back fenced. The two render identically.
 //! * **Link reference definitions** are resolved by comrak, so a reference link
@@ -24,7 +23,7 @@
 //!   itself is not part of the document.
 //! * Anything else — tables, footnote definitions, HTML blocks, whatever a
 //!   comrak extension produces — is kept as source text: a `raw_block` where a
-//!   block is expected, plain text where an inline is.
+//!   block is expected. Inline HTML has its own raw primitive.
 //!
 //! # Repair
 //!
@@ -311,6 +310,20 @@ impl<'a> Walk<'a> {
                 .strip_suffix('\n')
                 .unwrap_or(&html.literal)
                 .to_string();
+        }
+        // References live outside the raw block and are consumed by comrak.
+        // Its formatter writes resolved link/image destinations inline, making
+        // the preserved block self-contained when those definitions disappear.
+        if node.descendants().any(|child| {
+            matches!(
+                &*self.value(child),
+                NodeValue::Link(_) | NodeValue::Image(_)
+            )
+        }) {
+            let mut source = String::new();
+            comrak::format_commonmark(node, &commonmark_options(), &mut source)
+                .expect("formatting into a String cannot fail");
+            return source.trim_end_matches('\n').to_string();
         }
         self.cx.block_source(self.target(node).sourcepos())
     }

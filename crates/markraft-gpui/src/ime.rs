@@ -56,7 +56,11 @@ pub fn commit_specs(
             let replacement = state.selection().replacement_range(doc);
             (replacement.from, replacement.to)
         });
-    let select = TransactionSpec::new().selection(Selection::text(from, to));
+    let select = TransactionSpec::new().selection(Selection::Text {
+        anchor: from,
+        head: to,
+        marks: state.selection().stored_marks().cloned(),
+    });
     // The insertion is computed against the selection it replaces, which is
     // what the first spec establishes; the two travel as one transaction.
     let insert = state
@@ -226,6 +230,13 @@ impl EntityInputHandler for EditorView {
         };
         let text = printable(text);
         let text = single_line::text(&text, self.single_line).into_owned();
+        // macOS reports Escape (and deleting the final candidate character)
+        // as empty marked text. Restore the preedit snapshot, including the
+        // original replacement selection, before another candidate can start.
+        if text.is_empty() && self.is_composing() {
+            self.cancel_composition(cx);
+            return;
+        }
         let mut specs = Vec::new();
         if let Some(range) = range.as_ref()
             && let Some((from, to)) = self.positions_of(range)
@@ -285,7 +296,7 @@ impl EntityInputHandler for EditorView {
         let (row, offset) = self.row_at(from)?;
         let a = row.caret(offset, self.upstream);
         let b = if row.contains(to) {
-            row.caret(to - row.from, self.upstream)
+            row.caret(row.pos_to_offset(to), self.upstream)
         } else {
             a
         };
@@ -470,16 +481,9 @@ mod tests {
         let marked = mark(&session, &types, "hi");
         assert_eq!(text_of(&marked), "endxhi");
         // Cancelling takes back only the uncommitted candidate.
-        let range = markraft_core::composition_range(&marked).expect("a range");
         let cancelled = apply(
             &marked,
-            vec![
-                TransactionSpec::new()
-                    .changes([markraft_core::Change::delete(range.from, range.to)
-                        .with_fit(markraft_core::Fit::Auto)])
-                    .add_to_history(false),
-                markraft_core::finish_composition().sequential(),
-            ],
+            vec![markraft_core::cancel_composition(&marked).expect("an active composition")],
         );
         assert_eq!(text_of(&cancelled), "endx");
         let closed = group(&cancelled, false);

@@ -288,6 +288,9 @@ fn pop(state: &EditorState, side: Branch, only_selection: bool) -> Option<Transa
 }
 
 fn update_history(value: &HistoryState, tr: &Transaction) -> HistoryState {
+    if let Some(previous) = crate::composition::cancelled_history(tr) {
+        return previous.clone();
+    }
     // The configuration is read from the *start* state: reading it from the
     // resulting state would ask for the state this update is producing.
     let config = tr.start_state().facet(history_config()).clone();

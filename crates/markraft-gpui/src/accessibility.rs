@@ -19,6 +19,8 @@ struct TextRun {
     content_end: usize,
     text: String,
     offsets: Vec<usize>,
+    /// Document positions for each selectable unit boundary in `offsets`.
+    positions: Vec<usize>,
     bounds: accesskit::Rect,
 }
 
@@ -69,11 +71,31 @@ impl AccessibleText {
                 }
                 let x = f32::from(row.origin.x) * scale;
                 let y = f32::from(row.origin.y + row.line_height * visual as f32) * scale;
+                let offsets = character_offsets(&value);
+                let positions = offsets
+                    .iter()
+                    .map(|&byte| {
+                        let offset = (inner.start + value[..byte].chars().count()).min(inner.end);
+                        line.offset_to_pos(offset)
+                            .expect("a visible offset inside the line")
+                    })
+                    .collect();
                 self.runs.push(TextRun {
                     node_id: None,
-                    from: line.from + inner.start,
-                    content_end: line.from + inner.end,
-                    offsets: character_offsets(&value),
+                    from: if inner.start == 0 {
+                        line.from
+                    } else {
+                        line.offset_to_pos(inner.start)
+                            .expect("a row starts in its line")
+                    },
+                    content_end: if inner.end == line.len() {
+                        line.to
+                    } else {
+                        line.offset_to_pos(inner.end)
+                            .expect("a row ends in its line")
+                    },
+                    offsets,
+                    positions,
                     text: value,
                     bounds: accesskit::Rect {
                         x0: f64::from(x),
@@ -87,8 +109,10 @@ impl AccessibleText {
     }
 
     pub(crate) fn write(&mut self, builder: &mut A11ySubtreeBuilder) {
-        for run in &mut self.runs {
-            let id = builder.synthetic_node_id(("text", run.from));
+        for (index, run) in self.runs.iter_mut().enumerate() {
+            // An atomic raw block may paint several rows at one document
+            // position. Each displayed row still needs its own AccessKit ID.
+            let id = builder.synthetic_node_id(("text", run.from, index));
             run.node_id = Some(id);
             let mut node = accesskit::Node::new(Role::TextRun);
             node.set_value(run.text.clone());
@@ -117,19 +141,15 @@ impl AccessibleText {
             .iter()
             .rev()
             .find(|run| run.from <= pos && pos <= run.content_end)?;
-        let relative = pos - run.from;
-        // One token is one `char` inside a line, and the run's text is that stretch.
-        let byte = run
-            .text
-            .char_indices()
-            .nth(relative)
-            .map_or(run.text.len(), |(index, _)| index);
+        let index = run.positions.partition_point(|&boundary| boundary < pos);
+        let character_index = if run.positions.get(index) == Some(&pos) {
+            index
+        } else {
+            index.saturating_sub(1)
+        };
         Some(accesskit::TextPosition {
             node: run.node_id?,
-            character_index: run
-                .offsets
-                .partition_point(|&offset| offset <= byte)
-                .saturating_sub(1),
+            character_index,
         })
     }
 
@@ -138,9 +158,7 @@ impl AccessibleText {
             .runs
             .iter()
             .find(|run| run.node_id == Some(position.node))?;
-        let byte = *run.offsets.get(position.character_index)?;
-        let chars = run.text[..byte].chars().count();
-        Some((run.from + chars).min(run.content_end))
+        run.positions.get(position.character_index).copied()
     }
 
     pub(crate) fn selection(&self, selection: &accesskit::TextSelection) -> Option<Selection> {
@@ -168,6 +186,37 @@ mod tests {
     }
 
     #[test]
+    fn accessible_positions_skip_hidden_inline_boundaries() {
+        let state = crate::typeahead::tests::state_of("*你 **好** é*");
+        let projection = markraft_core::projection::projection_of(&state);
+        let line = &projection.lines()[0];
+        let value = projection.line_text(0).unwrap();
+        let offsets = character_offsets(value);
+        let positions: Vec<_> = offsets
+            .iter()
+            .map(|&byte| line.offset_to_pos(value[..byte].chars().count()).unwrap())
+            .collect();
+        let text = AccessibleText {
+            runs: vec![TextRun {
+                node_id: Some(accesskit::NodeId(1)),
+                from: line.from,
+                content_end: line.to,
+                text: value.into(),
+                offsets,
+                positions: positions.clone(),
+                bounds: accesskit::Rect::ZERO,
+            }],
+            selection: (line.from, line.to),
+        };
+        for (index, pos) in positions.into_iter().enumerate() {
+            let accessible = text.text_position(pos).unwrap();
+            assert_eq!(accessible.character_index, index);
+            assert_eq!(text.position(accessible), Some(pos));
+        }
+        assert_eq!(text.text_position(line.from).unwrap().character_index, 0);
+    }
+
+    #[test]
     fn accessible_positions_roundtrip_wrapped_lines_and_block_boundaries() {
         let run = |id, from, end, text: &str| TextRun {
             node_id: Some(accesskit::NodeId(id)),
@@ -175,6 +224,10 @@ mod tests {
             content_end: end,
             text: text.into(),
             offsets: character_offsets(text),
+            positions: character_offsets(text)
+                .into_iter()
+                .map(|byte| (from + text[..byte].chars().count()).min(end))
+                .collect(),
             bounds: accesskit::Rect::ZERO,
         };
         // Two visual rows of one line holding "你好", then the next block.

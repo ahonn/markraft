@@ -139,6 +139,51 @@ pub fn commonmark_node_rules() -> NodeRules {
             state.text(&written, false);
         }),
     );
+    rules.insert(
+        md::RAW_INLINE.to_string(),
+        rule(|state, node, _, _| {
+            state.text(attr_str(node, "source", ""), false);
+        }),
+    );
+    rules.insert(
+        md::INLINE_SPAN.to_string(),
+        rule(|state, node, _, _| {
+            // HTML tags cannot merge into the neighbouring Markdown delimiter run.
+            // Links retain Markdown spelling so an empty label remains a link node.
+            let rules = crate::html::commonmark_html_mark_rules();
+            let mut closing = Vec::new();
+            for mark in node.marks().iter() {
+                let name = state.schema().mark_type(mark.ty).name();
+                let (open, close) = if name == md::LINK {
+                    let value = |key| mark.attrs.get(key).and_then(|v| v.as_str()).unwrap_or("");
+                    (
+                        "[".to_string(),
+                        format!(
+                            "]({}{})",
+                            link_destination(value("href")),
+                            link_title(value("title"))
+                        ),
+                    )
+                } else if let Some(rule) = rules.get(name) {
+                    rule(mark)
+                } else {
+                    continue;
+                };
+                state.text(&open, false);
+                closing.push(close);
+            }
+            state.render_inline(node);
+            for close in closing.iter().rev() {
+                state.text(close, false);
+            }
+        }),
+    );
+    rules.insert(
+        md::SOFT_BREAK.to_string(),
+        rule(|state, _, _, _| {
+            state.text(if state.is_single_line() { " " } else { "\n" }, false);
+        }),
+    );
     rules.insert(md::HARD_BREAK.to_string(), rule(hard_break));
     rules
 }
@@ -437,7 +482,16 @@ fn emphasis_rule(run: &'static str, delimiter: char, tag: &'static str) -> MarkR
         open: Arc::new(
             move |state: &mut SerializerState<'_>, target: &MarkTarget<'_>| {
                 let merges = state.after_mark_close() && state.out().ends_with(delimiter);
-                let plain = !merges && emphasis_flanks(state, target, delimiter);
+                // A simultaneous ** + * opening is parsed as em outside strong.
+                // Use a tag when the model requires the opposite nesting.
+                let reversed = tag == "strong"
+                    && target.parent.maybe_child(target.index).is_some_and(|node| {
+                        state
+                            .schema()
+                            .mark_id(md::EM)
+                            .is_some_and(|ty| node.marks().contains_type(ty))
+                    });
+                let plain = !merges && !reversed && emphasis_flanks(state, target, delimiter);
                 state.set_tagged(target.mark.ty, !plain);
                 if plain {
                     run.to_string()

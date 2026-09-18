@@ -2,14 +2,15 @@
 //!
 //! Each function builds the whole of a command's effect, so a command is one
 //! transaction and one undo step, and every one of them can be driven straight from an
-//! [`EditorState`] in a test. Nothing here touches the tree: a linewise operator is a
-//! [`Slice`] cut out of the document and put back somewhere else.
+//! [`EditorState`] in a test. Linewise operators retain the containers around selected
+//! blocks in the register while deleting only those blocks from the document.
 
 use crate::motion::{self, Span};
 use markraft_core::commands::delete_range_changes;
 use markraft_core::projection::{Projection, slice_to_plain_text};
 use markraft_core::{
-    Change, ChangeSet, EditorState, Fit, Node, Selection, Slice, TrackMode, TransactionSpec,
+    Change, ChangeSet, EditorState, Fit, Fragment, Node, Selection, Slice, TrackMode,
+    TransactionSpec,
 };
 use std::ops::Range;
 
@@ -27,8 +28,8 @@ pub(crate) struct Register {
     pub depth: usize,
 }
 
-/// The node range whole lines `lines` occupy, and the depth of the parent that holds
-/// it.
+/// The enclosing sibling range for `lines`, and the depth of its parent.
+/// Partial containers at its edges are filtered by [`linewise_content`].
 ///
 /// The model's own [`block_range`](markraft_core::ResolvedPos::block_range) finds the
 /// smallest run of siblings covering the lines, which is what keeps a range spanning
@@ -63,15 +64,91 @@ pub(crate) fn linewise_unit(
     Some((start..end, depth))
 }
 
+/// The selected lines as closed nodes, plus the exact nodes to remove. A
+/// partially selected container is kept around the yank, but only its selected
+/// descendants are deleted from the source document.
+fn linewise_content(
+    state: &EditorState,
+    projection: &Projection,
+    lines: Range<usize>,
+) -> Option<(Slice, Vec<Range<usize>>, usize)> {
+    let (range, depth) = linewise_unit(state, projection, lines.clone())?;
+    let selected: std::collections::HashSet<usize> = projection
+        .lines()
+        .get(lines.start..lines.end.min(projection.line_count()))?
+        .iter()
+        .filter_map(|line| line.ancestors.last().map(|own| own.before))
+        .collect();
+
+    fn collect(
+        node: &Node,
+        before: usize,
+        selected: &std::collections::HashSet<usize>,
+    ) -> Option<(Node, Vec<Range<usize>>, bool)> {
+        let whole = before..before + node.node_size();
+        if selected.contains(&before) {
+            return Some((node.clone(), vec![whole], true));
+        }
+        let mut children = Vec::new();
+        let mut cuts = Vec::new();
+        let mut all = true;
+        let mut pos = before + 1;
+        for child in node.children() {
+            if let Some((part, ranges, complete)) = collect(child, pos, selected) {
+                children.push(part);
+                cuts.extend(ranges);
+                all &= complete;
+            } else {
+                all = false;
+            }
+            pos += child.node_size();
+        }
+        if children.is_empty() {
+            None
+        } else if all {
+            Some((node.clone(), vec![whole], true))
+        } else {
+            Some((node.copy(Fragment::from_nodes(children)), cuts, false))
+        }
+    }
+
+    let mut nodes = Vec::new();
+    let mut cuts = Vec::new();
+    let mut pos = range.start;
+    while pos < range.end {
+        let node = state.doc().node_at(pos)?;
+        if let Some((selected_node, ranges, _)) = collect(&node, pos, &selected) {
+            nodes.push(selected_node);
+            cuts.extend(ranges);
+        }
+        pos += node.node_size();
+    }
+    // Adjacent deletions must be fitted together: fitting each independently
+    // can introduce filler content before the full line range has been removed.
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for cut in cuts {
+        if let Some(previous) = merged.last_mut()
+            && previous.end == cut.start
+        {
+            previous.end = cut.end;
+        } else {
+            merged.push(cut);
+        }
+    }
+    Some((
+        Slice::from_fragment(Fragment::from_nodes(nodes)),
+        merged,
+        depth,
+    ))
+}
+
 /// The register a line range would yank.
 pub(crate) fn linewise_register(
     state: &EditorState,
     projection: &Projection,
     lines: Range<usize>,
 ) -> Option<Register> {
-    let doc = state.doc();
-    let (range, depth) = linewise_unit(state, projection, lines)?;
-    let slice = doc.slice(range.start, range.end).ok()?;
+    let (slice, _, depth) = linewise_content(state, projection, lines)?;
     Some(Register {
         text: slice_to_plain_text(state.schema(), &slice),
         slice,
@@ -84,7 +161,7 @@ pub(crate) fn linewise_register(
 pub(crate) fn charwise_register(state: &EditorState, range: Range<usize>) -> Register {
     let slice = state
         .doc()
-        .slice(range.start, range.end)
+        .slice_with_schema(state.schema(), range.start, range.end)
         .unwrap_or_else(|_| Slice::empty());
     Register {
         text: slice_to_plain_text(state.schema(), &slice),
@@ -132,14 +209,16 @@ pub(crate) fn delete_linewise(
     projection: &Projection,
     lines: Range<usize>,
 ) -> Option<TransactionSpec> {
-    let (range, _) = linewise_unit(state, projection, lines)?;
-    let (set, doc) = resolve(
-        state,
-        vec![Change::delete(range.start, range.end).with_fit(Fit::Auto)],
-    )?;
+    let (_, ranges, _) = linewise_content(state, projection, lines)?;
+    let start = ranges.first()?.start;
+    let changes = ranges
+        .into_iter()
+        .map(|range| Change::delete(range.start, range.end).with_fit(Fit::Auto))
+        .collect();
+    let (set, doc) = resolve(state, changes)?;
     let caret = set
-        .map_pos(range.start, 1, TrackMode::Simple)
-        .unwrap_or(range.start)
+        .map_pos(start, 1, TrackMode::Simple)
+        .unwrap_or(start)
         .min(doc.content_size());
     let after = Projection::of(&doc, state.schema());
     let line = motion::line_from(&after, caret);
@@ -159,8 +238,12 @@ pub(crate) fn change_linewise(
     let first = projection.line(lines.start)?;
     let mut changes = Vec::new();
     if lines.end > lines.start + 1 {
-        let (rest, _) = linewise_unit(state, projection, lines.start + 1..lines.end)?;
-        changes.push(Change::delete(rest.start, rest.end).with_fit(Fit::Auto));
+        let (_, ranges, _) = linewise_content(state, projection, lines.start + 1..lines.end)?;
+        changes.extend(
+            ranges
+                .into_iter()
+                .map(|range| Change::delete(range.start, range.end).with_fit(Fit::Auto)),
+        );
     }
     changes.extend(delete_range_changes(
         state.schema(),
@@ -193,7 +276,7 @@ pub(crate) fn paste(
         return None;
     }
     if register.linewise {
-        let at = linewise_paste_position(state.doc(), cursor, register, after)?;
+        let at = linewise_paste_position(state.doc(), projection, cursor, register, after)?;
         let (set, doc) = resolve(
             state,
             vec![Change::replace(at, at, register.slice.clone()).with_fit(Fit::Auto)],
@@ -231,16 +314,20 @@ pub(crate) fn paste(
 /// register's nodes were cut from, or at the deepest one it has.
 fn linewise_paste_position(
     doc: &Node,
+    projection: &Projection,
     cursor: usize,
     register: &Register,
     after: bool,
 ) -> Option<usize> {
-    let resolved = doc.resolve(cursor).ok()?;
-    let level = (register.depth + 1).clamp(1, resolved.depth().max(1));
+    let line = projection.line(motion::line_of(projection, cursor))?;
+    // Projection paths include the line's own node, including leaves that a
+    // resolved position cannot enter.
+    let level = register.depth.min(line.ancestors.len().checked_sub(1)?);
+    let before = line.ancestors[level].before;
     Some(if after {
-        resolved.after(level)
+        before + doc.node_at(before)?.node_size()
     } else {
-        resolved.before(level)
+        before
     })
 }
 
@@ -365,7 +452,11 @@ mod tests {
         let state = state_of("ab");
         let projection = projection_of(&state);
         let source = state_of("**XY**");
-        let register = charwise_register(&source, 1..3);
+        let source_projection = projection_of(&source);
+        let register = charwise_register(
+            &source,
+            motion::line_start(&source_projection, 0)..motion::line_end(&source_projection, 0),
+        );
         let spec = paste(&state, &projection, 1, &register, true).expect("a paste");
         assert_eq!(applied(&state, spec), "a**XY**b");
         let spec = paste(&state, &projection, 2, &register, false).expect("a paste");

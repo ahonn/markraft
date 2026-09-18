@@ -78,7 +78,49 @@ pub fn normalize_html(html: &str) -> String {
 }
 
 fn collapse(html: &str) -> String {
-    html.split_whitespace().collect::<Vec<_>>().join(" ")
+    // Collapse only text whitespace. Attribute values and comments are data:
+    // globally splitting whitespace would hide corruption of `title="a  b"`.
+    let mut out = String::new();
+    let mut pending_space = false;
+    let mut rest = html;
+    while !rest.is_empty() {
+        if rest.starts_with('<') {
+            let end = if rest.starts_with("<!--") {
+                rest.find("-->").map(|index| index + 3)
+            } else {
+                let mut quote = None;
+                rest.char_indices().find_map(|(index, character)| {
+                    match (quote, character) {
+                        (Some(q), c) if q == c => quote = None,
+                        (None, '\'' | '"') => quote = Some(character),
+                        (None, '>') => return Some(index + 1),
+                        _ => {}
+                    }
+                    None
+                })
+            }
+            .unwrap_or(rest.len());
+            if pending_space && !out.is_empty() {
+                out.push(' ');
+            }
+            pending_space = false;
+            out.push_str(&rest[..end]);
+            rest = &rest[end..];
+        } else {
+            let character = rest.chars().next().expect("nonempty remainder");
+            rest = &rest[character.len_utf8()..];
+            if character.is_ascii_whitespace() {
+                pending_space = true;
+            } else {
+                if pending_space && !out.is_empty() {
+                    out.push(' ');
+                }
+                pending_space = false;
+                out.push(character);
+            }
+        }
+    }
+    out
 }
 
 /// Whether the codec's normalisation of `source` renders the same HTML.

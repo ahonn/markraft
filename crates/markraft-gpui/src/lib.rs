@@ -153,8 +153,8 @@ pub fn bind_keys(cx: &mut App) {
         "cmd-i" => Italic, "cmd-e" => Code,
         "cmd-shift-s" => Strikethrough, "cmd-u" => Underline, "cmd-alt-0" => Paragraph,
         "cmd-alt-1" => Heading, "cmd-alt-2" => Heading2,
-        "cmd-alt-3" => Heading3, "cmd-shift-b" => Quote, "cmd-alt-c" => CodeBlock, "cmd-shift-7" => Ordered, "cmd-shift-8" => Bullet,
-        "cmd-shift-9" => Task, "cmd-enter" => ToggleTask,
+        "cmd-alt-3" => Heading3, "cmd-shift-b" => Quote, "cmd-alt-c" => CodeBlock,
+        "cmd-enter" => ToggleTask,
         "ctrl-cmd-space" => CharacterPalette,
         "alt-left" => WordLeft, "alt-right" => WordRight,
         "alt-shift-left" => SelectWordLeft, "alt-shift-right" => SelectWordRight,
@@ -163,9 +163,20 @@ pub fn bind_keys(cx: &mut App) {
         "cmd-shift-up" => SelectDocumentStart, "cmd-shift-down" => SelectDocumentEnd,
         "escape" => CancelComposition,
     }
+    cx.bind_keys(list_key_bindings());
     // Last, so that at the same context depth an extension's bindings win while its
     // identifier is in the editor's key context.
     typeahead::bind_keys(cx);
+}
+
+// GPUI folds Shift into non-letter keys on macOS: Cmd+Shift+7/8/9
+// arrive as Cmd+&/*/(. Bind the normalized symbols rather than raw digits.
+fn list_key_bindings() -> [KeyBinding; 3] {
+    [
+        KeyBinding::new("cmd-&", Ordered, Some("Markraft")),
+        KeyBinding::new("cmd-*", Bullet, Some("Markraft")),
+        KeyBinding::new("cmd-(", Task, Some("Markraft")),
+    ]
 }
 
 #[derive(Clone, Debug)]
@@ -393,6 +404,10 @@ impl EditorView {
     pub fn doc(&self) -> &Node {
         self.state.doc()
     }
+    /// The persistent document, excluding the input method’s uncommitted candidate.
+    pub fn committed_document(&self) -> &Node {
+        markraft_core::committed_document(&self.state)
+    }
     pub fn schema(&self) -> &Schema {
         self.state.schema()
     }
@@ -421,7 +436,7 @@ impl EditorView {
     /// silently answers for the wrong row when they do not.
     pub(crate) fn row_at(&self, pos: usize) -> Option<(&LayoutLine, usize)> {
         let row = self.layout.iter().find(|row| row.contains(pos))?;
-        Some((row, pos - row.from))
+        Some((row, row.pos_to_offset(pos)))
     }
 
     /// The caret, or the moving end of a range.
@@ -575,27 +590,11 @@ impl EditorView {
         }
     }
 
-    /// Take back the text an input method has not committed.
-    ///
-    /// The whole transaction stays out of the history — unlike a commit, which
-    /// belongs in it — because the candidate was never the user's text. No
-    /// later spec sets the annotation, so it describes all of it, which is what
-    /// the merge rule requires. The history rebases what it holds through the
-    /// deletion instead, so an undo group this cancel sits inside still undoes
-    /// to the document it started from.
+    /// Restore the content and selection from before the input method started.
     pub fn cancel_composition(&mut self, cx: &mut Context<Self>) {
-        let Some(range) = markraft_core::composition_range(&self.state) else {
-            return;
-        };
-        let specs = vec![
-            TransactionSpec::new()
-                .changes([markraft_core::Change::delete(range.from, range.to)
-                    .with_fit(markraft_core::Fit::Auto)])
-                .selection(Selection::cursor(range.from))
-                .add_to_history(false),
-            markraft_core::finish_composition().sequential(),
-        ];
-        self.edit(cx, true, specs);
+        if let Some(spec) = markraft_core::cancel_composition(&self.state) {
+            self.edit(cx, true, vec![spec]);
+        }
     }
 
     pub fn toggle_mark(&mut self, ty: MarkTypeId, attrs: Attrs, cx: &mut Context<Self>) {
@@ -630,7 +629,7 @@ impl EditorView {
         let pos = self.hit(point);
         let (range, mark) = links::link_at(self.state.doc(), ty, pos)?;
         let (row, offset) = self.row_at(range.start)?;
-        row.rectangles(offset..range.end - row.from, false)
+        row.rectangles(offset..row.pos_to_offset(range.end), false)
             .iter()
             .any(|bounds| bounds.contains(&point))
             .then(|| {
@@ -699,13 +698,13 @@ impl EditorView {
         );
         let (row, offset) = self.row_at(start)?;
         let range = if start != end {
-            offset..(end.min(row.to()) - row.from)
+            offset..row.pos_to_offset(end)
         } else if let Some((span, _)) = self
             .types
             .link
             .and_then(|ty| links::link_at(doc, ty, start))
         {
-            span.start.max(row.from) - row.from..span.end.min(row.to()) - row.from
+            row.pos_to_offset(span.start)..row.pos_to_offset(span.end)
         } else {
             offset..offset
         };
@@ -837,7 +836,7 @@ impl EditorView {
             return 0;
         };
         if point.y >= last.origin.y + last.height {
-            return last.from + last.char_len;
+            return last.offset_to_pos(last.char_len);
         }
         let row = self
             .layout
@@ -845,8 +844,7 @@ impl EditorView {
             .find(|row| point.y < row.origin.y + row.height)
             .unwrap_or(&self.layout[0]);
         let local = gpui::point(point.x - row.origin.x, point.y - row.origin.y);
-        let pos = row.from + row.char_at(local).min(row.char_len);
-        self.projection.floor_grapheme(pos)
+        row.hit_position(row.char_at(local), &self.projection)
     }
 
     fn select_point(&mut self, point: Point<Pixels>, extend: bool, cx: &mut Context<Self>) {
@@ -947,7 +945,9 @@ impl EditorView {
 
     /// The selected content, as a slice.
     pub fn selection_slice(&self) -> markraft_core::Slice {
-        self.state.selection().content(self.state.doc())
+        self.state
+            .selection()
+            .content_with_schema(self.state.doc(), self.state.schema())
     }
 
     fn copy(&mut self, cx: &mut Context<Self>) {
@@ -983,7 +983,7 @@ impl EditorView {
         let schema = self.state.schema().clone();
         let spec = if literal {
             let text = single_line::text(text, self.single_line);
-            markraft_core::commands::insert_text(&text)(&self.state)
+            keymap::insert_plain(&self.types, &text)(&self.state)
         } else if is_web_url(text.trim())
             && self.types.link.is_some()
             && (!self.state.selection().is_empty(self.state.doc()) || self.active_link().is_none())
@@ -1450,5 +1450,30 @@ mod link_tests {
         );
         assert_eq!(openable_url("file:///etc/passwd"), None);
         assert_eq!(openable_url("javascript:alert(1)"), None);
+    }
+}
+
+#[cfg(test)]
+mod key_binding_tests {
+    use super::list_key_bindings;
+    use gpui::{Keystroke, Modifiers};
+
+    #[test]
+    fn list_shortcuts_match_macos_shifted_digit_events() {
+        let bindings = list_key_bindings();
+        for (index, key) in ["&", "*", "("].into_iter().enumerate() {
+            // macOS GPUI clears Shift after translating the key to its symbol.
+            let typed = Keystroke {
+                modifiers: Modifiers::command(),
+                key: key.into(),
+                key_char: None,
+            };
+            for (binding_index, binding) in bindings.iter().enumerate() {
+                assert_eq!(
+                    binding.match_keystrokes(std::slice::from_ref(&typed)),
+                    (index == binding_index).then_some(false)
+                );
+            }
+        }
     }
 }

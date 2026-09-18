@@ -33,11 +33,16 @@ fn composed(steps: Vec<Command>) -> Command {
         let mut set: Option<markraft_core::ChangeSet> = None;
         let mut selection = None;
         let mut event = None;
-        for step in &steps {
-            let Some(spec) = step(&current) else { continue };
-            let Ok(tr) = current.update([spec]) else {
+        for (index, step) in steps.iter().enumerate() {
+            let Some(spec) = step(&current) else {
+                // Follow-up normalization is optional, but it must never run
+                // when the primary edit did not apply.
+                if index == 0 {
+                    return None;
+                }
                 continue;
             };
+            let tr = current.update([spec]).ok()?;
             let next = tr.changes().clone();
             set = Some(match set {
                 Some(previous) => previous.compose(&next).ok()?,
@@ -106,7 +111,7 @@ impl DocTypes {
             return false;
         };
         let line = &projection.lines()[index];
-        line.from == selection.head(doc)
+        line.pos_to_offset(selection.head(doc)) == Some(0)
             && line.ancestors.last().is_some_and(|own| own.index == 0)
             && line
                 .ancestors
@@ -326,38 +331,73 @@ pub(crate) fn toggle_list(types: &DocTypes, ty: NodeTypeId, item: NodeTypeId) ->
         if current == Some(ty) && current_item.is_some() {
             // The same list type but the other kind of item: change the items
             // rather than nesting a second list.
-            return convert_items(state, &types, item)(state);
+            return convert_items(&types, item)(state);
         }
-        wrap_in_list(ty, Attrs::empty())(state)
+        composed(vec![
+            wrap_in_list(ty, Attrs::empty()),
+            convert_items(&types, item),
+        ])(state)
     })
 }
 
-/// Turn the item the cursor sits in into one of type `item`.
-fn convert_items(state: &EditorState, types: &DocTypes, item: NodeTypeId) -> Command {
-    let Some((_, _, before)) = types.item_at_cursor(state) else {
-        return command(|_| None);
-    };
-    let schema = state.schema();
-    let attrs = schema.node_type(item).default_attrs().clone();
+/// Turn the selected items into `item`, preserving their content and selection.
+fn convert_items(types: &DocTypes, item: NodeTypeId) -> Command {
+    let types = types.clone();
     command(move |state| {
-        let node = state.doc().node_at(before)?;
-        let replaced = state
-            .schema()
-            .create(
-                item,
-                attrs.clone(),
-                node.marks().clone(),
-                node.content().clone(),
-            )
-            .ok()?;
-        let slice =
-            markraft_core::Slice::from_fragment(markraft_core::Fragment::from_node(replaced));
-        markraft_core::commands::changes_spec(
-            state,
-            vec![Change::replace(before, before + node.node_size(), slice)],
-            "format.block",
-        )
-        .map(|spec| spec.selection(state.selection().clone()))
+        let doc = state.doc();
+        let selection = state.selection();
+        let from = selection.from(doc);
+        let to = selection.to(doc);
+        let projection = projection_of(state);
+        let mut positions = std::collections::BTreeSet::new();
+        for line in projection.lines() {
+            if line.to < from || line.from > to || (from != to && line.from == to) {
+                continue;
+            }
+            if let Some(ancestor) = line
+                .ancestors
+                .iter()
+                .rev()
+                .find(|a| types.is_item(a.node_type))
+            {
+                positions.insert(ancestor.before);
+            }
+        }
+        let mut changes = Vec::new();
+        for before in positions {
+            let node = doc.node_at(before)?;
+            if node.type_id() == item {
+                continue;
+            }
+            let replaced = state
+                .schema()
+                .create(
+                    item,
+                    state.schema().node_type(item).default_attrs().clone(),
+                    node.marks().clone(),
+                    node.content().clone(),
+                )
+                .ok()?;
+            // Replace only the boundary tokens. Nested selected items then
+            // produce disjoint changes and retain the original content mapping.
+            let markup = replaced.markup().clone();
+            changes.push(Change::replace(
+                before,
+                before + 1,
+                markraft_core::Slice::from_tokens(&[markraft_core::Token::Open(markup.clone())]),
+            ));
+            let end = before + node.node_size();
+            changes.push(Change::replace(
+                end - 1,
+                end,
+                markraft_core::Slice::from_tokens(&[markraft_core::Token::Close(markup)]),
+            ));
+        }
+        if changes.is_empty() {
+            return None;
+        }
+        markraft_core::commands::changes_spec(state, changes, "format.block")
+            .map(|spec| spec.selection(selection.clone()))
     })
 }
 
@@ -574,6 +614,34 @@ mod tests {
         // The same list with the other item kind converts in place.
         let tasks = toggle_list(&types, bullet, task);
         assert_eq!(after(&state, &tasks).as_deref(), Some("- [ ] text"));
+    }
+
+    #[test]
+    fn a_paragraph_can_be_wrapped_directly_in_a_task_list() {
+        let state = state_of("text");
+        let types = types_of(&state);
+        let command = toggle_list(&types, types.bullet_list.unwrap(), types.task_item.unwrap());
+        assert_eq!(after(&state, &command).as_deref(), Some("- [ ] text"));
+        let state = state_of("one\n\ntwo");
+        let state = state
+            .update([TransactionSpec::new().selection(Selection::All)])
+            .unwrap()
+            .state()
+            .clone();
+        assert_eq!(
+            after(&state, &command).as_deref(),
+            Some("- [ ] one\n- [ ] two")
+        );
+    }
+
+    #[test]
+    fn enter_in_an_empty_completed_task_leaves_the_list() {
+        let state = state_of("- [x] ");
+        let state = at(&state, projection_of(&state).lines()[0].from);
+        assert_eq!(
+            after(&state, &enter(&types_of(&state))).as_deref(),
+            Some("")
+        );
     }
 
     #[test]

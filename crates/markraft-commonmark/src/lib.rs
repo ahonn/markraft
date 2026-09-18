@@ -17,12 +17,11 @@
 //! **Semantic fidelity, not byte fidelity.** A document that survives a round
 //! trip renders the same HTML; it does not come back as the same source text.
 //! Headings become ATX, code blocks become fenced, reference links become
-//! inline links, and where the author wrapped a paragraph is not recorded.
+//! inline links; soft breaks preserve whitespace semantics around raw HTML.
 //!
 //! **Nothing is silently lost.** Every construct either has a node type, or is
-//! kept verbatim in a `raw_block`, or — inline — degrades to the source text a
-//! reader sees anyway. The exceptions are listed under *Known losses* below and
-//! are each a thing CommonMark itself cannot express.
+//! kept in a `raw_block` or `raw_inline` primitive. Inline nesting that cannot
+//! fit a flat mark set is carried by an editable `inline_span` container.
 //!
 //! # The three pieces
 //!
@@ -59,8 +58,8 @@
 //!
 //! # Known losses
 //!
-//! Every one of these is a shape CommonMark cannot write down, not a gap in the
-//! codec. Each has a test of its own in `tests/cases.rs`.
+//! Editor-created shapes and cosmetic normalizations follow these rules.
+//! Each has a test of its own in `tests/cases.rs`.
 //!
 //! * A `hard_break` with nothing after it in its block is dropped, and one
 //!   inside a heading becomes a space; whitespace directly after a break is
@@ -70,11 +69,6 @@
 //!   move outside the mark, because `* a *` is not emphasis at all.
 //! * A line ending inside a **code span** becomes a space: CommonMark says so.
 //!   Everywhere else in inline content it travels as `&#10;` and comes back.
-//! * Emphasis cannot nest inside emphasis of the same kind, and a code span
-//!   takes no styling marks — a mark set holds one mark per type.
-//! * **Inline** HTML is not a modelled construct: a tag that pairs up as `<u>`,
-//!   `<em>`, `<strong>` or `<del>` becomes that mark, and anything else becomes
-//!   the text it reads as. HTML *blocks* are kept verbatim.
 //! * Cosmetic attributes are advisory: `fence_char` and `fence_length` grow to
 //!   clear the content, and `bullet_char`/`delimiter` change when the list
 //!   before would otherwise merge with this one.

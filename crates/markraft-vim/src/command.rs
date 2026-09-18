@@ -18,7 +18,7 @@ pub(crate) fn clamp(projection: &Projection, pos: usize) -> usize {
     let pos = motion::clamp(projection, pos);
     let index = motion::line_of(projection, pos);
     let line = &projection.lines()[index];
-    if line.is_empty() || pos < line.to {
+    if line.is_empty() || pos < motion::line_end(projection, index) {
         return pos;
     }
     motion::last_grapheme_of(projection, index)
@@ -32,7 +32,7 @@ pub(crate) fn cursor(state: &State, cx: &impl Host) -> usize {
     let head = host::head(cx);
     let anchor = host::anchor(cx);
     match state.mode {
-        Mode::VisualLine => projection.lines()[motion::line_of(&projection, head)].from,
+        Mode::VisualLine => motion::line_start(&projection, motion::line_of(&projection, head)),
         Mode::Visual if head > anchor => {
             let line = &projection.lines()[motion::line_of(&projection, head)];
             if head > line.from {
@@ -57,8 +57,8 @@ fn visual_selection(
         let a = motion::line_of(projection, anchor);
         let b = motion::line_of(projection, cursor);
         let (first, last) = (a.min(b), a.max(b));
-        let start = projection.lines()[first].from;
-        let end = projection.lines()[last].to;
+        let start = motion::line_start(projection, first);
+        let end = motion::line_end(projection, last);
         return if b >= a {
             Selection::text(start, end)
         } else {
@@ -115,7 +115,7 @@ pub(crate) fn motion(state: &mut State, cx: &mut impl Host, motion: Motion) {
         && motion == Motion::WordForward
         && motion::line_of(&projection, target) != motion::line_of(&projection, from)
     {
-        target = projection.lines()[motion::line_of(&projection, from)].to;
+        target = motion::line_end(&projection, motion::line_of(&projection, from));
     }
     let Some(operator) = operator else {
         move_cursor(state, cx, target);
@@ -347,7 +347,7 @@ pub(crate) fn insert(state: &mut State, cx: &mut impl Host, at: InsertAt) {
         InsertAt::Cursor => from,
         InsertAt::AfterCursor => motion::next_in_line(&projection, from),
         InsertAt::FirstNonBlank => motion::first_non_blank(&projection, index),
-        InsertAt::LineEnd => projection.lines()[index].to,
+        InsertAt::LineEnd => motion::line_end(&projection, index),
     };
     // The mode changes first, so the Normal-mode clamp does not pull `A` back a grapheme.
     enter_insert(state, cx);
@@ -374,7 +374,11 @@ pub(crate) fn open_line(state: &mut State, cx: &mut impl Host, below: bool) {
         return;
     }
     cx.select(
-        Selection::cursor(if below { line.to } else { line.from }),
+        Selection::cursor(if below {
+            motion::line_end(&projection, index)
+        } else {
+            motion::line_start(&projection, index)
+        }),
         false,
     );
     let command = markraft_gpui::commands::enter(cx.types());
@@ -384,12 +388,25 @@ pub(crate) fn open_line(state: &mut State, cx: &mut impl Host, below: bool) {
     if below {
         return;
     }
+    if line
+        .ancestors
+        .last()
+        .is_some_and(|own| Some(own.node_type) == cx.types().code_block)
+    {
+        // Code rows share one projection line; Enter inserted a newline without
+        // creating a new block. Return to the original insertion position.
+        cx.select(Selection::cursor(line.from), false);
+        return;
+    }
     // `O` split the line in two: the empty half is above, so the caret moves back to it.
     let projection = cx.projection();
     let head = host::head(cx);
     let index = motion::line_of(&projection, head);
     if index > 0 {
-        cx.select(Selection::cursor(projection.lines()[index - 1].from), false);
+        cx.select(
+            Selection::cursor(motion::line_start(&projection, index - 1)),
+            false,
+        );
     }
 }
 

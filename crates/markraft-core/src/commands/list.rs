@@ -150,7 +150,9 @@ pub fn split_list_item(item_type: NodeTypeId) -> Command {
         let range = selection.replacement_range(doc);
         let from = doc.resolve(range.from).ok()?;
         let to = doc.resolve(range.to).ok()?;
-        let depth = from.depth();
+        let depth = (1..=from.depth())
+            .rev()
+            .find(|&d| from.node(d).is_textblock(schema))?;
         if depth < 2 || !from.same_parent(&to) {
             return None;
         }
@@ -158,35 +160,36 @@ pub fn split_list_item(item_type: NodeTypeId) -> Command {
         if item.type_id() != item_type {
             return None;
         }
-        if from.parent().content_size() == 0 && item.child_count() == from.index_after(depth - 1) {
+        if from.node(depth).content_size() == 0 && item.child_count() == from.index_after(depth - 1)
+        {
             return None;
         }
-        let at_end = to.pos() == from.end(depth);
+        let at_end = to.pos() + to.depth() - depth == from.end(depth);
         let next_ty = if at_end {
             content_match_at(schema, item, 0).and_then(|m| schema.default_type(m))
         } else {
             None
         };
         let block_markup = match next_ty {
-            Some(ty) if ty != from.parent().type_id() => markup_of(schema, ty, &Attrs::empty()),
-            _ => from.parent().markup().clone(),
+            Some(ty) if ty != from.node(depth).type_id() => markup_of(schema, ty, &Attrs::empty()),
+            _ => from.node(depth).markup().clone(),
         };
         let item_markup = item.markup().clone();
-        if !can_split(
-            schema,
-            doc,
-            range.from,
-            2,
-            &[Some(item_markup.ty), Some(block_markup.ty)],
-        ) {
+        let split_depth = from.depth() - depth + 2;
+        let mut types_after = vec![Some(item_markup.ty), Some(block_markup.ty)];
+        types_after.extend((depth + 1..=from.depth()).map(|d| Some(from.node(d).type_id())));
+        if !can_split(schema, doc, range.from, split_depth, &types_after) {
             return None;
         }
-        let tokens = [
-            Token::Close(from.parent().markup().clone()),
-            Token::Close(item_markup.clone()),
-            Token::Open(item_markup),
-            Token::Open(block_markup),
-        ];
+        let mut tokens: Vec<_> = (depth..=from.depth())
+            .rev()
+            .map(|d| Token::Close(from.node(d).markup().clone()))
+            .collect();
+        tokens.push(Token::Close(item_markup.clone()));
+        tokens.push(Token::Open(item_markup));
+        tokens.push(Token::Open(block_markup));
+        tokens
+            .extend((depth + 1..=from.depth()).map(|d| Token::Open(from.node(d).markup().clone())));
         let (set, new_doc) = resolve_changes(
             state,
             vec![Change::replace(
@@ -195,7 +198,7 @@ pub fn split_list_item(item_type: NodeTypeId) -> Command {
                 Slice::from_tokens(&tokens),
             )],
         )?;
-        let caret = Selection::cursor(range.from + 4);
+        let caret = Selection::cursor(range.from + 2 * split_depth);
         caret.check(&new_doc, schema).ok()?;
         Some(
             TransactionSpec::new()

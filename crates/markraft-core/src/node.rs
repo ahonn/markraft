@@ -475,6 +475,37 @@ impl Node {
         ))
     }
 
+    /// Copy a range while retaining the semantic scopes of inline containers.
+    ///
+    /// Unlike the token-oriented [`Node::slice`], inline ancestors are closed
+    /// in the result, so clipboard insertion into plain text keeps their marks.
+    /// Partial block ancestors remain open for the usual paste fitting.
+    pub fn slice_with_schema(
+        &self,
+        schema: &Schema,
+        from: usize,
+        to: usize,
+    ) -> Result<Slice, NodeError> {
+        if from == to {
+            return Ok(Slice::empty());
+        }
+        let start = self.resolve(from)?;
+        let end = self.resolve(to)?;
+        let mut depth = start.shared_depth(to);
+        while depth > 0 && schema.node_type(start.node(depth).type_id()).is_inline() {
+            depth -= 1;
+        }
+        let offset = start.start(depth);
+        let content = start.node(depth).content().cut(from - offset, to - offset);
+        let open_start = (depth + 1..=start.depth())
+            .filter(|&d| !schema.node_type(start.node(d).type_id()).is_inline())
+            .count();
+        let open_end = (depth + 1..=end.depth())
+            .filter(|&d| !schema.node_type(end.node(d).type_id()).is_inline())
+            .count();
+        Ok(Slice::new(content, open_start, open_end))
+    }
+
     /// Validate this node and its content against `schema`.
     ///
     /// Checks attributes, content expressions, the all-inline-or-all-block rule

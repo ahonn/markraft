@@ -181,6 +181,43 @@ mod tests {
     }
 
     #[test]
+    fn composition_candidates_never_enter_saved_snapshots() {
+        use markraft_core::{
+            EditorState, EditorStateConfig, Selection, committed_document, composition,
+            finish_composition, update_composition,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let (store, mut library) = open(directory.path());
+        let persistence = Persistence::start(store, false);
+        let id = library.active_id.clone();
+        let document = doc::from_markdown("hello");
+        let mut state = EditorState::create(
+            EditorStateConfig::new(doc::schema().clone())
+                .doc(document)
+                .selection(Selection::text(1, 6))
+                .extensions(composition()),
+        )
+        .unwrap();
+        for candidate in ["n", "ni", "你"] {
+            let spec = update_composition(&state, candidate, candidate.chars().count()).unwrap();
+            state = state.update([spec]).unwrap().state().clone();
+            library.set_document(&id, committed_document(&state).clone());
+            persistence.flush(library.clone()).unwrap();
+            assert!(only_note(directory.path()).1.ends_with("---\nhello\n"));
+        }
+
+        state = state
+            .update([finish_composition()])
+            .unwrap()
+            .state()
+            .clone();
+        library.set_document(&id, committed_document(&state).clone());
+        persistence.flush(library).unwrap();
+        assert!(only_note(directory.path()).1.ends_with("---\n你\n"));
+    }
+
+    #[test]
     fn flush_saves_the_latest_snapshot_after_queued_revisions() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());

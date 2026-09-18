@@ -5,8 +5,8 @@
 //! textblock — so a line is shaped into one [`LayoutRow`] per newline-separated
 //! row, each of which may wrap further.
 //!
-//! Every geometry query is in *`char` offsets into the line*, which within a
-//! line is the same number as the document position minus the line's start.
+//! Every geometry query is in visible `char` offsets. The projection retained
+//! by each layout maps document positions past hidden inline boundaries.
 
 use crate::style::EditorStyle;
 use crate::types::DocTypes;
@@ -138,11 +138,13 @@ impl LayoutRow {
 /// One projection line, laid out.
 #[derive(Clone)]
 pub(crate) struct LayoutLine {
+    /// The projection used to shape this frame, including inline position maps.
+    source: Line,
     /// The projection line this was built from.
     pub index: usize,
     /// Document position of the line's first content token.
     pub from: usize,
-    /// How many `char`s — equivalently, token positions — the line holds.
+    /// How many visible `char`s the line holds.
     pub char_len: usize,
     pub rows: Vec<LayoutRow>,
     pub origin: Point<Pixels>,
@@ -162,7 +164,30 @@ pub(crate) struct LayoutLine {
 impl LayoutLine {
     /// The document position just past the line's own content.
     pub(crate) fn to(&self) -> usize {
-        self.from + self.char_len
+        self.source.to
+    }
+
+    pub(crate) fn pos_to_offset(&self, pos: usize) -> usize {
+        self.source
+            .pos_to_offset(pos.clamp(self.from, self.to()))
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn offset_to_pos(&self, offset: usize) -> usize {
+        self.source
+            .offset_to_pos(offset.min(self.char_len))
+            .unwrap_or(self.from)
+    }
+
+    pub(crate) fn hit_position(&self, offset: usize, projection: &Projection) -> usize {
+        let pos = self.offset_to_pos(offset);
+        // A leaf block has no grapheme to snap to. Searching backwards would
+        // move a hit on a divider into the preceding paragraph.
+        if self.char_len == 0 {
+            pos
+        } else {
+            projection.floor_grapheme(pos)
+        }
     }
 
     /// Whether `pos` falls inside this line.
@@ -523,6 +548,7 @@ fn shape_line(input: &ShapeInput<'_>, index: usize, width: Pixels, window: &Wind
         .flatten();
 
     let mut layout = LayoutLine {
+        source: line.clone(),
         index,
         from: line.from,
         char_len: line.len(),
@@ -1088,7 +1114,7 @@ impl Element for EditorSurface {
         let single_line_scroll_x = if view.single_line {
             rows.first()
                 .map(|row| {
-                    let offset = head.saturating_sub(row.from).min(row.char_len);
+                    let offset = row.pos_to_offset(head);
                     crate::single_line::scroll_offset(
                         view.single_line_scroll_x,
                         row.caret(offset, view.upstream).x - bounds.left(),
@@ -1134,7 +1160,7 @@ impl Element for EditorSurface {
                 }
                 let head = editor.head();
                 if let Some((row, offset)) = rows.iter().find(|row| row.contains(head)).map(|row| {
-                    let offset = head - row.from;
+                    let offset = row.pos_to_offset(head);
                     (row, offset)
                 }) {
                     let caret = row.caret(offset, editor.upstream);
@@ -1263,8 +1289,8 @@ impl Element for EditorSurface {
                 paint_code_header(self, row, header, &style, window, cx);
             }
             if a != b {
-                let from = a.saturating_sub(row.from);
-                let to = b.saturating_sub(row.from);
+                let from = row.pos_to_offset(a);
+                let to = row.pos_to_offset(b);
                 if b > row.from && a <= row.to() {
                     let spans_next = b > row.to();
                     for rect in row.rectangles(from..to.min(row.char_len), spans_next) {
@@ -1336,8 +1362,8 @@ impl Element for EditorSurface {
                 && end > row.from
                 && start <= row.to()
             {
-                let from = start.saturating_sub(row.from);
-                let to = (end.saturating_sub(row.from)).min(row.char_len);
+                let from = row.pos_to_offset(start);
+                let to = row.pos_to_offset(end);
                 for mut rect in row.rectangles(from..to, false) {
                     rect.origin.y += rect.size.height - px(2.);
                     rect.size.height = px(1.5);
@@ -1352,10 +1378,10 @@ impl Element for EditorSurface {
                 window.paint_quad(fill(
                     caret_quad(
                         row,
-                        caret_pos - row.from,
+                        row.pos_to_offset(caret_pos),
                         caret_next
                             .filter(|next| row.contains(*next))
-                            .map(|next| next - row.from),
+                            .map(|next| row.pos_to_offset(next)),
                         upstream,
                         caret_shape,
                     ),
@@ -1526,11 +1552,12 @@ mod tests {
 
     /// A row carrying only the token range it stands for, which is all the
     /// caret and selection geometry decides with.
-    fn probe(index: usize, from: usize, char_len: usize) -> LayoutLine {
+    fn probe(index: usize, line: &markraft_core::projection::Line) -> LayoutLine {
         LayoutLine {
+            source: line.clone(),
             index,
-            from,
-            char_len,
+            from: line.from,
+            char_len: line.len(),
             rows: Vec::new(),
             origin: point(px(0.), px(0.)),
             line_height: px(10.),
@@ -1553,7 +1580,7 @@ mod tests {
             .lines()
             .iter()
             .enumerate()
-            .map(|(index, line)| probe(index, line.from, line.len()))
+            .map(|(index, line)| probe(index, line))
             .collect()
     }
 
@@ -1564,6 +1591,30 @@ mod tests {
     const SHAPE: &str = "# Head\n\npara\n\n- a\n- b\n- [ ] c\n- [x] d\n\n1. x\n1. y\n\n\
                          > - q\n\n```rust\na\nb\nc\n```\n\n---\n\nLast paragraph\n\n\
                          h\n\nh\n\nh\n\nh\n\n<br>\n\nh";
+
+    #[test]
+    fn a_hit_on_a_divider_stays_on_that_leaf() {
+        let state = state_of("text\n\n***");
+        let projection = projection_of(&state);
+        let divider = &projection.lines()[1];
+        let row = probe(1, divider);
+        assert_eq!(row.hit_position(0, &projection), divider.from);
+    }
+
+    #[test]
+    fn layout_coordinates_skip_inline_container_boundaries() {
+        let rows = rows_of("*a **b** c*");
+        let row = &rows[0];
+        assert_eq!(row.char_len, 5);
+        assert!(row.to() - row.from > row.char_len);
+        for offset in 0..=row.char_len {
+            let pos = row.offset_to_pos(offset);
+            assert_eq!(row.pos_to_offset(pos), offset);
+            assert!(row.contains(pos));
+        }
+        assert_eq!(row.pos_to_offset(row.from), 0);
+        assert_eq!(row.pos_to_offset(row.to()), row.char_len);
+    }
 
     #[test]
     fn exactly_one_row_holds_any_caret_position() {

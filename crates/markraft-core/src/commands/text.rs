@@ -33,17 +33,72 @@ pub(crate) fn insert_text_spec(state: &EditorState, text: &str) -> Option<Transa
     let schema = state.schema();
     schema.text_type()?;
     let range = state.selection().replacement_range(doc);
-    let (from, to) = (range.from, range.to);
+    let (mut from, mut to) = (range.from, range.to);
     let resolved = doc.resolve(from).ok()?;
     let marks = marks_for_insertion(state, &resolved);
-    let slice = Slice::from_fragment(Fragment::from_node(schema.text_marked(text, marks.clone())));
+    let inherited = resolved.inherited_marks(schema);
+    let leave_scope = state.selection().stored_marks().is_some()
+        && inherited.iter().any(|mark| !marks.contains(mark))
+        && from == to;
+    let (slice, explicit_caret) = if leave_scope {
+        // A stored-mark toggle can turn off a mark inherited from an inline
+        // container. Type between split scopes so the ancestor cannot reapply it.
+        let scopes: Vec<_> = (1..=resolved.depth())
+            .filter(|&d| schema.node_type(resolved.node(d).type_id()).is_inline())
+            .map(|d| resolved.node(d).markup().clone())
+            .collect();
+        let mut left_empty = 0;
+        let mut right_empty = 0;
+        for d in (1..=resolved.depth()).rev() {
+            if !schema.node_type(resolved.node(d).type_id()).is_inline()
+                || from != resolved.start(d)
+            {
+                break;
+            }
+            from = resolved.before(d);
+            left_empty += 1;
+        }
+        for d in (1..=resolved.depth()).rev() {
+            if !schema.node_type(resolved.node(d).type_id()).is_inline() || to != resolved.end(d) {
+                break;
+            }
+            to = resolved.after(d);
+            right_empty += 1;
+        }
+        let mut tokens: Vec<_> = scopes[..scopes.len() - left_empty]
+            .iter()
+            .rev()
+            .cloned()
+            .map(Token::Close)
+            .collect();
+        tokens.push(Token::Node(schema.text_marked(text, marks.clone())));
+        let caret = from + scopes.len() - left_empty + text.chars().count();
+        tokens.extend(
+            scopes[..scopes.len() - right_empty]
+                .iter()
+                .cloned()
+                .map(Token::Open),
+        );
+        (Slice::from_tokens(&tokens), Some(caret))
+    } else {
+        let local_marks = resolved.local_marks(schema);
+        let local = marks.filter(|mark| !inherited.contains(mark) || local_marks.contains(mark));
+        (
+            Slice::from_fragment(Fragment::from_node(schema.text_marked(text, local))),
+            None,
+        )
+    };
     let (set, new_doc) = resolve_changes(
         state,
         vec![Change::replace(from, to, slice).with_fit(Fit::Auto)],
     )?;
-    let caret = set
-        .map_pos(to, 1, TrackMode::Simple)
-        .unwrap_or_else(|| new_doc.content_size());
+    let caret = explicit_caret.unwrap_or_else(|| {
+        set.map_pos(to, 1, TrackMode::Simple)
+            .unwrap_or_else(|| new_doc.content_size())
+    });
+    // Fitting may wrap text in a paragraph. Its closing token is not a text
+    // caret position, so find the end of the inserted inline content.
+    let caret = Selection::find_from(schema, &new_doc, caret, -1, true)?.head(&new_doc);
     // Stored marks survive typing, so several characters in a row share them.
     let selection = if state.selection().stored_marks().is_some() {
         Selection::cursor_with_marks(caret, marks)

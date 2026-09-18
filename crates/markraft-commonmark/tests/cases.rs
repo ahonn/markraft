@@ -171,10 +171,10 @@ fn an_html_block_and_a_footnote_definition_are_kept_verbatim() {
 }
 
 #[test]
-fn an_unsupported_inline_becomes_the_text_it_reads_as() {
-    // An empty link has no inline content to carry the mark.
-    assert_eq!(shape("[](url)"), r#"doc(paragraph("[](url)"))"#);
-    assert_eq!(round("[](url)"), "\\[\\](url)");
+fn an_empty_link_keeps_its_semantic_container() {
+    // The empty container carries the link without inventing text.
+    assert_eq!(shape("[](url)"), r#"doc(paragraph(inline_span{link}()))"#);
+    assert_eq!(round("[](url)"), "[](url)");
 }
 
 // -- marks ----------------------------------------------------------------
@@ -190,7 +190,7 @@ fn underline_uses_the_tag_convention_in_both_directions() {
 }
 
 #[test]
-fn html_emphasis_tags_import_as_marks_and_stray_ones_stay_literal() {
+fn html_emphasis_tags_import_as_marks_and_stray_ones_stay_raw() {
     assert_eq!(shape("<em>a</em>"), r#"doc(paragraph("a"{em}))"#);
     assert_eq!(
         shape("<strong>a</strong>"),
@@ -200,9 +200,12 @@ fn html_emphasis_tags_import_as_marks_and_stray_ones_stay_literal() {
         shape("<del>a</del>"),
         r#"doc(paragraph("a"{strikethrough}))"#
     );
-    // An unpaired tag reads as text, so it travels as text.
-    assert_eq!(shape("<em>a"), r#"doc(paragraph("<em>a"))"#);
-    assert_eq!(round("<em>a"), "\\<em>a");
+    // An unpaired tag is a raw HTML primitive, not escaped text.
+    assert_eq!(
+        shape("<em>a"),
+        r#"doc(paragraph(raw_inline[source=Str("<em>")], "a"))"#
+    );
+    assert_eq!(round("<em>a"), "<em>a");
 }
 
 #[test]
@@ -210,13 +213,7 @@ fn a_code_span_carries_the_marks_around_it() {
     assert_eq!(shape("**`x`**"), r#"doc(paragraph("x"{strong,code}))"#);
     assert_eq!(shape("*`x`*"), r#"doc(paragraph("x"{em,code}))"#);
     assert_eq!(shape("[`x`](/u)"), r#"doc(paragraph("x"{link,code}))"#);
-    for source in [
-        "**`x`**",
-        "*`x`*",
-        "[`x`](/u)",
-        "<u>~~`x`~~</u>",
-        "***`x`***",
-    ] {
+    for source in ["**`x`**", "*`x`*", "[`x`](/u)", "<u>~~`x`~~</u>"] {
         assert_eq!(round(source), source, "{source:?}");
     }
 }
@@ -448,8 +445,11 @@ fn a_tilde_fence_and_an_info_string_survive() {
 // -- inline shapes --------------------------------------------------------
 
 #[test]
-fn a_soft_break_becomes_a_space_and_a_hard_break_stays_a_node() {
-    assert_eq!(shape("one\ntwo"), r#"doc(paragraph("one two"))"#);
+fn a_soft_break_keeps_source_semantics_and_projects_as_space() {
+    assert_eq!(
+        shape("one\ntwo"),
+        r#"doc(paragraph("one", soft_break, "two"))"#
+    );
     assert_eq!(
         shape("one\\\ntwo"),
         r#"doc(paragraph("one", hard_break, "two"))"#

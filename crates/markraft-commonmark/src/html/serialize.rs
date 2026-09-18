@@ -236,7 +236,11 @@ impl HtmlState<'_> {
             let marks = child.marks();
             // Both lists are sorted by rank, so the marks that stay open are the
             // longest prefix the two share.
-            let keep = open.iter().take_while(|mark| marks.contains(mark)).count();
+            let keep = open
+                .iter()
+                .zip(marks.iter())
+                .take_while(|(a, b)| a == b)
+                .count();
             for mark in open.split_off(keep).into_iter().rev() {
                 let close = self.mark_tags(&mark).1;
                 self.write(&close);
@@ -389,6 +393,24 @@ pub fn commonmark_html_node_rules() -> HtmlNodeRules {
             state.attr("alt", attr_str(node, "alt", ""));
             state.attr("title", attr_str(node, "title", ""));
             state.write(">");
+        }),
+    );
+    rules.insert(
+        md::SOFT_BREAK.to_string(),
+        rule(|state, _, _| state.write("<span data-type=\"softBreak\"> </span>")),
+    );
+    rules.insert(
+        md::INLINE_SPAN.to_string(),
+        rule(|state, node, _| state.render_inline(node)),
+    );
+    rules.insert(
+        md::RAW_INLINE.to_string(),
+        rule(|state, node, _| {
+            // Keep the source opaque in clipboard HTML. Pasting must not execute
+            // or reinterpret a stored HTML primitive as the clipboard's own DOM.
+            state.write("<span data-type=\"rawInline\" data-source=\"");
+            state.write(&escape_attr(attr_str(node, "source", "")));
+            state.write("\"></span>");
         }),
     );
     rules.insert(

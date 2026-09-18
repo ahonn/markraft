@@ -164,9 +164,9 @@ pub use schema::{
 pub use slice::{Slice, Token, min_prefix_delta, node_tokens, tokens_cut, tokens_size};
 
 pub use composition::{
-    COMPOSE_USER_EVENT, CompositionRange, composition, composition_field, composition_range,
-    end_composition, finish_composition, is_composing, set_composition_range, start_composition,
-    update_composition,
+    COMPOSE_USER_EVENT, CompositionRange, cancel_composition, committed_document, composition,
+    composition_field, composition_range, end_composition, finish_composition, is_composing,
+    set_composition_range, start_composition, update_composition,
 };
 pub use corrections::{
     Correction, CorrectionContext, CorrectionTrigger, MAX_CORRECTION_ROUNDS, collect_corrections,

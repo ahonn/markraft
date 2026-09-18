@@ -1,9 +1,9 @@
 //! Marks and canonically ordered mark sets.
 //!
-//! Inline styling is flat: a leaf carries a set of marks rather than sitting
-//! inside a tree of styling nodes. A [`MarkSet`] is always sorted by
-//! `(rank, type id, attrs)`, so two nodes that look the same compare equal and
-//! serialise identically.
+//! Each inline node carries a canonical set of marks. Schemas may also use
+//! inline containers to preserve nested semantic scopes, including the same
+//! mark on both an ancestor and its child. A [`MarkSet`] is sorted by
+//! `(rank, type id, attrs)` within each individual scope.
 
 use std::sync::Arc;
 

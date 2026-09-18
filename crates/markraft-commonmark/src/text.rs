@@ -48,6 +48,7 @@ fn leaf_text(schema: &Schema, node: &Node) -> String {
             .to_string()
     };
     match name {
+        md::SOFT_BREAK => " ".to_string(),
         md::HARD_BREAK => "\n".to_string(),
         md::IMAGE => attr("alt"),
         md::RAW_BLOCK => attr("source"),

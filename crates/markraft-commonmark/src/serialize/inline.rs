@@ -121,6 +121,9 @@ impl SerializerState<'_> {
         let Some(node) = node else {
             return Vec::new();
         };
+        if self.schema().node_type(node.type_id()).name() == crate::schema::INLINE_SPAN {
+            return Vec::new();
+        }
         let mut marks: Vec<Mark> = node
             .marks()
             .iter()

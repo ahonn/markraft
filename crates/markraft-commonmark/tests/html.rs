@@ -139,10 +139,10 @@ fn loose_text_becomes_blocks_at_the_boundaries_around_it() {
 }
 
 #[test]
-fn an_unknown_element_passes_its_children_through() {
+fn an_unknown_element_preserves_boundaries_and_editable_children() {
     assert_eq!(
         shape("<p>a <custom-tag>b <b>c</b></custom-tag></p>"),
-        r#"doc(paragraph("a b ", "c"{strong}))"#
+        r#"doc(paragraph("a ", raw_inline[source=Str("<custom-tag>")], "b ", "c"{strong}, raw_inline[source=Str("</custom-tag>")]))"#
     );
 }
 
@@ -406,4 +406,61 @@ fn a_cut_inside_one_paragraph_writes_as_bare_inline_html() {
     let empty = markraft_core::Selection::cursor(2).content(&doc);
     assert!(empty.is_empty());
     assert_eq!(serializer().serialize_fragment(&empty), "");
+}
+
+#[test]
+fn a_foreign_html_table_keeps_cells_attributes_links_and_images() {
+    let codec = Codec::new();
+    let source = "<table><tr><th colspan='2'>Title</th></tr><tr><td><a href='https://example.com'>link</a></td><td><img src='photo.png' alt='photo'></td></tr></table>";
+    let doc = parser().parse(source).unwrap();
+    assert_eq!(
+        codec.schema.node_type(doc.child(0).type_id()).name(),
+        "raw_block"
+    );
+    let written = codec.write(&doc);
+    assert!(written.contains("<table>"));
+    assert!(written.contains("colspan=\"2\""));
+    assert!(written.contains("href=\"https://example.com\""));
+    assert!(written.contains("src=\"photo.png\""));
+    assert_eq!(codec.parse(&written), doc);
+    let rich = markraft_commonmark::HtmlSerializer::commonmark(&codec.schema).serialize(&doc);
+    assert_eq!(parser().parse(&rich).unwrap(), doc);
+}
+
+#[test]
+fn a_foreign_span_keeps_unknown_attributes_around_editable_text() {
+    use markraft_core::commands::{insert_text, run_command};
+    use markraft_core::{EditorState, EditorStateConfig, Selection};
+    let codec = Codec::new();
+    let doc = parser()
+        .parse("<p><span class='red'>hello</span></p>")
+        .unwrap();
+    assert_eq!(doc.child(0).child(1).text(), Some("hello"));
+    assert_eq!(codec.write(&doc), "<span class=\"red\">hello</span>");
+    let state = EditorState::create(
+        EditorStateConfig::new(codec.schema.clone())
+            .doc(doc)
+            .selection(Selection::cursor(3)),
+    )
+    .unwrap();
+    let edited = run_command(&state, &insert_text("X"))
+        .unwrap()
+        .unwrap()
+        .state()
+        .clone();
+    assert_eq!(
+        codec.write(edited.doc()),
+        "<span class=\"red\">hXello</span>"
+    );
+    let rich =
+        markraft_commonmark::HtmlSerializer::commonmark(&codec.schema).serialize(edited.doc());
+    assert_eq!(parser().parse(&rich).unwrap(), *edited.doc());
+}
+
+#[test]
+fn unmodelled_css_and_void_inline_elements_survive_html_paste() {
+    let source = "<p>a<span style='color:red'>b</span><wbr>c</p>";
+    let written = markdown(source);
+    assert_eq!(written, "a<span style=\"color:red\">b</span><wbr>c");
+    assert!(!written.contains("</wbr>"));
 }

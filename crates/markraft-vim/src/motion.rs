@@ -85,10 +85,25 @@ pub(crate) fn last_line(projection: &Projection) -> usize {
     projection.line_count().saturating_sub(1)
 }
 
+/// The canonical caret at the visible start or end of a line. Inline container
+/// tokens are structural positions, not additional stops for Vim motions.
+pub(crate) fn line_start(projection: &Projection, index: usize) -> usize {
+    let line = &projection.lines()[index.min(last_line(projection))];
+    line.offset_to_pos(0).unwrap_or(line.from)
+}
+
+pub(crate) fn line_end(projection: &Projection, index: usize) -> usize {
+    let line = &projection.lines()[index.min(last_line(projection))];
+    line.offset_to_pos(line.len()).unwrap_or(line.to)
+}
+
 /// `pos` brought inside a line of the document.
 pub(crate) fn clamp(projection: &Projection, pos: usize) -> usize {
     let line = &projection.lines()[line_of(projection, pos)];
-    pos.clamp(line.from, line.to)
+    let pos = pos.clamp(line.from, line.to);
+    line.pos_to_offset(pos)
+        .and_then(|offset| line.offset_to_pos(offset))
+        .unwrap_or(line.from)
 }
 
 /// The words of one whole line, as document position ranges.
@@ -111,11 +126,11 @@ pub(crate) fn target(projection: &Projection, from: usize, motion: Motion, count
     let from = clamp(projection, from);
     let count = count.clamp(1, MAX_COUNT);
     match motion {
-        Motion::LineStart => projection.lines()[line_of(projection, from)].from,
+        Motion::LineStart => line_start(projection, line_of(projection, from)),
         Motion::FirstNonBlank => first_non_blank(projection, line_of(projection, from)),
         Motion::LineEnd => {
             let line = (line_of(projection, from) + count - 1).min(last_line(projection));
-            projection.lines()[line].to
+            line_end(projection, line)
         }
         Motion::Line(line) => first_non_blank(projection, line.min(last_line(projection))),
         Motion::LineDelta(delta) => {
@@ -164,7 +179,7 @@ pub(crate) fn first_non_blank(projection: &Projection, line: usize) -> usize {
     projection
         .graphemes(line)
         .find(|(_, grapheme)| !grapheme.chars().all(char::is_whitespace))
-        .map_or(projection.lines()[line].from, |(pos, _)| pos)
+        .map_or(line_start(projection, line), |(pos, _)| pos)
 }
 
 /// The last grapheme of a non-empty line, where a Normal-mode cursor may rest.
@@ -197,10 +212,10 @@ fn next_word_start(projection: &Projection, from: usize) -> usize {
         return word.start;
     }
     if index == last_line(projection) {
-        return projection.lines()[index].to;
+        return line_end(projection, index);
     }
     // A blank line counts as a word, so `w` stops on it rather than skipping past.
-    let next = projection.lines()[index + 1].from;
+    let next = line_start(projection, index + 1);
     line_words(projection, index + 1)
         .first()
         .map_or(next, |word| word.start)
@@ -218,9 +233,9 @@ fn previous_word_start(projection: &Projection, from: usize) -> usize {
         return word.start;
     }
     if index == 0 {
-        return projection.lines()[0].from;
+        return line_start(projection, 0);
     }
-    let previous = projection.lines()[index - 1].from;
+    let previous = line_start(projection, index - 1);
     line_words(projection, index - 1)
         .last()
         .map_or(previous, |word| word.start)
@@ -239,7 +254,7 @@ fn next_word_end(projection: &Projection, from: usize) -> usize {
     if index == last_line(projection) {
         return last_grapheme_of(projection, index);
     }
-    let next = projection.lines()[index + 1].from;
+    let next = line_start(projection, index + 1);
     line_words(projection, index + 1)
         .first()
         .map_or(next, |word| word_end(projection, word))

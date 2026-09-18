@@ -198,6 +198,27 @@ impl ResolvedPos {
     /// parent does not allow in its content are dropped, so the result is
     /// always a mark set that may be stored here.
     pub fn marks(&self, schema: &Schema) -> MarkSet {
+        let inherited = self.inherited_marks(schema);
+        self.local_marks(schema)
+            .iter()
+            .fold(inherited, |marks, mark| marks.add(schema, mark.clone()))
+    }
+
+    /// Effective marks supplied by enclosing inline containers.
+    pub fn inherited_marks(&self, schema: &Schema) -> MarkSet {
+        (1..=self.depth()).fold(MarkSet::empty(), |marks, depth| {
+            let node = self.node(depth);
+            if schema.node_type(node.type_id()).is_inline() {
+                node.marks()
+                    .iter()
+                    .fold(marks, |marks, mark| marks.add(schema, mark.clone()))
+            } else {
+                marks
+            }
+        })
+    }
+
+    pub(crate) fn local_marks(&self, schema: &Schema) -> MarkSet {
         let parent = self.parent();
         let parent_ty = schema.node_type(parent.type_id());
         if parent.content_size() == 0 {
@@ -280,7 +301,12 @@ impl ResolvedPos {
         let mut depth = start_depth as isize;
         while depth >= 0 {
             let d = depth as usize;
-            if other.pos <= self.end(d) && pred.is_none_or(|pred| pred(self.node(d))) {
+            let ty = schema.node_type(self.node(d).type_id());
+            if !ty.is_inline()
+                && !ty.has_inline_content()
+                && other.pos <= self.end(d)
+                && pred.is_none_or(|pred| pred(self.node(d)))
+            {
                 return Some(NodeRange {
                     from: self.clone(),
                     to: other.clone(),

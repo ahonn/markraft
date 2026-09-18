@@ -1,6 +1,6 @@
 //! Position conversions, grapheme and word boundaries.
 //!
-//! Every conversion goes through a line: within a line one token is one `char`,
+//! Every conversion goes through a line and its visible-character mapping;
 //! and the line's text is a real `str` that
 //! [`unicode_segmentation`](unicode_segmentation) can be asked about directly.
 //!
@@ -48,33 +48,28 @@ fn words(text: &str) -> impl DoubleEndedIterator<Item = (usize, &str)> {
         .filter(|(_, segment)| !segment.chars().all(char::is_whitespace))
 }
 
-/// The grapheme clusters of one line, as `(document position, cluster)`.
-///
-/// The position runs alongside the byte offset, so a whole pass either way
-/// costs one walk of the line rather than one per cluster.
 struct Graphemes<'a> {
     inner: GraphemeIndices<'a>,
-    /// Position of the next cluster taken from the front.
+    line: Option<&'a super::Line>,
     front: usize,
-    /// Position just past the next cluster taken from the back.
     back: usize,
 }
 
 impl<'a> Iterator for Graphemes<'a> {
     type Item = (usize, &'a str);
     fn next(&mut self) -> Option<Self::Item> {
-        let (_, grapheme) = self.inner.next()?;
-        let pos = self.front;
-        self.front += grapheme.chars().count();
-        Some((pos, grapheme))
+        let (_, text) = self.inner.next()?;
+        let pos = self.line?.offset_to_pos(self.front)?;
+        self.front += text.chars().count();
+        Some((pos, text))
     }
 }
 
 impl DoubleEndedIterator for Graphemes<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        let (_, grapheme) = self.inner.next_back()?;
-        self.back -= grapheme.chars().count();
-        Some((self.back, grapheme))
+        let (_, text) = self.inner.next_back()?;
+        self.back -= text.chars().count();
+        Some((self.line?.offset_to_pos(self.back)?, text))
     }
 }
 
@@ -98,19 +93,21 @@ impl Projection {
     pub fn is_caret_position(&self, pos: usize) -> bool {
         self.line_at(pos)
             .and_then(|index| self.line(index))
-            .is_some_and(|line| line.kind == LineKind::Textblock)
+            .is_some_and(|line| {
+                line.kind == LineKind::Textblock && line.positions.binary_search(&pos).is_ok()
+            })
     }
 
     /// `pos` as a line index and a `char` offset into that line's text.
     pub fn pos_to_line_offset(&self, pos: usize) -> Option<(usize, usize)> {
         let index = self.line_at(pos)?;
-        Some((index, pos - self.lines()[index].from))
+        Some((index, self.lines()[index].pos_to_offset(pos)?))
     }
 
     /// The inverse of [`Projection::pos_to_line_offset`].
     pub fn line_offset_to_pos(&self, line: usize, offset: usize) -> Option<usize> {
         let line = self.line(line)?;
-        (offset <= line.len()).then(|| line.from + offset)
+        line.offset_to_pos(offset)
     }
 
     /// `pos` as a line index and a byte offset into that line's text, for a
@@ -125,7 +122,7 @@ impl Projection {
     /// `char` rounds down.
     pub fn line_byte_to_pos(&self, line: usize, byte: usize) -> Option<usize> {
         let text = self.line_text(line)?;
-        Some(self.line(line)?.from + byte_to_char(text, byte))
+        self.line_offset_to_pos(line, byte_to_char(text, byte))
     }
 
     /// The UTF-16 offset of `pos` inside line `line`'s text.
@@ -135,7 +132,7 @@ impl Projection {
             return None;
         }
         let text = self.line_text(line)?;
-        let byte = char_to_byte(text, pos - entry.from);
+        let byte = char_to_byte(text, entry.pos_to_offset(pos)?);
         Some(text[..byte].encode_utf16().count())
     }
 
@@ -148,12 +145,12 @@ impl Projection {
         let text = self.line_text(line)?;
         let mut units = 0usize;
         for (chars, ch) in text.chars().enumerate() {
-            if units >= offset {
-                return Some(entry.from + chars);
+            if units >= offset || units + ch.len_utf16() > offset {
+                return entry.offset_to_pos(chars);
             }
             units += ch.len_utf16();
         }
-        Some(entry.to)
+        entry.offset_to_pos(entry.len())
     }
 
     /// A document position as a UTF-16 offset into [`Projection::plain_text`].
@@ -200,9 +197,10 @@ impl Projection {
             return false;
         };
         let byte = char_to_byte(text, offset);
-        GraphemeCursor::new(byte, text.len(), true)
-            .is_boundary(text, 0)
-            .unwrap_or(true)
+        self.is_caret_position(pos)
+            && GraphemeCursor::new(byte, text.len(), true)
+                .is_boundary(text, 0)
+                .unwrap_or(true)
     }
 
     /// The next grapheme cluster boundary after `pos`, crossing into the next
@@ -211,7 +209,7 @@ impl Projection {
         let line = self.line_at(pos)?;
         match self.next_grapheme_in_line(pos)? {
             next if next != pos => Some(next),
-            _ => self.line(line + 1).map(|next| next.from),
+            _ => self.line(line + 1).and_then(|next| next.offset_to_pos(0)),
         }
     }
 
@@ -224,7 +222,7 @@ impl Projection {
             _ => line
                 .checked_sub(1)
                 .and_then(|index| self.line(index))
-                .map(|previous| previous.to),
+                .and_then(|previous| previous.offset_to_pos(previous.len())),
         }
     }
 
@@ -256,10 +254,10 @@ impl Projection {
         let next = (byte < text.len())
             .then(|| GraphemeCursor::new(byte, text.len(), true).next_boundary(text, 0))
             .and_then(|found| found.ok().flatten());
-        Some(match next {
-            Some(next) => self.lines()[line].from + byte_to_char(text, next),
-            None => self.lines()[line].to,
-        })
+        self.line_offset_to_pos(
+            line,
+            next.map_or(self.lines()[line].len(), |next| byte_to_char(text, next)),
+        )
     }
 
     /// The previous grapheme boundary before `pos`, never leaving the line
@@ -272,10 +270,10 @@ impl Projection {
         let previous = (byte > 0)
             .then(|| GraphemeCursor::new(byte, text.len(), true).prev_boundary(text, 0))
             .and_then(|found| found.ok().flatten());
-        Some(match previous {
-            Some(previous) => self.lines()[line].from + byte_to_char(text, previous),
-            None => self.lines()[line].from,
-        })
+        self.line_offset_to_pos(
+            line,
+            previous.map_or(0, |previous| byte_to_char(text, previous)),
+        )
     }
 
     /// The grapheme clusters of one line, as `(document position, cluster)`
@@ -287,8 +285,9 @@ impl Projection {
         let text = entry.and_then(|_| self.line_text(line)).unwrap_or_default();
         Graphemes {
             inner: text.grapheme_indices(true),
-            front: entry.map_or(0, |entry| entry.from),
-            back: entry.map_or(0, |entry| entry.to),
+            line: entry,
+            front: 0,
+            back: entry.map_or(0, |line| line.len()),
         }
     }
 
@@ -315,7 +314,7 @@ impl Projection {
             return None;
         }
         let text = self.line_text(line)?;
-        Some(&text[char_to_byte(text, offset)..char_to_byte(text, to - entry.from)])
+        Some(&text[char_to_byte(text, offset)..char_to_byte(text, entry.pos_to_offset(to)?)])
     }
 
     /// The words between `from` and `to`, as document position ranges.
@@ -330,13 +329,18 @@ impl Projection {
             return Vec::new();
         };
         let mut ranges = Vec::new();
-        let (mut byte, mut pos) = (0usize, from);
+        let Some((line, offset)) = self.pos_to_line_offset(from) else {
+            return ranges;
+        };
         for (start, segment) in words(text) {
-            pos += text[byte..start].chars().count();
-            let len = segment.chars().count();
-            ranges.push(pos..pos + len);
-            pos += len;
-            byte = start + segment.len();
+            let char_start = offset + byte_to_char(text, start);
+            let char_end = char_start + segment.chars().count();
+            if let (Some(start), Some(end)) = (
+                self.line_offset_to_pos(line, char_start),
+                self.line_offset_to_pos(line, char_end),
+            ) {
+                ranges.push(start..end);
+            }
         }
         ranges
     }
@@ -355,13 +359,13 @@ impl Projection {
             words(text).find(|(start, segment)| start + segment.len() > byte)
         {
             let end = start + segment.len();
-            return Some(self.lines()[line].from + byte_to_char(text, end));
+            return self.line_offset_to_pos(line, byte_to_char(text, end));
         }
         let entry = &self.lines()[line];
-        if pos < entry.to {
-            Some(entry.to)
+        if offset < entry.len() {
+            entry.offset_to_pos(entry.len())
         } else {
-            self.line(line + 1).map(|next| next.from)
+            self.line(line + 1).and_then(|next| next.offset_to_pos(0))
         }
     }
 
@@ -372,15 +376,15 @@ impl Projection {
         let text = self.line_text(line)?;
         let byte = char_to_byte(text, offset);
         if let Some((start, _)) = words(text).rev().find(|(start, _)| *start < byte) {
-            return Some(self.lines()[line].from + byte_to_char(text, start));
+            return self.line_offset_to_pos(line, byte_to_char(text, start));
         }
         let entry = &self.lines()[line];
-        if pos > entry.from {
-            Some(entry.from)
+        if offset > 0 {
+            entry.offset_to_pos(0)
         } else {
             line.checked_sub(1)
                 .and_then(|index| self.line(index))
-                .map(|previous| previous.to)
+                .and_then(|previous| previous.offset_to_pos(previous.len()))
         }
     }
 }
@@ -433,8 +437,14 @@ fn append_inline_node(schema: &Schema, node: &Node, out: &mut String) {
         out.push_str(text);
         return;
     }
+    if node.is_container() && !schema.node_type(node.type_id()).is_atom() {
+        append_inline(schema, node.content(), out);
+        return;
+    }
     let filler = if is_line_break(schema, node.type_id()) {
         '\n'
+    } else if schema.node_type(node.type_id()).in_group("soft_break") {
+        ' '
     } else {
         OBJECT_REPLACEMENT
     };

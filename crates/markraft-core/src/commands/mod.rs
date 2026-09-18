@@ -69,7 +69,7 @@ pub use input_rules::{
     input_rule_field, input_rules, undo_input_rule,
 };
 pub use list::{lift_list_item, sink_list_item, split_list_item, wrap_in_list};
-pub use marks::{mark_applies, range_has_mark, toggle_mark};
+pub use marks::{mark_applies, range_has_mark, remove_mark, set_mark, toggle_mark};
 pub use motion::{Direction, delete_by_grapheme, delete_by_word, move_by_grapheme, move_by_word};
 pub use text::{
     delete_range, delete_range_changes, insert_hard_break, insert_node, insert_text,
@@ -207,17 +207,33 @@ pub(crate) fn cursor(state: &EditorState) -> Option<ResolvedPos> {
 
 /// The cursor, when it sits at the start of a textblock.
 pub(crate) fn at_block_start(state: &EditorState) -> Option<ResolvedPos> {
-    let resolved = cursor(state)?;
-    let parent_is_textblock = resolved.parent().is_textblock(state.schema());
-    (parent_is_textblock && resolved.parent_offset() == 0).then_some(resolved)
+    block_boundary(state, false)
 }
 
 /// The cursor, when it sits at the end of a textblock.
 pub(crate) fn at_block_end(state: &EditorState) -> Option<ResolvedPos> {
+    block_boundary(state, true)
+}
+
+fn block_boundary(state: &EditorState, end: bool) -> Option<ResolvedPos> {
     let resolved = cursor(state)?;
-    let parent_is_textblock = resolved.parent().is_textblock(state.schema());
-    (parent_is_textblock && resolved.parent_offset() == resolved.parent().content_size())
-        .then_some(resolved)
+    let depth = (1..=resolved.depth())
+        .rev()
+        .find(|&d| resolved.node(d).is_textblock(state.schema()))?;
+    let boundary = if end {
+        resolved.end(depth)
+    } else {
+        resolved.start(depth)
+    };
+    let hidden = resolved.depth() - depth;
+    let at_boundary = if end {
+        resolved.pos().checked_add(hidden) == Some(boundary)
+    } else {
+        resolved.pos().checked_sub(hidden) == Some(boundary)
+    };
+    at_boundary
+        .then(|| state.doc().resolve(boundary).ok())
+        .flatten()
 }
 
 /// The position of the boundary before `pos`'s ancestors, where content that

@@ -497,3 +497,215 @@ fn delete_by_word_takes_a_word_and_a_selection_wins_over_both() {
     let after = run(&selected, &delete_by_word(Direction::Backward));
     assert_eq!(schema.describe(after.doc()), r#"doc(paragraph("otwo"))"#);
 }
+
+#[test]
+fn typing_over_all_keeps_the_caret_inside_the_fitted_paragraph() {
+    let schema = shared_schema();
+    let start = state(
+        doc(&schema, [n(&schema, "paragraph", [t(&schema, "hello")])]),
+        Extension::none(),
+    );
+    let selected = start
+        .update([TransactionSpec::new().selection(Selection::All)])
+        .unwrap()
+        .state()
+        .clone();
+    let typed = run(
+        &run(
+            &run(&selected, &crate::commands::insert_text("a")),
+            &crate::commands::insert_text("b"),
+        ),
+        &crate::commands::insert_text("c"),
+    );
+    assert_eq!(schema.describe(typed.doc()), r#"doc(paragraph("abc"))"#);
+    assert_eq!(typed.selection(), &Selection::cursor(4));
+}
+
+#[test]
+fn enter_deletes_a_cross_quote_selection_before_splitting() {
+    let schema = shared_schema();
+    let start = state(
+        doc(
+            &schema,
+            [
+                n(&schema, "paragraph", [t(&schema, "abc")]),
+                n(
+                    &schema,
+                    "blockquote",
+                    [n(&schema, "paragraph", [t(&schema, "def")])],
+                ),
+            ],
+        ),
+        Extension::none(),
+    );
+    let selected = text_selection(&start, 2, 8);
+    let split = run(&selected, &split_block());
+    assert_eq!(
+        schema.describe(split.doc()),
+        r#"doc(paragraph("a"), paragraph("ef"))"#
+    );
+    assert_eq!(split.selection(), &Selection::cursor(4));
+}
+
+#[test]
+fn enter_inside_an_inline_container_splits_its_textblock() {
+    let schema = shared_schema();
+    let start = state(
+        doc(
+            &schema,
+            [n(
+                &schema,
+                "paragraph",
+                [n(&schema, "inline_span", [t(&schema, "abcd")])],
+            )],
+        ),
+        Extension::none(),
+    );
+    let split = run(&at(&start, 4), &split_block());
+    assert_eq!(
+        schema.describe(split.doc()),
+        r#"doc(paragraph(inline_span("ab")), paragraph(inline_span("cd")))"#
+    );
+    assert_eq!(split.selection(), &Selection::cursor(8));
+}
+
+#[test]
+fn enter_inside_an_inline_container_splits_its_list_item() {
+    let schema = shared_schema();
+    let start = state(
+        doc(
+            &schema,
+            [n(
+                &schema,
+                "bullet_list",
+                [n(
+                    &schema,
+                    "list_item",
+                    [n(
+                        &schema,
+                        "paragraph",
+                        [n(&schema, "inline_span", [t(&schema, "abcd")])],
+                    )],
+                )],
+            )],
+        ),
+        Extension::none(),
+    );
+    let split = run(
+        &at(&start, 6),
+        &split_list_item(schema.node_id("list_item").unwrap()),
+    );
+    assert_eq!(
+        schema.describe(split.doc()),
+        r#"doc(bullet_list(list_item(paragraph(inline_span("ab"))), list_item(paragraph(inline_span("cd")))))"#
+    );
+}
+
+#[test]
+fn block_commands_and_join_skip_inline_container_boundaries() {
+    let schema = shared_schema();
+    let start = state(
+        doc(
+            &schema,
+            [
+                n(&schema, "paragraph", [t(&schema, "a")]),
+                n(
+                    &schema,
+                    "paragraph",
+                    [n(&schema, "inline_span", [t(&schema, "b")])],
+                ),
+            ],
+        ),
+        Extension::none(),
+    );
+    let joined = run(&at(&start, 5), &join_backward());
+    assert_eq!(
+        schema.describe(joined.doc()),
+        r#"doc(paragraph("a", inline_span("b")))"#
+    );
+    let wrapped = run(
+        &at(&start, 5),
+        &wrap_in(schema.node_id("blockquote").unwrap(), Attrs::empty()),
+    );
+    assert_eq!(
+        schema.describe(wrapped.doc()),
+        r#"doc(paragraph("a"), blockquote(paragraph(inline_span("b"))))"#
+    );
+}
+
+#[test]
+fn grapheme_motion_and_deletion_skip_inline_scope_boundaries() {
+    let schema = shared_schema();
+    let start = state(
+        doc(
+            &schema,
+            [n(
+                &schema,
+                "paragraph",
+                [
+                    t(&schema, "a"),
+                    n(&schema, "inline_span", [t(&schema, "bc")]),
+                    t(&schema, "d"),
+                ],
+            )],
+        ),
+        Extension::none(),
+    );
+    let mut cursor = at(&start, 1);
+    let mut offsets = Vec::new();
+    for _ in 0..4 {
+        cursor = run(&cursor, &move_by_grapheme(Direction::Forward, false));
+        offsets.push(
+            crate::projection::projection_of(&cursor)
+                .pos_to_line_offset(cursor.selection().head(cursor.doc()))
+                .unwrap()
+                .1,
+        );
+    }
+    assert_eq!(offsets, [1, 2, 3, 4]);
+    let deleted = run(&at(&start, 1), &delete_by_grapheme(Direction::Forward));
+    assert_eq!(
+        crate::projection::projection_of(&deleted).plain_text(),
+        "bcd"
+    );
+    let deleted = run(&at(&start, 6), &delete_by_grapheme(Direction::Backward));
+    assert_eq!(
+        crate::projection::projection_of(&deleted).plain_text(),
+        "abd"
+    );
+}
+
+#[test]
+fn copying_from_an_inline_scope_retains_its_marks_when_pasted_into_plain_text() {
+    let schema = shared_schema();
+    let marks = crate::MarkSet::from_marks(&schema, [m(&schema, "strong")]);
+    let span = n(&schema, "inline_span", [t(&schema, "abcd")]).mark(marks);
+    let source = doc(&schema, [n(&schema, "paragraph", [span])]);
+    let copied = Selection::text(3, 5).content_with_schema(&source, &schema);
+    let target = state(
+        doc(&schema, [n(&schema, "paragraph", [t(&schema, "xy")])]),
+        Extension::none(),
+    );
+    let pasted = run(&at(&target, 2), &replace_selection(copied));
+    assert_eq!(
+        schema.describe(pasted.doc()),
+        r#"doc(paragraph("x", inline_span{strong}("bc"), "y"))"#
+    );
+}
+
+#[test]
+fn converting_inline_scopes_to_code_keeps_visible_text_and_caret() {
+    let schema = shared_schema();
+    let span = n(&schema, "inline_span", [t(&schema, "abcd")])
+        .mark(crate::MarkSet::from_marks(&schema, [m(&schema, "strong")]));
+    let start = state(
+        doc(&schema, [n(&schema, "paragraph", [span])]),
+        Extension::none(),
+    );
+    let code = run(
+        &at(&start, 4),
+        &set_block_type(schema.node_id("code_block").unwrap(), Attrs::empty()),
+    );
+    assert_eq!(schema.describe(code.doc()), r#"doc(code_block("abcd"))"#);
+    assert_eq!(code.selection().head(code.doc()), 3);
+}

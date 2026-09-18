@@ -68,6 +68,11 @@ pub fn test_schema() -> Schema {
                     .inline(true)
                     .group("inline line_break"),
             )
+            .node(
+                NodeTypeSpec::new("inline_span", "inline*")
+                    .inline(true)
+                    .group("inline"),
+            )
             .mark(MarkTypeSpec::new("strong").rank(20).group("style"))
             .mark(MarkTypeSpec::new("em").rank(30).group("style"))
             .mark(MarkTypeSpec::new("code").rank(40).excludes("_"))

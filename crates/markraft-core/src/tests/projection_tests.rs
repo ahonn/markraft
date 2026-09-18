@@ -334,3 +334,95 @@ fn an_inline_atom_occupies_one_position_and_one_char() {
     assert!(projection.is_grapheme_boundary(2));
     assert!(projection.is_grapheme_boundary(3));
 }
+
+#[test]
+fn inline_container_boundaries_do_not_add_text_or_caret_stops() {
+    let schema = shared_schema();
+    let document = doc(
+        &schema,
+        [
+            n(
+                &schema,
+                "paragraph",
+                [n(
+                    &schema,
+                    "inline_span",
+                    [
+                        t(&schema, "a😀"),
+                        n(&schema, "inline_span", [t(&schema, "b")]),
+                    ],
+                )],
+            ),
+            n(
+                &schema,
+                "paragraph",
+                [n(&schema, "inline_span", [t(&schema, "next")])],
+            ),
+        ],
+    );
+    let projection = Projection::of(&document, &schema);
+    assert_eq!(projection.plain_text(), "a😀b\nnext");
+    let first = projection.line(0).unwrap();
+    assert_eq!(first.len(), 3);
+    assert_eq!(projection.text_between(first.from, first.to), Some("a😀b"));
+    for offset in 0..=first.len() {
+        let pos = first.offset_to_pos(offset).unwrap();
+        assert!(projection.is_caret_position(pos));
+        assert_eq!(first.pos_to_offset(pos), Some(offset));
+        assert_eq!(
+            projection.utf16_to_pos(projection.pos_to_utf16(pos).unwrap()),
+            Some(pos)
+        );
+    }
+    // A surrogate half rounds down to the start of its scalar value.
+    assert_eq!(projection.pos_from_utf16(0, 2), first.offset_to_pos(1));
+    let end = first.offset_to_pos(first.len()).unwrap();
+    let next = projection.line(1).unwrap().offset_to_pos(0).unwrap();
+    assert_eq!(projection.next_grapheme_boundary(end), Some(next));
+    assert_eq!(projection.next_word_boundary(end), Some(next));
+    assert_eq!(projection.prev_word_boundary(next), Some(end));
+    assert_eq!(
+        projection
+            .graphemes(0)
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>(),
+        ["a", "😀", "b"]
+    );
+    assert_eq!(
+        projection
+            .graphemes(0)
+            .rev()
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>(),
+        ["b", "😀", "a"]
+    );
+    let words = projection.word_ranges(first.from, first.to);
+    assert_eq!(
+        projection.text_between(words[0].start, words[0].end),
+        Some("a")
+    );
+    assert_eq!(
+        slice_to_plain_text(
+            &schema,
+            &document.slice(0, document.content_size()).unwrap()
+        ),
+        "a😀b\nnext"
+    );
+}
+
+#[test]
+fn an_empty_inline_container_has_one_editable_position() {
+    let schema = shared_schema();
+    let document = doc(
+        &schema,
+        [n(&schema, "paragraph", [n(&schema, "inline_span", [])])],
+    );
+    let projection = Projection::of(&document, &schema);
+    let line = projection.line(0).unwrap();
+    assert_eq!(projection.plain_text(), "");
+    assert!(line.is_empty());
+    assert_eq!(line.offset_to_pos(0), Some(2));
+    assert!(projection.is_caret_position(2));
+    assert!(!projection.is_caret_position(1));
+    assert!(!projection.is_caret_position(3));
+}

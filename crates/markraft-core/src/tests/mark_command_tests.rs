@@ -286,3 +286,117 @@ fn chain_takes_the_first_command_that_applies() {
         r#"doc(paragraph("a"), paragraph("b"))"#
     );
 }
+
+#[test]
+fn removing_part_of_an_inherited_mark_preserves_both_unselected_sides() {
+    let schema = shared_schema();
+    let strong = schema.mark_id("strong").unwrap();
+    let marks = MarkSet::from_marks(&schema, [m(&schema, "strong")]);
+    let span = n(&schema, "inline_span", [t(&schema, "abcd")]).mark(marks);
+    let start = state(
+        doc(&schema, [n(&schema, "paragraph", [span])]),
+        Extension::none(),
+    );
+    assert!(
+        start
+            .doc()
+            .resolve(3)
+            .unwrap()
+            .marks(&schema)
+            .contains_type(strong)
+    );
+    let selected = text_selection(&start, 3, 5);
+    let plain = run(&selected, &toggle_mark(strong, Attrs::empty()));
+    assert_eq!(
+        schema.describe(plain.doc()),
+        r#"doc(paragraph(inline_span{strong}("a"), inline_span("bc"), inline_span{strong}("d")))"#
+    );
+    let range = plain.selection().replacement_range(plain.doc());
+    assert!(!range_has_mark(plain.doc(), range.from, range.to, strong));
+}
+
+#[test]
+fn cursor_toggle_exits_the_inherited_mark_when_typing() {
+    let schema = shared_schema();
+    let strong = schema.mark_id("strong").unwrap();
+    let marks = MarkSet::from_marks(&schema, [m(&schema, "strong")]);
+    let span = n(&schema, "inline_span", [t(&schema, "ab")]).mark(marks);
+    let start = state(
+        doc(&schema, [n(&schema, "paragraph", [span])]),
+        Extension::none(),
+    );
+    let toggled = run(&at(&start, 3), &toggle_mark(strong, Attrs::empty()));
+    let typed = run(&toggled, &insert_text("X"));
+    let typed = run(&typed, &insert_text("Y"));
+    assert_eq!(
+        schema.describe(typed.doc()),
+        r#"doc(paragraph(inline_span{strong}("a"), "XY", inline_span{strong}("b")))"#
+    );
+}
+
+#[test]
+fn ordinary_typing_inherits_the_scope_without_duplicating_its_mark() {
+    let schema = shared_schema();
+    let marks = MarkSet::from_marks(&schema, [m(&schema, "strong")]);
+    let span = n(&schema, "inline_span", [t(&schema, "ab")]).mark(marks);
+    let start = state(
+        doc(&schema, [n(&schema, "paragraph", [span])]),
+        Extension::none(),
+    );
+    let typed = run(&at(&start, 3), &insert_text("X"));
+    assert_eq!(
+        schema.describe(typed.doc()),
+        r#"doc(paragraph(inline_span{strong}("aXb")))"#
+    );
+}
+
+#[test]
+fn setting_a_mark_across_a_code_block_keeps_forbidden_marks_out() {
+    let schema = shared_schema();
+    let strong = schema.mark_id("strong").unwrap();
+    let start = state(
+        doc(
+            &schema,
+            [
+                n(&schema, "paragraph", [t(&schema, "a")]),
+                n(&schema, "code_block", [t(&schema, "b")]),
+            ],
+        ),
+        Extension::none(),
+    );
+    let selected = text_selection(&start, 1, 5);
+    let typed = run(&selected, &set_mark(strong, Attrs::empty()));
+    assert_eq!(
+        schema.describe(typed.doc()),
+        r#"doc(paragraph("a"{strong}), code_block("b"))"#
+    );
+}
+
+#[test]
+fn removing_a_whole_inherited_link_does_not_leave_empty_links() {
+    let schema = shared_schema();
+    let link = schema.mark_id("link").unwrap();
+    let marks = MarkSet::from_marks(
+        &schema,
+        [crate::Mark::with_attrs(
+            link,
+            Attrs::from_pairs([("href", "https://old")]),
+        )],
+    );
+    let span = n(&schema, "inline_span", [t(&schema, "ab")]).mark(marks);
+    let start = state(
+        doc(&schema, [n(&schema, "paragraph", [span])]),
+        Extension::none(),
+    );
+    let plain = run(&text_selection(&start, 2, 4), &remove_mark(link));
+    assert!(!range_has_mark(
+        plain.doc(),
+        0,
+        plain.doc().content_size(),
+        link
+    ));
+    assert_eq!(
+        schema.describe(plain.doc()),
+        r#"doc(paragraph(inline_span("ab")))"#
+    );
+}

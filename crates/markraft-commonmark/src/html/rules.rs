@@ -5,8 +5,10 @@
 //! front of a general one: a `<li>` holding its own check box is a task item,
 //! and every other `<li>` is a plain one.
 //!
-//! An element the table does not mention passes its children through, which is
-//! what keeps a `<font>` or a web component from swallowing the text inside it.
+//! A custom empty table passes unknown elements' children through. The preset
+//! additionally preserves unknown inline boundaries as raw primitives and keeps
+//! tables as complete raw HTML blocks, so clipboard import does not flatten
+//! structures the schema cannot yet edit directly.
 
 use std::sync::Arc;
 
@@ -109,6 +111,12 @@ pub enum HtmlRule {
         /// The schema node type to build.
         node_type: String,
     },
+    /// Preserve an element's opening and closing HTML primitives while parsing
+    /// its children normally, so unknown inline semantics survive editing.
+    RawInline {
+        /// The inline source atom type, with a required `source` attribute.
+        node_type: String,
+    },
     /// Drop the element and everything under it.
     Ignore,
     /// Render the children in place, with no block boundary of its own.
@@ -126,6 +134,7 @@ impl std::fmt::Debug for HtmlRule {
             HtmlRule::Atom { .. } => "Atom",
             HtmlRule::Mark { .. } => "Mark",
             HtmlRule::LineBreak { .. } => "LineBreak",
+            HtmlRule::RawInline { .. } => "RawInline",
             HtmlRule::Ignore => "Ignore",
             HtmlRule::Inline => "Inline",
             HtmlRule::Boundary => "Boundary",
@@ -276,6 +285,22 @@ fn is_tight(target: HtmlTarget<'_>) -> bool {
 /// The rule table for the CommonMark/GFM preset.
 pub fn commonmark_html_rules() -> HtmlRules {
     let mut rules = HtmlRules::new()
+        .matching(
+            "span",
+            html_match_fn(|t| t.attr("data-type") == Some("rawInline")),
+            HtmlRule::Atom {
+                node_type: md::RAW_INLINE.to_string(),
+                attrs: html_attrs_fn(|t| attrs! {"source" => t.attr("data-source").unwrap_or("")}),
+            },
+        )
+        .matching(
+            "span",
+            html_match_fn(|t| t.attr("data-type") == Some("softBreak")),
+            HtmlRule::Atom {
+                node_type: md::SOFT_BREAK.to_string(),
+                attrs: no_attrs(),
+            },
+        )
         .with_all(
             &[
                 "script", "style", "head", "template", "noscript", "title", "meta", "link",
@@ -283,6 +308,15 @@ pub fn commonmark_html_rules() -> HtmlRules {
             HtmlRule::Ignore,
         )
         .with("input", HtmlRule::Ignore)
+        .with(
+            "table",
+            HtmlRule::block_with(
+                md::RAW_BLOCK,
+                html_attrs_fn(|target| attrs! {"source" => target.element.html()}),
+            ),
+        )
+        .with("label", HtmlRule::Inline)
+        .matching("span", html_match_fn(fully_modelled_span), HtmlRule::Inline)
         .with("p", HtmlRule::block(md::PARAGRAPH))
         .with("blockquote", HtmlRule::block(md::BLOCKQUOTE))
         .with("hr", HtmlRule::block(md::HORIZONTAL_RULE))
@@ -433,5 +467,39 @@ pub fn commonmark_html_rules() -> HtmlRules {
             ),
         );
     }
-    rules
+    rules.fallback(HtmlRule::RawInline {
+        node_type: md::RAW_INLINE.to_string(),
+    })
+}
+
+/// A plain span, or a span whose entire styling is represented by marks. Other
+/// attributes and CSS must survive as raw boundaries instead of disappearing.
+fn fully_modelled_span(target: HtmlTarget<'_>) -> bool {
+    target.element.value().attrs().all(|(name, value)| {
+        if name != "style" {
+            return false;
+        }
+        value
+            .split(';')
+            .filter(|part| !part.trim().is_empty())
+            .all(|part| {
+                let Some((property, value)) = part.split_once(':') else {
+                    return false;
+                };
+                let value = value.trim().to_ascii_lowercase();
+                match property.trim().to_ascii_lowercase().as_str() {
+                    "font-weight" => {
+                        value == "bold" || value.parse::<u16>().is_ok_and(|w| w >= 600)
+                    }
+                    "font-style" => value == "italic",
+                    "text-decoration" | "text-decoration-line" => {
+                        !value.is_empty()
+                            && value
+                                .split_whitespace()
+                                .all(|word| matches!(word, "underline" | "line-through"))
+                    }
+                    _ => false,
+                }
+            })
+    })
 }

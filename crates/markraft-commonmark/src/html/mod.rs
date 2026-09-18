@@ -102,6 +102,7 @@ impl HtmlParser {
             rules: &self.rules,
             blocks: Vec::new(),
             inline: InlineContent::new(&self.schema),
+            leading_space: true,
         };
         build.children(html.root_element(), &[])?;
         build.flush()?;
@@ -114,6 +115,7 @@ struct Build<'s> {
     rules: &'s HtmlRules,
     blocks: Vec<Node>,
     inline: InlineContent<'s>,
+    leading_space: bool,
 }
 
 impl<'s> Build<'s> {
@@ -162,11 +164,8 @@ impl<'s> Build<'s> {
     /// Whether a space written now would be collapsed away.
     fn at_space(&self) -> bool {
         match self.inline.last() {
-            None => true,
-            Some(node) => match node.text() {
-                Some(text) => text.ends_with(' '),
-                None => markraft_core::projection::is_line_break(self.schema, node.type_id()),
-            },
+            None => self.leading_space,
+            Some(node) => ends_in_space(self.schema, node),
         }
     }
 
@@ -217,14 +216,70 @@ impl<'s> Build<'s> {
         match self.rules.rule(target).clone() {
             HtmlRule::Ignore => {}
             HtmlRule::Inline => self.children(element, &marks)?,
+            HtmlRule::RawInline { node_type } => {
+                let ty = self.node_id(&node_type)?;
+                let atom = |source: String| {
+                    self.schema.create(
+                        ty,
+                        markraft_core::attrs! {"source" => source},
+                        MarkSet::empty(),
+                        Fragment::empty(),
+                    )
+                };
+                let mut opening = format!("<{}", target.tag());
+                for (name, value) in element.value().attrs() {
+                    opening.push_str(&format!(" {name}=\"{}\"", escape_attr(value)));
+                }
+                opening.push('>');
+                let set = self.inline.mark_set(marks.iter().cloned());
+                self.inline.push_node(atom(opening)?, set.clone());
+                self.children(element, &marks)?;
+                if !matches!(
+                    target.tag(),
+                    "area"
+                        | "base"
+                        | "br"
+                        | "col"
+                        | "embed"
+                        | "hr"
+                        | "img"
+                        | "input"
+                        | "link"
+                        | "meta"
+                        | "param"
+                        | "source"
+                        | "track"
+                        | "wbr"
+                ) {
+                    self.inline
+                        .push_node(atom(format!("</{}>", target.tag()))?, set);
+                }
+            }
             HtmlRule::Boundary => {
                 self.flush()?;
                 self.children(element, &marks)?;
                 self.flush()?;
             }
             HtmlRule::Mark { mark_type, attrs } => {
-                marks.push(self.mark(&mark_type, attrs(target))?);
-                self.children(element, &marks)?;
+                let leading_space = self.at_space();
+                let previous_leading = self.leading_space;
+                let before = self.inline.take();
+                self.leading_space = leading_space;
+                self.children(element, &[])?;
+                let children = self.inline.take();
+                self.leading_space = previous_leading;
+                self.inline.restore(before);
+                let mark = self.mark(&mark_type, attrs(target))?;
+                for node in crate::inline::wrap_mark(self.schema, mark, children)? {
+                    let set = marks.iter().fold(node.marks().clone(), |set, mark| {
+                        set.add(self.schema, mark.clone())
+                    });
+                    if let Some(text) = node.text() {
+                        self.inline.push_text(text, set);
+                    } else {
+                        self.inline.push_node(node, set);
+                    }
+                }
             }
             HtmlRule::Atom { node_type, attrs } => {
                 let ty = self.node_id(&node_type)?;
@@ -287,6 +342,7 @@ impl<'s> Build<'s> {
             rules: self.rules,
             blocks: Vec::new(),
             inline: InlineContent::new(self.schema),
+            leading_space: true,
         };
         inner.children(element, marks)?;
         inner.flush()?;
@@ -306,6 +362,7 @@ impl<'s> Build<'s> {
             rules: self.rules,
             blocks: Vec::new(),
             inline: InlineContent::new(self.schema),
+            leading_space: true,
         };
         inner.children(element, marks)?;
         inner.inline.trim_end();
@@ -355,4 +412,15 @@ fn style_marks(element: ElementRef<'_>) -> Vec<&'static str> {
         }
     }
     out
+}
+
+fn ends_in_space(schema: &Schema, node: &Node) -> bool {
+    if let Some(text) = node.text() {
+        return text.ends_with(' ');
+    }
+    if let Some(child) = node.last_child() {
+        return ends_in_space(schema, child);
+    }
+    markraft_core::projection::is_line_break(schema, node.type_id())
+        || schema.node_type(node.type_id()).in_group("soft_break")
 }

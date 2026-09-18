@@ -73,7 +73,9 @@ impl Host for Editing {
         let last = projection.line_count().saturating_sub(1);
         let target = (line as isize).saturating_add(rows).clamp(0, last as isize) as usize;
         let entry = &projection.lines()[target];
-        let head = entry.from + offset.min(entry.len());
+        let head = entry
+            .offset_to_pos(offset.min(entry.len()))
+            .expect("a visible offset");
         self.select(
             Selection::text(if extend { anchor } else { head }, head),
             false,
@@ -218,7 +220,9 @@ impl Keys {
     fn pos(&self, line: usize, offset: usize) -> usize {
         let projection = self.host.projection();
         let entry = &projection.lines()[line];
-        entry.from + offset.min(entry.len())
+        entry
+            .offset_to_pos(offset.min(entry.len()))
+            .expect("a visible offset")
     }
 
     fn at(mut self, line: usize, offset: usize) -> Self {
@@ -353,7 +357,12 @@ impl Keys {
 
     fn selected(&self) -> String {
         let state = &self.host.state;
-        slice_to_plain_text(state.schema(), &state.selection().content(state.doc()))
+        slice_to_plain_text(
+            state.schema(),
+            &state
+                .selection()
+                .content_with_schema(state.doc(), state.schema()),
+        )
     }
 
     fn lines(&self) -> usize {
@@ -1105,4 +1114,97 @@ fn an_external_node_selection_is_settled_into_the_text() {
     // caret is still somewhere the view can paint and a motion can start from.
     assert_eq!(keys.line_col(), (1, 0));
     assert_eq!(keys.keys("k").line_col(), (0, 0));
+}
+
+#[test]
+fn linewise_operators_preserve_unselected_container_children() {
+    for sequence in ["2dd", "Vjd"] {
+        let mut keys = Keys::new("one\n\n- two\n- three").at(0, 0);
+        keys.keys(sequence);
+        assert_eq!(keys.markdown(), "- three", "{sequence}");
+        keys.keys("u");
+        assert_eq!(keys.markdown(), "one\n\n- two\n- three");
+    }
+    let mut keys = Keys::new("one\n\n- two\n- three").at(0, 0);
+    keys.keys("2cc").typed("new").keys("<esc>");
+    assert_eq!(keys.markdown(), "new\n\n- three");
+    let mut keys = Keys::new("one\n\n- two\n- three").at(0, 0);
+    keys.keys("2yyGp");
+    assert_eq!(keys.markdown(), "one\n\n- two\n- three\n\none\n\n- two");
+    let mut keys = Keys::new("- one\n- two\n\nthree").at(1, 0);
+    keys.keys("2dd");
+    assert_eq!(keys.markdown(), "- one");
+    let mut keys = Keys::new("- one\n  - two\n  - three\n- four").at(0, 0);
+    keys.keys("2dd");
+    assert_eq!(keys.text(), "three\nfour");
+    let mut keys = Keys::new("> one\n>\n> two\n\nthree").at(1, 0);
+    keys.keys("2dd");
+    assert_eq!(keys.markdown(), "> one");
+}
+
+#[test]
+fn linewise_paste_next_to_a_leaf_block_has_no_ancestor_requirement() {
+    let mut keys = Keys::new("text\n\n***").at(0, 0);
+    keys.keys("yyjp");
+    assert_eq!(keys.markdown(), "text\n\n---\n\ntext");
+    let mut keys = Keys::new("text\n\n***").at(0, 0);
+    keys.keys("yyjP");
+    assert_eq!(keys.markdown(), "text\n\ntext\n\n---");
+}
+
+#[test]
+fn shift_o_in_code_keeps_the_cursor_in_the_new_code_row() {
+    let mut keys = Keys::new("before\n\n```\ncode\n```").at(1, 0);
+    keys.keys("O").typed("new").keys("<esc>");
+    assert_eq!(keys.markdown(), "before\n\n```\nnew\ncode\n```");
+    keys.keys("u");
+    assert_eq!(keys.markdown(), "before\n\n```\ncode\n```");
+}
+
+#[test]
+fn inline_containers_do_not_add_vim_caret_stops() {
+    let mut keys = Keys::new("**a **b**** c").at(0, 0);
+    for column in 1..=4 {
+        keys.keys("l");
+        assert_eq!(keys.line_col(), (0, column));
+        let projection = keys.host.projection();
+        assert!(projection.is_caret_position(host::head(&keys.host)));
+    }
+    for column in (0..4).rev() {
+        keys.keys("h");
+        assert_eq!(keys.line_col(), (0, column));
+    }
+    keys.keys("$0");
+    assert_eq!(keys.line_col(), (0, 0));
+    keys.keys("v2l");
+    assert_eq!(keys.selected(), "a b");
+    keys.keys("d");
+    assert_eq!(keys.text(), " c");
+}
+
+#[test]
+fn charwise_yanks_preserve_nested_inline_scopes_when_pasted_into_plain_text() {
+    for (source, outer) in [("*a **word** c*", "em"), ("**a **word** c**", "strong")] {
+        for yank in ["yw", "v3ly"] {
+            let trailing = if yank == "yw" { " " } else { "" };
+            let expected = format!("<{outer}><strong>word</strong>{trailing}</{outer}>");
+            let mut keys = Keys::new(&format!("{source}\n\nx")).at(0, 2);
+            keys.keys(yank);
+            let serializer =
+                markraft_commonmark::HtmlSerializer::commonmark(keys.host.state.schema());
+            let slice = keys.host.clipboard.as_ref().expect("a copied word");
+            let html = serializer.serialize_fragment(slice);
+            assert!(html.contains(&expected), "{source} {yank}: {html}");
+            keys.keys("G$p");
+            let html = serializer.serialize(keys.host.state.doc());
+            assert!(
+                html.contains(&format!("<p>x{expected}")),
+                "{source} {yank}: {html}"
+            );
+            assert_eq!(
+                keys.host.projection().line_text(1).unwrap().trim_end(),
+                "xword"
+            );
+        }
+    }
 }

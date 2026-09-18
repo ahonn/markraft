@@ -8,8 +8,10 @@
 //!
 //! Every CommonMark block has a node type, except the ones whose structure the
 //! model does not model: those are kept verbatim in a [`RAW_BLOCK`] leaf so a
-//! document never loses text it cannot interpret. Inline styling is flat: a
-//! text leaf carries a [`markraft_core::MarkSet`], not a tree of styling nodes.
+//! document never loses text it cannot interpret. Ordinary inline styling uses
+//! [`markraft_core::MarkSet`]; nested or empty structures that need more than a
+//! set use transparent [`INLINE_SPAN`] containers. [`RAW_INLINE`] preserves
+//! CommonMark inline HTML primitives.
 //!
 //! # Mark ranks
 //!
@@ -25,9 +27,9 @@
 //! | 50 | [`EM`] | `*…*` or `<em>…</em>` |
 //! | 60 | [`CODE`] | `` `…` `` — innermost, because its content is literal |
 //!
-//! Strong just outside em makes `**` and `*` merge into the `***…***` run that
-//! CommonMark reads back as both marks, and the tag-only underline sits outside
-//! the delimiter runs so `<u>**a**</u>` is written the way it was read.
+//! Simultaneous strong/em openings use a tag where adjacent delimiters would
+//! reverse their nesting. The tag-only underline sits outside delimiter runs.
+//! A nested inline span preserves the source order independently of ranks.
 //!
 //! [`CODE`] excludes nothing but itself. A code span's *content* is literal —
 //! no emphasis is read inside the backticks — but the span as a whole carries
@@ -115,6 +117,16 @@ pub const IMAGE: &str = "image";
 /// A hard line break: an inline atom in the groups `inline` and
 /// [`LINE_BREAK_GROUP`](markraft_core::projection::LINE_BREAK_GROUP).
 pub const HARD_BREAK: &str = "hard_break";
+/// A source line ending inside a paragraph, displayed as a space. Keeping the
+/// primitive matters when surrounding raw HTML changes whitespace semantics.
+pub const SOFT_BREAK: &str = "soft_break";
+
+/// A transparent inline container. Its marks wrap its entire content, preserving
+/// nested marks and their order where a flat mark set would lose information.
+pub const INLINE_SPAN: &str = "inline_span";
+/// One CommonMark inline HTML primitive, retained in the `source` attribute.
+/// It is an editable/selectable atom; its source is never interpreted as text.
+pub const RAW_INLINE: &str = "raw_inline";
 
 /// A link, `inclusive: false`, with `href` (`Str`, required) and `title`
 /// (`Str`, default `""`).
@@ -234,6 +246,19 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
         )
         .node(NodeTypeSpec::text(TEXT).group(INLINE_GROUP))
         .node(
+            NodeTypeSpec::new(INLINE_SPAN, "inline*")
+                .inline(true)
+                .group(INLINE_GROUP),
+        )
+        .node(
+            NodeTypeSpec::leaf(RAW_INLINE)
+                .inline(true)
+                .group(INLINE_GROUP)
+                .selectable(true)
+                .atom(true)
+                .attr(AttrSpec::required("source", AttrKind::Str)),
+        )
+        .node(
             NodeTypeSpec::leaf(IMAGE)
                 .inline(true)
                 .group(INLINE_GROUP)
@@ -242,6 +267,11 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                 .attr(AttrSpec::required("src", AttrKind::Str))
                 .attr(str_attr("alt", ""))
                 .attr(str_attr("title", "")),
+        )
+        .node(
+            NodeTypeSpec::leaf(SOFT_BREAK)
+                .inline(true)
+                .group(format!("{INLINE_GROUP} soft_break")),
         )
         .node(NodeTypeSpec::leaf(HARD_BREAK).inline(true).group(format!(
             "{INLINE_GROUP} {}",

@@ -267,7 +267,7 @@ impl Store {
                 continue;
             }
             // A blank note that was never written stays in memory only.
-            if saved.is_none() && doc::plain_text(&note.document).trim().is_empty() {
+            if saved.is_none() && doc::is_blank(&note.document) {
                 continue;
             }
             if let Some(saved) = saved
@@ -362,7 +362,7 @@ impl Store {
         let blank = library
             .notes
             .iter()
-            .all(|note| doc::plain_text(&note.document).trim().is_empty());
+            .all(|note| doc::is_blank(&note.document));
         if self.settings.legacy_imported || !blank || !legacy.exists() {
             return library;
         }
@@ -662,6 +662,38 @@ mod tests {
         let (store, reopened) = open(root.path());
         assert_eq!(reopened, library);
         assert_eq!(store.settings().active_id, id);
+    }
+
+    #[test]
+    fn non_text_notes_are_saved_and_survive_reopening() {
+        for source in ["![](photo.png)", "***", "```\n```", "- [ ] "] {
+            let root = tempfile::tempdir().unwrap();
+            let (mut store, mut library) = open(root.path());
+            let id = library.active_id.clone();
+            let document = doc::from_markdown(source);
+            library.set_document(&id, document.clone());
+            store.save(&library).unwrap();
+            assert_eq!(listing(root.path(), "").len(), 1, "{source}");
+            drop(store);
+
+            let (_, reopened) = open(root.path());
+            assert_eq!(reopened.active_note().id, id, "{source}");
+            assert_eq!(reopened.active_note().document, document, "{source}");
+        }
+    }
+
+    #[test]
+    fn unformatted_whitespace_only_notes_remain_unwritten() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut store, mut library) = open(root.path());
+        let paragraph = doc::schema()
+            .node("paragraph", [doc::schema().text(" \t ")])
+            .unwrap();
+        let document = doc::schema().doc([paragraph]).unwrap();
+        let id = library.active_id.clone();
+        library.set_document(&id, document);
+        store.save(&library).unwrap();
+        assert!(listing(root.path(), "").is_empty());
     }
 
     #[test]

@@ -361,7 +361,7 @@ impl NotesApp {
                     this.link_popover = None;
                     this.code_language_block = None;
                 }
-                let document = editor.read(cx).doc().clone();
+                let document = editor.read(cx).committed_document().clone();
                 if this.library.set_document(&note_id, document) {
                     this.changed(cx);
                 }
@@ -397,7 +397,7 @@ impl NotesApp {
     fn sync_documents(&mut self, cx: &App) {
         for (id, session) in &self.sessions {
             self.library
-                .set_document(id, session.editor.read(cx).doc().clone());
+                .set_document(id, session.editor.read(cx).committed_document().clone());
         }
     }
     /// Take over what other programs changed in the notes folder. Edits made here that
@@ -863,7 +863,12 @@ impl NotesApp {
         cx.notify();
     }
     fn apply_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let url = self.query.read(cx).text().trim().to_string();
+        let query = self.query.read(cx);
+        let url =
+            markraft_core::projection::Projection::of(query.committed_document(), query.schema())
+                .plain_text()
+                .trim()
+                .to_string();
         self.editor().update(cx, |editor, cx| {
             editor.set_link((!url.is_empty()).then_some(url.as_str()), cx)
         });
@@ -872,7 +877,12 @@ impl NotesApp {
         cx.notify();
     }
     fn apply_shortcut(&mut self, cx: &mut Context<Self>) {
-        let text = self.query.read(cx).text().trim().to_string();
+        let query = self.query.read(cx);
+        let text =
+            markraft_core::projection::Projection::of(query.committed_document(), query.schema())
+                .plain_text()
+                .trim()
+                .to_string();
         if let Some(platform) = &mut self.platform {
             match platform.set_shortcut(&text) {
                 Ok(()) => {
@@ -890,7 +900,7 @@ impl NotesApp {
     }
     fn copy_markdown(&mut self, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(doc::to_markdown(
-            self.editor().read(cx).doc(),
+            self.editor().read(cx).committed_document(),
         )));
         self.inform("Copied as Markdown", cx);
     }
@@ -1066,7 +1076,7 @@ impl NotesApp {
         let note = self.library.active_note();
         let title = note.title();
         let filename = format!("{}.md", title.replace(['/', ':'], "-"));
-        let document = doc::to_markdown(self.editor().read(cx).doc());
+        let document = doc::to_markdown(self.editor().read(cx).committed_document());
         let directory = self.path.clone().unwrap_or_default();
         let prompt = cx.prompt_for_new_path(&directory, Some(&filename));
         cx.spawn(async move |this, cx| {

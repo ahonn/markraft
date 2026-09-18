@@ -26,20 +26,16 @@ pub(crate) fn active_marks(state: &EditorState) -> MarkSet {
     }
     let (from, to) = (selection.from(doc), selection.to(doc));
     let mut common: Option<MarkSet> = None;
-    doc.nodes_between(from, to, &mut |node, pos, _, _| {
-        if node.text().is_none() && !node.is_leaf() {
-            return true;
-        }
-        let end = pos + node.node_size();
-        if pos.max(from) >= end.min(to) {
-            return true;
+    let projection = markraft_core::projection::projection_of(state);
+    for run in projection.lines().iter().flat_map(|line| &line.runs) {
+        if run.from.max(from) >= run.to.min(to) {
+            continue;
         }
         common = Some(match common.take() {
-            None => node.marks().clone(),
-            Some(previous) => previous.filter(|mark| node.marks().contains(mark)),
+            None => run.marks.clone(),
+            Some(previous) => previous.filter(|mark| run.marks.contains(mark)),
         });
-        true
-    });
+    }
     common.unwrap_or_else(MarkSet::empty)
 }
 
@@ -77,7 +73,9 @@ pub(crate) fn touched_lines<'a>(
     let first = projection.line_at(from).unwrap_or(0);
     let last = match projection.line_at(to) {
         // A range that stops at a later block's start leaves that block alone.
-        Some(index) if index > first && projection.lines()[index].from == to => index - 1,
+        Some(index) if index > first && projection.lines()[index].pos_to_offset(to) == Some(0) => {
+            index - 1
+        }
         Some(index) => index,
         None => projection.line_count().saturating_sub(1),
     };
@@ -174,18 +172,21 @@ mod tests {
 
     #[test]
     fn a_range_intersects_only_the_content_it_covers_in_either_direction() {
-        // `**ab**` then `cd` strong, then plain `ef`: positions 1..7 hold "abcdef".
+        // Source nesting may introduce transparent inline containers; select
+        // the visible text rather than assuming one token per character.
         let (schema, state) = state_of("***ab***cd*ef*");
         let em = schema.mark_id(md::EM).unwrap();
         let strong = schema.mark_id(md::STRONG).unwrap();
         // "ab" carries em+strong, "cd" nothing, "ef" em.
-        let both = select(&state, 1, 3);
+        let projection = projection_of(&state);
+        let pos = |offset| projection.line_offset_to_pos(0, offset).unwrap();
+        let both = select(&state, pos(0), pos(2));
         assert!(active_marks(&both).contains_type(em));
         assert!(active_marks(&both).contains_type(strong));
-        assert!(active_marks(&select(&state, 3, 1)).contains_type(strong));
-        assert!(!active_marks(&select(&state, 1, 5)).contains_type(strong));
-        assert!(active_marks(&select(&state, 5, 7)).contains_type(em));
-        assert!(active_marks(&select(&state, 7, 5)).contains_type(em));
+        assert!(active_marks(&select(&state, pos(2), pos(0))).contains_type(strong));
+        assert!(!active_marks(&select(&state, pos(0), pos(4))).contains_type(strong));
+        assert!(active_marks(&select(&state, pos(4), pos(6))).contains_type(em));
+        assert!(active_marks(&select(&state, pos(6), pos(4))).contains_type(em));
     }
 
     #[test]
@@ -210,6 +211,19 @@ mod tests {
         let into_next = select(&state, 1, 6);
         assert!(!active_marks(&into_next).contains_type(strong));
         assert_eq!(active_block_type(&into_next, &projection), None);
+    }
+
+    #[test]
+    fn a_selection_stopping_at_a_nested_inline_start_excludes_that_block() {
+        let (schema, state) = state_of("# heading\n\n*text **bold***");
+        let projection = projection_of(&state);
+        let from = projection.line_offset_to_pos(0, 0).unwrap();
+        let to = projection.line_offset_to_pos(1, 0).unwrap();
+        let selected = select(&state, from, to);
+        assert_eq!(
+            active_block_type(&selected, &projection).map(|(ty, _)| ty),
+            schema.node_id(md::HEADING)
+        );
     }
 
     #[test]

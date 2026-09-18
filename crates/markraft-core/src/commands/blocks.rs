@@ -33,23 +33,53 @@ pub fn split_block_keep_marks() -> Command {
 }
 
 fn split_block_impl(state: &EditorState, keep_marks: bool) -> Option<TransactionSpec> {
+    if !state.selection().is_empty(state.doc()) {
+        // A cross-container replacement must first fit the deletion. Splitting
+        // the resulting textblock then keeps both sides structurally balanced.
+        let deletion = super::general::delete_selection()(state)?;
+        let deleted = state.update([deletion]).ok()?;
+        let from = state.selection().from(state.doc());
+        let mapped = deleted
+            .changes()
+            .map_pos(from, -1, crate::change::TrackMode::Simple)?;
+        let selection = Selection::find_from(state.schema(), deleted.new_doc(), mapped, 1, true)
+            .or_else(|| {
+                Selection::find_from(state.schema(), deleted.new_doc(), mapped, -1, true)
+            })?;
+        let deleted = state
+            .update([TransactionSpec::new()
+                .change_set(deleted.changes().clone())
+                .selection(selection)])
+            .ok()?;
+        let split = split_block_impl(deleted.state(), keep_marks)?;
+        let split = deleted.state().update([split]).ok()?;
+        return Some(
+            TransactionSpec::new()
+                .change_set(deleted.changes().compose(split.changes()).ok()?)
+                .selection(split.state().selection().clone())
+                .user_event("split")
+                .scroll_into_view(),
+        );
+    }
     let doc = state.doc();
     let schema = state.schema();
     let range = state.selection().replacement_range(doc);
     let (from, to) = (range.from, range.to);
     let resolved_from = doc.resolve(from).ok()?;
     let resolved_to = doc.resolve(to).ok()?;
-    let depth = resolved_from.depth();
-    if depth == 0 {
-        return None;
-    }
-    let parent = resolved_from.parent().clone();
+    let depth = (1..=resolved_from.depth())
+        .rev()
+        .find(|&depth| resolved_from.node(depth).is_textblock(schema))?;
+    let parent = resolved_from.node(depth).clone();
     if !schema.node_type(parent.type_id()).is_block() {
         return None;
     }
-    let at_end = resolved_to.parent_offset() == resolved_to.parent().content_size();
-    let at_start = resolved_from.parent_offset() == 0;
-    let default = default_type_after(schema, &resolved_from);
+    let at_end = (depth..=resolved_to.depth())
+        .all(|d| resolved_to.pos() + resolved_to.depth() - d == resolved_to.end(d));
+    let at_start = (depth..=resolved_from.depth())
+        .all(|d| resolved_from.pos() - (resolved_from.depth() - d) == resolved_from.start(d));
+    let block_start = doc.resolve(resolved_from.start(depth)).ok()?;
+    let default = default_type_after(schema, &block_start);
 
     let mut changes = Vec::new();
     let (close_markup, open_markup) = if at_end {
@@ -83,14 +113,27 @@ fn split_block_impl(state: &EditorState, keep_marks: bool) -> Option<Transaction
         (parent.markup().clone(), parent.markup().clone())
     };
 
-    if !can_split(schema, doc, from, 1, &[Some(open_markup.ty)]) {
+    let split_depth = resolved_from.depth() - depth + 1;
+    let mut types_after = vec![Some(open_markup.ty)];
+    types_after
+        .extend((depth + 1..=resolved_from.depth()).map(|d| Some(resolved_from.node(d).type_id())));
+    if !can_split(schema, doc, from, split_depth, &types_after) {
         return None;
     }
-    let tokens = [Token::Close(close_markup), Token::Open(open_markup.clone())];
+    let mut tokens: Vec<_> = (depth + 1..=resolved_from.depth())
+        .rev()
+        .map(|d| Token::Close(resolved_from.node(d).markup().clone()))
+        .collect();
+    tokens.push(Token::Close(close_markup));
+    tokens.push(Token::Open(open_markup.clone()));
+    tokens.extend(
+        (depth + 1..=resolved_from.depth())
+            .map(|d| Token::Open(resolved_from.node(d).markup().clone())),
+    );
     changes.push(Change::replace(from, to, Slice::from_tokens(&tokens)));
 
     let (set, new_doc) = super::resolve_changes(state, changes)?;
-    let caret = from + 2;
+    let caret = from + 2 * split_depth;
     let selection = if keep_marks {
         let marks = marks_at(state, &resolved_from);
         let parent_ty = schema.node_type(open_markup.ty);
@@ -329,6 +372,29 @@ pub fn set_block_type(node_type: NodeTypeId, attrs: Attrs) -> Command {
                     attrs: markup.attrs.clone(),
                     marks: node.marks().clone(),
                 };
+                if schema.node_type(node_type).is_code()
+                    && node.children().any(|child| !child.is_text())
+                {
+                    // Code has plain text content. Inline scopes and atoms must
+                    // become their visible text rather than invalid children.
+                    let text = crate::projection::slice_to_plain_text(
+                        schema,
+                        &Slice::from_fragment(node.content().clone()),
+                    );
+                    let content = if text.is_empty() {
+                        Fragment::empty()
+                    } else {
+                        Fragment::from_node(schema.text(&text))
+                    };
+                    structural.push(Change::replace(
+                        pos,
+                        pos + size,
+                        Slice::from_fragment(Fragment::from_node(Node::container(
+                            new_markup, content,
+                        ))),
+                    ));
+                    return false;
+                }
                 structural.push(Change::replace(
                     pos,
                     pos + 1,
@@ -358,13 +424,34 @@ pub fn set_block_type(node_type: NodeTypeId, attrs: Attrs) -> Command {
         // removal recorded against a type that forbids the mark is dropped.
         let mut rounds = mark_rounds;
         rounds.push(structural);
-        let (set, _) = resolve_rounds(state, rounds)?;
-        Some(
-            TransactionSpec::new()
-                .change_set(set)
-                .user_event("settype")
-                .scroll_into_view(),
-        )
+        let (set, next_doc) = resolve_rounds(state, rounds)?;
+        let mut spec = TransactionSpec::new()
+            .change_set(set)
+            .user_event("settype")
+            .scroll_into_view();
+        if let Selection::Text {
+            anchor,
+            head,
+            marks,
+        } = state.selection()
+        {
+            let before = crate::projection::Projection::of(doc, schema);
+            let after = crate::projection::Projection::of(&next_doc, schema);
+            if let (Some((a_line, a_offset)), Some((h_line, h_offset))) = (
+                before.pos_to_line_offset(*anchor),
+                before.pos_to_line_offset(*head),
+            ) && let (Some(anchor), Some(head)) = (
+                after.line_offset_to_pos(a_line, a_offset),
+                after.line_offset_to_pos(h_line, h_offset),
+            ) {
+                spec = spec.selection(Selection::Text {
+                    anchor,
+                    head,
+                    marks: marks.clone(),
+                });
+            }
+        }
+        Some(spec)
     })
 }
 

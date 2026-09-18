@@ -73,6 +73,20 @@ pub fn plain_text(doc: &Node) -> String {
     markraft_commonmark::to_plain_text(schema(), doc)
 }
 
+/// Only unformatted, whitespace-only paragraphs are disposable blank notes.
+/// Atoms and other block structures carry content even without readable text.
+pub fn is_blank(doc: &Node) -> bool {
+    doc.children().all(|block| {
+        schema().node_type(block.type_id()).name() == md::PARAGRAPH
+            && block.marks().is_empty()
+            && block.children().all(|child| {
+                child.is_text()
+                    && child.marks().is_empty()
+                    && child.text().is_some_and(|text| text.trim().is_empty())
+            })
+    })
+}
+
 fn node(name: &str) -> NodeTypeId {
     schema()
         .node_id(name)

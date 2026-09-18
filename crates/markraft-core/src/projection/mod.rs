@@ -19,17 +19,11 @@
 //!
 //! # Offsets
 //!
-//! Inside a textblock every token is one `char` of the line's text: a text
-//! leaf contributes one token and one `char` per Unicode scalar value, and an
-//! inline atom contributes [`OBJECT_REPLACEMENT`] once per token it occupies.
-//! A line break contributes `'\n'`. So within a line,
-//! `char offset == pos - line.from` exactly, which is what makes
-//! [`Projection::pos_to_line_offset`] and
-//! [`Projection::line_offset_to_pos`] inverse.
-//!
-//! Across lines that no longer holds — the tokens that close one block and open
-//! the next carry no text — so document-wide conversions go through the line
-//! index rather than through arithmetic.
+//! Text and atoms contribute visible characters. Non-atomic inline containers
+//! contribute their content recursively, inheriting marks, while their opening
+//! and closing tokens stay invisible. Position conversions use the projected
+//! runs rather than `pos - line.from`, and each visible boundary has one
+//! canonical caret position. This prevents extra arrow-key stops at style edges.
 //!
 //! # Caching
 //!
@@ -147,6 +141,8 @@ pub struct Line {
     pub char_start: usize,
     /// UTF-16 offset of the line inside [`Projection::plain_text`].
     pub utf16_start: usize,
+    /// Canonical editable document position of each visible character boundary.
+    positions: Vec<usize>,
 }
 
 impl Line {
@@ -155,15 +151,34 @@ impl Line {
         self.ancestors.last().map(|a| a.node_type)
     }
 
-    /// How many `char`s — equivalently, how many token positions — the line
-    /// holds.
+    /// How many visible Unicode scalar values the line holds. Transparent
+    /// inline-container boundaries contribute no characters.
     pub fn len(&self) -> usize {
-        self.to - self.from
+        self.positions.len().saturating_sub(1)
     }
 
     /// Whether the line holds no content.
     pub fn is_empty(&self) -> bool {
-        self.to == self.from
+        self.len() == 0
+    }
+
+    /// Convert a visible character offset to its canonical editable position.
+    pub fn offset_to_pos(&self, offset: usize) -> Option<usize> {
+        self.positions.get(offset).copied()
+    }
+
+    /// Convert a document position to the corresponding visible character
+    /// offset. Structural boundaries share an offset with their adjacent text.
+    pub fn pos_to_offset(&self, pos: usize) -> Option<usize> {
+        if !(self.from..=self.to).contains(&pos) {
+            return None;
+        }
+        for run in &self.runs {
+            if pos <= run.to {
+                return Some(run.char_from + pos.saturating_sub(run.from));
+            }
+        }
+        Some(self.len())
     }
 
     /// The nesting depth of the line's block, counting from the document.
@@ -301,70 +316,39 @@ impl Builder<'_> {
             byte_end: byte_start,
             char_start,
             utf16_start,
+            positions: vec![pos],
         });
     }
 
     fn push_textblock(&mut self, block: &Node, from: usize, ancestors: &[Ancestor]) {
         let (byte_start, char_start, utf16_start) = self.start_line();
-        let mut runs: Vec<Run> = Vec::new();
-        let mut rows: Vec<Row> = Vec::new();
-        let mut row_start = (from, 0usize);
-        let mut pos = from;
-        let mut offset = 0usize;
-
-        for child in block.children() {
-            let size = child.node_size();
-            if let Some(text) = child.text() {
-                self.text.push_str(text);
-                self.utf16_len += text.encode_utf16().count();
-                self.char_len += size;
-                runs.push(Run {
-                    content: RunContent::Text(text.to_string()),
-                    marks: child.marks().clone(),
-                    from: pos,
-                    to: pos + size,
-                    char_from: offset,
-                    char_to: offset + size,
+        let mut runs = Vec::new();
+        let mut positions = vec![from];
+        self.inline_runs(block, from, &MarkSet::empty(), &mut runs, &mut positions);
+        let to = from + block.content_size();
+        let mut rows = Vec::new();
+        let mut row_offset = 0;
+        for run in &runs {
+            if matches!(&run.content, RunContent::Atom(node) if is_line_break(self.schema, node.type_id()))
+            {
+                rows.push(Row {
+                    from: positions[row_offset],
+                    to: positions[run.char_from],
+                    char_from: row_offset,
+                    char_to: run.char_from,
                 });
-            } else {
-                let is_break = is_line_break(self.schema, child.type_id());
-                let filler = if is_break { '\n' } else { OBJECT_REPLACEMENT };
-                for _ in 0..size {
-                    self.text.push(filler);
-                }
-                self.utf16_len += size;
-                self.char_len += size;
-                runs.push(Run {
-                    content: RunContent::Atom(child.clone()),
-                    marks: child.marks().clone(),
-                    from: pos,
-                    to: pos + size,
-                    char_from: offset,
-                    char_to: offset + size,
-                });
-                if is_break {
-                    rows.push(Row {
-                        from: row_start.0,
-                        to: pos,
-                        char_from: row_start.1,
-                        char_to: offset,
-                    });
-                    row_start = (pos + size, offset + size);
-                }
+                row_offset = run.char_to;
             }
-            pos += size;
-            offset += size;
         }
-
         rows.push(Row {
-            from: row_start.0,
-            to: pos,
-            char_from: row_start.1,
-            char_to: offset,
+            from: positions[row_offset],
+            to: *positions.last().expect("initial boundary"),
+            char_from: row_offset,
+            char_to: positions.len() - 1,
         });
         self.lines.push(Line {
             from,
-            to: pos,
+            to,
             kind: LineKind::Textblock,
             ancestors: ancestors.to_vec(),
             runs,
@@ -373,7 +357,62 @@ impl Builder<'_> {
             byte_end: self.text.len(),
             char_start,
             utf16_start,
+            positions,
         });
+    }
+
+    fn inline_runs(
+        &mut self,
+        parent: &Node,
+        from: usize,
+        inherited: &MarkSet,
+        runs: &mut Vec<Run>,
+        positions: &mut Vec<usize>,
+    ) {
+        let mut pos = from;
+        for child in parent.children() {
+            let size = child.node_size();
+            let marks = child.marks().iter().fold(inherited.clone(), |marks, mark| {
+                marks.add(self.schema, mark.clone())
+            });
+            if child.is_container() && !self.schema.node_type(child.type_id()).is_atom() {
+                *positions.last_mut().expect("initial boundary") = pos + 1;
+                self.inline_runs(child, pos + 1, &marks, runs, positions);
+            } else {
+                let offset = positions.len() - 1;
+                let text = child.text().map(str::to_string).unwrap_or_else(|| {
+                    let filler = if is_line_break(self.schema, child.type_id()) {
+                        '\n'
+                    } else if self
+                        .schema
+                        .node_type(child.type_id())
+                        .in_group("soft_break")
+                    {
+                        ' '
+                    } else {
+                        OBJECT_REPLACEMENT
+                    };
+                    std::iter::repeat_n(filler, size).collect()
+                });
+                self.utf16_len += text.encode_utf16().count();
+                self.char_len += size;
+                self.text.push_str(&text);
+                *positions.last_mut().expect("initial boundary") = pos;
+                positions.extend(pos + 1..=pos + size);
+                runs.push(Run {
+                    content: match child.text() {
+                        Some(_) => RunContent::Text(text),
+                        None => RunContent::Atom(child.clone()),
+                    },
+                    marks,
+                    from: pos,
+                    to: pos + size,
+                    char_from: offset,
+                    char_to: offset + size,
+                });
+            }
+            pos += size;
+        }
     }
 }
 
