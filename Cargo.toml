@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/markraft-core",
+    "crates/markraft-doc",
     "crates/markraft-gpui",
     "crates/markraft-vim",
     "crates/markraft-app",
@@ -18,6 +19,7 @@ repository = "https://github.com/ahonn/markraft"
 gpui = { package = "gpui-pre", version = "=0.3.4" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.4", features = ["font-kit", "runtime_shaders"] }
 markraft-core = { path = "crates/markraft-core" }
+markraft-doc = { path = "crates/markraft-doc" }
 markraft-gpui = { path = "crates/markraft-gpui" }
 markraft-vim = { path = "crates/markraft-vim" }
 
