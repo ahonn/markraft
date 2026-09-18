@@ -6,6 +6,7 @@ use std::{
     collections::HashSet,
     fs, io,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -50,14 +51,17 @@ pub struct Note {
     pub pinned: bool,
     /// Front matter lines Markraft does not own, kept verbatim.
     pub front_matter: Vec<String>,
+    /// The file this note was read from was not valid text, so what could not be
+    /// decoded now reads as `U+FFFD`. Writing the note makes that replacement
+    /// permanent, which is worth warning about before the first edit is saved.
+    /// It describes the file as it was read: a save does not clear it, a reload does.
+    pub lossy: bool,
 }
 
 impl Note {
     pub fn title(&self) -> String {
-        doc::plain_text(&self.document)
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
+        doc::title_line(&self.document)
+            .as_deref()
             .unwrap_or("Untitled")
             .graphemes(true)
             .take(64)
@@ -107,6 +111,7 @@ impl Library {
             deleted_at: None,
             pinned: false,
             front_matter: Vec::new(),
+            lossy: false,
         });
         self.active_id.clone_from(&id);
         id
@@ -229,7 +234,11 @@ impl Library {
 
     pub fn validate(&self) -> Result<(), String> {
         if self.version != LIBRARY_VERSION {
-            return Err(format!("Unsupported library version: {}", self.version));
+            return Err(
+                "These notes were written by a different version of Markraft. \
+                 Update Markraft, then open them again."
+                    .into(),
+            );
         }
         let mut ids = HashSet::new();
         if self
@@ -237,24 +246,36 @@ impl Library {
             .iter()
             .any(|note| note.id.is_empty() || !ids.insert(&note.id))
         {
-            return Err("The note library contains missing or duplicate note IDs.".into());
+            return Err(
+                "Markraft cannot tell two of your notes apart, so it stopped before \
+                 saving. Reload the folder to use the notes on disk."
+                    .into(),
+            );
         }
         if self
             .note(&self.active_id)
             .is_none_or(|note| note.deleted_at.is_some())
         {
-            return Err("The note library does not contain an active note.".into());
+            return Err(
+                "Markraft lost track of which note is open, so it stopped before saving. \
+                 Open a note from the list, then try again."
+                    .into(),
+            );
         }
         if self.preferences.window_bounds.is_some_and(|bounds| {
             bounds.iter().any(|value| !value.is_finite()) || bounds[2] <= 0.0 || bounds[3] <= 0.0
         }) {
-            return Err("The saved window bounds are invalid.".into());
+            return Err(
+                "The window size Markraft remembered cannot be used, so it stopped before \
+                 saving. Resize the window, then try again."
+                    .into(),
+            );
         }
         Ok(())
     }
 }
 
-fn timestamp() -> u64 {
+pub(crate) fn timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -273,6 +294,11 @@ pub struct Settings {
     pub preferences: Preferences,
     /// The single-file library of earlier versions has been imported.
     pub legacy_imported: bool,
+    /// Where the unreadable settings file was kept when these settings had to
+    /// fall back to the defaults. It belongs to this launch, not to the file, so
+    /// it is never written back.
+    #[serde(skip)]
+    pub recovered_from: Option<PathBuf>,
 }
 
 impl Settings {
@@ -281,19 +307,67 @@ impl Settings {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(crate::vault::describe(path, &error)),
         };
-        serde_json::from_slice(&bytes).or_else(|_| {
+        serde_json::from_slice(&bytes).or_else(|error| {
+            eprintln!(
+                "Markraft: {} is not readable settings: {error}",
+                path.display()
+            );
             let mut damaged = path.as_os_str().to_os_string();
             damaged.push(format!(".damaged-{}", Uuid::new_v4()));
-            fs::rename(path, damaged).map_err(|error| error.to_string())?;
-            Ok(Self::default())
+            let damaged = PathBuf::from(damaged);
+            fs::rename(path, &damaged).map_err(|error| crate::vault::describe(path, &error))?;
+            Ok(Self {
+                recovered_from: Some(damaged),
+                ..Self::default()
+            })
+        })
+    }
+
+    /// What to tell the user when their folder choice and hotkey were lost with
+    /// the settings file, so the reset does not go unexplained.
+    pub fn recovery_notice(&self) -> Option<String> {
+        self.recovered_from.as_deref().map(|damaged| {
+            format!(
+                "Markraft could not read your settings, so your notes folder and shortcut \
+                 were reset. The unreadable file was kept as “{}”.",
+                crate::vault::file_label(damaged)
+            )
         })
     }
 
     pub fn write(&self, path: &Path) -> Result<(), String> {
-        let bytes = serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec_pretty(self).map_err(|error| {
+            eprintln!("Markraft: settings could not be encoded: {error}");
+            "Markraft could not prepare your settings for saving.".to_owned()
+        })?;
         crate::vault::atomic_write(path, &bytes)
+    }
+}
+
+/// Things the user should be told once, noticed where there is no interface to
+/// show them in: on the way to the first window, or on the save worker's thread.
+/// Whoever can show them drains them.
+#[derive(Clone, Debug, Default)]
+pub struct Notices(Arc<Mutex<Vec<String>>>);
+
+impl Notices {
+    /// Repeats are dropped: the same file is read again on every refresh.
+    pub fn raise(&self, text: String) {
+        if let Ok(mut pending) = self.0.lock()
+            && !pending.contains(&text)
+        {
+            pending.push(text);
+        }
+    }
+
+    /// Everything raised since the last call.
+    pub fn take(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .map(|mut pending| std::mem::take(&mut *pending))
+            .unwrap_or_default()
     }
 }
 
@@ -320,5 +394,50 @@ mod tests {
         assert_eq!(library.search("", false).len(), 1);
         assert_eq!(library.search("", true).len(), 2);
         assert_eq!(library.active_note().document, doc::empty());
+    }
+
+    #[test]
+    fn a_title_skips_leading_markup_and_falls_back_to_untitled() {
+        let mut library = Library::default();
+        let html = library.new_note(doc::from_markdown("<div class=\"card\">\n\nReal title\n"));
+        assert_eq!(library.note(&html).unwrap().title(), "Real title");
+        let markup = library.new_note(doc::from_markdown("<hr/>"));
+        assert_eq!(library.note(&markup).unwrap().title(), "Untitled");
+    }
+
+    #[test]
+    fn damaged_settings_are_set_aside_with_something_to_tell_the_user() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        fs::write(&path, b"{ not json").unwrap();
+
+        let settings = Settings::read(&path).unwrap();
+        assert_eq!(settings.notes_folder, None);
+        assert_eq!(settings.preferences, Preferences::default());
+        let kept = settings.recovered_from.clone().expect("the file was kept");
+        assert!(kept.exists());
+        let notice = settings.recovery_notice().expect("a notice");
+        let name = kept.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(notice.contains(&name), "{notice}");
+
+        // The recovery belongs to this launch: it is not written back, and the
+        // settings that replace the damaged file load without a notice.
+        settings.write(&path).unwrap();
+        let reread = Settings::read(&path).unwrap();
+        assert_eq!(reread.recovered_from, None);
+        assert_eq!(reread.recovery_notice(), None);
+    }
+
+    #[test]
+    fn notices_are_taken_once_and_never_repeat_themselves() {
+        let notices = Notices::default();
+        notices.raise("A note could not be read.".into());
+        notices.raise("A note could not be read.".into());
+        notices.raise("The settings were reset.".into());
+        assert_eq!(
+            notices.take(),
+            ["A note could not be read.", "The settings were reset."]
+        );
+        assert!(notices.take().is_empty());
     }
 }

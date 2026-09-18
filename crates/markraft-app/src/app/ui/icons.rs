@@ -31,6 +31,14 @@ pub(super) enum Icon {
     Task,
     Divider,
     Restore,
+    Table,
+    RowAdd,
+    RowDelete,
+    ColumnAdd,
+    ColumnDelete,
+    AlignLeft,
+    AlignCenter,
+    AlignRight,
 }
 
 pub(super) fn icon(kind: Icon, color: Hsla) -> impl IntoElement {
@@ -252,6 +260,38 @@ pub(super) fn icon(kind: Icon, color: Hsla) -> impl IntoElement {
                 Icon::Task => {
                     rounded_rect(&mut path, 2.5, 2.5, 11., 11., 2.);
                     line(&mut path, &[(5., 8.), (7., 10.), (11., 6.)]);
+                }
+                // The table set: a grid, then one row or one column of it beside the
+                // sign of what the control does to it.
+                Icon::Table => {
+                    rounded_rect(&mut path, 2.5, 2.5, 11., 11., 2.);
+                    line(&mut path, &[(8., 2.5), (8., 13.5)]);
+                    line(&mut path, &[(2.5, 8.), (13.5, 8.)]);
+                }
+                Icon::RowAdd | Icon::RowDelete => {
+                    rounded_rect(&mut path, 2.5, 2.5, 11., 5., 1.5);
+                    line(&mut path, &[(5.5, 11.), (10.5, 11.)]);
+                    if matches!(kind, Icon::RowAdd) {
+                        line(&mut path, &[(8., 8.5), (8., 13.5)]);
+                    }
+                }
+                Icon::ColumnAdd | Icon::ColumnDelete => {
+                    rounded_rect(&mut path, 2.5, 2.5, 5., 11., 1.5);
+                    line(&mut path, &[(9., 8.), (14., 8.)]);
+                    if matches!(kind, Icon::ColumnAdd) {
+                        line(&mut path, &[(11.5, 5.5), (11.5, 10.5)]);
+                    }
+                }
+                Icon::AlignLeft | Icon::AlignCenter | Icon::AlignRight => {
+                    line(&mut path, &[(3., 4.), (13., 4.)]);
+                    line(&mut path, &[(3., 12.), (13., 12.)]);
+                    // The middle line is the short one, set where the column would be.
+                    let (from, to) = match kind {
+                        Icon::AlignCenter => (5., 11.),
+                        Icon::AlignRight => (7., 13.),
+                        _ => (3., 9.),
+                    };
+                    line(&mut path, &[(from, 8.), (to, 8.)]);
                 }
                 Icon::Restore => {
                     path.move_to(point(px(3.), px(6.5)));

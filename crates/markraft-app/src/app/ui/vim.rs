@@ -56,8 +56,8 @@ impl NotesApp {
         cx.notify();
     }
 
-    /// A quiet `NORMAL` / `INSERT` / `VISUAL` label in the footer's left corner, clear
-    /// of the centred count. Nothing is drawn while vim is off.
+    /// A quiet `NORMAL` / `INSERT` / `VISUAL` label, first in the footer's left group
+    /// and ahead of the count. Nothing is drawn while vim is off.
     pub(in crate::app) fn vim_badge(&self) -> Option<Div> {
         if !self.library.preferences.vim_mode {
             return None;
@@ -65,8 +65,7 @@ impl NotesApp {
         let mode = self.sessions.get(&self.library.active_id)?.vim_mode;
         Some(
             div()
-                .absolute()
-                .left(px(12.))
+                .flex_shrink_0()
                 .h(px(18.))
                 .px(px(6.))
                 .flex()

@@ -15,7 +15,7 @@ use markraft_commonmark::{
 };
 use markraft_core::Codecs;
 use markraft_core::commands::{Command, command, replace_selection};
-use markraft_core::projection::Projection;
+use markraft_core::projection::{Line, Projection};
 use markraft_core::{
     Attrs, EditorState, Extension, Fragment, MarkSet, MarkTypeId, Node, NodeTypeId, Schema, Slice,
 };
@@ -71,6 +71,76 @@ pub fn to_markdown(doc: &Node) -> String {
 
 pub fn plain_text(doc: &Node) -> String {
     markraft_commonmark::to_plain_text(schema(), doc)
+}
+
+/// The line a note is named after: the first one that reads as text.
+///
+/// A block the model keeps verbatim — an HTML block, a table — contributes what
+/// a reader would see in it rather than its markup, so a note opening with
+/// `<div class="note">` is not named after the tag. A note with nothing to read
+/// has no title line.
+pub fn title_line(doc: &Node) -> Option<String> {
+    doc.children().find_map(|block| {
+        let text = if schema().node_type(block.type_id()).name() == md::RAW_BLOCK {
+            strip_tags(
+                block
+                    .attrs()
+                    .get("source")
+                    .and_then(|source| source.as_str())
+                    .unwrap_or_default(),
+            )
+        } else {
+            plain_text(block)
+        };
+        text.lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(one_line)
+    })
+}
+
+/// A title is one line of prose, and it also names the note's file, so the tabs a
+/// table's cells are laid out with — and any other control character the text carries —
+/// read as a single space rather than travelling into a window title or a file name.
+fn one_line(line: &str) -> String {
+    let mut title = String::with_capacity(line.len());
+    for character in line.chars() {
+        if character.is_control() {
+            if !title.ends_with(' ') {
+                title.push(' ');
+            }
+        } else {
+            title.push(character);
+        }
+    }
+    title.trim_end().to_owned()
+}
+
+/// The table a projected line sits in, named by where that table starts in the
+/// document, or `None` for a line outside one. A table lays its cells out one to a
+/// line, so this is what tells a break between two cells from a break between blocks.
+pub fn table_of(line: &Line) -> Option<usize> {
+    let table = node(md::TABLE);
+    line.ancestors
+        .iter()
+        .find(|ancestor| ancestor.node_type == table)
+        .map(|ancestor| ancestor.before)
+}
+
+/// The readable text of raw markup: everything outside `<…>`. Nothing is
+/// rendered, so an entity stays as it was written.
+fn strip_tags(source: &str) -> String {
+    let mut text = String::with_capacity(source.len());
+    let mut depth = 0usize;
+    for character in source.chars() {
+        match character {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => text.push(character),
+            _ => {}
+        }
+    }
+    text
 }
 
 /// Only unformatted, whitespace-only paragraphs are disposable blank notes.
@@ -302,6 +372,47 @@ mod tests {
         ] {
             assert_eq!(active(&state_of(source)), Some(expected), "{source}");
         }
+    }
+
+    #[test]
+    fn a_title_line_reads_through_markup_and_gives_up_on_a_note_with_no_text() {
+        for (source, expected) in [
+            ("# Heading\n\nbody", Some("Heading")),
+            ("  spaced  \n\nbody", Some("spaced")),
+            // Raw HTML names the note after what it renders, not after its tags.
+            ("<div class=\"card\">\n\nBody text\n", Some("Body text")),
+            ("<p>Inline text</p>", Some("Inline text")),
+            ("<hr/>", None),
+            ("***", None),
+            // A table's cells are laid out with tabs between them; a title is one line
+            // of prose, and it also names a file, so no control character survives it.
+            ("| a | b |\n| - | - |\n| c | d |", Some("a b")),
+        ] {
+            assert_eq!(
+                title_line(&from_markdown(source)).as_deref(),
+                expected,
+                "{source}"
+            );
+        }
+        assert_eq!(title_line(&empty()), None);
+    }
+
+    /// What the footer's character count leans on: a table lays each cell out on a line
+    /// of its own, and every one of those lines names the same table, so the breaks
+    /// between them can be told from the break between two blocks.
+    #[test]
+    fn the_cells_of_one_table_share_a_line_of_their_own_and_name_it() {
+        let state = state_of("intro\n\n| a | b |\n| - | - |\n| c | d |\n\nafter");
+        let projection = projection_of(&state);
+        let tables: Vec<_> = projection.lines().iter().map(table_of).collect();
+        assert_eq!(projection.line_count(), 6, "one line for each of the cells");
+        assert_eq!(tables[0], None);
+        assert_eq!(tables[5], None);
+        let table = tables[1].expect("the first cell sits in a table");
+        assert!(
+            tables[1..5].iter().all(|line| *line == Some(table)),
+            "every cell names the one table: {tables:?}"
+        );
     }
 
     #[test]

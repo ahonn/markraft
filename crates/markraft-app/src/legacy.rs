@@ -89,15 +89,28 @@ struct LegacyLibrary {
 
 /// Read one exported document written by earlier versions.
 pub fn read_document(text: &str) -> Result<Node, String> {
-    let legacy: LegacyDocument = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    let legacy: LegacyDocument = serde_json::from_str(text).map_err(|error| {
+        eprintln!("Markraft: a note could not be read from JSON: {error}");
+        "This file does not hold a note Markraft can read. \
+         Import the Markdown file instead."
+            .to_owned()
+    })?;
     Ok(document(&legacy))
 }
 
 /// Read the single-file library written by earlier versions.
 pub fn read_library(path: &Path) -> Result<Library, String> {
-    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-    let legacy: LegacyLibrary =
-        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let bytes = std::fs::read(path).map_err(|error| crate::vault::describe(path, &error))?;
+    let legacy: LegacyLibrary = serde_json::from_slice(&bytes).map_err(|error| {
+        eprintln!(
+            "Markraft: {} is not a readable library: {error}",
+            path.display()
+        );
+        format!(
+            "“{}” does not hold notes Markraft can read.",
+            crate::vault::file_label(path)
+        )
+    })?;
     let library = Library {
         version: legacy.version,
         active_id: legacy.active_id,
@@ -117,6 +130,7 @@ fn note(legacy: LegacyNote) -> Note {
         deleted_at: legacy.deleted_at,
         pinned: legacy.pinned,
         front_matter: legacy.front_matter,
+        lossy: false,
     }
 }
 

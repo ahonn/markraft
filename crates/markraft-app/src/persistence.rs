@@ -1,7 +1,7 @@
 //! One worker owns the notes folder: it preserves save ordering, and it watches the
 //! folder so that changes made by other programs reach the application.
 use crate::{
-    storage::Library,
+    storage::{Library, Notices},
     vault::{External, Store},
 };
 use notify::Watcher;
@@ -24,16 +24,21 @@ pub enum Event {
     /// the application calls [`Persistence::acknowledge`].
     External(Vec<External>),
 }
+type Purged = (Vec<String>, Result<(), String>);
 enum Request {
     Save(u64, Library),
     Flush(Library, Sender<Result<(), String>>),
     Reload(Sender<Result<Library, String>>),
     Refresh,
     Acknowledge(Vec<String>),
+    Purge(Vec<String>, Sender<Purged>),
 }
 pub struct Persistence {
     requests: Sender<Request>,
     events: Receiver<Event>,
+    /// Shared with the store the worker owns, so what it notices on its own
+    /// thread still reaches the interface.
+    notices: Notices,
     // Dropping the watcher stops it; the worker ends when `requests` is dropped.
     _watcher: Option<notify::RecommendedWatcher>,
 }
@@ -44,6 +49,7 @@ impl Persistence {
     fn start(mut store: Store, watching: bool) -> Self {
         let (requests, incoming) = mpsc::channel();
         let (outgoing, events) = mpsc::channel();
+        let notices = store.notices();
         let watcher = watching.then(|| watch(&store, requests.clone())).flatten();
         std::thread::spawn(move || {
             for request in incoming {
@@ -66,19 +72,62 @@ impl Persistence {
                         }
                     }
                     Request::Acknowledge(ids) => store.acknowledge(&ids),
+                    Request::Purge(ids, response) => {
+                        let _ = response.send(store.purge(&ids));
+                    }
                 }
             }
         });
         Self {
             requests,
             events,
+            notices,
             _watcher: watcher,
         }
     }
     pub fn save(&self, revision: u64, library: Library) -> Result<(), String> {
         self.requests
             .send(Request::Save(revision, library))
-            .map_err(|_| "The save worker stopped. Copy your note before quitting.".into())
+            .map_err(|_| {
+                "Saving stopped working. Copy your note (⇧⌘C), then quit and reopen Markraft."
+                    .into()
+            })
+    }
+    /// Everything the notes folder gave the user to read, once there is somewhere
+    /// to show it. Empty after it has been taken.
+    pub fn notices(&self) -> Vec<String> {
+        self.notices.take()
+    }
+    /// Delete these notes' files for good, after all earlier requests have run. Returns
+    /// the ids that are gone, which the caller drops from its library, and the reason a
+    /// purge stopped short. A timeout leaves the request queued and reports it, so the
+    /// notes stay in the trash rather than disappearing from a folder that still has
+    /// them; the next refresh reconciles whatever the worker did get to.
+    pub fn purge(&self, ids: Vec<String>) -> Purged {
+        let (response, result) = mpsc::channel();
+        let disconnected = || {
+            "Markraft can no longer reach your notes folder, so nothing was deleted. \
+             Quit and reopen Markraft, then try again."
+                .to_string()
+        };
+        if self.requests.send(Request::Purge(ids, response)).is_err() {
+            return (Vec::new(), Err(disconnected()));
+        }
+        result
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|error| {
+                (
+                    Vec::new(),
+                    Err(match error {
+                        RecvTimeoutError::Timeout => {
+                            "Deleting is taking too long. The notes are still in \
+                             Recently Deleted; try again."
+                                .to_string()
+                        }
+                        RecvTimeoutError::Disconnected => disconnected(),
+                    }),
+                )
+            })
     }
     /// The caller compares save revisions with its current document revision. Old
     /// successful acknowledgments must not clear a newer pending change or its error.
@@ -92,14 +141,18 @@ impl Persistence {
     /// local changes and invalidate their revision acknowledgments before adopting the result.
     pub fn reload(&self) -> Result<Library, String> {
         let (response, result) = mpsc::channel();
-        self.requests
-            .send(Request::Reload(response))
-            .map_err(|_| "The save worker stopped.".to_string())?;
+        self.requests.send(Request::Reload(response)).map_err(|_| {
+            "Markraft can no longer reach your notes folder. Copy your note (⇧⌘C), \
+             then quit and reopen Markraft."
+                .to_string()
+        })?;
         // Do not time out and leave an invisible baseline change queued: the UI must
         // receive the adopted library before any later local snapshot can be saved.
-        result
-            .recv()
-            .map_err(|_| "The save worker stopped before reloading finished.".to_string())?
+        result.recv().map_err(|_| {
+            "Markraft stopped reading your notes folder before it had finished. \
+             Copy your note (⇧⌘C), then quit and reopen Markraft."
+                .to_string()
+        })?
     }
     /// A queue barrier: all earlier requests finish before this latest snapshot is saved.
     /// A timeout leaves the request queued; callers must retain the note and show the error.
@@ -107,7 +160,10 @@ impl Persistence {
         let (response, result) = mpsc::channel();
         self.requests
             .send(Request::Flush(library, response))
-            .map_err(|_| "The save worker stopped.".to_string())?;
+            .map_err(|_| {
+                "Saving stopped working. Copy your note (⇧⌘C), then quit and reopen Markraft."
+                    .to_string()
+            })?;
         result
             .recv_timeout(Duration::from_secs(10))
             .map_err(|error| {
@@ -116,8 +172,8 @@ impl Persistence {
                         "Saving is taking too long. The note remains open; try again."
                     }
                     RecvTimeoutError::Disconnected => {
-                        "The save worker stopped before saving finished. \
-                         Copy your note before quitting."
+                        "Saving stopped before your note was written. \
+                         Copy your note (⇧⌘C), then quit and reopen Markraft."
                     }
                 }
                 .to_string()
@@ -283,6 +339,7 @@ mod tests {
         let persistence = Persistence {
             requests,
             events: results,
+            notices: Notices::default(),
             _watcher: None,
         };
         assert!(persistence.save(1, Library::default()).is_err());

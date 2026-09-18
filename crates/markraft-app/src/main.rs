@@ -57,12 +57,11 @@ fn main() {
         .join("Library/Application Support/Markraft")
     };
     let settings_path = settings_path.unwrap_or_else(|| support().join("settings.json"));
+    // This read is what sets a damaged settings file aside, so its notice travels
+    // from here: the store's own read then finds no file at all.
+    let settings = Settings::read(&settings_path).unwrap_or_default();
     // Until a folder has been chosen the app opens on that question.
-    let directory = directory.or_else(|| {
-        Settings::read(&settings_path)
-            .ok()
-            .and_then(|settings| settings.notes_folder)
-    });
+    let directory = directory.or_else(|| settings.notes_folder.clone());
     let instance = match Instance::acquire(&settings_path).unwrap_or_else(|e| fail(&e)) {
         Launch::Forwarded => return,
         Launch::Primary(instance) => instance,
@@ -72,6 +71,9 @@ fn main() {
         .map(|directory| Store::open(directory, settings_path.clone()));
     let (store, library, error) = match opened {
         Some(Ok((mut store, library))) => {
+            if let Some(notice) = settings.recovery_notice() {
+                store.notices().raise(notice);
+            }
             let library = store.import_legacy(library, &app::legacy_library(&settings_path));
             (Some(store), library, None)
         }
@@ -93,9 +95,17 @@ fn main() {
         let size = size(px(480.), px(320.));
         let mut bounds = Bounds::centered(None, size, cx);
         if let Some([x, y, w, h]) = library.preferences.window_bounds {
-            // Clamp to the primary display so an unplugged monitor cannot strand the note.
-            if let Some(display) = cx.primary_display() {
-                let screen = display.visible_bounds();
+            // Clamp to the display the window was last on, so a note left on a
+            // second monitor is not dragged back to the primary one. An unplugged
+            // monitor falls to the display nearest to where the note used to be.
+            let origin = point(px(x), px(y));
+            let screen = cx
+                .displays()
+                .into_iter()
+                .map(|display| display.visible_bounds())
+                .min_by(|a, b| distance(*a, origin).total_cmp(&distance(*b, origin)))
+                .or_else(|| cx.primary_display().map(|display| display.visible_bounds()));
+            if let Some(screen) = screen {
                 let w = px(w).max(px(360.)).min(screen.size.width);
                 let h = px(h).max(px(220.)).min(screen.size.height);
                 bounds = Bounds::new(
@@ -150,6 +160,20 @@ fn main() {
         cx.activate(true);
     });
 }
+/// How far a point lies outside a display: zero for the one holding it, so the
+/// display a window was last on wins and the closest remaining one takes over
+/// when it is gone.
+fn distance(bounds: Bounds<Pixels>, point: Point<Pixels>) -> f32 {
+    let outside = |low: Pixels, high: Pixels, value: Pixels| {
+        f32::from(low - value).max(f32::from(value - high)).max(0.)
+    };
+    outside(bounds.left(), bounds.right(), point.x).hypot(outside(
+        bounds.top(),
+        bounds.bottom(),
+        point.y,
+    ))
+}
+
 fn window_handle_show(app: &WeakEntity<NotesApp>, cx: &mut App) -> Result<(), ()> {
     let handle = cx.windows().first().copied().ok_or(())?;
     handle

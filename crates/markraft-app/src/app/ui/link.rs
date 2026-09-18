@@ -14,9 +14,11 @@ impl NotesApp {
         if self.panel != Panel::Editor {
             self.link_popover = None;
         }
-        // The edit field closes as soon as focus goes anywhere else.
+        // The edit field closes as soon as focus goes anywhere else. Tab moves it to the
+        // panel handle, which still belongs to the popover.
         if self.link_popover == Some(LinkPopover::Edit)
             && !self.query.focus_handle(cx).is_focused(window)
+            && !self.panel_focus.is_focused(window)
         {
             self.link_popover = None;
         }
@@ -52,7 +54,7 @@ impl NotesApp {
                         .min_w_0()
                         .w_0()
                         .pt(px(1.))
-                        .child(self.query.clone()),
+                        .child(self.query_field(cx)),
                 )
                 .child(separator())
                 .child(self.format_button(
@@ -60,7 +62,7 @@ impl NotesApp {
                     "Apply · ↩",
                     Icon::Check,
                     Intent::ApplyLink,
-                    false,
+                    None,
                     cx,
                 ))
                 .child(self.format_button(
@@ -68,7 +70,7 @@ impl NotesApp {
                     "Unlink",
                     Icon::Trash,
                     Intent::Unlink,
-                    false,
+                    None,
                     cx,
                 )),
             LinkPopover::View => div()
@@ -97,7 +99,7 @@ impl NotesApp {
                     "Edit link",
                     Icon::Edit,
                     Intent::EditLink,
-                    false,
+                    None,
                     cx,
                 ))
                 .child(self.format_button(
@@ -105,7 +107,7 @@ impl NotesApp {
                     "Copy link",
                     Icon::Copy,
                     Intent::CopyLink,
-                    false,
+                    None,
                     cx,
                 ))
                 .child(self.format_button(
@@ -113,7 +115,7 @@ impl NotesApp {
                     "Open link",
                     Icon::Open,
                     Intent::OpenLink,
-                    false,
+                    None,
                     cx,
                 ))
                 .child(self.format_button(
@@ -121,7 +123,7 @@ impl NotesApp {
                     "Unlink",
                     Icon::Trash,
                     Intent::Unlink,
-                    false,
+                    None,
                     cx,
                 )),
         };
@@ -140,18 +142,8 @@ impl NotesApp {
                 .rounded(HEIGHT / 2.)
                 .bg(self.surface_color())
                 .border_1()
-                .border_color(if self.dark {
-                    rgba(0xffffff18)
-                } else {
-                    rgba(0xffffffcc)
-                })
-                .shadow(vec![BoxShadow {
-                    color: rgba(0x00000030).into(),
-                    offset: point(px(0.), px(6.)),
-                    blur_radius: px(20.),
-                    spread_radius: px(0.),
-                    inset: false,
-                }])
+                .border_color(self.border_color())
+                .shadow(popover_shadow())
                 // Clicks inside the pill must not reach the editor underneath.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(contents),

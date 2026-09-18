@@ -1,7 +1,7 @@
 //! A second launch asks the existing process for this library to show its window.
 use std::{
     fs::{File, OpenOptions, TryLockError},
-    io::Write,
+    io::{self, Write},
     os::unix::{fs::OpenOptionsExt, net::UnixDatagram},
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -31,7 +31,7 @@ impl Instance {
             .truncate(false)
             .mode(0o600)
             .open(&lock_path)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| crate::vault::describe(file, &error))?;
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match lock.try_lock() {
@@ -41,18 +41,20 @@ impl Instance {
                     let directory = tempfile::Builder::new()
                         .prefix("markraft-")
                         .tempdir_in("/tmp")
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| relaunch_failure(&error))?;
                     let path = directory.path().join("show.sock");
-                    let socket = UnixDatagram::bind(&path).map_err(|error| error.to_string())?;
+                    let socket =
+                        UnixDatagram::bind(&path).map_err(|error| relaunch_failure(&error))?;
                     socket
                         .set_nonblocking(true)
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| relaunch_failure(&error))?;
                     // Publish only after the socket is listening, while retaining the lock
                     // for this instance's lifetime. A simultaneous launcher waits below.
-                    lock.set_len(0).map_err(|error| error.to_string())?;
+                    lock.set_len(0)
+                        .map_err(|error| crate::vault::describe(file, &error))?;
                     lock.write_all(path.as_os_str().as_encoded_bytes())
                         .and_then(|_| lock.sync_all())
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| crate::vault::describe(file, &error))?;
                     return Ok(Launch::Primary(Self {
                         socket,
                         _directory: directory,
@@ -63,10 +65,11 @@ impl Instance {
                     if let Ok(address) = std::fs::read_to_string(&lock_path)
                         && !address.is_empty()
                     {
-                        let sender = UnixDatagram::unbound().map_err(|error| error.to_string())?;
+                        let sender =
+                            UnixDatagram::unbound().map_err(|error| relaunch_failure(&error))?;
                         sender
                             .set_write_timeout(Some(Duration::from_millis(100)))
-                            .map_err(|error| error.to_string())?;
+                            .map_err(|error| relaunch_failure(&error))?;
                         // A datagram queues one complete request; no accept/read race or
                         // partial message can discard a show request on the UI thread.
                         if sender.send_to(b"show", &address).is_ok() {
@@ -74,13 +77,16 @@ impl Instance {
                         }
                     }
                     if Instant::now() >= deadline {
-                        return Err("Another Markraft instance is starting or not responding. \
-                                    Try opening it again."
+                        return Err("Markraft is already running, but it did not answer. \
+                                    Wait a moment and open it again, or quit it from the \
+                                    menu bar first."
                             .into());
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                Err(TryLockError::Error(error)) => return Err(error.to_string()),
+                Err(TryLockError::Error(error)) => {
+                    return Err(crate::vault::describe(file, &error));
+                }
             }
         }
     }
@@ -99,19 +105,34 @@ impl Instance {
     }
 }
 
+/// The private channel a second launch uses to hand its request to this one.
+/// Its failures are about this machine rather than about the notes, so they
+/// share one sentence and leave the detail in the log.
+fn relaunch_failure(error: &io::Error) -> String {
+    eprintln!("Markraft: the launch channel failed: {error}");
+    "Markraft could not set up the link that a second launch uses to reopen its window. \
+     Quit Markraft and open it again."
+        .to_owned()
+}
+
 fn canonical_target(file: &Path) -> Result<PathBuf, String> {
     if file.exists() {
-        return file.canonicalize().map_err(|error| error.to_string());
+        return file
+            .canonicalize()
+            .map_err(|error| crate::vault::describe(file, &error));
     }
     let parent = file
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(parent).map_err(|error| crate::vault::describe(parent, &error))?;
     Ok(parent
         .canonicalize()
-        .map_err(|error| error.to_string())?
-        .join(file.file_name().ok_or("The notes path must name a file.")?))
+        .map_err(|error| crate::vault::describe(parent, &error))?
+        .join(
+            file.file_name()
+                .ok_or("Markraft needs a settings file to work with, not a folder.")?,
+        ))
 }
 
 #[cfg(test)]

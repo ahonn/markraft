@@ -45,6 +45,20 @@ unsafe impl Encode for NSRect {
 
 const LOGIN_ITEMS: &str = "System Settings → General → Login Items & Extensions";
 
+/// Seconds this Mac's clock stands ahead of UTC, including whatever daylight saving is
+/// in force. Timestamps are stored in UTC; a date shown to the user has to be the one
+/// on their calendar, so it is read through this.
+pub fn local_utc_offset() -> i64 {
+    unsafe {
+        let zone: *mut AnyObject = msg_send![class!(NSTimeZone), localTimeZone];
+        if zone.is_null() {
+            return 0;
+        }
+        let seconds: isize = msg_send![zone, secondsFromGMT];
+        seconds as i64
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlatformEvent {
     Toggle,
@@ -64,7 +78,7 @@ pub struct Platform {
 
 impl Platform {
     pub fn new() -> Result<Self, String> {
-        let hotkeys = GlobalHotKeyManager::new().map_err(|error| error.to_string())?;
+        let hotkeys = GlobalHotKeyManager::new().map_err(menu_bar_failure)?;
         let menu = Menu::new();
         let toggle = MenuItem::new("Show / Hide Notes", true, None);
         let new_note = MenuItem::new("New Note", true, None);
@@ -78,7 +92,7 @@ impl Platform {
             &PredefinedMenuItem::separator(),
             &quit,
         ])
-        .map_err(|error| error.to_string())?;
+        .map_err(menu_bar_failure)?;
         let menu_actions = vec![
             (toggle.id().clone(), PlatformEvent::Toggle),
             (new_note.id().clone(), PlatformEvent::NewNote),
@@ -91,7 +105,7 @@ impl Platform {
             .with_icon_as_template(true)
             .with_tooltip("Markraft Notes")
             .build()
-            .map_err(|error| error.to_string())?;
+            .map_err(menu_bar_failure)?;
         let mut platform = Self {
             _tray: tray,
             hotkeys,
@@ -115,15 +129,25 @@ impl Platform {
         let next = if shortcut.trim().is_empty() {
             None
         } else {
-            Some(HotKey::from_str(shortcut).map_err(|error| error.to_string())?)
+            Some(HotKey::from_str(shortcut).map_err(|error| {
+                eprintln!("Markraft: {shortcut} is not a hotkey: {error}");
+                format!(
+                    "“{shortcut}” is not a shortcut Markraft understands. \
+                     Try one like Alt+N or Ctrl+Shift+Space."
+                )
+            })?)
         };
         if self.shortcut == next {
             return Ok(());
         }
         if let Some(next) = next {
-            self.hotkeys
-                .register(next)
-                .map_err(|error| format!("Could not register {shortcut}: {error}"))?;
+            self.hotkeys.register(next).map_err(|error| {
+                eprintln!("Markraft: {shortcut} could not be registered: {error}");
+                format!(
+                    "“{shortcut}” is not available — another app is probably using it. \
+                     Choose a different shortcut."
+                )
+            })?;
         }
         if let Some(previous) = self.shortcut
             && let Err(error) = self.hotkeys.unregister(previous)
@@ -131,7 +155,10 @@ impl Platform {
             if let Some(next) = next {
                 let _ = self.hotkeys.unregister(next);
             }
-            return Err(error.to_string());
+            eprintln!("Markraft: a shortcut could not be released: {error}");
+            return Err("Markraft could not release the shortcut it was using. \
+                        Quit and reopen Markraft, then set it again."
+                .into());
         }
         self.shortcut = next;
         Ok(())
@@ -203,14 +230,19 @@ impl Platform {
             let _: () = msg_send![native, setBecomesKeyOnlyIfNeeded: Bool::NO];
             let _: () = msg_send![native, setLevel: 3_isize]; // NSFloatingWindowLevel
             let _: () = msg_send![native, setExcludedFromWindowsMenu: Bool::YES];
-            // Keep native traffic lights visible while reserving window sizing
-            // for edge dragging. FullScreenNone cannot be combined with the
-            // FullScreenAuxiliary behavior required above.
+            // Keep the close button while reserving window sizing for edge dragging.
+            // FullScreenNone cannot be combined with the FullScreenAuxiliary behavior
+            // required above. A disabled standard button draws itself from an image
+            // AppKit does not recolour for the dark appearance, where it comes out as a
+            // black dot rather than the platform's grey; there is no supported way to
+            // restyle it, and neither control does anything here, so both are taken out
+            // of the window instead of being shown dead.
             for button_kind in [1_usize, 2_usize] {
                 // NSWindowMiniaturizeButton, NSWindowZoomButton.
                 let button: *mut AnyObject = msg_send![native, standardWindowButton: button_kind];
                 if !button.is_null() {
                     let _: () = msg_send![button, setEnabled: Bool::NO];
+                    let _: () = msg_send![button, setHidden: Bool::YES];
                 }
             }
         }
@@ -240,14 +272,14 @@ impl Platform {
         }
     }
 
-    /// Fade the native close, minimize and zoom buttons together with the GPUI chrome.
-    /// Transparent buttons stay in place; they are only reachable while the pointer is
-    /// inside the window, which is exactly when they are visible.
-    pub fn set_traffic_lights_visible(&self, window: &gpui::Window, visible: bool, animated: bool) {
+    /// Fade the native window buttons together with the GPUI chrome, to the same resting
+    /// opacity. Faded buttons stay in place and stay clickable, which is what keeps the
+    /// window closable while the chrome is at rest.
+    pub fn set_traffic_lights_alpha(&self, window: &gpui::Window, alpha: f32, animated: bool) {
         let Ok(native) = native_window(window) else {
             return;
         };
-        let alpha = if visible { 1.0_f64 } else { 0.0_f64 };
+        let alpha = f64::from(alpha.clamp(0., 1.));
         unsafe {
             let context_class = class!(NSAnimationContext);
             if animated {
@@ -255,7 +287,8 @@ impl Platform {
                 let context: *mut AnyObject = msg_send![context_class, currentContext];
                 let _: () = msg_send![context, setDuration: 0.2_f64];
             }
-            for button_kind in [0_usize, 1_usize, 2_usize] {
+            // Only the close button: `configure_window` takes the other two out.
+            for button_kind in [0_usize] {
                 let button: *mut AnyObject = msg_send![native, standardWindowButton: button_kind];
                 if button.is_null() {
                     continue;
@@ -356,15 +389,34 @@ impl Drop for Platform {
     }
 }
 
+/// Losing the native window reads the same to the user however it happened.
+const NO_NATIVE_WINDOW: &str = "Markraft could not find its own window. Quit and reopen Markraft.";
+
+/// The menu bar item and the global shortcut are one thing to the user, and a
+/// failure to set them up leaves the notes themselves working.
+fn menu_bar_failure(detail: impl std::fmt::Display) -> String {
+    eprintln!("Markraft: the menu bar item could not be set up: {detail}");
+    "Markraft could not put its icon in the menu bar. Notes still work, but the \
+     menu bar item and the shortcut that opens them are unavailable."
+        .to_owned()
+}
+
 fn native_window(window: &gpui::Window) -> Result<*mut AnyObject, String> {
-    let handle = HasWindowHandle::window_handle(window).map_err(|error| error.to_string())?;
+    let handle = HasWindowHandle::window_handle(window).map_err(|error| {
+        eprintln!("Markraft: the window handle is unavailable: {error}");
+        NO_NATIVE_WINDOW.to_owned()
+    })?;
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
-        return Err("Floating Notes requires a macOS AppKit window".into());
+        return Err(
+            "Markraft could not take charge of its window, so it cannot float above \
+             other apps. Quit and reopen Markraft."
+                .into(),
+        );
     };
     let native: *mut AnyObject =
         unsafe { msg_send![handle.ns_view.as_ptr().cast::<AnyObject>(), window] };
     if native.is_null() {
-        Err("The editor view has no native window".into())
+        Err(NO_NATIVE_WINDOW.into())
     } else {
         Ok(native)
     }
@@ -433,7 +485,7 @@ fn note_icon() -> Result<Icon, String> {
             }
         }
     }
-    Icon::from_rgba(pixels, SIZE as u32, SIZE as u32).map_err(|error| error.to_string())
+    Icon::from_rgba(pixels, SIZE as u32, SIZE as u32).map_err(menu_bar_failure)
 }
 
 fn diagnostics(event: &str) {

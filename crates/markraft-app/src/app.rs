@@ -10,9 +10,11 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use markraft_core::MarkSet;
-use markraft_gpui::{EditorEvent, EditorStyle, EditorView, ExtensionHandle, Setup};
+use markraft_gpui::{
+    ColumnAlignment, EditorEvent, EditorStyle, EditorView, ExtensionHandle, Setup, TableInfo,
+};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -56,6 +58,15 @@ enum FormatMenu {
     Inline,
     List,
 }
+/// A transient message over the note. One that carries an action shows it as a button
+/// and stays longer, because reaching that button takes a moment.
+#[derive(Clone)]
+struct Notice {
+    text: SharedString,
+    until: Instant,
+    /// The note an "Undo" button puts back; a plain notice carries none.
+    undo: Option<String>,
+}
 struct Session {
     editor: Entity<EditorView>,
     _changes: Subscription,
@@ -81,9 +92,16 @@ pub struct NotesApp {
     _query_changes: Subscription,
     panel: Panel,
     panel_focus: FocusHandle,
+    /// The stop id of the chrome control Tab has moved to. `None` while the caret owns
+    /// the keyboard and nothing wears the focus ring.
+    chrome_focus: Option<SharedString>,
     selected: usize,
+    /// The deleted note whose "Delete Permanently" button has been asked once and is
+    /// waiting for the confirming second click.
+    confirm_purge: Option<String>,
     picker_scroll: ScrollHandle,
     actions_scroll: ScrollHandle,
+    settings_scroll: ScrollHandle,
     format_scroll: ScrollHandle,
     code_language_scroll: ScrollHandle,
     code_language_block: Option<usize>,
@@ -94,17 +112,28 @@ pub struct NotesApp {
     save_at: Option<Instant>,
     error: Option<String>,
     platform_error: Option<String>,
-    notice: Option<(String, Instant)>,
+    notice: Option<Notice>,
+    /// Things the notes folder gave the user to read. They are sentences rather than
+    /// acknowledgments, so they wait their turn instead of replacing one another.
+    pending_notices: VecDeque<String>,
+    /// Notes already warned about being read from a file that is not valid text.
+    lossy_warned: HashSet<String>,
     show_words: bool,
     format_toolbar: bool,
     format_menu: Option<FormatMenu>,
     link_popover: Option<LinkPopover>,
+    /// The table the toolbar was last drawn for. It is paint geometry, so it is only
+    /// ever as fresh as the last frame, which is also the frame the keyboard walks.
+    table: Option<TableInfo>,
     format_selected: usize,
     format_snapshot: Option<(MarkSet, Option<doc::Block>)>,
     dark: bool,
-    // The pointer is over the window; toolbar chrome is hidden while it is away.
+    // The pointer is over the window; toolbar chrome recedes while it is away.
     pointer_inside: bool,
-    traffic_lights_visible: bool,
+    /// When the keyboard was last used here. Someone typing is present even with the
+    /// pointer parked outside the window, so the chrome stays up for a moment after.
+    last_key_at: Option<Instant>,
+    chrome_shown: bool,
     window_active: bool,
     expected_size: Option<Size<Pixels>>,
     last_size: Size<Pixels>,
@@ -135,6 +164,7 @@ impl NotesApp {
             EditorView::single_line(cx)
                 .with_style(query_style(dark))
                 .with_placeholder("Search notes…")
+                .with_aria_label("Search notes")
         });
         let query_changes = cx.subscribe(&query, |this, _, event: &EditorEvent, cx| {
             if !matches!(event, EditorEvent::Changed { .. }) {
@@ -233,10 +263,13 @@ impl NotesApp {
             _query_changes: query_changes,
             panel: Panel::Editor,
             link_popover: None,
+            table: None,
             panel_focus: cx.focus_handle(),
             selected: 0,
+            confirm_purge: None,
             picker_scroll: ScrollHandle::new(),
             actions_scroll: ScrollHandle::new(),
+            settings_scroll: ScrollHandle::new(),
             format_scroll: ScrollHandle::new(),
             code_language_scroll: ScrollHandle::new(),
             code_language_block: None,
@@ -248,6 +281,9 @@ impl NotesApp {
             error,
             platform_error,
             notice: None,
+            pending_notices: VecDeque::new(),
+            lossy_warned: HashSet::new(),
+            chrome_focus: None,
             show_words: false,
             format_toolbar: false,
             format_menu: None,
@@ -255,7 +291,8 @@ impl NotesApp {
             format_snapshot: None,
             dark,
             pointer_inside: true,
-            traffic_lights_visible: true,
+            last_key_at: None,
+            chrome_shown: true,
             window_active: window.is_window_active(),
             expected_size: None,
             last_size: window.bounds().size,
@@ -281,6 +318,18 @@ impl NotesApp {
     fn ensure_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.code_language_block = None;
         let id = self.library.active_id.clone();
+        // Once per note: what the file cost to read is worth knowing before the first
+        // save writes the replacements back over it.
+        if self
+            .library
+            .note(&id)
+            .is_some_and(|note| note.lossy && !self.lossy_warned.contains(&id))
+        {
+            self.lossy_warned.insert(id.clone());
+            self.queue_notice(
+                "This file was not valid text; saving replaces the unreadable parts.".to_owned(),
+            );
+        }
         self.session_order.retain(|entry| entry != &id);
         self.session_order.push_back(id.clone());
         while self.session_order.len() > 8 {
@@ -339,7 +388,7 @@ impl NotesApp {
                 }
                 if matches!(event, EditorEvent::CodeCopied) {
                     if this.library.active_id == note_id {
-                        this.inform("Code copied", cx);
+                        this.inform("Copied code", cx);
                     }
                     return;
                 }
@@ -445,10 +494,7 @@ impl NotesApp {
             persistence.acknowledge(ids);
         }
         if kept > 0 {
-            self.inform(
-                "Changed on disk — your unsaved edits were kept as a copy",
-                cx,
-            );
+            self.inform("Kept your unsaved edits as a separate note", cx);
             self.changed(cx);
         }
         cx.notify();
@@ -481,15 +527,36 @@ impl NotesApp {
         cx.notify();
         !self.dirty
     }
-    /// Window controls, the action capsule and the formatting toggle appear only
-    /// while the pointer is over the window or a keyboard-opened panel needs them.
+    /// Window controls, the action capsule and the formatting toggle are up while
+    /// someone is present: the pointer is over the window, the window is the one being
+    /// typed into, a key was pressed a moment ago, or a keyboard-opened panel needs
+    /// them. Away from all of that they recede to [`CHROME_REST`] rather than
+    /// disappearing, so what the window can do stays discoverable.
     fn chrome_visible(&self) -> bool {
-        self.pointer_inside || self.panel != Panel::Editor || self.format_menu.is_some()
+        self.pointer_inside
+            || self.window_active
+            || self.panel != Panel::Editor
+            || self.format_menu.is_some()
+            || self
+                .last_key_at
+                .is_some_and(|at| at.elapsed() < KEY_PRESENCE)
     }
     /// Critically damped: chrome fades without overshoot, and a reversal while the
-    /// pointer crosses the window edge continues from the current opacity.
-    pub(super) fn chrome_spring(visible: bool) -> SpringAnimation<bool> {
-        SpringAnimation::new(SpringConfig::new(600., 49., 1.)).to(visible)
+    /// pointer crosses the window edge continues from the current opacity. Reduced
+    /// motion keeps both end states and drops the travel between them.
+    pub(super) fn chrome_spring(visible: bool, reduce_motion: bool) -> SpringAnimation<bool> {
+        SpringAnimation::new(SpringConfig::new(600., 49., 1.))
+            .to(visible)
+            .playback(ui::playback(reduce_motion))
+    }
+    /// A keystroke counts as presence for a moment, so the chrome does not vanish from
+    /// under someone who is writing with the pointer parked outside the window.
+    pub(super) fn note_key_press(&mut self, cx: &mut Context<Self>) {
+        let was_visible = self.chrome_visible();
+        self.last_key_at = Some(Instant::now());
+        if !was_visible {
+            cx.notify();
+        }
     }
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(platform) = &self.platform {
@@ -498,11 +565,20 @@ impl NotesApp {
                 self.pointer_inside = inside;
                 cx.notify();
             }
-            let chrome = self.chrome_visible();
-            if chrome != self.traffic_lights_visible {
-                self.traffic_lights_visible = chrome;
-                platform.set_traffic_lights_visible(window, chrome, !cx.reduce_motion());
+        }
+        // The keystroke timer expires on its own, so the chrome is compared here rather
+        // than only where its inputs change.
+        let chrome = self.chrome_visible();
+        if chrome != self.chrome_shown {
+            self.chrome_shown = chrome;
+            if let Some(platform) = &self.platform {
+                platform.set_traffic_lights_alpha(
+                    window,
+                    if chrome { 1. } else { CHROME_REST },
+                    !cx.reduce_motion(),
+                );
             }
+            cx.notify();
         }
         if self.instance.requested_show() {
             self.show(window, cx);
@@ -525,6 +601,14 @@ impl NotesApp {
                 }
                 PlatformEvent::Quit => self.quit(cx),
             }
+        }
+        for notice in self
+            .persistence
+            .as_ref()
+            .map(Persistence::notices)
+            .unwrap_or_default()
+        {
+            self.queue_notice(notice);
         }
         let events = self
             .persistence
@@ -558,9 +642,20 @@ impl NotesApp {
         if self
             .notice
             .as_ref()
-            .is_some_and(|(_, until)| Instant::now() > *until)
+            .is_some_and(|notice| Instant::now() > notice.until)
         {
             self.notice = None;
+            cx.notify();
+        }
+        // One queued sentence at a time, once whatever was on screen has had its turn.
+        if self.notice.is_none()
+            && let Some(text) = self.pending_notices.pop_front()
+        {
+            self.notice = Some(Notice {
+                text: text.into(),
+                until: Instant::now() + READING_NOTICE,
+                undo: None,
+            });
             cx.notify();
         }
         if self.panel == Panel::Editor
@@ -591,7 +686,8 @@ impl NotesApp {
             }
         }
     }
-    fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chrome_focus = None;
         window.focus(&self.editor().focus_handle(cx), cx);
     }
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -602,6 +698,7 @@ impl NotesApp {
         } else {
             window.activate_window();
         }
+        self.chrome_focus = None;
         if self.persistence.is_none() {
             window.focus(&self.panel_focus, cx);
         } else if self.panel != Panel::Editor {
@@ -655,6 +752,29 @@ impl NotesApp {
             self.editor().update(cx, |e, cx| e.cancel_composition(cx));
             return;
         }
+        // A notice offering an action takes the first Escape; the cascade below resumes
+        // on the next one.
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|notice| notice.undo.is_some())
+        {
+            self.notice = None;
+            self.chrome_focus = None;
+            // Hand the keyboard back to the panel the notice was drawn over.
+            if self.panel != Panel::Editor {
+                window.focus(&self.query.focus_handle(cx), cx);
+            }
+            cx.notify();
+            return;
+        }
+        // A question standing on a row takes the first Escape, so nothing behind it
+        // closes while the answer is still pending.
+        if self.confirm_purge.take().is_some() {
+            cx.notify();
+            return;
+        }
+        self.chrome_focus = None;
         let had_popover = self.format_menu.take().is_some()
             | self.link_popover.take().is_some()
             | self.code_language_block.take().is_some();
@@ -717,16 +837,24 @@ impl NotesApp {
             panel
         };
         self.selected = 0;
-        let (query, placeholder) = match self.panel {
+        self.chrome_focus = None;
+        self.confirm_purge = None;
+        let (query, placeholder, label) = match self.panel {
             Panel::Settings => (
                 self.library.preferences.hotkey.clone(),
-                "Record a shortcut…",
+                "Type a shortcut, e.g. Alt+N",
+                "Global shortcut",
             ),
-            Panel::Actions => (String::new(), "Search for actions…"),
-            _ => (String::new(), "Search for notes…"),
+            Panel::Actions => (String::new(), "Search for actions…", "Search actions"),
+            Panel::Trash => (
+                String::new(),
+                "Search deleted notes…",
+                "Search deleted notes",
+            ),
+            _ => (String::new(), "Search for notes…", "Search notes"),
         };
         self.link_popover = None;
-        self.set_query(query, placeholder, cx);
+        self.set_query(query, placeholder, label, cx);
         if self.panel != Panel::Editor {
             window.focus(&self.query.focus_handle(cx), cx);
         } else {
@@ -772,9 +900,10 @@ impl NotesApp {
                     .saturating_sub(1),
             );
             self.picker_scroll.scroll_to_item(self.selected);
+            self.chrome_focus = None;
             window.focus(&self.query.focus_handle(cx), cx);
             self.changed(cx);
-            self.inform("Moved to Recently Deleted", cx);
+            self.inform_undo("Moved to Recently Deleted", id.to_owned(), cx);
         }
     }
     fn delete_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -786,11 +915,95 @@ impl NotesApp {
             self.panel = Panel::Editor;
             self.focus_editor(window, cx);
             self.changed(cx);
-            self.inform("Moved to Recently Deleted", cx);
+            self.inform_undo("Moved to Recently Deleted", id, cx);
         }
+    }
+    /// Take back the deletion the notice still offers, and open that note again.
+    fn undo_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.notice.take().and_then(|notice| notice.undo) else {
+            return;
+        };
+        if self.library.restore(&id) {
+            self.ensure_session(window, cx);
+            self.panel = Panel::Editor;
+            self.focus_editor(window, cx);
+            self.changed(cx);
+            self.inform("Restored note", cx);
+        } else {
+            cx.notify();
+        }
+    }
+    /// Delete deleted notes for good. The trash is the undo, so this one is asked twice
+    /// before it runs; what the folder actually gave up is what leaves the library.
+    fn purge_notes(&mut self, ids: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
+        let count = ids.len();
+        let (purged, result) = persistence.purge(ids);
+        for id in &purged {
+            self.library.remove(id);
+            self.sessions.remove(id);
+            self.session_order.retain(|entry| entry != id);
+            self.lossy_warned.remove(id);
+        }
+        self.confirm_purge = None;
+        self.chrome_focus = None;
+        self.ensure_session(window, cx);
+        self.selected = self.selected.min(
+            self.library
+                .search(self.query.read(cx).text().trim(), true)
+                .len()
+                .saturating_sub(1),
+        );
+        self.picker_scroll.scroll_to_item(self.selected);
+        self.changed(cx);
+        match result {
+            Ok(()) if count == 1 => self.inform("Deleted permanently", cx),
+            Ok(()) => self.inform("Emptied Recently Deleted", cx),
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+            }
+        }
+    }
+    /// ⌘K's bulk purge. It reaches past what the list shows, so it is confirmed in a
+    /// dialog rather than by a second click.
+    fn empty_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self
+            .library
+            .search("", true)
+            .iter()
+            .map(|note| note.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!(
+                "Permanently delete {} {}?",
+                ids.len(),
+                if ids.len() == 1 { "note" } else { "notes" }
+            ),
+            Some("Recently Deleted will be emptied. This cannot be undone."),
+            &["Cancel", "Delete"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(1) {
+                let _ = cx.update(|window, cx| {
+                    this.update(cx, |this, cx| this.purge_notes(ids, window, cx))
+                });
+            }
+        })
+        .detach();
     }
     fn restore_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.library.restore(id) {
+            // The row and its buttons leave the list with the note.
+            self.chrome_focus = None;
+            self.confirm_purge = None;
             self.ensure_session(window, cx);
             self.changed(cx);
             self.selected = self.selected.min(
@@ -799,11 +1012,31 @@ impl NotesApp {
                     .len()
                     .saturating_sub(1),
             );
-            self.inform("Note restored", cx);
+            self.inform("Restored note", cx);
         }
     }
     fn inform(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.notice = Some((text.into(), Instant::now() + Duration::from_secs(3)));
+        self.notice = Some(Notice {
+            text: text.into(),
+            until: Instant::now() + Duration::from_secs(3),
+            undo: None,
+        });
+        cx.notify();
+    }
+    /// A sentence the user has to read, rather than an acknowledgment of what they just
+    /// did. It waits for the notice on screen instead of replacing it, and stays longer.
+    fn queue_notice(&mut self, text: String) {
+        if !self.pending_notices.contains(&text) {
+            self.pending_notices.push_back(text);
+        }
+    }
+    /// A notice whose deletion can still be taken back.
+    fn inform_undo(&mut self, text: &str, note: String, cx: &mut Context<Self>) {
+        self.notice = Some(Notice {
+            text: text.into(),
+            until: Instant::now() + Duration::from_secs(8),
+            undo: Some(note),
+        });
         cx.notify();
     }
     fn apply_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -820,11 +1053,20 @@ impl NotesApp {
             .update(cx, |e, cx| e.set_style(query_style(self.dark), cx));
         cx.notify();
     }
-    /// The query field holds literal text, so it is never read as Markdown.
-    fn set_query(&mut self, text: String, placeholder: &'static str, cx: &mut Context<Self>) {
+    /// Lend the one query field to a surface. It holds literal text, so it is never read
+    /// as Markdown, and it takes the name of whatever it is serving: the field reports
+    /// that name itself rather than borrowing one from a group drawn around it.
+    fn set_query(
+        &mut self,
+        text: String,
+        placeholder: &'static str,
+        label: &'static str,
+        cx: &mut Context<Self>,
+    ) {
         self.query.update(cx, |e, cx| {
             e.set_value(&text, cx);
             e.set_placeholder(placeholder, cx);
+            e.set_aria_label(label, cx);
         });
     }
     /// ⌘L: a link under the caret shows its actions, anything else asks for an address.
@@ -834,6 +1076,7 @@ impl NotesApp {
         }
         self.format_menu = None;
         self.code_language_block = None;
+        self.chrome_focus = None;
         if self.editor().read(cx).active_link().is_some() {
             self.link_popover = Some(LinkPopover::View);
             cx.notify();
@@ -850,7 +1093,8 @@ impl NotesApp {
             .unwrap_or_default()
             .to_owned();
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
-        self.set_query(url, "Enter a link…", cx);
+        self.chrome_focus = None;
+        self.set_query(url, "Enter a link…", "Link URL", cx);
         self.link_popover = Some(LinkPopover::Edit);
         window.focus(&self.query.focus_handle(cx), cx);
         cx.notify();
@@ -889,7 +1133,7 @@ impl NotesApp {
                     self.library.preferences.hotkey = text;
                     self.platform_error = None;
                     self.changed(cx);
-                    self.inform("Shortcut updated", cx);
+                    self.inform("Updated shortcut", cx);
                 }
                 Err(e) => {
                     self.platform_error = Some(e);
@@ -1011,7 +1255,7 @@ impl NotesApp {
                     })
                     .await;
                 let _ = this.update(cx, |this, cx| match result {
-                    Ok(()) => this.inform("Library copy saved", cx),
+                    Ok(()) => this.inform("Saved library copy", cx),
                     Err(e) => {
                         this.error = Some(e);
                         cx.notify();
@@ -1041,7 +1285,7 @@ impl NotesApp {
                         let result = this
                             .persistence
                             .as_ref()
-                            .ok_or_else(|| "The library is not open".to_string())
+                            .ok_or_else(|| "Choose a notes folder first.".to_string())
                             .and_then(|p| p.reload());
                         match result {
                             Ok(library) => {
@@ -1086,7 +1330,7 @@ impl NotesApp {
                     .spawn(async move { std::fs::write(path, document).map_err(|e| e.to_string()) })
                     .await;
                 let _ = this.update(cx, |this, cx| match result {
-                    Ok(()) => this.inform("Markdown exported", cx),
+                    Ok(()) => this.inform("Exported Markdown", cx),
                     Err(e) => {
                         this.error = Some(e);
                         cx.notify();
@@ -1115,7 +1359,7 @@ impl NotesApp {
                             .into_iter()
                             .map(|path| {
                                 let text = std::fs::read_to_string(&path)
-                                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                                    .map_err(|e| crate::vault::describe(&path, &e))?;
                                 // A `.json` file is a backup an earlier version
                                 // wrote; everything else is Markdown.
                                 if path.extension().is_some_and(|e| e == "json") {
@@ -1155,14 +1399,22 @@ impl NotesApp {
 /// Heights of the toolbar and footer, which float over the top and bottom of the note.
 const TOOLBAR_HEIGHT: Pixels = px(52.);
 const FOOTER_HEIGHT: Pixels = px(44.);
+/// What the chrome fades to while nobody is there. Far enough back to leave the note
+/// alone, near enough that the controls can still be found.
+const CHROME_REST: f32 = 0.35;
+/// How long a keystroke counts as someone being at the window.
+const KEY_PRESENCE: Duration = Duration::from_millis(2500);
+/// A queued notice is a sentence, not an acknowledgment, so it is given time to read.
+const READING_NOTICE: Duration = Duration::from_secs(8);
 fn notes_style(dark: bool) -> EditorStyle {
     let mut style = if dark {
         EditorStyle::notes_dark()
     } else {
         EditorStyle::notes()
     };
-    // Text starts a little under the toolbar's lower edge, which is only a fade.
-    style.top_overlay = TOOLBAR_HEIGHT - px(13.);
+    // The whole toolbar height, so a block that runs under it — a code block's header
+    // bar, a heading — is scrolled clear of the capsule rather than behind it.
+    style.top_overlay = TOOLBAR_HEIGHT;
     style.bottom_overlay = FOOTER_HEIGHT;
     style
 }
@@ -1186,6 +1438,11 @@ pub fn bind_app_keys(cx: &mut App) {
         KeyBinding::new("up", markraft_gpui::Up, Some("MarkraftApp")),
         KeyBinding::new("down", markraft_gpui::Down, Some("MarkraftApp")),
         KeyBinding::new("enter", markraft_gpui::Enter, Some("MarkraftApp")),
+        // Tab walks the open panel's controls. The editor binds the same keys in its own,
+        // deeper context, so a note still indents; the app intercepts them in the capture
+        // phase and only keeps them while a panel or popover is open.
+        KeyBinding::new("tab", markraft_gpui::Indent, Some("MarkraftApp")),
+        KeyBinding::new("shift-tab", markraft_gpui::Outdent, Some("MarkraftApp")),
         KeyBinding::new("cmd-s", Save, Some("MarkraftApp")),
         KeyBinding::new("cmd-shift-c", CopyMarkdown, Some("MarkraftApp")),
         KeyBinding::new("cmd-q", Quit, None),

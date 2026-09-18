@@ -9,8 +9,9 @@
 //!
 //! Preferences and the active note are per machine and live in a separate settings file.
 use crate::doc;
-use crate::storage::{Library, Note, Settings};
+use crate::storage::{Library, Note, Notices, Settings};
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{self, Write},
@@ -22,6 +23,13 @@ use uuid::Uuid;
 
 const TRASH: &str = ".trash";
 const INTERNAL: &str = ".markraft";
+/// The longest file name Markraft writes, in bytes. File systems stop at 255
+/// bytes per component, and a note's title can be far longer in UTF-8 than it
+/// looks; the rest of the budget leaves room for a name's date prefix, its
+/// extension and the suffix that separates notes sharing a title.
+const NAME_BUDGET: usize = 180;
+/// How many conflicting note titles a message lists before counting the rest.
+const LISTED_TITLES: usize = 3;
 
 /// What was last read from or written to one note's file.
 struct Saved {
@@ -54,23 +62,35 @@ pub struct Store {
     pending: HashSet<String>,
     settings: Settings,
     saved_library: Library,
+    notices: Notices,
 }
 
 impl Store {
     pub fn open(directory: PathBuf, settings_path: PathBuf) -> Result<(Self, Library), String> {
-        fs::create_dir_all(directory.join(INTERNAL)).map_err(|error| error.to_string())?;
-        let directory = fs::canonicalize(directory).map_err(|error| error.to_string())?;
+        fs::create_dir_all(directory.join(INTERNAL))
+            .map_err(|error| describe(&directory, &error))?;
+        let directory =
+            fs::canonicalize(&directory).map_err(|error| describe(&directory, &error))?;
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(directory.join(INTERNAL).join("lock"))
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| describe(&directory, &error))?;
         lock.try_lock().map_err(|error| {
-            format!("Another Markraft instance may already be using this folder: {error}")
+            eprintln!("Markraft: {} is locked: {error}", directory.display());
+            format!(
+                "Another copy of Markraft is already using “{}”. Quit that one, \
+                 or choose a different notes folder.",
+                file_label(&directory)
+            )
         })?;
         let settings = Settings::read(&settings_path)?;
+        let notices = Notices::default();
+        if let Some(notice) = settings.recovery_notice() {
+            notices.raise(notice);
+        }
         let mut store = Self {
             directory,
             settings_path,
@@ -79,10 +99,18 @@ impl Store {
             pending: HashSet::new(),
             settings,
             saved_library: Library::default(),
+            notices,
         };
         let library = store.scan()?;
         store.saved_library = library.clone();
         Ok((store, library))
+    }
+
+    /// What the user should be told about how this folder was opened and read.
+    /// The store is handed to the save worker, so the application keeps this
+    /// handle and drains it once it has a window to show them in.
+    pub fn notices(&self) -> Notices {
+        self.notices.clone()
     }
 
     #[cfg(test)]
@@ -113,10 +141,11 @@ impl Store {
             .collect();
         let mut files = HashMap::new();
         for (folder, deleted) in [(PathBuf::new(), false), (PathBuf::from(TRASH), true)] {
-            let entries = match fs::read_dir(self.directory.join(&folder)) {
+            let read = self.directory.join(&folder);
+            let entries = match fs::read_dir(&read) {
                 Ok(entries) => entries,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.to_string()),
+                Err(error) => return Err(describe(&read, &error)),
             };
             let mut paths: Vec<_> = entries
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -128,7 +157,8 @@ impl Store {
             for path in paths {
                 let relative = folder.join(path.file_name().expect("listed files have names"));
                 // Another program may remove a file between listing and reading it.
-                let Some(bytes) = read_optional(&path).map_err(|error| error.to_string())? else {
+                let Some(bytes) = read_optional(&path).map_err(|error| describe(&path, &error))?
+                else {
                     continue;
                 };
                 let previous = known.get(relative.as_path());
@@ -151,7 +181,21 @@ impl Store {
                     .ok()
                     .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                     .map_or(0, |duration| duration.as_millis() as u64);
-                let mut note = decode(&String::from_utf8_lossy(&bytes), modified);
+                // A file that is not valid text is still read, with what could not
+                // be decoded replaced; the note remembers that so its first save
+                // does not quietly make the replacement permanent.
+                let text = String::from_utf8_lossy(&bytes);
+                let lossy = matches!(text, Cow::Owned(_));
+                let mut note = decode(&text, modified);
+                note.lossy = lossy;
+                if lossy {
+                    self.notices.raise(format!(
+                        "“{}” is not saved as plain text, so the parts Markraft could not \
+                         read show as “�”. Keep a copy before editing it: saving the note \
+                         writes the replacements to the file.",
+                        file_label(&path)
+                    ));
+                }
                 if note.id.is_empty()
                     && let Some(previous) = previous
                 {
@@ -243,6 +287,36 @@ impl Store {
         Ok(changes)
     }
 
+    /// Delete these notes' files for good, and forget them, so that the next refresh
+    /// reads a folder the bookkeeping already agrees with rather than adopting them
+    /// back. The copy each one left in `.markraft/backups` stays: it is what remains
+    /// after the trash that held it is gone.
+    ///
+    /// A note whose file is already missing is still forgotten. One whose file cannot
+    /// be removed stops the purge with the reason, and the notes named before it are
+    /// already gone; the caller drops from its library exactly what this reports.
+    pub fn purge(&mut self, ids: &[String]) -> (Vec<String>, Result<(), String>) {
+        let mut purged = Vec::new();
+        for id in ids {
+            if let Some(saved) = self.files.remove(id) {
+                let path = self.directory.join(&saved.path);
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        // Put it back, so the folder and the bookkeeping still agree.
+                        self.files.insert(id.clone(), saved);
+                        return (purged, Err(describe(&path, &error)));
+                    }
+                }
+            }
+            self.pending.remove(id);
+            self.saved_library.notes.retain(|note| &note.id != id);
+            purged.push(id.clone());
+        }
+        (purged, Ok(()))
+    }
+
     /// The application has taken over these external changes; its snapshots are
     /// authoritative for the notes again.
     pub fn acknowledge(&mut self, ids: &[String]) {
@@ -270,9 +344,10 @@ impl Store {
             if saved.is_none() && doc::is_blank(&note.document) {
                 continue;
             }
-            if let Some(saved) = saved
-                && read_optional(&self.directory.join(&saved.path))
-                    .map_err(|error| error.to_string())?
+            let written = saved.map(|saved| self.directory.join(&saved.path));
+            if let (Some(saved), Some(written)) = (saved, written.as_deref())
+                && read_optional(written)
+                    .map_err(|error| describe(written, &error))?
                     .as_ref()
                     != Some(&saved.bytes)
             {
@@ -298,8 +373,8 @@ impl Store {
             taken.insert(path.clone());
             let bytes = encode(note).into_bytes();
             let target = self.directory.join(&path);
-            fs::create_dir_all(target.parent().expect("note paths have a parent"))
-                .map_err(|error| error.to_string())?;
+            let parent = target.parent().expect("note paths have a parent");
+            fs::create_dir_all(parent).map_err(|error| describe(parent, &error))?;
             if let Some(saved) = saved {
                 atomic_write(
                     &self
@@ -314,8 +389,8 @@ impl Store {
             if let Some(saved) = saved
                 && saved.path != path
             {
-                fs::remove_file(self.directory.join(&saved.path))
-                    .map_err(|error| error.to_string())?;
+                let previous = self.directory.join(&saved.path);
+                fs::remove_file(&previous).map_err(|error| describe(&previous, &error))?;
             }
             self.files.insert(
                 note.id.clone(),
@@ -342,7 +417,7 @@ impl Store {
             Err(format!(
                 "Changed on disk by another program and not overwritten: {}. \
                  Reload to use the version on disk.",
-                conflicts.join(", ")
+                listed(&conflicts)
             ))
         }
     }
@@ -416,16 +491,49 @@ fn file_name(note: &Note) -> String {
             }
         })
         .collect();
-    let title: String = title
-        .trim_matches(|c: char| c == '.' || c.is_whitespace())
-        .graphemes(true)
-        .take(60)
-        .collect();
     let (year, month, day, ..) = civil(note.created_at);
+    let prefix = format!("{year:04}-{month:02}-{day:02} ");
+    // What the title may spend: the rest of the budget goes to the prefix, the
+    // extension and the ` 999` that separates notes sharing this title.
+    let budget = NAME_BUDGET.saturating_sub(prefix.len() + ".md".len() + " 999".len());
+    let title = clamp(
+        title.trim_matches(|c: char| c == '.' || c.is_whitespace()),
+        60,
+        budget,
+    );
+    let title = title.trim_end_matches(|c: char| c == '.' || c.is_whitespace());
     format!(
-        "{year:04}-{month:02}-{day:02} {}",
-        if title.is_empty() { "Untitled" } else { &title }
+        "{prefix}{}",
+        if title.is_empty() { "Untitled" } else { title }
     )
+}
+
+/// At most `clusters` grapheme clusters and `bytes` bytes, cut on a cluster
+/// boundary so a name never splits a character or an emoji sequence.
+fn clamp(text: &str, clusters: usize, bytes: usize) -> String {
+    let mut clamped = String::new();
+    for cluster in text.graphemes(true).take(clusters) {
+        if clamped.len() + cluster.len() > bytes {
+            break;
+        }
+        clamped.push_str(cluster);
+    }
+    clamped
+}
+
+/// Titles for a message, counting the ones it does not name: a folder edited
+/// elsewhere can conflict in every note at once.
+fn listed(titles: &[String]) -> String {
+    let named = titles
+        .iter()
+        .take(LISTED_TITLES)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    match titles.len().saturating_sub(LISTED_TITLES) {
+        0 => named,
+        rest => format!("{named} and {rest} more"),
+    }
 }
 
 fn encode(note: &Note) -> String {
@@ -463,6 +571,7 @@ fn decode(text: &str, modified: u64) -> Note {
         deleted_at: None,
         pinned: false,
         front_matter: Vec::new(),
+        lossy: false,
     };
     let (header, body) = text
         .strip_prefix("---\n")
@@ -523,11 +632,14 @@ pub fn backup(library: &Library) -> Result<Vec<u8>, String> {
         "active_id": library.active_id,
         "notes": notes,
     }))
-    .map_err(|error| error.to_string())
+    .map_err(|error| {
+        eprintln!("Markraft: the backup could not be encoded: {error}");
+        "Markraft could not prepare the backup file.".to_owned()
+    })
 }
 
 /// Milliseconds since the epoch as (year, month, day, hour, minute, second, millisecond).
-fn civil(milliseconds: u64) -> (i64, u32, u32, u32, u32, u32, u32) {
+pub(crate) fn civil(milliseconds: u64) -> (i64, u32, u32, u32, u32, u32, u32) {
     let seconds = milliseconds / 1000;
     let days = (seconds / 86_400) as i64;
     let second = (seconds % 86_400) as u32;
@@ -584,6 +696,59 @@ fn parse_iso(text: &str) -> Option<u64> {
     Some((days * 86_400 + hour * 3600 + minute * 60 + second) * 1000 + millisecond)
 }
 
+/// The one place where a file-system failure becomes something a person can act
+/// on. An `io::Error` reads as the operating system's own report of a system
+/// call — the kind of sentence that belongs in a log, not in a window — so the
+/// raw text is printed for a bug report and reaches the interface only inside
+/// the parentheses of the last resort.
+pub(crate) fn describe(path: &Path, error: &io::Error) -> String {
+    eprintln!("Markraft: {}: {error} ({:?})", path.display(), error.kind());
+    message(path, error)
+}
+
+/// The half of [`describe`] the user reads, separated so it can be tested
+/// without the log.
+fn message(path: &Path, error: &io::Error) -> String {
+    let name = file_label(path);
+    match error.kind() {
+        io::ErrorKind::NotFound => format!(
+            "“{name}” is no longer there. It may have been renamed, moved or deleted; \
+             choose the notes folder again."
+        ),
+        io::ErrorKind::PermissionDenied => format!(
+            "Markraft is not allowed to use “{name}”. Check its permissions in Finder, \
+             or choose another notes folder."
+        ),
+        io::ErrorKind::AlreadyExists => {
+            format!("“{name}” already exists. Rename or move it, then try again.")
+        }
+        io::ErrorKind::InvalidFilename => format!(
+            "“{name}” is not a name this disk accepts. Shorten the note's first line, \
+             then try again."
+        ),
+        io::ErrorKind::StorageFull => {
+            format!("The disk has no room left for “{name}”. Free some space, then try again.")
+        }
+        io::ErrorKind::ReadOnlyFilesystem => format!(
+            "“{name}” is on a disk that cannot be written to. Choose a notes folder \
+             on a disk you can write to."
+        ),
+        io::ErrorKind::TimedOut => format!(
+            "“{name}” did not respond in time. If it is on a network drive or in iCloud, \
+             check the connection and try again."
+        ),
+        _ => format!("Markraft could not use “{name}” ({error})."),
+    }
+}
+
+/// A file or folder as the user knows it. The whole path belongs in the log; in
+/// a message it would bury the sentence.
+pub(crate) fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
     match fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
@@ -594,17 +759,20 @@ fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
 
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path.parent().unwrap_or(Path::new("."));
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let mut output = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    fs::create_dir_all(parent).map_err(|error| describe(parent, &error))?;
+    let mut output =
+        tempfile::NamedTempFile::new_in(parent).map_err(|error| describe(parent, &error))?;
     output
         .write_all(bytes)
         .and_then(|_| output.as_file().sync_all())
-        .map_err(|error| error.to_string())?;
-    output.persist(path).map_err(|error| error.to_string())?;
+        .map_err(|error| describe(path, &error))?;
+    output
+        .persist(path)
+        .map_err(|error| describe(path, &error.error))?;
     // Sync the directory entry as well as the file contents when the platform supports it.
     File::open(parent)
         .and_then(|directory| directory.sync_all())
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| describe(parent, &error))?;
     Ok(())
 }
 
@@ -733,6 +901,50 @@ mod tests {
     }
 
     #[test]
+    fn purging_removes_a_deleted_note_for_good_without_adopting_it_back() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut store, mut library) = open(root.path());
+        let id = library.active_id.clone();
+        library.notes[0].created_at = 0;
+        library.set_document(&id, doc::from_markdown("Throw away"));
+        store.save(&library).unwrap();
+        library.delete(&id);
+        store.save(&library).unwrap();
+        assert_eq!(listing(root.path(), TRASH), ["1970-01-01 Throw away.md"]);
+
+        let (purged, result) = store.purge(std::slice::from_ref(&id));
+        result.unwrap();
+        assert_eq!(purged, std::slice::from_ref(&id));
+        assert!(listing(root.path(), TRASH).is_empty());
+        // The last version written stays in the backups folder.
+        assert!(
+            root.path()
+                .join("notes/.markraft/backups")
+                .join(format!("{id}.md"))
+                .exists()
+        );
+        // The folder and the bookkeeping agree, so nothing is reported as an external
+        // change and the note is not read back in.
+        library.remove(&id);
+        assert!(store.refresh().unwrap().is_empty());
+        store.save(&library).unwrap();
+        assert!(listing(root.path(), TRASH).is_empty());
+        drop(store);
+        let (_, reopened) = open(root.path());
+        assert!(reopened.search("", true).is_empty());
+        assert!(reopened.search("Throw away", false).is_empty());
+    }
+
+    #[test]
+    fn purging_a_note_that_was_never_written_is_not_a_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut store, _) = open(root.path());
+        let (purged, result) = store.purge(&["never-saved".to_owned()]);
+        assert_eq!(purged, ["never-saved"]);
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
     fn foreign_files_are_adopted_untouched_until_edited() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("notes")).unwrap();
@@ -772,6 +984,117 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("settings.json.damaged-")
         }));
+    }
+
+    #[test]
+    fn long_cjk_and_emoji_titles_are_cut_to_a_name_the_file_system_accepts() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut store, mut library) = open(root.path());
+        // 60 clusters of this are far past the 255-byte limit on a path component.
+        let title = "中文標題👩🏽‍💻".repeat(30);
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown(&format!("# {title}\n\nbody")));
+        library.notes[0].created_at = 0;
+        // A second note with the same title takes the collision suffix, which must
+        // fit in the budget as well.
+        library.keep_copy(doc::from_markdown(&format!("# {title}")));
+        library.notes[1].created_at = 0;
+        store.save(&library).unwrap();
+
+        let names = listing(root.path(), "");
+        assert_eq!(names.len(), 2, "{names:?}");
+        for name in &names {
+            assert!(name.len() <= NAME_BUDGET, "{} bytes: {name}", name.len());
+            assert!(name.starts_with("1970-01-01 中文標題👩🏽‍💻"), "{name}");
+            let written = name
+                .strip_suffix(".md")
+                .and_then(|stem| stem.strip_prefix("1970-01-01 "))
+                .expect("a dated Markdown name")
+                .trim_end_matches(" 2");
+            // Cutting inside a cluster would leave a lone skin tone or zero-width
+            // joiner behind, which every cluster matching the title's rules out.
+            assert!(
+                written
+                    .graphemes(true)
+                    .zip(title.graphemes(true))
+                    .all(|(written, title)| written == title),
+                "{written}"
+            );
+        }
+        drop(store);
+        let (_, reopened) = open(root.path());
+        assert_eq!(reopened.search("", false).len(), 2);
+    }
+
+    #[test]
+    fn a_note_that_opens_with_html_is_named_after_its_text() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut store, mut library) = open(root.path());
+        let id = library.active_id.clone();
+        library.set_document(
+            &id,
+            doc::from_markdown("<div class=\"card\">\n\nShopping: list/things\n"),
+        );
+        library.notes[0].created_at = 0;
+        store.save(&library).unwrap();
+        assert_eq!(
+            listing(root.path(), ""),
+            ["1970-01-01 Shopping- list-things.md"]
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_text_is_read_with_something_to_tell_the_user() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("notes")).unwrap();
+        fs::write(root.path().join("notes/broken.md"), b"caf\xe9 au lait").unwrap();
+        let (store, library) = open(root.path());
+        assert_eq!(library.notes.len(), 1);
+        assert!(library.notes[0].lossy);
+        assert!(doc::plain_text(&library.notes[0].document).contains('\u{fffd}'));
+        let notices = store.notices().take();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("broken.md"), "{}", notices[0]);
+        assert!(store.notices().take().is_empty());
+    }
+
+    #[test]
+    fn a_conflict_names_a_few_notes_and_counts_the_rest() {
+        let titles: Vec<String> = (1..=5).map(|number| format!("Note {number}")).collect();
+        assert_eq!(listed(&titles[..1]), "Note 1");
+        assert_eq!(listed(&titles[..3]), "Note 1, Note 2, Note 3");
+        assert_eq!(listed(&titles), "Note 1, Note 2, Note 3 and 2 more");
+    }
+
+    #[test]
+    fn file_system_failures_are_explained_without_the_operating_system_wording() {
+        let path = Path::new("/Users/someone/Notes/Shopping list.md");
+        for (kind, expected) in [
+            (io::ErrorKind::NotFound, "no longer there"),
+            (io::ErrorKind::PermissionDenied, "not allowed"),
+            (io::ErrorKind::AlreadyExists, "already exists"),
+            (
+                io::ErrorKind::InvalidFilename,
+                "not a name this disk accepts",
+            ),
+            (io::ErrorKind::StorageFull, "no room left"),
+            (io::ErrorKind::ReadOnlyFilesystem, "cannot be written to"),
+            (io::ErrorKind::TimedOut, "did not respond in time"),
+        ] {
+            let text = message(
+                path,
+                &io::Error::new(kind, "File name too long (os error 63)"),
+            );
+            assert!(text.contains("Shopping list.md"), "{text}");
+            assert!(text.contains(expected), "{text}");
+            assert!(!text.contains("os error"), "{text}");
+        }
+        // Anything else still says which file, and keeps the detail in parentheses.
+        let text = message(path, &io::Error::other("the disk fell over"));
+        assert!(
+            text.contains("“Shopping list.md” (the disk fell over)"),
+            "{text}"
+        );
     }
 
     #[test]

@@ -2,6 +2,10 @@ use super::*;
 
 type FormatItem = (&'static str, &'static str, Intent, bool);
 
+/// How wide the formatting toolbar sits in the middle of the footer. It is fixed: the
+/// same five controls, whatever the note is.
+const TOOLBAR_CAPSULE: Pixels = px(171.);
+
 impl NotesApp {
     pub(super) fn capsule(&self) -> Div {
         div()
@@ -10,11 +14,7 @@ impl NotesApp {
             .rounded_full()
             .bg(self.surface_color())
             .border_1()
-            .border_color(if self.dark {
-                rgba(0xffffff18)
-            } else {
-                rgba(0xffffffcc)
-            })
+            .border_color(self.border_color())
     }
 
     pub(super) fn open_format_menu(
@@ -25,6 +25,7 @@ impl NotesApp {
     ) {
         self.code_language_block = None;
         self.link_popover = None;
+        self.chrome_focus = None;
         self.query
             .update(cx, |editor, cx| editor.cancel_composition(cx));
         self.editor()
@@ -56,7 +57,7 @@ impl NotesApp {
         cx.notify();
     }
 
-    fn format_items(&self, cx: &App) -> Vec<FormatItem> {
+    pub(super) fn format_items(&self, cx: &App) -> Vec<FormatItem> {
         let editor = self.editor().read(cx);
         let marks = editor.active_marks();
         let kind = doc::Block::active(editor.state(), &editor.projection());
@@ -181,13 +182,17 @@ impl NotesApp {
         true
     }
 
+    /// One small icon control. `toggled` is `Some` for a control that carries a state
+    /// the interface can show as on or off — a format that is in force, a column's
+    /// alignment — and `None` for one that only acts, which stays a plain button rather
+    /// than reaching the accessibility tree as a checkbox.
     pub(super) fn format_button(
         &self,
         id: &'static str,
         label: &'static str,
         kind: Icon,
         intent: Intent,
-        active: bool,
+        toggled: Option<bool>,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let menu = match intent {
@@ -195,49 +200,72 @@ impl NotesApp {
             _ => None,
         };
         let expanded = menu.is_some() && self.format_menu == menu;
-        div()
-            .id(id)
-            .role(Role::Button)
-            .aria_label(label)
-            .when_some(menu, |s, _| s.aria_expanded(expanded))
-            .aria_toggled(if active {
-                accesskit::Toggled::True
-            } else {
-                accesskit::Toggled::False
-            })
-            .h(px(26.))
-            .w(px(if menu.is_some() { 40. } else { 28. }))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.))
-            .cursor_pointer()
-            .when(active || expanded, |s| s.bg(self.selected_color()))
-            .hover(|s| s.bg(self.hover_color()))
-            .active(|s| s.bg(self.pressed_color()))
-            .tooltip(self.hint(label))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
-                this.intent(intent.clone(), window, cx);
-            }))
-            .child(icon(
-                kind,
-                if active {
-                    self.control_text()
-                } else {
-                    self.muted()
-                },
-            ))
-            .when(menu.is_some(), |s| {
-                s.child(icon(Icon::ChevronDown, self.muted()))
-            })
+        let active = toggled == Some(true);
+        // A control that takes the whole table away is written in the destructive ink,
+        // as its ⌘K row is.
+        let ink = if matches!(intent, Intent::Table(TableEdit::DeleteTable)) {
+            self.danger()
+        } else if active {
+            self.control_text()
+        } else {
+            self.muted()
+        };
+        self.ring(
+            id,
+            ROW_RADIUS,
+            div()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(label)
+                .when_some(menu, |s, _| s.aria_expanded(expanded))
+                // A control that opens a menu reports whether the menu is open; it is
+                // not a toggle, whatever fill the format in force gives it.
+                .when_some(toggled.filter(|_| menu.is_none()), |s, on| {
+                    s.aria_toggled(if on {
+                        accesskit::Toggled::True
+                    } else {
+                        accesskit::Toggled::False
+                    })
+                })
+                .h(px(26.))
+                .w(px(if menu.is_some() { 40. } else { 28. }))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(ROW_RADIUS)
+                .cursor_pointer()
+                .when(active || expanded, |s| s.bg(self.selected_color()))
+                .hover(|s| s.bg(self.hover_color()))
+                .active(|s| s.bg(self.pressed_color()))
+                .tooltip(self.hint(label))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.intent(intent.clone(), window, cx);
+                }))
+                .child(icon(kind, ink))
+                .when(menu.is_some(), |s| {
+                    s.child(icon(Icon::ChevronDown, self.muted()))
+                }),
+        )
     }
 
-    pub(super) fn footer(&self, count: String, cx: &mut Context<Self>) -> Div {
+    /// One row along the bottom of the note: what mode the editor is in and how much
+    /// text there is on the left, the formatting toolbar in the middle, and the toggle
+    /// that opens it on the right. Opening the toolbar adds to the row rather than
+    /// taking the count's place, so nothing the row says moves.
+    pub(super) fn footer(&self, count: String, viewport: Pixels, cx: &mut Context<Self>) -> Div {
         let editor = self.editor().read(cx);
         let marks = editor.active_marks();
         let kind = doc::Block::active(editor.state(), &editor.projection());
+        let reduce_motion = cx.reduce_motion();
+        // What is left of the row's left half once the centred toolbar has its width.
+        // In a window too narrow for both, the toolbar is the one that has to be there.
+        let room = if self.format_toolbar {
+            (viewport - TOOLBAR_CAPSULE) / 2. - px(20.)
+        } else {
+            viewport
+        };
         div()
             .h(px(44.))
             .flex_shrink_0()
@@ -245,6 +273,38 @@ impl NotesApp {
             .flex()
             .items_center()
             .justify_center()
+            .child(
+                div()
+                    .absolute()
+                    .left(px(12.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .children(self.vim_badge())
+                    .when(room > px(110.), |s| {
+                        s.child(
+                            div()
+                                .id("word-count")
+                                .role(Role::Button)
+                                .aria_label("Toggle character and word count")
+                                .h(px(24.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .rounded(ROW_RADIUS)
+                                .text_size(px(12.))
+                                .text_color(self.muted())
+                                .cursor_pointer()
+                                .hover(|s| s.bg(self.hover_color()))
+                                .active(|s| s.bg(self.pressed_color()))
+                                .tooltip(self.hint("Toggle between character count and word count"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.intent(Intent::ToggleCount, window, cx)
+                                }))
+                                .child(count),
+                        )
+                    }),
+            )
             .child(
                 div()
                     .absolute()
@@ -275,35 +335,13 @@ impl NotesApp {
                     .with_spring(
                         "format-toggle-fade",
                         // An expanded toolbar keeps its close button regardless of the pointer.
-                        Self::chrome_spring(self.chrome_visible() || self.format_toolbar),
-                        |s, phase| s.opacity(phase.interpolate_clamped(0., 1.)),
+                        Self::chrome_spring(
+                            self.chrome_visible() || self.format_toolbar,
+                            reduce_motion,
+                        ),
+                        |s, phase| s.opacity(phase.interpolate_clamped(CHROME_REST, 1.)),
                     ),
             )
-            .when(!self.format_toolbar, |s| {
-                s.children(self.vim_badge()).child(
-                    div()
-                        .id("word-count")
-                        .role(Role::Button)
-                        .aria_label("Toggle character and word count")
-                        .h(px(24.))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .rounded(px(5.))
-                        .text_size(px(12.))
-                        .text_color(self.muted())
-                        .cursor_pointer()
-                        .hover(|s| s.bg(self.hover_color()))
-                        .active(|s| s.bg(self.pressed_color()))
-                        .tooltip(self.hint("Toggle between character count and word count"))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.show_words = !this.show_words;
-                            this.focus_editor(window, cx);
-                            cx.notify();
-                        }))
-                        .child(count),
-                )
-            })
             .when(self.format_toolbar, |s| {
                 s.child(
                     self.capsule()
@@ -314,7 +352,7 @@ impl NotesApp {
                             "Text Style",
                             Icon::Heading,
                             Intent::FormatMenu(FormatMenu::Block),
-                            matches!(kind, Some(doc::Block::Heading(_))),
+                            Some(matches!(kind, Some(doc::Block::Heading(_)))),
                             cx,
                         ))
                         .child(
@@ -323,14 +361,16 @@ impl NotesApp {
                                 "Text Formatting",
                                 Icon::Italic,
                                 Intent::FormatMenu(FormatMenu::Inline),
-                                [
-                                    doc::Inline::Bold,
-                                    doc::Inline::Italic,
-                                    doc::Inline::Strikethrough,
-                                    doc::Inline::Underline,
-                                ]
-                                .iter()
-                                .any(|inline| inline.is_active(&marks)),
+                                Some(
+                                    [
+                                        doc::Inline::Bold,
+                                        doc::Inline::Italic,
+                                        doc::Inline::Strikethrough,
+                                        doc::Inline::Underline,
+                                    ]
+                                    .iter()
+                                    .any(|inline| inline.is_active(&marks)),
+                                ),
                                 cx,
                             ),
                         )
@@ -339,7 +379,7 @@ impl NotesApp {
                             "Inline Code · ⌘E",
                             Icon::Code,
                             Intent::Mark(doc::Inline::Code),
-                            doc::Inline::Code.is_active(&marks),
+                            Some(doc::Inline::Code.is_active(&marks)),
                             cx,
                         ))
                         .child(
@@ -358,10 +398,10 @@ impl NotesApp {
                                 _ => Icon::Bullet,
                             },
                             Intent::FormatMenu(FormatMenu::List),
-                            matches!(
+                            Some(matches!(
                                 kind,
                                 Some(doc::Block::Bullet | doc::Block::Ordered | doc::Block::Task)
-                            ),
+                            )),
                             cx,
                         )),
                 )
@@ -371,55 +411,66 @@ impl NotesApp {
     pub(super) fn format_popover(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let items = self.format_items(cx);
         let width = px(216.);
-        let height = px(8. + items.len() as f32 * 32.).min(window.bounds().size.height - px(100.));
+        let height =
+            (px(8.) + ROW_HEIGHT * items.len() as f32).min(window.bounds().size.height - px(100.));
+        let total = items.len();
         let mut list = div()
             .id("format-menu-items")
+            .role(Role::ListBox)
+            .aria_label("Formatting")
             .track_scroll(&self.format_scroll)
             .overflow_y_scroll()
             .size_full()
             .p(px(4.));
         for (index, (label, hint, intent, checked)) in items.into_iter().enumerate() {
+            let stop = SharedString::from(format!("format-choice-{index}"));
             list = list.child(
-                div()
-                    .id(("format-choice", index))
-                    .role(Role::Button)
-                    .aria_label(label)
-                    .aria_selected(index == self.format_selected)
-                    .aria_toggled(if checked {
-                        accesskit::Toggled::True
-                    } else {
-                        accesskit::Toggled::False
-                    })
-                    .h(px(32.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded(px(6.))
-                    .text_size(px(13.))
-                    .cursor_pointer()
-                    .when(index == self.format_selected, |s| {
-                        s.bg(self.selected_color())
-                    })
-                    .hover(|s| s.bg(self.selected_color()))
-                    .active(|s| s.bg(self.pressed_color()))
-                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                        if this.format_selected != index {
-                            this.format_selected = index;
-                            cx.notify();
-                        }
-                    }))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.intent(intent.clone(), window, cx)
-                    }))
-                    .child(
-                        div()
-                            .w(px(14.))
-                            .when(checked, |s| s.child(icon(Icon::Check, self.control_text()))),
-                    )
-                    .child(div().flex_1().child(label))
-                    .child(self.shortcut(hint)),
+                self.ring(
+                    &stop,
+                    ROW_RADIUS,
+                    div()
+                        .id(stop.clone())
+                        .role(Role::Button)
+                        .aria_label(label)
+                        .aria_selected(index == self.format_selected)
+                        .aria_position_in_set(index + 1)
+                        .aria_size_of_set(total)
+                        .aria_toggled(if checked {
+                            accesskit::Toggled::True
+                        } else {
+                            accesskit::Toggled::False
+                        })
+                        .h(ROW_HEIGHT)
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded(ROW_RADIUS)
+                        .text_size(px(13.))
+                        .cursor_pointer()
+                        .when(index == self.format_selected, |s| {
+                            s.bg(self.selected_color())
+                        })
+                        .hover(|s| s.bg(self.selected_color()))
+                        .active(|s| s.bg(self.pressed_color()))
+                        .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                            if this.format_selected != index {
+                                this.format_selected = index;
+                                cx.notify();
+                            }
+                        }))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.intent(intent.clone(), window, cx)
+                        }))
+                        .child(
+                            div()
+                                .w(px(14.))
+                                .when(checked, |s| s.child(icon(Icon::Check, self.control_text()))),
+                        )
+                        .child(div().flex_1().child(label))
+                        .child(self.shortcut(hint)),
+                ),
             );
         }
         div()
@@ -429,17 +480,11 @@ impl NotesApp {
             .left((window.bounds().size.width - width) / 2.)
             .w(width)
             .h(height)
-            .rounded(px(10.))
+            .rounded(POPOVER_RADIUS)
             .bg(self.surface_color())
             .border_1()
             .border_color(self.border_color())
-            .shadow(vec![BoxShadow {
-                color: rgba(0x00000025).into(),
-                offset: point(px(0.), px(4.)),
-                blur_radius: px(18.),
-                spread_radius: px(0.),
-                inset: false,
-            }])
+            .shadow(popover_shadow())
             .occlude()
             .overflow_hidden()
             // Preserve the editor selection until the chosen format is applied.

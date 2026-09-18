@@ -21,6 +21,9 @@ pub(super) struct Command {
     pub intent: Option<Intent>,
     /// Rank in the `/` menu and how it is applied; `None` keeps it out.
     pub slash: Option<(u8, SlashEffect)>,
+    /// Whether the ⌘K panel marks the command as the one already in force, for the few
+    /// that describe a state rather than an action. `None` for the rest.
+    pub checked: Option<bool>,
 }
 
 /// How the `/` menu applies a command, once the trigger text has been deleted.
@@ -45,6 +48,7 @@ impl Command {
             shortcut,
             intent: Some(intent),
             slash: None,
+            checked: None,
         }
     }
     /// A command only the editor's `/` menu offers.
@@ -60,10 +64,15 @@ impl Command {
             shortcut: "",
             intent: None,
             slash: Some((rank, effect)),
+            checked: None,
         }
     }
     pub(super) fn slash(mut self, rank: u8, effect: SlashEffect) -> Self {
         self.slash = Some((rank, effect));
+        self
+    }
+    pub(super) fn checked(mut self, checked: bool) -> Self {
+        self.checked = Some(checked);
         self
     }
 }
@@ -161,7 +170,9 @@ impl NotesApp {
         Typeahead::new(
             SLASH_MENU,
             TRIGGERS.to_vec(),
-            SlashProvider::new(self.action_items()),
+            // The `/` menu is built once per note, before the editor exists, so it takes
+            // the commands that do not depend on where the caret is.
+            SlashProvider::new(self.action_items(Caret::default())),
         )
     }
 
