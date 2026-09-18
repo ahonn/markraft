@@ -21,3 +21,4 @@ mod state_prop_tests;
 mod state_tests;
 mod structural_tests;
 mod support;
+mod table_command_tests;

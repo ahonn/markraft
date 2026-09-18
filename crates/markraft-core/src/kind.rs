@@ -36,6 +36,13 @@ pub struct DocTypeNames {
     pub horizontal_rule: Option<&'static str>,
     /// Source text kept verbatim, in a `source` attribute.
     pub raw_block: Option<&'static str>,
+    /// A table, carrying an `alignments` attribute: one entry per column,
+    /// comma-separated, each `left`, `center`, `right` or `none`.
+    pub table: Option<&'static str>,
+    /// One row of a table. The first row of a table is its header row.
+    pub table_row: Option<&'static str>,
+    /// One cell of a table row: a textblock.
+    pub table_cell: Option<&'static str>,
     /// A hard line break: an inline atom.
     pub hard_break: Option<&'static str>,
     /// An image: an inline atom.

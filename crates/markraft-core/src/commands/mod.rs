@@ -45,6 +45,10 @@
 //! Deviations are noted on the individual commands. `moveToLineBoundary` has no
 //! counterpart here: where a visual line ends is a layout question, and this
 //! crate has no layout.
+//!
+//! The table commands take after `prosemirror-tables` in shape only: there is
+//! no cell selection here, and Tab and Enter grow the table the way a Markdown
+//! editor's do.
 
 mod blocks;
 mod general;
@@ -53,6 +57,7 @@ mod list;
 mod marks;
 mod motion;
 pub mod structure;
+mod table;
 mod text;
 
 pub use blocks::{
@@ -71,6 +76,12 @@ pub use input_rules::{
 pub use list::{lift_list_item, sink_list_item, split_list_item, wrap_in_list};
 pub use marks::{mark_applies, range_has_mark, remove_mark, set_mark, toggle_mark};
 pub use motion::{Direction, delete_by_grapheme, delete_by_word, move_by_grapheme, move_by_word};
+pub use table::{
+    ALIGNMENTS_ATTR, CellPos, ColumnAlignment, TableTypes, add_column_after, add_column_before,
+    add_row_after, add_row_before, cell_at, column_alignments, delete_column, delete_empty_table,
+    delete_row, delete_table, goto_cell_above, goto_cell_below, goto_next_cell, goto_prev_cell,
+    guard_cell_boundary, guard_cell_range, guard_cell_split, insert_table, set_column_alignment,
+};
 pub use text::{
     delete_range, delete_range_changes, insert_hard_break, insert_node, insert_text,
     replace_selection, replace_selection_changes,
