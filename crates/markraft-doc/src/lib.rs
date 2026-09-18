@@ -67,7 +67,7 @@
 //! doc.check(&schema).unwrap();
 //! ```
 //!
-//! # Known limitations
+//! # Known limitations of the change system
 //!
 //! * [`ChangeSet::transform`] guarantees that both rebased sets apply and
 //!   leave a valid document, and that changes touching disjoint stretches of
@@ -84,6 +84,19 @@
 //!   *container* type allows and that container straddles the insertion, the
 //!   composed result marks the inner nodes where sequential application would
 //!   have marked the container.
+//! # Editor state
+//!
+//! [`EditorState`] adds the editing layer on top of the model: a selection, a
+//! configuration built from [`Extension`]s, [`Facet`]s and [`StateField`]s, and
+//! [`Transaction`]s that produce the next state. [`history`] records the
+//! inverted change sets, [`composition`] tracks IME marked text, and
+//! [`corrections`] repair shapes the schema alone cannot forbid — running until
+//! they have nothing left to ask for. A
+//! [`transaction_appender`] reacts to a finished transaction with another one;
+//! [`EditorState::update_with_appended`] is what returns the whole chain.
+//!
+//! # Known limitations
+//!
 //! * Repairing a change can widen it ([`Fit`]). When the widened range reaches
 //!   over another change in the same set, [`ChangeSet::create`] reports
 //!   [`ChangeError::FitConflict`] rather than guessing how to merge the two;
@@ -92,15 +105,20 @@
 mod attr;
 mod build;
 mod change;
+mod composition;
+mod corrections;
 mod error;
 mod fit;
 mod fragment;
+mod history;
 mod json;
 mod mark;
 mod node;
 mod pos;
 mod schema;
+mod selection;
 mod slice;
+mod state;
 
 #[cfg(test)]
 mod tests;
@@ -120,3 +138,28 @@ pub use schema::{
     NodeTypeSpec, Schema, SchemaSpec,
 };
 pub use slice::{Slice, Token, min_prefix_delta, node_tokens, tokens_cut, tokens_size};
+
+pub use composition::{
+    COMPOSE_USER_EVENT, CompositionRange, composition, composition_field, composition_range,
+    end_composition, finish_composition, is_composing, set_composition_range, start_composition,
+    update_composition,
+};
+pub use corrections::{
+    Correction, CorrectionContext, CorrectionTrigger, MAX_CORRECTION_ROUNDS, collect_corrections,
+    correction, corrections, corrections_diverged, fill_required_content,
+};
+pub use history::{
+    HistoryConfig, HistoryState, InvertedEffectsFn, IsolateHistory, begin_undo_group,
+    end_undo_group, history, history_config, history_field, inverted_effects, isolate,
+    isolate_history, redo, redo_depth, redo_selection, undo, undo_depth, undo_selection,
+};
+pub use selection::{Selection, SelectionKind, SelectionRange};
+pub use state::{
+    Annotation, AnnotationType, Appended, ChangeFilterFn, ChangeFilterResult, Compartment,
+    Configuration, Dep, EditorState, EditorStateConfig, Extension, Facet, FacetConfig,
+    MAX_APPENDED_TRANSACTIONS, Prec, StateEffect, StateEffectType, StateError, StateField,
+    StateFieldConfig, StateJsonFields, Transaction, TransactionAppenderFn, TransactionExtenderFn,
+    TransactionFilterFn, TransactionSpec, add_to_history, append_config, appended,
+    appenders_diverged, change_filter, compartment_reconfigure, origin, reconfigure, remote, time,
+    transaction_appender, transaction_extender, transaction_filter, user_event,
+};

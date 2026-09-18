@@ -2,6 +2,7 @@
 
 use crate::attr::{AttrKind, AttrSpec, AttrValue, Attrs};
 use crate::change::Change;
+use crate::fragment::Fragment;
 use crate::mark::{Mark, MarkSet};
 use crate::node::{Markup, Node};
 use crate::schema::{MarkTypeSpec, NodeTypeSpec, Schema, SchemaSpec};
@@ -106,6 +107,36 @@ pub fn link(schema: &Schema, href: &str) -> Mark {
 /// An image leaf.
 pub fn img(schema: &Schema, src: &str) -> Node {
     na(schema, "image", crate::attrs! {"src" => src}, [])
+}
+
+/// Build a state on the test schema.
+pub fn state(document: Node, extensions: crate::state::Extension) -> crate::state::EditorState {
+    let schema = document_schema(&document);
+    crate::state::EditorState::create(
+        crate::state::EditorStateConfig::new(schema)
+            .doc(document)
+            .extensions(extensions),
+    )
+    .expect("a valid starting state")
+}
+
+/// The test schema, cached so every state in one test shares it.
+pub fn shared_schema() -> Schema {
+    use std::sync::OnceLock;
+    static SCHEMA: OnceLock<Schema> = OnceLock::new();
+    SCHEMA.get_or_init(test_schema).clone()
+}
+
+fn document_schema(_doc: &Node) -> Schema {
+    shared_schema()
+}
+
+/// A change that inserts plain text at `pos`.
+pub fn insert_text(schema: &Schema, pos: usize, text: &str) -> Change {
+    Change::insert(
+        pos,
+        Slice::from_fragment(Fragment::from_node(schema.text(text))),
+    )
 }
 
 /// A tiny xorshift-style generator, so property tests are reproducible without
