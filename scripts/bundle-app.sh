@@ -11,7 +11,7 @@ esac
 bundle=target/MarkraftNotes.app
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" target/Markraft.iconset
 cp "target/$profile/markraft-app" "$bundle/Contents/MacOS/markraft-app"
-swift scripts/app-icon.swift target/Markraft.iconset
+swift scripts/app-icon.swift assets/icon/Markraft.png target/Markraft.iconset
 iconutil -c icns target/Markraft.iconset -o "$bundle/Contents/Resources/Markraft.icns"
 cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
