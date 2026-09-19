@@ -7,8 +7,9 @@
 //! # What the tree can hold
 //!
 //! Every CommonMark block has a node type, except the ones whose structure the
-//! model does not model: those are kept verbatim in a [`RAW_BLOCK`] leaf so a
-//! document never loses text it cannot interpret. Ordinary inline styling uses
+//! model does not model: those are kept verbatim in a [`RAW_BLOCK`], whose text
+//! *is* their source, so a document never loses text it cannot interpret and
+//! the source stays editable in place. Ordinary inline styling uses
 //! [`markraft_core::MarkSet`]; nested or empty structures that need more than a
 //! set use transparent [`INLINE_SPAN`] containers. [`RAW_INLINE`] preserves
 //! CommonMark inline HTML primitives.
@@ -116,9 +117,14 @@ pub const TASK_ITEM: &str = "task_item";
 /// A thematic break. A selectable block leaf.
 pub const HORIZONTAL_RULE: &str = "horizontal_rule";
 /// Source text for a block construct the model does not interpret — an HTML
-/// block, a footnote definition — held verbatim in the required `source`
-/// attribute (`Str`). A selectable block leaf that takes no marks and is
-/// written back unchanged.
+/// block, an HTML comment, a footnote definition: `text*`, no marks,
+/// `code: true`, like [`CODE_BLOCK`] and with no attributes at all.
+///
+/// Its text *is* the source, line endings and all, with no trailing one, and is
+/// written back unchanged. The editor shows it rather than rendering it, so it
+/// is ordinary editable text: an edit that leaves something that is no longer
+/// an HTML block is read as whatever it has become the next time the source is
+/// parsed.
 pub const RAW_BLOCK: &str = "raw_block";
 /// A GFM table: `table_row+`, attribute `alignments` (`Str`, default `""`).
 ///
@@ -268,11 +274,11 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                 .selectable(true),
         )
         .node(
-            NodeTypeSpec::leaf(RAW_BLOCK)
+            NodeTypeSpec::new(RAW_BLOCK, "text*")
                 .group(BLOCK_GROUP)
-                .selectable(true)
-                .atom(true)
-                .attr(AttrSpec::required("source", AttrKind::Str)),
+                .code(true)
+                .defining(true)
+                .marks(""),
         )
         .node(
             NodeTypeSpec::new(TABLE, "table_row+")

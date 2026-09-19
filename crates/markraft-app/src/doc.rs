@@ -82,13 +82,7 @@ pub fn plain_text(doc: &Node) -> String {
 pub fn title_line(doc: &Node) -> Option<String> {
     doc.children().find_map(|block| {
         let text = if schema().node_type(block.type_id()).name() == md::RAW_BLOCK {
-            strip_tags(
-                block
-                    .attrs()
-                    .get("source")
-                    .and_then(|source| source.as_str())
-                    .unwrap_or_default(),
-            )
+            strip_tags(&plain_text(block))
         } else {
             plain_text(block)
         };

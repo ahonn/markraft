@@ -374,6 +374,162 @@ fn an_html_block_and_a_footnote_definition_are_kept_verbatim() {
 }
 
 #[test]
+fn a_raw_block_holds_its_source_as_its_own_text() {
+    // The text *is* the source, line endings and all and with no trailing one.
+    // The editor shows that markup instead of rendering it, so the user edits
+    // it the way they edit a code block.
+    assert_eq!(
+        shape("<div>\nraw <b>text</b>\n</div>"),
+        "doc(raw_block(\"<div>\nraw <b>text</b>\n</div>\"))"
+    );
+    assert_eq!(
+        shape("<!-- a comment -->"),
+        "doc(raw_block(\"<!-- a comment -->\"))"
+    );
+    // A comment runs over as many lines as it likes and stays one block.
+    assert_eq!(
+        shape("<!-- one\ntwo\nthree -->"),
+        "doc(raw_block(\"<!-- one\ntwo\nthree -->\"))"
+    );
+}
+
+#[test]
+fn a_raw_block_carries_the_prefix_of_every_container_it_sits_in() {
+    // Each line of the source is written behind the list indent or the quote
+    // bar, exactly as a code block's content is.
+    let codec = Codec::new();
+    for source in [
+        "- <div>\n  x\n  </div>",
+        "- a\n- <div>\n  x\n  </div>",
+        "1. <div>\n   x\n   </div>",
+        "> <div>\n> x\n> </div>",
+        "> - <div>\n>   x\n>   </div>",
+    ] {
+        assert_eq!(round(source), source, "{source:?} was not written back");
+        assert!(judge(&codec, source).is_ok(), "{source:?}");
+    }
+}
+
+#[test]
+fn a_raw_block_before_another_block_in_an_item_writes_the_list_loose() {
+    // An HTML block runs on until a blank line, so a tight item would read the
+    // paragraph under it as more of its own source. A loose list puts the blank
+    // line there, and `tight` is cosmetic, so that is the one thing that gives.
+    let codec = Codec::new();
+    let schema = &codec.schema;
+    let item = schema
+        .node(
+            md::LIST_ITEM,
+            [
+                schema
+                    .node(md::RAW_BLOCK, [schema.text("<div>\nx\n</div>")])
+                    .expect("a raw block"),
+                schema
+                    .node(md::PARAGRAPH, [schema.text("after")])
+                    .expect("a paragraph"),
+            ],
+        )
+        .expect("an item");
+    let list = schema
+        .node_with(
+            md::BULLET_LIST,
+            attrs! {"tight" => true, "bullet_char" => "-"},
+            [item],
+        )
+        .expect("a list");
+    let doc = schema.doc([list]).expect("a document");
+    let written = codec.write(&doc);
+    assert_eq!(written, "- <div>\n  x\n  </div>\n\n  after");
+    assert_eq!(
+        codec.describe(&codec.parse(&written)),
+        concat!(
+            r#"doc(bullet_list[bullet_char=Str("-"),tight=Bool(false)](list_item("#,
+            "raw_block(\"<div>\nx\n</div>\"), paragraph(\"after\"))))"
+        )
+    );
+    assert_eq!(codec.normalize(&written), written);
+}
+
+#[test]
+fn an_edited_raw_block_is_read_as_whatever_its_text_has_become() {
+    use markraft_core::commands::{delete_range, run_command};
+    use markraft_core::{EditorState, EditorStateConfig, Selection};
+
+    // Deleting the tags leaves text that is no longer an HTML block, and the
+    // next parse reads it as the paragraph it now is. That is what making the
+    // source editable means, and it is intended.
+    let codec = Codec::new();
+    let doc = codec.parse("<div>\nraw text\n</div>");
+    let state = EditorState::create(
+        EditorStateConfig::new(codec.schema.clone())
+            .doc(doc)
+            .selection(Selection::cursor(1)),
+    )
+    .expect("a valid starting state");
+    let delete = |state: &EditorState, from, to| {
+        run_command(state, &delete_range(from, to))
+            .expect("the deletion applies")
+            .expect("the transaction resolves")
+            .state()
+            .clone()
+    };
+    // `<div>\n` off the front, then `\n</div>` off the back.
+    let state = delete(&state, 1, 7);
+    let state = delete(&state, 9, 16);
+    assert_eq!(codec.describe(state.doc()), r#"doc(raw_block("raw text"))"#);
+    let written = codec.write(state.doc());
+    assert_eq!(written, "raw text");
+    assert_eq!(shape(&written), r#"doc(paragraph("raw text"))"#);
+}
+
+#[test]
+fn an_emptied_raw_block_writes_nothing_at_all() {
+    // A block whose text an edit removed has no source left to write, so it
+    // writes nothing — not even the blank lines that would separate it — and
+    // the next parse finds no block there.
+    let codec = Codec::new();
+    let schema = &codec.schema;
+    let empty = schema.node(md::RAW_BLOCK, []).expect("an empty raw block");
+    let paragraph = |text: &str| {
+        schema
+            .node(md::PARAGRAPH, [schema.text(text)])
+            .expect("a paragraph")
+    };
+    let doc = schema
+        .doc([paragraph("a"), empty.clone(), paragraph("b")])
+        .expect("a document");
+    assert_eq!(codec.write(&doc), "a\n\nb");
+    assert_eq!(shape("a\n\nb"), r#"doc(paragraph("a"), paragraph("b"))"#);
+    // On its own it leaves nothing at all, and the importer fills the empty
+    // document back in.
+    let doc = schema.doc([empty]).expect("a document");
+    assert_eq!(codec.write(&doc), "");
+    assert_eq!(shape(""), "doc(paragraph())");
+}
+
+#[test]
+fn every_raw_block_shape_is_a_fixed_point_of_parse_and_write() {
+    let codec = Codec::new();
+    for source in [
+        "<div>\nraw <b>text</b>\n</div>",
+        "<!-- a comment -->",
+        "<!-- one\ntwo\nthree -->",
+        "<table><tr><td>a</td></tr></table>",
+        "text\n\n<div>\nx\n</div>\n\nmore text",
+        "- <div>\n  x\n  </div>",
+        "- <div>\n  x\n  </div>\n\n  after",
+        "> <div>\n> x\n> </div>",
+        "> - <div>\n>   x\n>   </div>",
+    ] {
+        let doc = codec.parse(source);
+        let written = codec.write(&doc);
+        assert_eq!(codec.parse(&written), doc, "{source:?} does not settle");
+        assert_eq!(codec.normalize(&written), written, "{source:?}");
+        assert!(judge(&codec, source).is_ok(), "{source:?}");
+    }
+}
+
+#[test]
 fn an_empty_link_keeps_its_semantic_container() {
     // The empty container carries the link without inventing text.
     assert_eq!(shape("[](url)"), r#"doc(paragraph(inline_span{link}()))"#);

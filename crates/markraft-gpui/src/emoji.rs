@@ -104,14 +104,14 @@ impl Extension for EmojiShortcodes {
 /// The `:shortcode:` whose closing colon `caret` sits after, and the emoji it stands
 /// for. The opening colon must open the line or follow whitespace, so `10:30:` and
 /// `a:b:` are text; the name must be a whole shortcode; and no part of the run may be
-/// inline code or lie in a code block.
+/// inline code or lie in a verbatim block.
 fn closing_shortcode(
     state: &EditorState,
     projection: &Projection,
     types: &DocTypes,
     caret: usize,
 ) -> Option<(Range<usize>, &'static str)> {
-    if types.in_code_block_at(state) {
+    if types.in_verbatim_block_at(state) {
         return None;
     }
     let index = projection.line_at(caret)?;
@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn code_never_auto_replaces() {
+    fn verbatim_text_never_auto_replaces() {
         // A code block, and an inline code span covering the whole run or only its
         // closing colon.
         for source in ["```\n:smile:\n```", "x `:smile:`", "`:smile:`"] {
@@ -368,6 +368,12 @@ mod tests {
                 .expect("a line");
             assert!(found_in(&state, caret).is_none(), "{source}");
         }
+        // A raw block keeps its source as it was written, shortcode and all.
+        let state = state_of("<div>\n:smile:\n</div>");
+        let caret = projection_of(&state).lines()[0]
+            .offset_to_pos("<div>\n:smile:".chars().count())
+            .expect("an offset inside the block");
+        assert!(found_in(&state, caret).is_none());
         // Code that merely abuts the run does not stop it.
         let state = state_of("`x` :smile:");
         let caret = projection_of(&state).lines()[0].to;

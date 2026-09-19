@@ -295,7 +295,7 @@ impl Extension for Typeahead {
             .then(|| {
                 open_match(
                     &cx.projection(),
-                    cx.types().in_code_block_at(cx.state()),
+                    cx.types().in_verbatim_block_at(cx.state()),
                     cx.head(),
                     &self.triggers,
                     self.min_query,
@@ -512,7 +512,7 @@ pub(crate) mod tests {
         let state = at(state, pos);
         trigger_match(
             &projection_of(&state),
-            types.in_code_block_at(&state),
+            types.in_verbatim_block_at(&state),
             pos,
             &SLASH,
         )
@@ -563,9 +563,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_code_block_never_matches() {
+    fn a_verbatim_block_never_matches() {
         let state = state_of("```\n/head\n```");
         assert_eq!(query(&state, 6), None);
+        // A raw block keeps its source verbatim, so a slash in one is a slash.
+        let state = state_of("<div>\n/head\n</div>");
+        let caret = projection_of(&state).lines()[0]
+            .offset_to_pos("<div>\n/head".chars().count())
+            .expect("an offset inside the block");
+        assert_eq!(query(&state, caret), None);
     }
 
     #[test]

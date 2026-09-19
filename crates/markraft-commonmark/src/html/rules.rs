@@ -53,6 +53,8 @@ impl HtmlTarget<'_> {
 pub type HtmlAttrsFn = Arc<dyn for<'a> Fn(HtmlTarget<'a>) -> Attrs + Send + Sync>;
 /// Decides whether a rule applies to an element.
 pub type HtmlMatchFn = Arc<dyn for<'a> Fn(HtmlTarget<'a>) -> bool + Send + Sync>;
+/// Produces the literal text a rule puts inside a textblock.
+pub type HtmlTextFn = Arc<dyn for<'a> Fn(HtmlTarget<'a>) -> String + Send + Sync>;
 
 /// Wrap a closure as an [`HtmlAttrsFn`].
 pub fn html_attrs_fn<F>(f: F) -> HtmlAttrsFn
@@ -70,8 +72,22 @@ where
     Arc::new(f)
 }
 
+/// Wrap a closure as an [`HtmlTextFn`].
+pub fn html_text_fn<F>(f: F) -> HtmlTextFn
+where
+    F: for<'a> Fn(HtmlTarget<'a>) -> String + Send + Sync + 'static,
+{
+    Arc::new(f)
+}
+
 fn no_attrs() -> HtmlAttrsFn {
     html_attrs_fn(|_| Attrs::empty())
+}
+
+/// The usual text of a textblock: everything the element renders, which is what
+/// a `<pre>` holds.
+fn element_text() -> HtmlTextFn {
+    html_text_fn(|target| target.text())
 }
 
 /// What to do with one element.
@@ -86,12 +102,16 @@ pub enum HtmlRule {
         /// Its attributes.
         attrs: HtmlAttrsFn,
     },
-    /// Build a block node whose content is the element's text, taken verbatim.
+    /// Build a block node whose content is literal text taken from the element
+    /// rather than from its children — its own text for a code block, its whole
+    /// markup for a block the model keeps as source.
     TextBlock {
         /// The schema node type to build.
         node_type: String,
         /// Its attributes.
         attrs: HtmlAttrsFn,
+        /// The text to put inside it.
+        text: HtmlTextFn,
     },
     /// Build an inline leaf. The element's children are not visited.
     Atom {
@@ -174,6 +194,15 @@ impl HtmlRule {
         HtmlRule::Mark {
             mark_type: mark_type.to_string(),
             attrs,
+        }
+    }
+
+    /// A block node of a fixed type holding the element's own text.
+    pub fn text_block(node_type: &str, attrs: HtmlAttrsFn) -> HtmlRule {
+        HtmlRule::TextBlock {
+            node_type: node_type.to_string(),
+            attrs,
+            text: element_text(),
         }
     }
 }
@@ -311,13 +340,15 @@ pub fn commonmark_html_rules() -> HtmlRules {
         .with("input", HtmlRule::Ignore)
         // Before the general `<table>`: a table the schema cannot describe is
         // kept whole rather than flattened into one the reader would misread.
+        // Its markup, not its text, is what the raw block holds.
         .matching(
             "table",
             html_match_fn(|target| !is_modelled_table(target)),
-            HtmlRule::block_with(
-                md::RAW_BLOCK,
-                html_attrs_fn(|target| attrs! {"source" => target.element.html()}),
-            ),
+            HtmlRule::TextBlock {
+                node_type: md::RAW_BLOCK.to_string(),
+                attrs: no_attrs(),
+                text: html_text_fn(|target| target.element.html()),
+            },
         )
         .with(
             "table",
@@ -343,20 +374,13 @@ pub fn commonmark_html_rules() -> HtmlRules {
         .matching(
             "pre",
             html_match_fn(|target| target.attr("data-type") == Some("rawBlock")),
-            HtmlRule::block_with(
-                md::RAW_BLOCK,
-                html_attrs_fn(|target| {
-                    let text = target.text();
-                    let source = text.strip_suffix('\n').unwrap_or(&text).to_string();
-                    attrs! {"source" => source}
-                }),
-            ),
+            HtmlRule::text_block(md::RAW_BLOCK, no_attrs()),
         )
         .with(
             "pre",
-            HtmlRule::TextBlock {
-                node_type: md::CODE_BLOCK.to_string(),
-                attrs: html_attrs_fn(|target| {
+            HtmlRule::text_block(
+                md::CODE_BLOCK,
+                html_attrs_fn(|target| {
                     let language = target
                         .element
                         .descendants()
@@ -381,7 +405,7 @@ pub fn commonmark_html_rules() -> HtmlRules {
                         "fence_length" => length,
                     }
                 }),
-            },
+            ),
         )
         .with(
             "ul",

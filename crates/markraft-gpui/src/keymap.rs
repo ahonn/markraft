@@ -1,9 +1,10 @@
 //! What each bound action does, as a chain of catalogue commands.
 //!
-//! The chains mirror ProseMirror's base and list keymaps, with the two
+//! The chains mirror ProseMirror's base and list keymaps, with the three
 //! departures the editor's own tests describe: Backspace at the start of a list
-//! item outdents before it lifts or joins, and Enter in an empty list item
-//! leaves the list.
+//! item outdents before it lifts or joins, Enter in an empty list item leaves
+//! the list, and Backspace in an empty verbatim block turns it into a
+//! paragraph.
 
 use crate::types::DocTypes;
 use markraft_core::commands::{
@@ -122,13 +123,6 @@ impl DocTypes {
                 .is_some_and(|parent| self.is_item(parent.node_type))
     }
 
-    /// Whether the cursor sits inside a code block.
-    fn in_code_block(&self, state: &EditorState) -> bool {
-        let doc = state.doc();
-        doc.resolve(state.selection().head(doc))
-            .is_ok_and(|resolved| Some(resolved.parent().type_id()) == self.code_block)
-    }
-
     /// The type and attributes of the textblock the cursor sits in.
     fn block_at_cursor(&self, state: &EditorState) -> Option<(NodeTypeId, Attrs)> {
         let doc = state.doc();
@@ -189,6 +183,28 @@ pub(crate) fn enter(types: &DocTypes) -> Command {
     some(list)
 }
 
+/// Backspace at the start of an empty verbatim block: turn it into a paragraph.
+///
+/// A verbatim block keeps Enter for itself, so the key that would otherwise
+/// delete nothing is the way out of an empty one. A raw block has no chrome of
+/// its own, so an empty one is invisible as well as inescapable.
+fn clear_empty_verbatim(types: &DocTypes) -> Command {
+    let types = types.clone();
+    command(move |state| {
+        let paragraph = types.paragraph?;
+        if !state.selection().is_cursor() || !types.in_verbatim_block_at(state) {
+            return None;
+        }
+        let doc = state.doc();
+        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        // Empty content leaves the cursor nowhere but the block's start.
+        if resolved.parent().content_size() != 0 {
+            return None;
+        }
+        set_block_type(paragraph, Attrs::empty())(state)
+    })
+}
+
 /// Backspace.
 pub(crate) fn backspace(types: &DocTypes) -> Command {
     let outdent = {
@@ -206,6 +222,7 @@ pub(crate) fn backspace(types: &DocTypes) -> Command {
         types.table_types().map(delete_empty_table),
         types.table_types().map(guard_cell_boundary),
         Some(outdent),
+        Some(clear_empty_verbatim(types)),
         Some(join_backward()),
         Some(select_node_backward()),
     ])
@@ -267,22 +284,22 @@ pub(crate) fn move_document_edge(end: bool, extend: bool) -> Command {
     })
 }
 
-/// Tab: step to the next table cell, sink a list item, or indent inside a code
-/// block.
+/// Tab: step to the next table cell, sink a list item, or indent inside a
+/// verbatim block.
 ///
-/// A cell holds inline content, so no code block can sit in one and the two
+/// A cell holds inline content, so no verbatim block can sit in one and the two
 /// never compete.
 pub(crate) fn indent(types: &DocTypes) -> Command {
-    let code = {
+    let verbatim = {
         let types = types.clone();
         when(
-            move |state| types.in_code_block(state) && state.selection().is_cursor(),
+            move |state| types.in_verbatim_block_at(state) && state.selection().is_cursor(),
             markraft_core::commands::insert_text("\t"),
         )
     };
     let mut list = vec![types.table_types().map(goto_next_cell)];
     list.extend(per_item(types, sink_list_item));
-    list.push(Some(code));
+    list.push(Some(verbatim));
     some(list)
 }
 
@@ -470,8 +487,8 @@ pub(crate) fn toggle_task(types: &DocTypes) -> Command {
 
 /// Insert literal text, turning its line endings into block breaks.
 ///
-/// A line ending is a block break everywhere but in a code block, where it is
-/// the character it looks like. The multi-block form is an open slice, so its
+/// A line ending is a block break everywhere but in a verbatim block, where it
+/// is the character it looks like. The multi-block form is an open slice, so its
 /// first and last paragraphs merge with the block the caret sits in exactly as
 /// a paste of the same shape would.
 pub(crate) fn insert_plain(types: &DocTypes, text: &str) -> Command {
@@ -479,7 +496,7 @@ pub(crate) fn insert_plain(types: &DocTypes, text: &str) -> Command {
     let types = types.clone();
     let text = text.to_owned();
     let insert = command(move |state| {
-        if !text.contains('\n') || types.in_code_block(state) {
+        if !text.contains('\n') || types.in_verbatim_block_at(state) {
             return markraft_core::commands::insert_text(&text)(state);
         }
         let schema = state.schema();
@@ -511,12 +528,12 @@ pub(crate) fn insert_plain(types: &DocTypes, text: &str) -> Command {
     some([guard, Some(insert)])
 }
 
-/// ⌘A: the code block the cursor sits in first, then the whole document.
+/// ⌘A: the verbatim block the cursor sits in first, then the whole document.
 pub(crate) fn select_all(types: &DocTypes) -> Command {
     let types = types.clone();
     command(move |state| {
         let doc = state.doc();
-        if types.in_code_block(state) {
+        if types.in_verbatim_block_at(state) {
             let resolved = doc.resolve(state.selection().head(doc)).ok()?;
             let (from, to) = (
                 resolved.start(resolved.depth()),
@@ -540,7 +557,7 @@ mod tests {
     use super::*;
     use crate::typeahead::tests::{at, state_of, types_of};
     use markraft_commonmark::{schema as md, to_markdown};
-    use markraft_core::commands::run_command;
+    use markraft_core::commands::{delete_range, run_command};
     use markraft_core::projection::projection_of;
 
     /// Run `command` and give back the Markdown it leaves, or `None` when the
@@ -822,6 +839,66 @@ mod tests {
             after(&state, &toggle_task(&types_of(&state))).as_deref(),
             Some("```\ncode\n```\n\n<br>")
         );
+    }
+
+    /// The caret at `offset` characters into the document's first line.
+    fn offset_in_first_line(state: &EditorState, offset: usize) -> EditorState {
+        let line = projection_of(state).lines()[0].clone();
+        at(
+            state,
+            line.offset_to_pos(offset).expect("an offset in the line"),
+        )
+    }
+
+    /// A raw block holds its source as text, so Enter writes the line ending it
+    /// looks like rather than splitting the block in two.
+    #[test]
+    fn enter_in_a_raw_block_writes_a_newline_and_keeps_the_block() {
+        let state = state_of("<div>\nab\n</div>");
+        let raw = state.doc().child(0).type_id();
+        let state = offset_in_first_line(&state, "<div>\na".chars().count());
+        let split = applied(&state, &enter(&types_of(&state))).expect("Enter applies");
+        assert_eq!(
+            to_markdown(state.schema(), split.doc()),
+            "<div>\na\nb\n</div>"
+        );
+        assert_eq!(split.doc().child_count(), 1, "still one block");
+        assert_eq!(split.doc().child(0).type_id(), raw, "and still the raw one");
+    }
+
+    /// Typing past the last character of a raw block stays in it: there is no
+    /// chrome to fall out of, so the text simply grows.
+    #[test]
+    fn typing_at_the_end_of_a_raw_block_stays_inside_it() {
+        let state = state_of("<div>\nab\n</div>");
+        let raw = state.doc().child(0).type_id();
+        let state = at(&state, projection_of(&state).lines()[0].to);
+        let typed = applied(&state, &insert_plain(&types_of(&state), "\nc"))
+            .expect("the insertion applies");
+        assert_eq!(
+            to_markdown(state.schema(), typed.doc()),
+            "<div>\nab\n</div>\nc"
+        );
+        assert_eq!(typed.doc().child_count(), 1, "the newline stayed literal");
+        assert_eq!(typed.doc().child(0).type_id(), raw);
+    }
+
+    /// An emptied raw block draws nothing at all, so Backspace — the key that
+    /// would otherwise delete nothing — is the way out of one.
+    #[test]
+    fn backspace_in_an_empty_raw_block_leaves_a_paragraph() {
+        let state = state_of("<div>");
+        let types = types_of(&state);
+        let line = projection_of(&state).lines()[0].clone();
+        let emptied = applied(&state, &delete_range(line.from, line.to)).expect("the text goes");
+        let emptied = at(&emptied, projection_of(&emptied).lines()[0].from);
+        let cleared = applied(&emptied, &backspace(&types)).expect("Backspace applies");
+        assert_eq!(cleared.doc().child_count(), 1);
+        assert_eq!(Some(cleared.doc().child(0).type_id()), types.paragraph);
+        // A raw block with text in it still loses one character at a time.
+        let state = at(&state, line.to);
+        let deleted = applied(&state, &backspace(&types)).expect("a grapheme goes");
+        assert_eq!(to_markdown(state.schema(), deleted.doc()), "<div");
     }
 
     #[test]

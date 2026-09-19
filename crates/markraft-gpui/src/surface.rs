@@ -500,7 +500,7 @@ impl LayoutLine {
     }
 
     /// The `char` range of each visual row, clamped to the line's own content so
-    /// a placeholder or a raw block's source reports nothing selectable.
+    /// a placeholder reports nothing selectable.
     pub(crate) fn accessible_rows(&self) -> Vec<Range<usize>> {
         let mut ranges = Vec::new();
         for row in &self.rows {
@@ -653,14 +653,18 @@ enum CellWidth {
     Column(Pixels),
 }
 
-pub(crate) fn shape(input: &ShapeInput<'_>, width: Pixels, window: &Window) -> Vec<LayoutLine> {
+pub(crate) fn shape(
+    input: &ShapeInput<'_>,
+    width: Pixels,
+    text_system: &WindowTextSystem,
+) -> Vec<LayoutLine> {
     let mut lines: Vec<LayoutLine> = (0..input.projection.line_count())
         .map(|index| {
             let cell = table_cell(input, index).map(|_| CellWidth::Natural);
-            shape_line(input, index, width, cell, window)
+            shape_line(input, index, width, cell, text_system)
         })
         .collect();
-    shape_tables(input, &mut lines, width, window);
+    shape_tables(input, &mut lines, width, text_system);
     lines
 }
 
@@ -674,7 +678,7 @@ fn shape_line(
     index: usize,
     width: Pixels,
     cell: Option<CellWidth>,
-    window: &Window,
+    text_system: &WindowTextSystem,
 ) -> LayoutLine {
     let ShapeInput {
         doc,
@@ -688,7 +692,7 @@ fn shape_line(
     let code = types.is_code_block(line);
     let font_size = style.font_size(heading, code);
     let max_indent = max_indent(style, width);
-    let number = ordered_marker(doc, types, line, style, font_size, window);
+    let number = ordered_marker(doc, types, line, style, font_size, text_system);
     let indent = indent_of(types, line, style, number.as_ref().map(|(_, w)| *w)).min(max_indent);
     let marker = marker_of(types, line, style, number.map(|(shaped, _)| shaped));
     let decoration = decoration_of(input, index, line, cell.is_some(), max_indent);
@@ -701,14 +705,13 @@ fn shape_line(
         None => (width - indent - if code { CODE_PADDING } else { px(0.) }).max(px(40.)),
     };
     let unwrapped = single_line || cell == Some(CellWidth::Natural);
-    let text = display_text(input, line, index, font_size, wrap_width, window);
+    let text = display_text(input, line, index, font_size, wrap_width, text_system);
     // A drawn image needs the whole row it was measured for.
     let line_height = text
         .line_height
         .unwrap_or(font_size * style.line_height_ratio);
     let runs = text_runs(input, line, &text, heading, code, font_size, style);
-    let shaped = window
-        .text_system()
+    let shaped = text_system
         .shape_text(
             text.text.clone().into(),
             font_size,
@@ -751,7 +754,7 @@ fn shape_line(
             crate::syntax::language_label(types.code_language(line).unwrap_or("")),
             width,
             style,
-            window,
+            text_system,
         )
     });
 
@@ -797,7 +800,7 @@ fn shape_line(
         layout.min_width = min_content_width(&layout, &runs.code);
     }
     layout.height = layout.text_height() + gap;
-    shape_inline_code(&mut layout, &text.text, &runs.code, font_size, window);
+    shape_inline_code(&mut layout, &text.text, &runs.code, font_size, text_system);
     place_atoms(&mut layout, text.atoms);
     layout
 }
@@ -943,7 +946,12 @@ fn is_word_char(c: char) -> bool {
 /// content wants. Consecutive lines naming the same table form one grid: its
 /// columns are sized from those widths, each cell is reshaped inside the column
 /// it was given, and the cells of one row are placed on one band of y.
-fn shape_tables(input: &ShapeInput<'_>, lines: &mut [LayoutLine], width: Pixels, window: &Window) {
+fn shape_tables(
+    input: &ShapeInput<'_>,
+    lines: &mut [LayoutLine],
+    width: Pixels,
+    text_system: &WindowTextSystem,
+) {
     let mut start = 0usize;
     while start < lines.len() {
         let Some((table, _, _)) = table_cell(input, lines[start].index) else {
@@ -956,7 +964,7 @@ fn shape_tables(input: &ShapeInput<'_>, lines: &mut [LayoutLine], width: Pixels,
         {
             end += 1;
         }
-        shape_table(input, table, &mut lines[start..end], width, window);
+        shape_table(input, table, &mut lines[start..end], width, text_system);
         start = end;
     }
 }
@@ -967,7 +975,7 @@ fn shape_table(
     table: usize,
     cells: &mut [LayoutLine],
     width: Pixels,
-    window: &Window,
+    text_system: &WindowTextSystem,
 ) {
     let Some(first) = cells.first() else { return };
     let left = first.origin.x;
@@ -1003,7 +1011,7 @@ fn shape_table(
             cell.index,
             width,
             Some(CellWidth::Column(content)),
-            window,
+            text_system,
         );
     }
 
@@ -1342,8 +1350,8 @@ fn place_atoms(layout: &mut LayoutLine, pending: Vec<PendingAtom>) {
 /// enter.
 struct DisplayText {
     text: String,
-    /// True when the text is a stand-in — a placeholder space for an empty line,
-    /// or the source of a raw block — so no run may be derived from the content.
+    /// True when the text is a stand-in — a placeholder space for an empty line
+    /// — so no run may be derived from the content.
     synthetic: bool,
     /// The display byte length of each of the line's projection runs, which is
     /// the run's own length except where an atom's placeholder widened it.
@@ -1384,7 +1392,7 @@ fn display_text(
     index: usize,
     font_size: Pixels,
     column: Pixels,
-    window: &Window,
+    text_system: &WindowTextSystem,
 ) -> DisplayText {
     let ShapeInput {
         types,
@@ -1393,14 +1401,7 @@ fn display_text(
         ..
     } = *input;
     if line.kind == LineKind::LeafBlock {
-        let source = line
-            .ancestors
-            .last()
-            .filter(|own| Some(own.node_type) == types.raw_block)
-            .and_then(|own| own.attrs.get("source"))
-            .and_then(|value| value.as_str())
-            .unwrap_or(" ");
-        return DisplayText::stand_in(source.to_owned());
+        return DisplayText::stand_in(" ".to_owned());
     }
     let source = projection.line_text(index).unwrap_or_default();
     if source.is_empty() {
@@ -1422,12 +1423,12 @@ fn display_text(
         let len: usize = source[byte..].chars().take(chars).map(char::len_utf8).sum();
         let slice = &source[byte..byte + len];
         byte += len;
-        match atom_of(types, run, style, font_size, column, alone, window) {
+        match atom_of(types, run, style, font_size, column, alone, text_system) {
             Some(atom) => {
                 // One atom is one character, and it advances nowhere near far
                 // enough for what is drawn over it, so the row reserves the
                 // width in fillers.
-                let unit = *filler.get_or_insert_with(|| filler_width(font_size, window));
+                let unit = *filler.get_or_insert_with(|| filler_width(font_size, text_system));
                 let count = (atom.width / unit).ceil().max(1.) as usize;
                 text.extend(std::iter::repeat_n(PILL_FILLER, count));
                 run_bytes.push(count * PILL_FILLER.len_utf8());
@@ -1466,10 +1467,10 @@ fn display_text(
 
 /// The advance of one [`PILL_FILLER`], which is the unit a placeholder reserves
 /// its width in.
-fn filler_width(font_size: Pixels, window: &Window) -> Pixels {
+fn filler_width(font_size: Pixels, text_system: &WindowTextSystem) -> Pixels {
     const SAMPLE: usize = 8;
     let text: String = std::iter::repeat_n(PILL_FILLER, SAMPLE).collect();
-    let shaped = window.text_system().shape_line(
+    let shaped = text_system.shape_line(
         text.clone().into(),
         font_size,
         &[TextRun {
@@ -1532,7 +1533,7 @@ fn atom_of(
     font_size: Pixels,
     column: Pixels,
     alone: bool,
-    window: &Window,
+    text_system: &WindowTextSystem,
 ) -> Option<Atom> {
     let RunContent::Atom(node) = &run.content else {
         return None;
@@ -1551,7 +1552,7 @@ fn atom_of(
     };
     let room = (column * PILL_MAX_RATIO - shape.chrome()).max(px(16.));
     let shaped = |label: String| {
-        Rc::new(window.text_system().shape_line(
+        Rc::new(text_system.shape_line(
             label.clone().into(),
             size,
             &[TextRun {
@@ -1681,7 +1682,11 @@ fn text_runs(
     // names the columns rather than holding data.
     let header = types.is_table_header(line);
     let checked_item = types.in_checked_item(line);
-    let text_color = if checked_item {
+    // A raw block's source is shown as source: monospaced and quiet, so it reads
+    // as the markup it is rather than as prose. It carries no chrome, so the
+    // face and the colour are all that say so.
+    let raw = types.is_raw_block(line);
+    let text_color = if checked_item || raw {
         style.muted_text
     } else {
         style.text
@@ -1697,9 +1702,6 @@ fn text_runs(
         if heading.is_some() {
             face.weight = FontWeight::BOLD;
         }
-        // A raw block's source is shown as source: monospaced and quiet, so it
-        // reads as the markup it is rather than as prose.
-        let raw = types.is_raw_block(line);
         if raw {
             face = font(CODE_FONT);
         }
@@ -1707,7 +1709,7 @@ fn text_runs(
             runs: vec![TextRun {
                 len: text.text.len(),
                 font: face,
-                color: if raw { style.muted_text } else { text_color },
+                color: text_color,
                 background_color: None,
                 underline: None,
                 strikethrough: None,
@@ -1726,7 +1728,7 @@ fn text_runs(
             continue;
         }
         let marks = &run.marks;
-        let is_code = code_block || has(types.code, marks);
+        let is_code = code_block || raw || has(types.code, marks);
         let is_link = has(types.link, marks);
         let mut face = font(if is_code { CODE_FONT } else { ".SystemUIFont" });
         if has(types.strong, marks) || heading.is_some() || header {
@@ -1881,7 +1883,7 @@ fn ordered_marker(
     line: &Line,
     style: &EditorStyle,
     font_size: Pixels,
-    window: &Window,
+    text_system: &WindowTextSystem,
 ) -> Option<(Rc<ShapedLine>, Pixels)> {
     let (item, list) = types.item_of(line)?;
     if Some(list.node_type) != types.ordered_list || !starts_item(types, line) {
@@ -1897,7 +1899,7 @@ fn ordered_marker(
         .map_or(item.index + 1, |node| node.child_count());
     let shape_number = |ordinal: i64| {
         let text = format!("{ordinal}.");
-        Rc::new(window.text_system().shape_line(
+        Rc::new(text_system.shape_line(
             text.clone().into(),
             font_size,
             &[TextRun {
@@ -2042,9 +2044,14 @@ fn gap_below(
 
 /// The shaped language label of a code block's header, trimmed to the room the
 /// picker and the copy button leave it.
-fn code_header(label: &str, width: Pixels, style: &EditorStyle, window: &Window) -> Rc<ShapedLine> {
+fn code_header(
+    label: &str,
+    width: Pixels,
+    style: &EditorStyle,
+    text_system: &WindowTextSystem,
+) -> Rc<ShapedLine> {
     let shape_label = |label: String| {
-        Rc::new(window.text_system().shape_line(
+        Rc::new(text_system.shape_line(
             label.clone().into(),
             px(13.),
             &[TextRun {
@@ -2075,7 +2082,7 @@ fn shape_inline_code(
     text: &str,
     code_ranges: &[(Range<usize>, Font, Hsla)],
     font_size: Pixels,
-    window: &Window,
+    text_system: &WindowTextSystem,
 ) {
     if code_ranges.is_empty() {
         return;
@@ -2115,7 +2122,7 @@ fn shape_inline_code(
         }
         for (index, part, slot) in pieces {
             let row_text = layout.rows[index].text().to_owned();
-            let line = window.text_system().shape_line(
+            let line = text_system.shape_line(
                 row_text[part.clone()].to_owned().into(),
                 font_size * scale,
                 &[TextRun {
@@ -2186,7 +2193,7 @@ impl Element for EditorSurface {
                     _ if view.single_line => px(0.),
                     _ => px(600.),
                 });
-                let rows = shape(&view.shape_input(), width, window);
+                let rows = shape(&view.shape_input(), width, window.text_system());
                 let height = rows
                     .iter()
                     .fold(if view.single_line { px(0.) } else { px(40.) }, |h, row| {
@@ -2207,7 +2214,7 @@ impl Element for EditorSurface {
         cx: &mut App,
     ) -> Vec<LayoutLine> {
         let view = self.editor.read(cx);
-        let mut rows = shape(&view.shape_input(), bounds.size.width, window);
+        let mut rows = shape(&view.shape_input(), bounds.size.width, window.text_system());
         let mut y = bounds.top();
         for row in &mut rows {
             y += row.top_gap;
@@ -3003,19 +3010,20 @@ fn paint_code_header(
 mod tests {
     use super::{
         AtomShape, CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_PADDING, Decoration,
-        LayoutLine, Marker, QUOTE_BAR, ShapeInput, TableScroll, Widening, atom_label, cell_under,
-        column_demands, column_widths, decoration_of, drawn_image, file_name, gap_below, marker_of,
-        max_indent, merge_row_centers, place_table, quote_bars, reveal_offset, table_overflows,
-        unbreakable_units, visible_strips,
+        LayoutLine, LayoutRow, Marker, QUOTE_BAR, ShapeInput, TableScroll, Widening, atom_label,
+        cell_under, column_demands, column_widths, decoration_of, drawn_image, file_name,
+        gap_below, marker_of, max_indent, merge_row_centers, place_table, quote_bars,
+        reveal_offset, shape, table_overflows, unbreakable_units, visible_strips,
     };
     use crate::style::EditorStyle;
     use crate::typeahead::tests::state_of;
     use crate::types::DocTypes;
-    use gpui::{Bounds, Pixels, point, px, size};
+    use gpui::{Bounds, NoopTextSystem, Pixels, TextSystem, WindowTextSystem, point, px, size};
     use markraft_commonmark::{commonmark_doc_type_names, commonmark_schema};
     use markraft_core::commands::ColumnAlignment;
     use markraft_core::projection::{Line, RunContent, projection_of};
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     /// A row carrying only the token range it stands for, which is all the
     /// caret and selection geometry decides with.
@@ -3269,6 +3277,57 @@ mod tests {
                 Some(Decoration::Code)
             ),
             "a code block keeps its own",
+        );
+    }
+
+    /// A window-free text system, so the shaping pass can be run in a test.
+    /// Every character comes out the same width, which is all a row count and a
+    /// caret stop ask of it.
+    fn text_system() -> WindowTextSystem {
+        WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))))
+    }
+
+    /// Every line of `source`, laid out at a note's width.
+    fn shaped(source: &str) -> Vec<LayoutLine> {
+        let state = state_of(source);
+        let projection = projection_of(&state);
+        let schema = commonmark_schema();
+        let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
+        let style = EditorStyle::notes();
+        let input = ShapeInput {
+            doc: state.doc(),
+            types: &types,
+            projection: &projection,
+            style: &style,
+            single_line: false,
+        };
+        shape(&input, px(600.), &text_system())
+    }
+
+    /// A raw block's source is its own text, so it goes through the rows a code
+    /// block goes through: one per `\n`, each holding the caret stops of its own
+    /// line and reported to AccessKit as the text it is rather than as an atom.
+    #[test]
+    fn a_raw_blocks_rows_follow_its_newlines() {
+        let source = "<div>\n  x\n</div>";
+        let lines = shaped(&format!("{source}\n\npara"));
+        let raw = &lines[0];
+        assert_eq!(
+            raw.rows.iter().map(LayoutRow::text).collect::<Vec<_>>(),
+            vec!["<div>", "  x", "</div>"],
+            "one row per source line"
+        );
+        assert_eq!(raw.visual_rows(), 3, "and none of them wrapped");
+        assert_eq!(raw.char_len, source.chars().count());
+        // Caret movement, selection and hit testing all locate an offset by its
+        // row, so every row has to answer for its own stretch of the block.
+        for (offset, row) in [(0, 0), (5, 0), (6, 1), (9, 1), (10, 2), (raw.char_len, 2)] {
+            assert_eq!(raw.locate(offset).0, row, "offset {offset}");
+        }
+        assert_eq!(
+            raw.accessible_rows(),
+            vec![0..5, 6..9, 10..raw.char_len],
+            "every row is selectable text"
         );
     }
 

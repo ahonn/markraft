@@ -1,9 +1,9 @@
 //! Plain text, for the `text/plain` flavour of a clipboard and for search.
 //!
 //! One line per block, and one line per hard break inside a block. An atom
-//! contributes the text a reader would see in its place: an image's `alt`, a
-//! raw block's source. A thematic break contributes nothing, because it has no
-//! text.
+//! contributes the text a reader would see in its place: an image's `alt`. A
+//! thematic break contributes nothing, because it has no text; a raw block
+//! contributes its source, which is its text already.
 //!
 //! A table is the one block that is not one line: its cells are separated by
 //! tabs and its rows by line endings, which is what a spreadsheet reads and
@@ -78,7 +78,6 @@ fn leaf_text(schema: &Schema, node: &Node) -> String {
         md::SOFT_BREAK => " ".to_string(),
         md::HARD_BREAK => "\n".to_string(),
         md::IMAGE => attr("alt"),
-        md::RAW_BLOCK => attr("source"),
         _ => String::new(),
     }
 }

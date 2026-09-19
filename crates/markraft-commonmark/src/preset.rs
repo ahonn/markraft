@@ -63,7 +63,8 @@ fn attr_int(node: &Node, name: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
-/// The concatenated text of a node's children, which is what a code block holds.
+/// The concatenated text of a node's children: what a code block holds, and
+/// what a raw block holds.
 fn text_content(node: &Node) -> String {
     node.children().filter_map(|child| child.text()).collect()
 }
@@ -130,7 +131,18 @@ pub fn commonmark_node_rules() -> NodeRules {
     rules.insert(
         md::RAW_BLOCK.to_string(),
         rule(|state, node, _, _| {
-            state.text(attr_str(node, "source", ""), false);
+            // The text is the source, written as it stands: one output line per
+            // line of it, each carrying the prefix of the containers it sits
+            // in, and a blank line on either side like any other block.
+            //
+            // A block whose text an edit removed has no source left to write,
+            // so it writes nothing at all — not even the separation around it —
+            // and the next parse no longer sees a block there.
+            let source = text_content(node);
+            if source.is_empty() {
+                return;
+            }
+            state.text(&source, false);
             state.close_block(node);
         }),
     );
@@ -447,17 +459,18 @@ fn tight_attr(node: &Node) -> bool {
 /// written loose however its `tight` attribute reads. The alternative — a blank
 /// line inside a list the model calls tight — would not survive being read back.
 ///
-/// A table is stricter still, because the first line after it that is not blank
-/// is read as one more of its rows. It has to be the last block of its item;
-/// what the *next* item's marker starts is a new item, not a row. What may come
-/// before it is the ordinary rule's business: a table cannot interrupt a
-/// paragraph either.
+/// A table and a raw block are stricter still, because each runs on until a
+/// blank line: the first line after a table that is not blank is read as one
+/// more of its rows, and an HTML block ends where a blank line does. Either has
+/// to be the last block of its item; what the *next* item's marker starts is a
+/// new item, not more of the block. What may come before them is the ordinary
+/// rule's business: neither can interrupt a paragraph either.
 fn writable_tight(state: &SerializerState<'_>, list: &Node) -> bool {
     list.children().all(|item| {
         let last = item.child_count().saturating_sub(1);
         let mut previous: Option<&Node> = None;
         item.children().enumerate().all(|(index, block)| {
-            let ok = (index == last || !is_table(state, block))
+            let ok = (index == last || !runs_until_a_blank_line(state, block))
                 && previous.is_none_or(|before| {
                     !is_open_paragraph(state, before) || interrupts_paragraph(state, block)
                 });
@@ -467,8 +480,10 @@ fn writable_tight(state: &SerializerState<'_>, list: &Node) -> bool {
     })
 }
 
-fn is_table(state: &SerializerState<'_>, node: &Node) -> bool {
-    state.schema().node_id(md::TABLE) == Some(node.type_id())
+/// Whether the block swallows the line after it unless that line is blank.
+fn runs_until_a_blank_line(state: &SerializerState<'_>, node: &Node) -> bool {
+    let named = |name: &str| state.schema().node_id(name) == Some(node.type_id());
+    named(md::TABLE) || named(md::RAW_BLOCK)
 }
 
 fn is_open_paragraph(state: &SerializerState<'_>, node: &Node) -> bool {

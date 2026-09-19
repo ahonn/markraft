@@ -7,7 +7,7 @@
 
 use markraft_core::commands::{ALIGNMENTS_ATTR, ColumnAlignment, TableTypes};
 use markraft_core::projection::{Ancestor, Line};
-use markraft_core::{Attrs, DocTypeNames, MarkTypeId, NodeTypeId, Schema};
+use markraft_core::{Attrs, DocTypeNames, EditorState, MarkTypeId, NodeTypeId, Schema};
 
 /// The conventional schema names of the two roles [`DocTypeNames`] has no
 /// entry for.
@@ -47,10 +47,11 @@ pub struct DocTypes {
     pub task_item: Option<NodeTypeId>,
     /// A thematic break. Without it nothing draws the rule's line.
     pub horizontal_rule: Option<NodeTypeId>,
-    /// A block the codec keeps verbatim — an HTML block, a comment. Its source
-    /// is shown as source and never rendered. Without it such a block is drawn
-    /// as ordinary prose rather than in the monospaced style that marks it as
-    /// markup.
+    /// A block the codec keeps verbatim — an HTML block, a comment. Source text
+    /// kept verbatim as the block's text; edited in place; drawn in the code
+    /// font and muted. Without it such a block is drawn as ordinary prose, and
+    /// Enter, Tab, ⌘A and a paste behave inside one exactly as they do
+    /// anywhere else.
     pub raw_block: Option<NodeTypeId>,
     /// A table, carrying an `alignments` attribute. All three table roles have
     /// to be present for any of them to do anything: without them a table's
@@ -167,11 +168,30 @@ impl DocTypes {
             .is_some_and(|ty| Some(ty) == self.code_block)
     }
 
-    /// Whether the line's own block is a raw block, whose source is drawn as
-    /// the source it is.
+    /// Whether the line's own block is a raw block, whose source is its text
+    /// and is drawn as the source it is.
     pub(crate) fn is_raw_block(&self, line: &Line) -> bool {
         line.node_type()
             .is_some_and(|ty| Some(ty) == self.raw_block)
+    }
+
+    /// Whether the line's own block holds its text verbatim — a code block or a
+    /// raw block. The two are drawn differently, but a key pressed inside one
+    /// does what it does inside the other: a line ending is a character, Tab is
+    /// a tab, and nothing typed is read as markup.
+    pub(crate) fn is_verbatim_block(&self, line: &Line) -> bool {
+        self.is_code_block(line) || self.is_raw_block(line)
+    }
+
+    /// Whether the cursor sits in a verbatim block, for the paths that ask
+    /// about the document rather than about a laid-out line.
+    pub(crate) fn in_verbatim_block_at(&self, state: &EditorState) -> bool {
+        let doc = state.doc();
+        doc.resolve(state.selection().head(doc))
+            .is_ok_and(|resolved| {
+                let ty = Some(resolved.parent().type_id());
+                ty == self.code_block || ty == self.raw_block
+            })
     }
 
     /// Whether the line is the first block of a ticked task item.

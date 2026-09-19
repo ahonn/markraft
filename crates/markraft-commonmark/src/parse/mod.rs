@@ -34,8 +34,9 @@
 //!   row, and every row is squared off to the column count the alignments
 //!   declare — see [`crate::table`].
 //! * Anything else — footnote definitions, HTML blocks, whatever a comrak
-//!   extension produces — is kept as source text: a `raw_block` where a block
-//!   is expected. Inline HTML has its own raw primitive.
+//!   extension produces — is kept as source text: a `raw_block` whose text is
+//!   that source where a block is expected. Inline HTML has its own raw
+//!   primitive.
 //!
 //! # Repair
 //!
@@ -52,9 +53,7 @@ use std::cell::Ref;
 
 use comrak::nodes::{AstNode, NodeValue};
 use comrak::{Arena, Options, parse_document};
-use markraft_core::{
-    Attrs, Fragment, MarkSet, MarkTypeId, Node, NodeError, NodeTypeId, Schema, Slice,
-};
+use markraft_core::{Attrs, MarkTypeId, Node, NodeError, NodeTypeId, Schema, Slice};
 
 use crate::rules::{ParseCx, ParseRule, ParseRules, ParseTarget, commonmark_rules};
 
@@ -344,14 +343,16 @@ impl<'a> Walk<'a> {
         self.cx.block_source(self.target(node).sourcepos())
     }
 
+    /// A raw block holding `source` as its text. An empty source leaves the
+    /// block empty, because a textblock has no child standing for no text.
     fn raw_block(&self, name: &str, source: &str) -> Result<Node, ParseError> {
         let ty = self.node_id(name)?;
-        Ok(self.schema.create(
-            ty,
-            markraft_core::attrs! {"source" => source},
-            MarkSet::empty(),
-            Fragment::empty(),
-        )?)
+        let children = if source.is_empty() {
+            Vec::new()
+        } else {
+            vec![self.schema.text(source)]
+        };
+        self.fit(ty, Attrs::empty(), children)
     }
 
     /// Build a node of `ty` holding `children`, making the content fit.

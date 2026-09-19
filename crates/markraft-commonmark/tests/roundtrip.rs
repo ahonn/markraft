@@ -15,8 +15,8 @@
 //! * a fence character run inside a code block, which forces the fence to grow;
 //! * a line ending inside a code span, which CommonMark turns into a space;
 //! * a hard break inside a table cell, which a row of one source line cannot
-//!   hold, and a table inside a list item, whose blank lines decide the list's
-//!   tightness for it — `cases.rs` pins both.
+//!   hold, and a table or a raw block inside a list item, whose blank lines
+//!   decide the list's tightness for it — `cases.rs` pins all three.
 //!
 //! It does generate the two shapes GFM's autolink extension reads: a link
 //! whose text is its own URL, which is written back bare, and plain text that
@@ -252,7 +252,7 @@ impl Gen<'_> {
             5 if !in_item => {
                 let source = *self.rng.pick(RAW_SOURCES);
                 self.schema
-                    .node_with(md::RAW_BLOCK, attrs! {"source" => source}, [])
+                    .node(md::RAW_BLOCK, [self.schema.text(source)])
                     .expect("a raw block")
             }
             6 if !in_item => self.table(),

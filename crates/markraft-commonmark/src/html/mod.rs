@@ -42,8 +42,8 @@ mod rules;
 mod serialize;
 
 pub use rules::{
-    HtmlAttrsFn, HtmlMatchFn, HtmlRule, HtmlRules, HtmlTarget, commonmark_html_rules,
-    html_attrs_fn, html_match_fn,
+    HtmlAttrsFn, HtmlMatchFn, HtmlRule, HtmlRules, HtmlTarget, HtmlTextFn, commonmark_html_rules,
+    html_attrs_fn, html_match_fn, html_text_fn,
 };
 pub use serialize::{
     HtmlMarkRule, HtmlMarkRules, HtmlNodeRule, HtmlNodeRules, HtmlSerializer, HtmlState,
@@ -285,10 +285,10 @@ impl<'s> Build<'s> {
                 self.children(element, &marks)?;
                 self.block_separator();
             }
-            HtmlRule::TextBlock { .. } if self.inline_only => {
+            HtmlRule::TextBlock { text, .. } if self.inline_only => {
                 self.block_separator();
-                let text = target.text();
-                self.text(&text, &marks);
+                let body = text(target);
+                self.text(&body, &marks);
                 self.block_separator();
             }
             HtmlRule::Boundary => {
@@ -337,13 +337,17 @@ impl<'s> Build<'s> {
                         .create(ty, Attrs::empty(), MarkSet::empty(), Fragment::empty())?;
                 self.inline.push_node(node, MarkSet::empty());
             }
-            HtmlRule::TextBlock { node_type, attrs } => {
+            HtmlRule::TextBlock {
+                node_type,
+                attrs,
+                text,
+            } => {
                 self.flush()?;
                 let ty = self.node_id(&node_type)?;
-                let text = target.text();
-                let text = text.strip_suffix('\n').unwrap_or(&text);
-                let content = (!text.is_empty())
-                    .then(|| self.schema.text(text))
+                let body = text(target);
+                let body = body.strip_suffix('\n').unwrap_or(&body);
+                let content = (!body.is_empty())
+                    .then(|| self.schema.text(body))
                     .into_iter()
                     .collect();
                 self.blocks

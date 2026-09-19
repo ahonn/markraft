@@ -242,9 +242,8 @@ pub enum ParseRule {
     },
     /// Drop the comrak node and everything under it.
     Ignore,
-    /// Keep the node's source text: a node of `node_type` holding it in a
-    /// `source` attribute when a block is expected, plain text when an inline
-    /// is.
+    /// Keep the node's source text: a textblock of `node_type` whose text is
+    /// that source when a block is expected, plain text when an inline is.
     Raw {
         /// The block node type that holds the source.
         node_type: TypeFn,
@@ -367,8 +366,8 @@ impl ParseRules {
             .unwrap_or(&self.fallback)
     }
 
-    /// The node type the fallback keeps unknown blocks in, when it keeps them
-    /// at all.
+    /// The textblock type the fallback keeps unknown blocks in, when it keeps
+    /// them at all.
     pub fn raw_block_type(&self, target: ParseTarget<'_>) -> Option<String> {
         match &self.fallback {
             ParseRule::Raw { node_type } => Some(node_type(target)),

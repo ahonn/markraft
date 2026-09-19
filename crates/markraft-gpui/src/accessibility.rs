@@ -119,8 +119,10 @@ impl AccessibleText {
 
     pub(crate) fn write(&mut self, builder: &mut A11ySubtreeBuilder) {
         for (index, run) in self.runs.iter_mut().enumerate() {
-            // An atomic raw block may paint several rows at one document
-            // position. Each displayed row still needs its own AccessKit ID.
+            // A row that stands in for content with no position of its own —
+            // an empty line, a divider — shares its document position with the
+            // row beside it. Each displayed row still needs its own AccessKit
+            // ID, so the index is part of the key.
             let id = builder.synthetic_node_id(("text", run.from, index));
             run.node_id = Some(id);
             let mut node = accesskit::Node::new(Role::TextRun);

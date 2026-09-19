@@ -34,7 +34,7 @@ pub struct DocTypeNames {
     pub task_item: Option<&'static str>,
     /// A thematic break: a block-level leaf.
     pub horizontal_rule: Option<&'static str>,
-    /// Source text kept verbatim, in a `source` attribute.
+    /// Source text kept verbatim as the block's own text, edited in place.
     pub raw_block: Option<&'static str>,
     /// A table, carrying an `alignments` attribute: one entry per column,
     /// comma-separated, each `left`, `center`, `right` or `none`.

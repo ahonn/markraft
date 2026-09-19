@@ -526,13 +526,12 @@ pub(crate) fn open_line(state: &mut State, cx: &mut impl Host, below: bool) {
     if below {
         return;
     }
-    if line
-        .ancestors
-        .last()
-        .is_some_and(|own| Some(own.node_type) == cx.types().code_block)
-    {
-        // Code rows share one projection line; Enter inserted a newline without
-        // creating a new block. Return to the original insertion position.
+    if line.ancestors.last().is_some_and(|own| {
+        let types = cx.types();
+        Some(own.node_type) == types.code_block || Some(own.node_type) == types.raw_block
+    }) {
+        // Code and raw rows share one projection line; Enter inserted a newline
+        // without creating a new block. Return to the original insertion position.
         cx.select(Selection::cursor(line.from), false);
         return;
     }

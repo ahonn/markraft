@@ -400,11 +400,11 @@ pub fn commonmark_html_node_rules() -> HtmlNodeRules {
             // A line ending straight after `<pre>` is one an HTML parser drops,
             // so text that starts with one is written with an extra.
             state.write("<pre data-type=\"rawBlock\">");
-            let source = attr_str(node, "source", "");
+            let source = text_content(node);
             if source.starts_with('\n') {
                 state.write("\n");
             }
-            preformatted(state, source);
+            preformatted(state, &source);
             state.write("</pre>");
         }),
     );

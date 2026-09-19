@@ -1080,7 +1080,7 @@ impl EditorView {
             && self
                 .projection
                 .line(last_line)
-                .is_some_and(|line| line.to == head && self.types.is_code_block(line))
+                .is_some_and(|line| line.to == head && self.types.is_verbatim_block(line))
         {
             let command = markraft_core::commands::exit_code();
             if self.run_command(&command, cx) {
@@ -1135,7 +1135,7 @@ impl EditorView {
         let literal = self.single_line
             || self.codecs.is_none()
             || matches!(mode, clipboard::PasteMode::Plain)
-            || self.types.in_code_block_at(&self.state);
+            || self.types.in_verbatim_block_at(&self.state);
         if literal && clipboard_text.is_none() {
             return;
         }
@@ -1247,15 +1247,6 @@ impl EditorView {
     /// stranding the candidate.
     pub(crate) fn accepts_text_input(&self) -> bool {
         self.is_composing() || self.extension_input_policy() == InputPolicy::Accept
-    }
-}
-
-impl DocTypes {
-    /// Whether the cursor sits in a code block, for the paste and Tab paths.
-    pub(crate) fn in_code_block_at(&self, state: &EditorState) -> bool {
-        let doc = state.doc();
-        doc.resolve(state.selection().head(doc))
-            .is_ok_and(|resolved| Some(resolved.parent().type_id()) == self.code_block)
     }
 }
 

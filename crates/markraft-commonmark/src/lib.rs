@@ -23,10 +23,12 @@
 //! `<a href="u">x</a>` comes back as `[x](u)`.
 //!
 //! **Nothing is silently lost.** Every construct either has a node type, or is
-//! kept in a `raw_block` or `raw_inline` primitive. Inline nesting that cannot
-//! fit a flat mark set is carried by an editable `inline_span` container, and
-//! an HTML table whose structure the model cannot describe stays a `raw_block`
-//! holding its markup.
+//! kept in a `raw_block` or `raw_inline` primitive. A `raw_block` is a
+//! textblock whose text *is* that source: the editor shows the markup rather
+//! than rendering it, so the user edits it in place, and it is written back
+//! verbatim. Inline nesting that cannot fit a flat mark set is carried by an
+//! editable `inline_span` container, and an HTML table whose structure the
+//! model cannot describe stays a `raw_block` holding its markup.
 //!
 //! # The three pieces
 //!
@@ -80,9 +82,10 @@
 //! * `tight` is honoured where the shape allows it. A list whose items hold
 //!   blocks that need a blank line between them is written loose, and a list
 //!   with nowhere to put a blank line — one item holding one block — always
-//!   reads back tight. A table has to be the last block of its item, or the
-//!   list is written loose: the first line after a table that is not blank is
-//!   read as one more of its rows.
+//!   reads back tight. A table and a raw block have to be the last block of
+//!   their item, or the list is written loose: each runs on until a blank line,
+//!   the table reading the line under it as one more of its rows and the HTML
+//!   block reading it as more of its source.
 //! * A table's columns are re-padded to a uniform display width, and its
 //!   delimiter row is rewritten from the `alignments` attribute. A `|` inside
 //!   a cell travels as `\|`, which is the only spelling GFM reads back.
@@ -97,6 +100,10 @@
 //!   one cell, or a `<caption>` is kept whole as a `raw_block`. One with a
 //!   `<th>` in a body row imports as an ordinary cell, because GFM has no row
 //!   header either. Block content inside a cell is flattened to inline.
+//! * A `raw_block` is source, not a sealed node. An edit that leaves text which
+//!   is no longer an HTML block is read as whatever it has become — a paragraph
+//!   once the `<div>` is gone — and one emptied of its text writes nothing, so
+//!   the next parse finds no block there at all.
 
 #![forbid(unsafe_code)]
 
