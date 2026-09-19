@@ -347,6 +347,12 @@ fn a_hard_break_in_a_cell_is_a_break_tag() {
         )
     );
     assert_eq!(codec.normalize(&written), written);
+    // A `<br>` an author wrote in a cell reads the same way — a break there
+    // has no spelling, so the source, not the tree, is the fixed point.
+    assert_eq!(
+        round("| a |\n| - |\n| x<br>y |"),
+        "| a      |\n| ------ |\n| x<br>y |"
+    );
 }
 
 // -- constructs with no model of their own --------------------------------
@@ -403,6 +409,106 @@ fn html_emphasis_tags_import_as_marks_and_stray_ones_stay_raw() {
         r#"doc(paragraph(raw_inline[source=Str("<em>")], "a"))"#
     );
     assert_eq!(round("<em>a"), "<em>a");
+}
+
+#[test]
+fn an_anchor_with_nothing_but_a_destination_is_the_link_mark() {
+    let codec = Codec::new();
+    assert_eq!(
+        shape("an <a href=\"https://example.com\">anchor</a> here"),
+        r#"doc(paragraph("an ", "anchor"{link}, " here"))"#
+    );
+    // The mark holds a destination and a title and nothing else, so the anchor
+    // is written back as the CommonMark link it is: a semantic round trip, and
+    // a fixed point from there on.
+    assert_eq!(
+        round("an <a href=\"/u\" title=\"t\">anchor</a> here"),
+        "an [anchor](/u \"t\") here"
+    );
+    assert_eq!(
+        round("an [anchor](/u \"t\") here"),
+        "an [anchor](/u \"t\") here"
+    );
+    // An entity in an attribute resolves on the way in and travels back out.
+    assert_eq!(
+        round("<a href=\"https://e.example/?a=1&amp;b=2\">x</a>"),
+        "[x](https://e.example/?a=1&amp;b=2)"
+    );
+    // An anchor nests with the marks around it the way `<em>` does.
+    assert_eq!(
+        shape("<a href=\"/u\"><em>x</em> y</a>"),
+        r#"doc(paragraph("x"{link,em}, " y"{link}))"#
+    );
+    // Anything the mark cannot hold keeps the tag as source text instead.
+    for source in [
+        "an <a>anchor</a> here",
+        "an <a href=\"/u\" target=\"_blank\">anchor</a> here",
+        "an <a class=\"x\" href=\"/u\">anchor</a> here",
+        "an <a href=\"/u\">anchor here",
+    ] {
+        assert_eq!(round(source), source, "{source:?}");
+        assert!(shape(source).contains("raw_inline"), "{source:?}");
+    }
+    for source in [
+        "an <a href=\"/u\" title=\"t\">anchor</a> here",
+        "an <a>anchor</a> here",
+        "an <a href=\"/u\" target=\"_blank\">anchor</a> here",
+    ] {
+        judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
+    }
+}
+
+#[test]
+fn an_image_tag_is_the_image_atom_unless_it_says_more_than_one_holds() {
+    let codec = Codec::new();
+    for tag in [
+        "<img src=\"x.png\" alt=\"img\">",
+        "<img src=\"x.png\" alt=\"img\"/>",
+        "<img src=\"x.png\" alt=\"img\" />",
+    ] {
+        let source = format!("see {tag} here");
+        assert_eq!(
+            shape(&source),
+            concat!(
+                r#"doc(paragraph("see ", "#,
+                r#"image[alt=Str("img"),src=Str("x.png"),title=Str("")], " here"))"#
+            ),
+            "{tag}"
+        );
+        assert_eq!(round(&source), "see ![img](x.png) here", "{tag}");
+        judge(&codec, &source).unwrap_or_else(|message| panic!("{message}"));
+    }
+    // A width, a class or a style would be lost, and an image needs a source.
+    for source in [
+        "see <img src=\"x.png\" width=\"20\"> here",
+        "see <img class=\"icon\" src=\"x.png\"> here",
+        "see <img alt=\"img\"> here",
+    ] {
+        assert_eq!(round(source), source, "{source:?}");
+        assert!(shape(source).contains("raw_inline"), "{source:?}");
+    }
+}
+
+#[test]
+fn a_break_tag_is_a_hard_break_where_one_can_be_written_back() {
+    let codec = Codec::new();
+    for tag in ["<br>", "<br/>", "<br />"] {
+        let source = format!("a{tag}b");
+        assert_eq!(
+            shape(&source),
+            r#"doc(paragraph("a", hard_break, "b"))"#,
+            "{tag}"
+        );
+        assert_eq!(round(&source), "a\\\nb", "{tag}");
+        judge(&codec, &source).unwrap_or_else(|message| panic!("{message}"));
+    }
+    // A heading is one source line and a break at the end of a block is
+    // dropped, so in both places the tag stays the primitive that writes
+    // itself again. A tag carrying an attribute does too.
+    for source in ["# a<br>b", "a<br>", "a<br class=\"x\">b"] {
+        assert_eq!(round(source), source, "{source:?}");
+        assert!(shape(source).contains("raw_inline"), "{source:?}");
+    }
 }
 
 #[test]

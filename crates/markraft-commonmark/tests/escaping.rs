@@ -79,6 +79,28 @@ fn four_columns_of_indentation_travel_as_a_character_reference() {
 }
 
 #[test]
+fn text_shaped_like_a_tag_the_importer_reads_is_protected() {
+    // `<a>`, `<img>` and `<br>` become a mark, an atom and a break, so text
+    // that only looks like one has to come back as the text it is.
+    let codec = Codec::new();
+    let schema = &codec.schema;
+    for text in [
+        "a<br>b",
+        "<img src=\"x.png\" alt=\"img\">",
+        "<a href=\"/u\">anchor</a>",
+    ] {
+        let doc = schema
+            .doc([schema
+                .node(md::PARAGRAPH, [schema.text(text)])
+                .expect("a paragraph")])
+            .expect("a document");
+        let written = codec.write(&doc);
+        assert!(written.contains("\\<"), "{written:?} keeps a bare tag");
+        assert_eq!(codec.parse(&written), doc, "{text:?} does not come back");
+    }
+}
+
+#[test]
 fn a_line_ending_inside_inline_content_travels_as_a_reference() {
     assert_eq!(shape("a&#10;b"), "doc(paragraph(\"a\nb\"))");
     assert_eq!(round("a&#10;b"), "a&#10;b");

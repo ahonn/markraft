@@ -197,6 +197,28 @@ fn html_and_markdown_agree_on_the_same_document() {
 }
 
 #[test]
+fn both_flavours_read_the_same_inline_html_the_same_way() {
+    // The Markdown importer meets these as source text and this one as
+    // elements; a fragment both can read has to land as one tree either way.
+    let codec = Codec::new();
+    for fragment in [
+        "a<br>b",
+        "see <img src=\"x.png\" alt=\"img\"> here",
+        "see <img src=\"x.png\" alt=\"a\" title=\"t\"> here",
+        "an <a href=\"https://example.com\">anchor</a> here",
+        "an <a href=\"/u\" title=\"t\">anchor</a> here",
+        "an <a href=\"/u?a=1&amp;b=2\">anchor</a> here",
+        "a <em>styled</em> <strong>run</strong> here",
+    ] {
+        assert_eq!(
+            codec.describe(&parser().parse(fragment).expect("HTML parses")),
+            codec.describe(&codec.parse(fragment)),
+            "{fragment}"
+        );
+    }
+}
+
+#[test]
 fn a_fragment_opens_the_same_way_markdown_does() {
     let parser = parser();
     let inline = parser.parse_fragment("<p>hello</p>").expect("parses");

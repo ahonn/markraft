@@ -408,6 +408,28 @@ impl<'s> Build<'s> {
     }
 }
 
+/// One HTML tag read on its own: its element name and its attributes, with
+/// entity references in the values resolved.
+///
+/// The Markdown importer meets inline HTML as source text, so it has to read
+/// the same `href` out of `<a href="a&amp;b">` that this importer reads out of
+/// the element. Both go through the one HTML parser, which is what keeps the
+/// two flavours from drifting apart on what a tag says.
+pub(crate) fn read_tag(source: &str) -> Option<(String, Vec<(String, String)>)> {
+    let document = Html::parse_fragment(source);
+    let root = document.root_element();
+    let element = root
+        .descendants()
+        .filter_map(ElementRef::wrap)
+        .find(|element| element.id() != root.id())?;
+    let attrs = element
+        .value()
+        .attrs()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    Some((element.value().name().to_string(), attrs))
+}
+
 /// Whether the element is the only thing in its parent that carries meaning.
 fn only_child(element: ElementRef<'_>) -> bool {
     element.parent().is_some_and(|parent| {

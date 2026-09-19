@@ -18,7 +18,9 @@
 //! trip renders the same HTML; it does not come back as the same source text.
 //! Headings become ATX, code blocks become fenced, reference links become
 //! inline links, an autolink becomes the bare URL GFM reads back; soft breaks
-//! preserve whitespace semantics around raw HTML.
+//! preserve whitespace semantics around raw HTML. Inline HTML a reader shows
+//! as a link, an image or a line break is read as one and written in Markdown:
+//! `<a href="u">x</a>` comes back as `[x](u)`.
 //!
 //! **Nothing is silently lost.** Every construct either has a node type, or is
 //! kept in a `raw_block` or `raw_inline` primitive. Inline nesting that cannot
@@ -87,7 +89,10 @@
 //! * A `hard_break` inside a table cell is written `<br>`, because a row is one
 //!   source line. It renders as the break the author made and comes back as a
 //!   `raw_inline` holding `<br>`, which writes itself again unchanged; only the
-//!   HTML flavour gives the `hard_break` node itself back.
+//!   HTML flavour gives the `hard_break` node itself back. A `<br>` an author
+//!   wrote there stays that primitive for the same reason, as does one in a
+//!   heading or at the end of a block: elsewhere the tag is read as the break
+//!   it is.
 //! * An HTML table with a nested table, a `colspan`/`rowspan` over more than
 //!   one cell, or a `<caption>` is kept whole as a `raw_block`. One with a
 //!   `<th>` in a body row imports as an ordinary cell, because GFM has no row

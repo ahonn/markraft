@@ -13,9 +13,15 @@
 //!   how this codec spells "a blank line the author meant to keep". Runs of
 //!   blank lines in the source are separators, as CommonMark says, and produce
 //!   nothing.
-//! * **Inline HTML** that pairs up as `<u>`, `<em>`, `<strong>` or `<del>`
-//!   becomes the matching mark or nested span; other tags stay raw inline
-//!   primitives and are written without escaping.
+//! * **Inline HTML** that pairs up as `<u>`, `<em>`, `<strong>`, `<del>` or
+//!   `<a href="…">` becomes the matching mark or nested span, and `<img src="…">`
+//!   and `<br>` become the image and hard break atoms. A tag is read this way
+//!   only when the tree holds everything it says and the serialiser can write
+//!   that back: one carrying an attribute the model has no room for — a
+//!   `target`, a `width` — stays a raw inline primitive, as `<mark>`, `<sub>`
+//!   and every other tag do, and is written without escaping. A `<br>` in a
+//!   heading or a table cell stays raw too, because a break has no spelling on
+//!   a line that cannot end.
 //! * An **indented code block** becomes an ordinary `code_block` and is written
 //!   back fenced. The two render identically.
 //! * **Link reference definitions** are resolved by comrak, so a reference link
