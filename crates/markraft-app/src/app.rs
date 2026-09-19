@@ -6,6 +6,7 @@ use crate::{
     persistence::{Event, Persistence},
     platform::{Platform, PlatformEvent},
     storage::Library,
+    updater::Updater,
     vault::{External, Store},
 };
 use gpui::{prelude::*, *};
@@ -25,6 +26,7 @@ actions!(
         Save,
         CopyMarkdown,
         Quit,
+        CheckForUpdates,
         Hide,
         Show,
         NewNote,
@@ -85,6 +87,7 @@ pub struct NotesApp {
     path: Option<PathBuf>,
     settings_path: PathBuf,
     platform: Option<Platform>,
+    updater: Updater,
     instance: Instance,
     sessions: HashMap<String, Session>,
     session_order: VecDeque<String>,
@@ -229,7 +232,7 @@ impl NotesApp {
             cx.notify();
         });
         let quit = cx.on_app_quit(|this, cx| {
-            if !this.flush(cx) {
+            if !this.prepare_to_quit(cx) {
                 eprintln!(
                     "Markraft: {}",
                     this.error.as_deref().unwrap_or("Could not save")
@@ -256,6 +259,7 @@ impl NotesApp {
             path,
             settings_path,
             platform,
+            updater: Updater::new(),
             instance,
             sessions: HashMap::new(),
             session_order: VecDeque::new(),
@@ -310,6 +314,9 @@ impl NotesApp {
         }
         // Persist a newly created library and any one-time legacy import.
         app.changed(cx);
+        if let Some(error) = app.updater.take_startup_error() {
+            app.queue_notice(error);
+        }
         app
     }
     fn editor(&self) -> Entity<EditorView> {
@@ -599,6 +606,7 @@ impl NotesApp {
                     self.show(window, cx);
                     self.open_panel(Panel::Settings, window, cx);
                 }
+                PlatformEvent::CheckForUpdates => self.check_for_updates(window, cx),
                 PlatformEvent::Quit => self.quit(cx),
             }
         }
@@ -629,6 +637,21 @@ impl NotesApp {
                 }
                 Event::Saved(_) => {}
                 Event::External(changes) => self.apply_external(changes, window, cx),
+            }
+        }
+        // Process external file changes first, then make the same save barrier as
+        // a normal quit. A failed save must never approve Sparkle's relaunch.
+        if let Some(continuation) = self.updater.take_relaunch() {
+            if self.prepare_to_quit(cx) {
+                cx.defer(move |_| {
+                    if let Some(main_thread) = sparkle_updater::MainThreadMarker::new() {
+                        continuation.resume(main_thread);
+                    }
+                });
+            } else {
+                self.updater.postpone(continuation);
+                self.show(window, cx);
+                self.inform("Update paused. Resolve the save error, then choose Check for Updates to retry.", cx);
             }
         }
         if self.save_at.is_some_and(|at| Instant::now() >= at) {
@@ -732,15 +755,23 @@ impl NotesApp {
             self.show(window, cx);
         }
     }
-    fn quit(&mut self, cx: &mut Context<Self>) {
+    fn prepare_to_quit(&mut self, cx: &mut Context<Self>) -> bool {
         if self.persistence.is_none() {
-            cx.quit();
-            return;
+            return true;
         }
         self.editor()
             .update(cx, |editor, cx| editor.cancel_composition(cx));
-        if self.flush(cx) {
+        self.flush(cx)
+    }
+    fn quit(&mut self, cx: &mut Context<Self>) {
+        if self.prepare_to_quit(cx) {
             cx.quit();
+        }
+    }
+    pub fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(error) = self.updater.check() {
+            self.show(window, cx);
+            self.inform(&error, cx);
         }
     }
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1459,6 +1490,7 @@ pub fn bind_app_keys(cx: &mut App) {
         Menu::new("Markraft Notes").items([
             MenuItem::action("Show Notes", Show),
             MenuItem::action("Settings…", Settings),
+            MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::separator(),
             MenuItem::action("Quit Markraft Notes", Quit),
         ]),

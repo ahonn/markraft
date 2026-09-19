@@ -1,0 +1,5 @@
+[env]
+MACOSX_DEPLOYMENT_TARGET = "13.0"
+SPARKLE_FRAMEWORK_PATH = { value = "target/sparkle", relative = true }
+# Enables unbundled cargo run/test; release apps resolve their embedded framework.
+DYLD_FRAMEWORK_PATH = { value = "target/sparkle", relative = true }

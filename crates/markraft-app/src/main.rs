@@ -5,6 +5,7 @@ mod legacy;
 mod persistence;
 mod platform;
 mod storage;
+mod updater;
 mod vault;
 
 use app::{NotesApp, bind_app_keys};
@@ -54,7 +55,11 @@ fn main() {
         PathBuf::from(
             env::var_os("HOME").unwrap_or_else(|| fail("HOME is unavailable; use --dir PATH")),
         )
-        .join("Library/Application Support/Markraft")
+        .join(if cfg!(feature = "updater-mock") {
+            "Library/Application Support/Markraft Update Test"
+        } else {
+            "Library/Application Support/Markraft"
+        })
     };
     let settings_path = settings_path.unwrap_or_else(|| support().join("settings.json"));
     // This read is what sets a damaged settings file aside, so its notice travels
@@ -152,6 +157,13 @@ fn main() {
                 let weak = app.downgrade();
                 cx.on_action(move |_: &app::Show, cx| {
                     let _ = window_handle_show(&weak, cx);
+                });
+                let weak = app.downgrade();
+                let handle = window.window_handle();
+                cx.on_action(move |_: &app::CheckForUpdates, cx| {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        let _ = weak.update(cx, |app, cx| app.check_for_updates(window, cx));
+                    });
                 });
                 app
             },

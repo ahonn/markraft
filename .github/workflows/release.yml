@@ -1,0 +1,81 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    uses: ./.github/workflows/ci.yml
+  release:
+    needs: validate
+    runs-on: macos-15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MARKRAFT_SIGN_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate public distribution repository
+        run: |
+          test "$GITHUB_REPOSITORY" = 'ahonn/markraft'
+          test "$(gh repo view --json visibility --jq .visibility)" = PUBLIC
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-universal
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo install cargo-bundle --version 0.11.0 --locked
+      - name: Set temporary credential paths
+        run: |
+          echo "SPARKLE_PRIVATE_KEY_FILE=$RUNNER_TEMP/sparkle-private-key" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN=$RUNNER_TEMP/markraft-signing.keychain-db" >> "$GITHUB_ENV"
+      - name: Import signing credentials
+        env:
+          CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          : "${CERTIFICATE_P12:?Missing MACOS_CERTIFICATE_P12}"
+          : "${SPARKLE_PRIVATE_KEY:?Missing SPARKLE_PRIVATE_KEY}"
+          umask 077
+          printf '%s' "$CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$SPARKLE_PRIVATE_KEY_FILE"
+          keychain_password=$(openssl rand -hex 24)
+          echo "::add-mask::$keychain_password"
+          security create-keychain -p "$keychain_password" "$SIGNING_KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$SIGNING_KEYCHAIN"
+          security unlock-keychain -p "$keychain_password" "$SIGNING_KEYCHAIN"
+          security import "$RUNNER_TEMP/signing.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$SIGNING_KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$SIGNING_KEYCHAIN"
+          security list-keychains -d user -s "$SIGNING_KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db"
+      - name: Build, sign, notarize and generate appcast
+        run: bash scripts/release-app.sh "$GITHUB_REF_NAME"
+      - name: Publish all artifacts together
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --json isDraft > "$RUNNER_TEMP/release.json" 2> "$RUNNER_TEMP/release-error"; then
+            python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["isDraft"] else "Release is already published; do not overwrite it")' "$RUNNER_TEMP/release.json"
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Markraft $GITHUB_REF_NAME" --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" "target/release-artifacts/Markraft-${GITHUB_REF_NAME#v}-universal.zip" target/release-artifacts/appcast.xml target/release-artifacts/SHA256SUMS --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+      - name: Remove signing credentials
+        if: always()
+        run: |
+          security delete-keychain "$SIGNING_KEYCHAIN" || true
+          rm -f "$RUNNER_TEMP/signing.p12" "$SPARKLE_PRIVATE_KEY_FILE"

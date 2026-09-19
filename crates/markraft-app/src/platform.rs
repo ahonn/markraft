@@ -64,6 +64,7 @@ pub enum PlatformEvent {
     Toggle,
     NewNote,
     Settings,
+    CheckForUpdates,
     Quit,
 }
 
@@ -83,12 +84,14 @@ impl Platform {
         let toggle = MenuItem::new("Show / Hide Notes", true, None);
         let new_note = MenuItem::new("New Note", true, None);
         let settings = MenuItem::new("Settings…", true, None);
+        let updates = MenuItem::new("Check for Updates…", true, None);
         let quit = MenuItem::new("Quit Markraft Notes", true, None);
         menu.append_items(&[
             &toggle,
             &new_note,
             &PredefinedMenuItem::separator(),
             &settings,
+            &updates,
             &PredefinedMenuItem::separator(),
             &quit,
         ])
@@ -97,6 +100,7 @@ impl Platform {
             (toggle.id().clone(), PlatformEvent::Toggle),
             (new_note.id().clone(), PlatformEvent::NewNote),
             (settings.id().clone(), PlatformEvent::Settings),
+            (updates.id().clone(), PlatformEvent::CheckForUpdates),
             (quit.id().clone(), PlatformEvent::Quit),
         ];
         let tray = TrayIconBuilder::new()

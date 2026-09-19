@@ -7,6 +7,10 @@ description = "Floating macOS notepad built on the Markraft editor"
 repository.workspace = true
 license.workspace = true
 
+[features]
+# Local update integration tests use an isolated app identity and data directory.
+updater-mock = []
+
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
@@ -20,9 +24,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 notify = "8"
+url = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"
 tray-icon = { version = "0.21", default-features = false }
 objc2 = "0.6"
 raw-window-handle = "0.6"
+sparkle-updater = "=0.1.0"
+objc2-foundation = { version = "0.3", features = ["NSBundle", "NSString"] }
+
+[package.metadata.bundle]
+name = "Markraft Notes"
+identifier = "dev.markraft.app"
+icon = ["target/Markraft.icns"]
+category = "Productivity"
+osx_minimum_system_version = "13.0"
+osx_frameworks = ["target/sparkle/Sparkle.framework"]
