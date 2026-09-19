@@ -47,8 +47,10 @@ pub struct DocTypes {
     pub task_item: Option<NodeTypeId>,
     /// A thematic break. Without it nothing draws the rule's line.
     pub horizontal_rule: Option<NodeTypeId>,
-    /// Source text kept verbatim. Without it such a block is drawn as ordinary
-    /// text rather than in the monospaced style that marks it as unparsed.
+    /// A block the codec keeps verbatim — an HTML block, a comment. Its source
+    /// is shown as source and never rendered. Without it such a block is drawn
+    /// as ordinary prose rather than in the monospaced style that marks it as
+    /// markup.
     pub raw_block: Option<NodeTypeId>,
     /// A table, carrying an `alignments` attribute. All three table roles have
     /// to be present for any of them to do anything: without them a table's
@@ -67,12 +69,14 @@ pub struct DocTypes {
     /// An image, carrying `src`, `alt` and `title` attributes. Without it an
     /// image is drawn as a bare object-replacement character, which is blank.
     pub image: Option<NodeTypeId>,
-    /// One inline HTML primitive, kept verbatim in a `source` attribute.
-    /// Without it such an atom is drawn as a bare object-replacement
-    /// character, which is blank.
+    /// One inline HTML primitive, kept verbatim in a `source` attribute. The
+    /// view draws that source as it stands and never renders it. Without it
+    /// such an atom is drawn as a bare object-replacement character, which is
+    /// blank.
     pub raw_inline: Option<NodeTypeId>,
-    /// A transparent inline container. Without it the view cannot tell that a
-    /// run carries structure nothing else in the line shows.
+    /// A transparent inline container. The view draws nothing for one — a span
+    /// carries the marks that say what it is, and those are what is drawn — so
+    /// this names the type for hosts and extensions that build one.
     pub inline_span: Option<NodeTypeId>,
     /// Strong emphasis. Without it ⌘B does nothing.
     pub strong: Option<MarkTypeId>,
@@ -103,8 +107,8 @@ impl DocTypes {
     /// [`DocTypes::raw_inline`] and [`DocTypes::inline_span`] have no entry in
     /// [`DocTypeNames`], so they are looked up under the names the CommonMark
     /// preset gives them. A schema that spells them differently sets the two
-    /// fields itself; leaving them unset only costs the decoration each one
-    /// draws.
+    /// fields itself; leaving [`DocTypes::raw_inline`] unset costs the source
+    /// text an inline primitive is drawn as.
     pub fn from_schema_names(schema: &Schema, names: &DocTypeNames) -> DocTypes {
         let node = |name: Option<&str>| name.and_then(|name| schema.node_id(name));
         let mark = |name: Option<&str>| name.and_then(|name| schema.mark_id(name));
@@ -163,8 +167,8 @@ impl DocTypes {
             .is_some_and(|ty| Some(ty) == self.code_block)
     }
 
-    /// Whether the line's own block is a raw block, whose source is drawn
-    /// verbatim.
+    /// Whether the line's own block is a raw block, whose source is drawn as
+    /// the source it is.
     pub(crate) fn is_raw_block(&self, line: &Line) -> bool {
         line.node_type()
             .is_some_and(|ty| Some(ty) == self.raw_block)

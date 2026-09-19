@@ -7,6 +7,10 @@
 //!
 //! Every geometry query is in visible `char` offsets. The projection retained
 //! by each layout maps document positions past hidden inline boundaries.
+//!
+//! HTML is never rendered or interpreted: a raw block and an inline HTML
+//! primitive alike are drawn as the source they hold, in the code font, so a
+//! note shows exactly what it will be written back as.
 
 use crate::style::EditorStyle;
 use crate::types::DocTypes;
@@ -14,7 +18,7 @@ use crate::{CaretShape, EditorEvent, EditorView};
 use gpui::{prelude::*, *};
 use markraft_core::commands::ColumnAlignment;
 use markraft_core::projection::{Line, LineKind, Projection, Run, RunContent};
-use markraft_core::{MarkSet, Node, NodeTypeId};
+use markraft_core::{MarkSet, Node};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -35,17 +39,18 @@ const INLINE_CODE_SCALE: f32 = 0.86;
 const INLINE_CODE_PADDING: Pixels = px(5.);
 const NUMBER_GAP: Pixels = px(6.);
 
-/// An inline atom the view draws itself — an image, a retained HTML primitive —
-/// is a pill like inline code. One atom is one character of the projection and
-/// a pill needs more room than that character advances, so the display text
-/// holds a run of [`PILL_FILLER`] in its place; see [`Widening`].
+/// An inline atom the view draws itself is one character of the projection and
+/// takes far more room than that character advances, so the display text holds
+/// a run of [`PILL_FILLER`] in its place; see [`Widening`]. An image's stand-in
+/// is a pill like inline code; an inline HTML primitive is drawn as the source
+/// it stands for, because the view never renders HTML.
 const PILL_SCALE: f32 = 0.82;
 const PILL_PADDING: Pixels = px(7.);
 const PILL_ICON: Pixels = px(13.);
 const PILL_ICON_GAP: Pixels = px(5.);
-/// No-break, so a pill never wraps in the middle of its own placeholder.
+/// No-break, so an atom never wraps in the middle of its own placeholder.
 const PILL_FILLER: char = '\u{00a0}';
-/// The widest a pill may grow, as a share of the column.
+/// The widest a drawn atom may grow, as a share of the column.
 const PILL_MAX_RATIO: f32 = 0.9;
 
 /// An image the note can read off the disk is drawn for real, at the column's
@@ -57,9 +62,6 @@ const IMAGE_MAX_HEIGHT: Pixels = px(320.);
 const IMAGE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// How many decoded images are kept, keyed by source.
 const IMAGE_CACHE_LIMIT: usize = 24;
-/// How far apart the dots of an inline-span hint sit, and how big each one is.
-const HINT_PITCH: Pixels = px(3.);
-const HINT_DOT: Pixels = px(1.);
 // SF Mono; Menlo is wider and heavier at this size.
 const CODE_FONT: &str = ".AppleSystemUIFontMonospaced";
 const CODE_PADDING: Pixels = px(12.);
@@ -121,16 +123,36 @@ impl InlineCode {
     }
 }
 
-/// One inline atom drawn as a pill, once shaping says which slot it landed in.
+/// How an inline atom is drawn over the fillers reserving its slot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AtomShape {
+    /// An image's stand-in: a picture glyph and a label on a rounded fill.
+    Pill,
+    /// The source of an inline HTML primitive, drawn as the quiet code-font
+    /// text it is — the view keeps HTML verbatim and never renders it.
+    Source,
+}
+
+impl AtomShape {
+    /// What the shape draws around its label, which is all an atom reserves
+    /// beyond the width of the text itself.
+    fn chrome(self) -> Pixels {
+        match self {
+            AtomShape::Pill => PILL_PADDING * 2. + PILL_ICON + PILL_ICON_GAP,
+            AtomShape::Source => px(0.),
+        }
+    }
+}
+
+/// One inline atom, once shaping says which slot it landed in.
 #[derive(Clone)]
-struct InlinePill {
+struct InlineAtom {
     /// Relative to the line's origin.
     left: Pixels,
     slot: Pixels,
     /// Visual row within the whole block.
     visual_row: usize,
-    /// Whether the picture glyph is drawn before the label.
-    picture: bool,
+    shape: AtomShape,
     label: Rc<ShapedLine>,
     /// A decoded image drawn in place of the pill, at the size it was measured
     /// for.
@@ -141,7 +163,7 @@ struct InlinePill {
 ///
 /// Every geometry query the view answers is in projection offsets, and the rows
 /// are shaped from the display text, so the two spaces have to be mapped onto
-/// each other wherever a pill widened an atom.
+/// each other wherever an atom's placeholder widened the text.
 #[derive(Clone, Copy)]
 struct Widening {
     /// `char` offset of the atom within the projection line.
@@ -150,14 +172,6 @@ struct Widening {
     display: usize,
     /// How many `char`s the placeholder takes. Always at least one.
     len: usize,
-}
-
-#[derive(Clone)]
-struct CodeHeader {
-    language: Rc<ShapedLine>,
-    /// A code block's header carries the language picker and the copy button;
-    /// a raw block's is a plain caption with nothing to click.
-    interactive: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -169,8 +183,8 @@ enum Decoration {
         joined: usize,
     },
     Divider,
-    /// A code or raw block's rounded background, behind the whole line.
-    Panel,
+    /// A code block's rounded background, behind the whole line.
+    Code,
 }
 
 #[derive(Clone)]
@@ -271,14 +285,12 @@ pub(crate) struct LayoutLine {
     pub(crate) code_pos: Option<usize>,
     marker: Option<Marker>,
     decoration: Option<Decoration>,
-    code_header: Option<CodeHeader>,
+    /// The shaped language label of a code block's header.
+    code_header: Option<Rc<ShapedLine>>,
     code_hitboxes: Option<(Hitbox, Hitbox)>,
     /// Sorted by `source`; see [`Widening`].
     widenings: Vec<Widening>,
-    pills: Vec<InlinePill>,
-    /// `char` ranges whose text sits inside an inline span the line shows
-    /// nothing else for.
-    hints: Vec<Range<usize>>,
+    atoms: Vec<InlineAtom>,
     /// Where the line sits in a table, when it is a cell of one.
     pub(crate) table: Option<TableCell>,
 }
@@ -348,8 +360,8 @@ impl LayoutLine {
     }
 
     /// The projection `char` offset a display offset stands at. Inside a
-    /// placeholder the nearer of the atom's two edges wins, so a click on the
-    /// right half of a pill puts the caret after it.
+    /// placeholder the nearer of the atom's two edges wins, so a click on its
+    /// right half puts the caret after it.
     fn to_source(&self, display: usize) -> usize {
         let mut shift = 0;
         for widening in &self.widenings {
@@ -378,34 +390,22 @@ impl LayoutLine {
         (index, char_to_byte(row.text(), local))
     }
 
-    /// Window-space bounds of the header's label, on a code or raw block. Only
-    /// a code block's is a button; a raw block's caption reserves neither the
-    /// chevron nor the copy slot.
-    fn header_bounds(&self) -> Option<Bounds<Pixels>> {
-        let header = self.code_header.as_ref()?;
-        let (chevron, copy) = if header.interactive {
-            (CODE_CHEVRON_WIDTH, CODE_COPY_WIDTH + px(2.))
-        } else {
-            (px(0.), px(0.))
-        };
-        let label_width = header.language.width + chevron + px(12.);
+    /// Window-space bounds of the language button, available only on a code
+    /// line.
+    pub(crate) fn code_language_bounds(&self) -> Option<Bounds<Pixels>> {
+        let label = self.code_header.as_ref()?;
+        let label_width = label.width + CODE_CHEVRON_WIDTH + px(12.);
         Some(Bounds::new(
             point(
-                self.origin.x + self.width - copy - label_width,
+                self.origin.x + self.width - (CODE_COPY_WIDTH + px(2.)) - label_width,
                 self.origin.y - CODE_HEADER_HEIGHT - CODE_HEADER_LIFT,
             ),
             size(label_width, CODE_HEADER_HEIGHT),
         ))
     }
 
-    /// Window-space button bounds, available only on a code line.
-    pub(crate) fn code_language_bounds(&self) -> Option<Bounds<Pixels>> {
-        self.code_header.as_ref().filter(|it| it.interactive)?;
-        self.header_bounds()
-    }
-
     fn code_copy_bounds(&self) -> Option<Bounds<Pixels>> {
-        self.code_header.as_ref().filter(|it| it.interactive)?;
+        self.code_header.as_ref()?;
         Some(Bounds::new(
             point(
                 self.origin.x + self.width - CODE_COPY_WIDTH,
@@ -686,39 +686,19 @@ fn shape_line(
     let line = &projection.lines()[index];
     let heading = types.heading_level(line);
     let code = types.is_code_block(line);
-    // A raw block is drawn in the same panel as a code block: its source is text
-    // the document could not interpret, not prose.
-    let raw = types.is_raw_block(line);
     let font_size = style.font_size(heading, code);
     let max_indent = max_indent(style, width);
-    let quote_levels = types.quote_depth(line);
     let number = ordered_marker(doc, types, line, style, font_size, window);
     let indent = indent_of(types, line, style, number.as_ref().map(|(_, w)| *w)).min(max_indent);
     let marker = marker_of(types, line, style, number.map(|(shaped, _)| shaped));
-    // A cell carries no block decoration of its own: the grid is the table's,
-    // and a cell's own height is zero except on the last of its row, which a
-    // quote bar or a panel has no way to draw against.
-    let decoration = if cell.is_some() {
-        None
-    } else if code || raw {
-        Some(Decoration::Panel)
-    } else if types.horizontal_rule.is_some() && line.node_type() == types.horizontal_rule {
-        Some(Decoration::Divider)
-    } else if quote_levels > 0 {
-        Some(Decoration::Quote {
-            levels: quote_levels.min(visible_levels(style, max_indent)),
-            joined: joined_quote_levels(projection, index, types).min(quote_levels),
-        })
-    } else {
-        None
-    };
+    let decoration = decoration_of(input, index, line, cell.is_some(), max_indent);
 
     let wrap_width = match cell {
         Some(CellWidth::Column(content)) => content.max(px(16.)),
-        // The measuring pass is unconstrained, but a pill still needs a nominal
+        // The measuring pass is unconstrained, but an atom still needs a nominal
         // column to size itself against.
         Some(CellWidth::Natural) => (width - indent).max(px(40.)),
-        None => (width - indent - if code || raw { CODE_PADDING } else { px(0.) }).max(px(40.)),
+        None => (width - indent - if code { CODE_PADDING } else { px(0.) }).max(px(40.)),
     };
     let unwrapped = single_line || cell == Some(CellWidth::Natural);
     let text = display_text(input, line, index, font_size, wrap_width, window);
@@ -753,10 +733,11 @@ fn shape_line(
         rows.push(row);
     }
 
-    let gap = gap_below(input, index, line, heading, code || raw, &marker);
-    // A panel's own top padding holds its header, at the top of the document as
-    // anywhere else. Everything else starts flush and only a heading claims space.
-    let top_gap = if code || raw {
+    let gap = gap_below(input, index, line, heading, code, &marker);
+    // A code block's own top padding holds its header, at the top of the document
+    // as anywhere else. Everything else starts flush and only a heading claims
+    // space.
+    let top_gap = if code {
         CODE_PADDING + CODE_HEADER_HEIGHT
     } else if index == 0 {
         px(0.)
@@ -765,19 +746,14 @@ fn shape_line(
     } else {
         px(0.)
     };
-    let code_header = if code {
+    let code_header = code.then(|| {
         code_header(
             crate::syntax::language_label(types.code_language(line).unwrap_or("")),
-            true,
             width,
             style,
             window,
         )
-    } else if raw {
-        code_header(raw_block_label(&text.text), false, width, style, window)
-    } else {
-        None
-    };
+    });
 
     let mut layout = LayoutLine {
         source: line.clone(),
@@ -803,8 +779,7 @@ fn shape_line(
         code_header,
         code_hitboxes: None,
         widenings: text.widenings,
-        pills: Vec::new(),
-        hints: hints_of(input, line),
+        atoms: Vec::new(),
         table: None,
     };
     if single_line && let Some(row) = layout.rows.first() {
@@ -823,8 +798,45 @@ fn shape_line(
     }
     layout.height = layout.text_height() + gap;
     shape_inline_code(&mut layout, &text.text, &runs.code, font_size, window);
-    place_pills(&mut layout, text.pills);
+    place_atoms(&mut layout, text.atoms);
     layout
+}
+
+/// The decoration drawn behind or beside a line: a code block's panel, the rule
+/// of a thematic break, or one bar per block quote the line sits in. A raw block
+/// has none — its source is shown as source, not fenced off as a panel.
+///
+/// A cell carries no block decoration of its own: the grid is the table's, and a
+/// cell's own height is zero except on the last of its row, which a quote bar or
+/// a panel has no way to draw against.
+fn decoration_of(
+    input: &ShapeInput<'_>,
+    index: usize,
+    line: &Line,
+    in_cell: bool,
+    max_indent: Pixels,
+) -> Option<Decoration> {
+    let ShapeInput {
+        types,
+        projection,
+        style,
+        ..
+    } = *input;
+    let quote_levels = types.quote_depth(line);
+    if in_cell {
+        None
+    } else if types.is_code_block(line) {
+        Some(Decoration::Code)
+    } else if types.horizontal_rule.is_some() && line.node_type() == types.horizontal_rule {
+        Some(Decoration::Divider)
+    } else if quote_levels > 0 {
+        Some(Decoration::Quote {
+            levels: quote_levels.min(visible_levels(style, max_indent)),
+            joined: joined_quote_levels(projection, index, types).min(quote_levels),
+        })
+    } else {
+        None
+    }
 }
 
 /// The narrowest a line's content can be drawn at without splitting a unit the
@@ -1306,40 +1318,23 @@ pub(crate) fn merge_row_centers(mut centers: Vec<Pixels>) -> Vec<Pixels> {
 
 /// Give every placeholder the slot the shaped rows put it in. A placeholder is
 /// non-breaking, so it always lands on exactly one visual row.
-fn place_pills(layout: &mut LayoutLine, pending: Vec<PendingPill>) {
-    for pill in pending {
+fn place_atoms(layout: &mut LayoutLine, pending: Vec<PendingAtom>) {
+    for atom in pending {
         let Some(slot) = layout
-            .display_rectangles(pill.chars.clone(), false)
+            .display_rectangles(atom.chars.clone(), false)
             .into_iter()
             .next()
         else {
             continue;
         };
-        layout.pills.push(InlinePill {
+        layout.atoms.push(InlineAtom {
             left: slot.origin.x - layout.origin.x,
             slot: slot.size.width,
             visual_row: ((slot.origin.y - layout.origin.y) / layout.line_height).round() as usize,
-            picture: pill.picture,
-            label: pill.label,
-            image: pill.image,
+            shape: atom.shape,
+            label: atom.label,
+            image: atom.image,
         });
-    }
-}
-
-/// What a raw block's header calls it. Only a GFM table, an HTML comment and an
-/// HTML block ever reach one, and the first line of the source says which.
-fn raw_block_label(source: &str) -> &'static str {
-    let first = source
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or_default()
-        .trim_start();
-    if first.starts_with("<!--") {
-        "Comment"
-    } else if first.starts_with('|') {
-        "Table"
-    } else {
-        "HTML"
     }
 }
 
@@ -1351,10 +1346,10 @@ struct DisplayText {
     /// or the source of a raw block — so no run may be derived from the content.
     synthetic: bool,
     /// The display byte length of each of the line's projection runs, which is
-    /// the run's own length except where a pill widened an atom.
+    /// the run's own length except where an atom's placeholder widened it.
     run_bytes: Vec<usize>,
     widenings: Vec<Widening>,
-    pills: Vec<PendingPill>,
+    atoms: Vec<PendingAtom>,
     /// The height a drawn image needs, where it is taller than a text row.
     line_height: Option<Pixels>,
 }
@@ -1367,18 +1362,18 @@ impl DisplayText {
             synthetic: true,
             run_bytes: Vec::new(),
             widenings: Vec::new(),
-            pills: Vec::new(),
+            atoms: Vec::new(),
             line_height: None,
         }
     }
 }
 
-/// A pill the display text has reserved room for, before shaping says where on
+/// An atom the display text has reserved room for, before shaping says where on
 /// the block it landed.
-struct PendingPill {
+struct PendingAtom {
     /// `char` range of the placeholder within the display text.
     chars: Range<usize>,
-    picture: bool,
+    shape: AtomShape,
     label: Rc<ShapedLine>,
     image: Option<(Arc<RenderImage>, Size<Pixels>)>,
 }
@@ -1417,7 +1412,7 @@ fn display_text(
     let mut text = String::with_capacity(source.len());
     let mut run_bytes = Vec::with_capacity(line.runs.len());
     let mut widenings = Vec::new();
-    let mut pills = Vec::new();
+    let mut atoms = Vec::new();
     let mut byte = 0usize;
     let mut display = 0usize;
     let mut filler: Option<Pixels> = None;
@@ -1427,12 +1422,13 @@ fn display_text(
         let len: usize = source[byte..].chars().take(chars).map(char::len_utf8).sum();
         let slice = &source[byte..byte + len];
         byte += len;
-        match pill_of(types, run, style, font_size, column, alone, window) {
-            Some(pill) => {
+        match atom_of(types, run, style, font_size, column, alone, window) {
+            Some(atom) => {
                 // One atom is one character, and it advances nowhere near far
-                // enough for a pill, so the row reserves the width in fillers.
+                // enough for what is drawn over it, so the row reserves the
+                // width in fillers.
                 let unit = *filler.get_or_insert_with(|| filler_width(font_size, window));
-                let count = (pill.width / unit).ceil().max(1.) as usize;
+                let count = (atom.width / unit).ceil().max(1.) as usize;
                 text.extend(std::iter::repeat_n(PILL_FILLER, count));
                 run_bytes.push(count * PILL_FILLER.len_utf8());
                 widenings.push(Widening {
@@ -1440,14 +1436,14 @@ fn display_text(
                     display,
                     len: count,
                 });
-                if let Some((_, size)) = &pill.image {
+                if let Some((_, size)) = &atom.image {
                     line_height = Some(size.height);
                 }
-                pills.push(PendingPill {
+                atoms.push(PendingAtom {
                     chars: display..display + count,
-                    picture: pill.picture,
-                    label: pill.label,
-                    image: pill.image,
+                    shape: atom.shape,
+                    label: atom.label,
+                    image: atom.image,
                 });
                 display += count;
             }
@@ -1463,7 +1459,7 @@ fn display_text(
         synthetic: false,
         run_bytes,
         widenings,
-        pills,
+        atoms,
         line_height,
     }
 }
@@ -1489,18 +1485,47 @@ fn filler_width(font_size: Pixels, window: &Window) -> Pixels {
     (shaped.width / SAMPLE as f32).max(px(1.))
 }
 
-/// A pill's content and the width it needs.
-struct Pill {
-    picture: bool,
+/// A drawn atom's content and the width it needs.
+struct Atom {
+    shape: AtomShape,
     label: Rc<ShapedLine>,
     width: Pixels,
     image: Option<(Arc<RenderImage>, Size<Pixels>)>,
 }
 
-/// The pill an inline atom is drawn as, for the atoms the view draws itself.
-/// Every other atom keeps the object-replacement character the projection gave
-/// it.
-fn pill_of(
+/// A node's attribute, trimmed, or the empty string where it has none.
+fn attr<'a>(node: &'a Node, name: &str) -> &'a str {
+    node.attrs()
+        .get(name)
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+}
+
+/// What an inline atom is drawn as, for the atoms the view draws itself: an
+/// image's label, or the verbatim source of an inline HTML primitive. Every
+/// other atom keeps the object-replacement character the projection gave it,
+/// which is blank.
+fn atom_label<'a>(types: &DocTypes, node: &'a Node) -> Option<(AtomShape, &'a str)> {
+    let ty = node.type_id();
+    if Some(ty) == types.image {
+        let label = match (attr(node, "alt"), file_name(attr(node, "src"))) {
+            ("", Some(name)) => name,
+            ("", None) => "Image",
+            (alt, _) => alt,
+        };
+        Some((AtomShape::Pill, label))
+    } else if Some(ty) == types.raw_inline {
+        // HTML is kept verbatim and shown as source, so the tag reads exactly as
+        // it was written — a closing tag included.
+        Some((AtomShape::Source, attr(node, "source")))
+    } else {
+        None
+    }
+}
+
+/// The atom an inline run is drawn as, shaped and measured.
+fn atom_of(
     types: &DocTypes,
     run: &Run,
     style: &EditorStyle,
@@ -1508,51 +1533,27 @@ fn pill_of(
     column: Pixels,
     alone: bool,
     window: &Window,
-) -> Option<Pill> {
+) -> Option<Atom> {
     let RunContent::Atom(node) = &run.content else {
         return None;
     };
-    let ty = node.type_id();
-    let attr = |name: &str| {
-        node.attrs()
-            .get(name)
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .trim()
-    };
+    let (shape, text) = atom_label(types, node)?;
     // A local file the note can read is drawn for real where it has the line to
     // itself; the placeholder is still built, and stands in wherever it is not.
-    let drawn = (alone && Some(ty) == types.image)
-        .then(|| drawn_image(attr("src"), column))
+    let drawn = (alone && Some(node.type_id()) == types.image)
+        .then(|| drawn_image(attr(node, "src"), column))
         .flatten();
-    let (picture, face, text) = if Some(ty) == types.image {
-        let label = match (attr("alt"), file_name(attr("src"))) {
-            ("", Some(name)) => name,
-            ("", None) => "Image",
-            (alt, _) => alt,
-        };
-        (true, font(".SystemUIFont"), label)
-    } else if Some(ty) == types.raw_inline {
-        // A closing tag only ends what its opener named, so it collapses to `</>`
-        // and the text between the two pills stays readable.
-        match attr("source") {
-            "" => (false, font(CODE_FONT), "HTML"),
-            source if source.starts_with("</") => (false, font(CODE_FONT), "</>"),
-            source => (false, font(CODE_FONT), source),
-        }
-    } else {
-        return None;
+    // A pill's label is smaller than the text around it, as inline code is;
+    // source text sits in the sentence at the sentence's own size.
+    let (face, size) = match shape {
+        AtomShape::Pill => (font(".SystemUIFont"), font_size * PILL_SCALE),
+        AtomShape::Source => (font(CODE_FONT), font_size),
     };
-    let icon = if picture {
-        PILL_ICON + PILL_ICON_GAP
-    } else {
-        px(0.)
-    };
-    let room = (column * PILL_MAX_RATIO - PILL_PADDING * 2. - icon).max(px(16.));
-    let shape = |label: String| {
+    let room = (column * PILL_MAX_RATIO - shape.chrome()).max(px(16.));
+    let shaped = |label: String| {
         Rc::new(window.text_system().shape_line(
             label.clone().into(),
-            font_size * PILL_SCALE,
+            size,
             &[TextRun {
                 len: label.len(),
                 font: face.clone(),
@@ -1565,17 +1566,19 @@ fn pill_of(
         ))
     };
     let mut graphemes = text.graphemes(true).collect::<Vec<_>>();
-    let mut label = shape(graphemes.concat());
+    let mut label = shaped(graphemes.concat());
+    // Even source text has to stay within the column: its placeholder is one
+    // unbreakable run, so nothing downstream can shorten it.
     while label.width > room && graphemes.len() > 1 {
         graphemes.pop();
-        label = shape(format!("{}…", graphemes.concat()));
+        label = shaped(format!("{}…", graphemes.concat()));
     }
-    Some(Pill {
+    Some(Atom {
         width: match &drawn {
             Some((_, size)) => size.width,
-            None => PILL_PADDING * 2. + icon + label.width,
+            None => label.width + shape.chrome(),
         },
-        picture,
+        shape,
         label,
         image: drawn,
     })
@@ -1658,74 +1661,6 @@ fn file_name(src: &str) -> Option<&str> {
     (!name.is_empty()).then_some(name)
 }
 
-/// The `char` ranges of the line that sit inside an inline span carrying no
-/// mark the view draws.
-///
-/// Such a run is the only part of a document whose structure nothing on screen
-/// stands for, so it gets a hint. A span that became a mark — `<b>` is strong —
-/// already shows what it is and is left alone.
-fn hints_of(input: &ShapeInput<'_>, line: &Line) -> Vec<Range<usize>> {
-    let types = input.types;
-    let (Some(span), Some(own)) = (types.inline_span, line.ancestors.last()) else {
-        return Vec::new();
-    };
-    // An inline container is the only thing that makes a line's token span
-    // longer than its visible text, so an ordinary line needs no walk at all.
-    if line.to - line.from == line.len() {
-        return Vec::new();
-    }
-    let Some(block) = input.doc.node_at(own.before) else {
-        return Vec::new();
-    };
-    let mut positions = Vec::new();
-    silent_spans(&block, own.before + 1, span, types, &mut positions);
-    positions
-        .into_iter()
-        .filter_map(|range| {
-            let from = line.pos_to_offset(range.start)?;
-            let to = line.pos_to_offset(range.end)?;
-            (to > from).then_some(from..to)
-        })
-        .collect()
-}
-
-/// Collect the content ranges of every inline span under `parent` whose own
-/// marks the view draws nothing for.
-fn silent_spans(
-    parent: &Node,
-    from: usize,
-    span: NodeTypeId,
-    types: &DocTypes,
-    out: &mut Vec<Range<usize>>,
-) {
-    let mut pos = from;
-    for child in parent.children() {
-        let size = child.node_size();
-        if child.is_container() {
-            if child.type_id() == span && !drawn_marks(types, child.marks()) {
-                out.push(pos + 1..pos + size - 1);
-            }
-            silent_spans(child, pos + 1, span, types, out);
-        }
-        pos += size;
-    }
-}
-
-/// Whether the view paints anything for `marks`, which is what tells a reader
-/// that the span carrying them is there.
-fn drawn_marks(types: &DocTypes, marks: &MarkSet) -> bool {
-    [
-        types.strong,
-        types.em,
-        types.code,
-        types.strikethrough,
-        types.underline,
-        types.link,
-    ]
-    .into_iter()
-    .any(|ty| has(ty, marks))
-}
-
 struct Runs {
     runs: Vec<TextRun>,
     /// Byte ranges of inline code within the whole line text, with their face.
@@ -1751,7 +1686,7 @@ fn text_runs(
     } else {
         style.text
     };
-    // A ticked item is greyed and struck through as a whole, but a pill and a
+    // A ticked item is greyed and struck through as a whole, but an atom and a
     // link keep the colours that say what they are.
     let done = checked_item.then_some(StrikethroughStyle {
         thickness: px(1.),
@@ -1762,8 +1697,9 @@ fn text_runs(
         if heading.is_some() {
             face.weight = FontWeight::BOLD;
         }
-        // A raw block's source sits on its own panel, so it reads as code here.
-        let raw = line.kind == LineKind::LeafBlock && text.text != " ";
+        // A raw block's source is shown as source: monospaced and quiet, so it
+        // reads as the markup it is rather than as prose.
+        let raw = types.is_raw_block(line);
         if raw {
             face = font(CODE_FONT);
         }
@@ -1771,7 +1707,7 @@ fn text_runs(
             runs: vec![TextRun {
                 len: text.text.len(),
                 font: face,
-                color: if raw { style.text } else { text_color },
+                color: if raw { style.muted_text } else { text_color },
                 background_color: None,
                 underline: None,
                 strikethrough: None,
@@ -1800,8 +1736,8 @@ fn text_runs(
             face.style = FontStyle::Italic;
         }
         let atom = matches!(run.content, RunContent::Atom(_));
-        // A widened atom is drawn as a pill over the fillers standing in for it.
-        let pill = text
+        // A widened atom is drawn over the fillers standing in for it.
+        let widened = text
             .widenings
             .iter()
             .any(|widening| widening.source == run.char_from);
@@ -1813,7 +1749,7 @@ fn text_runs(
             text_color
         };
         // Inline code only reserves its space here; see `InlineCode`.
-        let color = if pill {
+        let color = if widened {
             gpui::transparent_black()
         } else if has(types.code, marks) && !code_block {
             code.push((range, face.clone(), ink));
@@ -1826,7 +1762,7 @@ fn text_runs(
             font: face,
             color,
             background_color: None,
-            underline: (!pill && (has(types.underline, marks) || is_link)).then_some(
+            underline: (!widened && (has(types.underline, marks) || is_link)).then_some(
                 UnderlineStyle {
                     thickness: px(1.),
                     color: Some(ink),
@@ -1926,7 +1862,7 @@ fn indent_of(
             indent += style.quote_indent;
         } else if types.is_list(ty) {
             indent += style.list_indent;
-        } else if Some(ty) == types.code_block || Some(ty) == types.raw_block {
+        } else if Some(ty) == types.code_block {
             indent += CODE_PADDING;
         }
     }
@@ -2104,13 +2040,9 @@ fn gap_below(
     style.paragraph_gap
 }
 
-fn code_header(
-    label: &str,
-    interactive: bool,
-    width: Pixels,
-    style: &EditorStyle,
-    window: &Window,
-) -> Option<CodeHeader> {
+/// The shaped language label of a code block's header, trimmed to the room the
+/// picker and the copy button leave it.
+fn code_header(label: &str, width: Pixels, style: &EditorStyle, window: &Window) -> Rc<ShapedLine> {
     let shape_label = |label: String| {
         Rc::new(window.text_system().shape_line(
             label.clone().into(),
@@ -2126,22 +2058,14 @@ fn code_header(
             None,
         ))
     };
-    let chrome = if interactive {
-        CODE_COPY_WIDTH + CODE_CHEVRON_WIDTH
-    } else {
-        px(0.)
-    };
-    let language_width = (width - chrome - px(30.)).max(px(20.));
+    let language_width = (width - CODE_COPY_WIDTH - CODE_CHEVRON_WIDTH - px(30.)).max(px(20.));
     let mut label = label.graphemes(true).take(64).collect::<Vec<_>>();
     let mut shaped = shape_label(label.concat());
     while shaped.width > language_width && !label.is_empty() {
         label.pop();
         shaped = shape_label(format!("{}…", label.concat()));
     }
-    Some(CodeHeader {
-        language: shaped,
-        interactive,
-    })
+    shaped
 }
 
 /// Shape the smaller text drawn inside each inline-code pill, and record the
@@ -2464,8 +2388,8 @@ impl Element for EditorSurface {
                         );
                     }
                 }
-                for pill in &row.pills {
-                    paint_pill(row, pill, &style, window, cx);
+                for atom in &row.atoms {
+                    paint_atom(row, atom, &style, window, cx);
                 }
                 match row.decoration {
                     Some(Decoration::Quote { levels, joined }) => {
@@ -2494,7 +2418,7 @@ impl Element for EditorSurface {
                         ),
                         style.rule,
                     )),
-                    Some(Decoration::Panel) => {
+                    Some(Decoration::Code) => {
                         window.paint_quad(
                             fill(
                                 Bounds::new(
@@ -2514,8 +2438,8 @@ impl Element for EditorSurface {
                     }
                     None => {}
                 }
-                if let Some(header) = &row.code_header {
-                    paint_code_header(self, row, header, &style, window, cx);
+                if let Some(label) = &row.code_header {
+                    paint_code_header(self, row, label, &style, window, cx);
                 }
                 if a != b {
                     let from = row.pos_to_offset(a);
@@ -2554,9 +2478,6 @@ impl Element for EditorSurface {
                             cx,
                         );
                     }
-                }
-                for hint in &row.hints {
-                    paint_hint(row, hint.clone(), &style, window);
                 }
                 if let Some(marker) = &row.marker {
                     paint_marker(row, marker, &style, window, cx);
@@ -2848,17 +2769,17 @@ fn paint_table(
     }
 }
 
-/// Draw one inline atom's pill over the fillers reserving its slot.
-fn paint_pill(
+/// Draw one inline atom over the fillers reserving its slot.
+fn paint_atom(
     row: &LayoutLine,
-    pill: &InlinePill,
+    atom: &InlineAtom,
     style: &EditorStyle,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let top = row.origin.y + row.line_height * pill.visual_row as f32;
-    if let Some((image, drawn)) = &pill.image {
-        let bounds = Bounds::new(point(row.origin.x + pill.left, top), *drawn);
+    let top = row.origin.y + row.line_height * atom.visual_row as f32;
+    if let Some((image, drawn)) = &atom.image {
+        let bounds = Bounds::new(point(row.origin.x + atom.left, top), *drawn);
         let _ = window.paint_image(
             bounds,
             bounds,
@@ -2869,26 +2790,33 @@ fn paint_pill(
         );
         return;
     }
+    // Source text is text: it starts where the run before it left off, with
+    // nothing drawn around it.
+    if atom.shape == AtomShape::Source {
+        let _ = atom.label.paint(
+            point(row.origin.x + atom.left, top),
+            row.line_height,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+        return;
+    }
     let inset = (row.line_height * 0.1).round();
     let bounds = Bounds::new(
-        point(row.origin.x + pill.left, top + inset),
-        size(pill.slot, row.line_height - inset * 2.),
+        point(row.origin.x + atom.left, top + inset),
+        size(atom.slot, row.line_height - inset * 2.),
     );
     window.paint_quad(fill(bounds, style.inline_code_background).corner_radii(style.code_radius));
-    let icon = if pill.picture {
-        PILL_ICON + PILL_ICON_GAP
-    } else {
-        px(0.)
-    };
-    let left = bounds.origin.x + (bounds.size.width - icon - pill.label.width).max(px(0.)) / 2.;
-    if pill.picture {
-        paint_picture(
-            point(left, bounds.center().y - PILL_ICON * 0.5),
-            style,
-            window,
-        );
-    }
-    let _ = pill.label.paint(
+    let icon = PILL_ICON + PILL_ICON_GAP;
+    let left = bounds.origin.x + (bounds.size.width - icon - atom.label.width).max(px(0.)) / 2.;
+    paint_picture(
+        point(left, bounds.center().y - PILL_ICON * 0.5),
+        style,
+        window,
+    );
+    let _ = atom.label.paint(
         point(left + icon, top),
         row.line_height,
         TextAlign::Left,
@@ -2920,22 +2848,6 @@ fn paint_picture(origin: Point<Pixels>, style: &EditorStyle, window: &mut Window
     frame.line_to(at(9.5, 3.5));
     if let Ok(path) = frame.build() {
         window.paint_path(path, style.muted_text);
-    }
-}
-
-/// Draw the dotted rule under text that sits inside an inline span the line
-/// shows nothing else for.
-fn paint_hint(row: &LayoutLine, chars: Range<usize>, style: &EditorStyle, window: &mut Window) {
-    for rect in row.rectangles(chars, false) {
-        let y = rect.origin.y + row.line_height - HINT_PITCH;
-        let mut x = rect.origin.x;
-        while x + HINT_DOT <= rect.origin.x + rect.size.width {
-            window.paint_quad(fill(
-                Bounds::new(point(x, y), size(HINT_DOT, HINT_DOT)),
-                style.rule,
-            ));
-            x += HINT_PITCH;
-        }
     }
 }
 
@@ -3003,24 +2915,22 @@ fn paint_marker(
 fn paint_code_header(
     surface: &EditorSurface,
     row: &LayoutLine,
-    header: &CodeHeader,
+    label: &ShapedLine,
     style: &EditorStyle,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let label = row.header_bounds().expect("a header has label bounds");
-    let _ = header.language.paint(
-        label.origin + point(px(6.), px(3.)),
+    let (Some(language), Some(copy)) = (row.code_language_bounds(), row.code_copy_bounds()) else {
+        return;
+    };
+    let _ = label.paint(
+        language.origin + point(px(6.), px(3.)),
         px(18.),
         TextAlign::Left,
         None,
         window,
         cx,
     );
-    // A raw block's header is a caption: nothing to pick, nothing to copy.
-    let (Some(language), Some(copy)) = (row.code_language_bounds(), row.code_copy_bounds()) else {
-        return;
-    };
     let mut icons = PathBuilder::stroke(px(1.2));
     let chevron = point(
         language.right() - CODE_CHEVRON_WIDTH,
@@ -3092,11 +3002,11 @@ fn paint_code_header(
 #[cfg(test)]
 mod tests {
     use super::{
-        CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_PADDING, LayoutLine, Marker,
-        QUOTE_BAR, ShapeInput, TableScroll, Widening, cell_under, column_demands, column_widths,
-        drawn_image, file_name, gap_below, hints_of, marker_of, merge_row_centers, place_table,
-        quote_bars, raw_block_label, reveal_offset, table_overflows, unbreakable_units,
-        visible_strips,
+        AtomShape, CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_PADDING, Decoration,
+        LayoutLine, Marker, QUOTE_BAR, ShapeInput, TableScroll, Widening, atom_label, cell_under,
+        column_demands, column_widths, decoration_of, drawn_image, file_name, gap_below, marker_of,
+        max_indent, merge_row_centers, place_table, quote_bars, reveal_offset, table_overflows,
+        unbreakable_units, visible_strips,
     };
     use crate::style::EditorStyle;
     use crate::typeahead::tests::state_of;
@@ -3104,8 +3014,7 @@ mod tests {
     use gpui::{Bounds, Pixels, point, px, size};
     use markraft_commonmark::{commonmark_doc_type_names, commonmark_schema};
     use markraft_core::commands::ColumnAlignment;
-    use markraft_core::projection::{Projection, projection_of};
-    use markraft_core::{Mark, MarkSet, Node, Schema};
+    use markraft_core::projection::{Line, RunContent, projection_of};
     use std::collections::HashMap;
 
     /// A row carrying only the token range it stands for, which is all the
@@ -3129,8 +3038,7 @@ mod tests {
             code_header: None,
             code_hitboxes: None,
             widenings: Vec::new(),
-            pills: Vec::new(),
-            hints: Vec::new(),
+            atoms: Vec::new(),
             table: None,
         }
     }
@@ -3226,8 +3134,13 @@ mod tests {
         }
     }
 
-    /// The gap every line of a document carries below it.
-    fn gaps_of(source: &str, style: &EditorStyle) -> Vec<Pixels> {
+    /// Run `each` over every line of `source`, with the shaping input the layout
+    /// pass would have built for it.
+    fn per_line<T>(
+        source: &str,
+        style: &EditorStyle,
+        each: impl Fn(&ShapeInput<'_>, usize, &Line) -> T,
+    ) -> Vec<T> {
         let state = state_of(source);
         let projection = projection_of(&state);
         let schema = commonmark_schema();
@@ -3243,17 +3156,29 @@ mod tests {
             .lines()
             .iter()
             .enumerate()
-            .map(|(index, line)| {
-                gap_below(
-                    &input,
-                    index,
-                    line,
-                    types.heading_level(line),
-                    types.is_code_block(line),
-                    &marker_of(&types, line, style, None),
-                )
-            })
+            .map(|(index, line)| each(&input, index, line))
             .collect()
+    }
+
+    /// The gap every line of a document carries below it.
+    fn gaps_of(source: &str, style: &EditorStyle) -> Vec<Pixels> {
+        per_line(source, style, |input, index, line| {
+            gap_below(
+                input,
+                index,
+                line,
+                input.types.heading_level(line),
+                input.types.is_code_block(line),
+                &marker_of(input.types, line, input.style, None),
+            )
+        })
+    }
+
+    /// The decoration every line of a document carries, at a note's width.
+    fn decorations_of(source: &str, style: &EditorStyle) -> Vec<Option<Decoration>> {
+        per_line(source, style, |input, index, line| {
+            decoration_of(input, index, line, false, max_indent(input.style, px(600.)))
+        })
     }
 
     /// The tight list gap belongs between a list's own lines. The block that
@@ -3320,17 +3245,31 @@ mod tests {
         assert_eq!(gaps[1], style.paragraph_gap, "leaving both quotes");
     }
 
-    /// The source says what a raw block holds; only a GFM table, an HTML comment
-    /// and an HTML block ever reach one.
+    /// The view keeps HTML verbatim and shows it as source, so a raw block is
+    /// drawn like a paragraph of monospace text: nothing behind it, and the
+    /// ordinary gap below.
     #[test]
-    fn a_raw_block_is_captioned_by_its_source() {
-        assert_eq!(raw_block_label("| a | b |\n| - | - |"), "Table");
-        assert_eq!(raw_block_label("\n\n  | a |"), "Table");
-        assert_eq!(raw_block_label("<!-- a note -->"), "Comment");
-        assert_eq!(raw_block_label("\n  <!--\n  many lines\n  -->"), "Comment");
-        assert_eq!(raw_block_label("<div>x</div>"), "HTML");
-        assert_eq!(raw_block_label("<!DOCTYPE html>"), "HTML");
-        assert_eq!(raw_block_label(""), "HTML");
+    fn a_raw_block_is_drawn_as_a_plain_block() {
+        let style = spaced_style();
+        let source = "<div>\n  x\n</div>\n\npara";
+        assert!(
+            per_line(source, &style, |input, _, line| input
+                .types
+                .is_raw_block(line))[0],
+            "the HTML block is the one kept verbatim"
+        );
+        assert_eq!(gaps_of(source, &style)[0], style.paragraph_gap);
+        assert!(
+            decorations_of(source, &style)[0].is_none(),
+            "no panel behind a raw block"
+        );
+        assert!(
+            matches!(
+                decorations_of("```\nx\n```\n\npara", &style)[0],
+                Some(Decoration::Code)
+            ),
+            "a code block keeps its own",
+        );
     }
 
     /// A two-by-one RGBA PNG, so a decode can be checked against a known
@@ -3367,11 +3306,11 @@ mod tests {
         assert_eq!(file_name(""), None);
     }
 
-    /// A pill needs far more room than the one character its atom is, so the
+    /// A drawn atom needs far more room than the one character it is, so the
     /// display text holds a run of fillers in its place. Every geometry query
     /// still speaks in projection offsets, which the two maps have to preserve.
     #[test]
-    fn a_pill_placeholder_stays_one_caret_stop() {
+    fn an_atom_placeholder_stays_one_caret_stop() {
         let mut rows = rows_of("ab![alt](x.png)cd");
         let row = &mut rows[0];
         assert_eq!(row.char_len, 5, "the atom is one visible character");
@@ -3383,57 +3322,39 @@ mod tests {
         for offset in 0..=row.char_len {
             assert_eq!(row.to_source(row.to_display(offset)), offset, "at {offset}");
         }
-        assert_eq!(row.to_display(2), 2, "the atom starts where its pill does");
-        assert_eq!(row.to_display(3), 7, "and ends where its pill does");
-        assert_eq!(row.to_source(3), 2, "the pill's left half is before it");
+        assert_eq!(row.to_display(2), 2, "the atom starts where its slot does");
+        assert_eq!(row.to_display(3), 7, "and ends where its slot does");
+        assert_eq!(row.to_source(3), 2, "the atom's left half is before it");
         assert_eq!(row.to_source(6), 3, "and its right half is after it");
-        assert_eq!(row.to_display(5), 9, "text past the pill keeps its order");
+        assert_eq!(row.to_display(5), 9, "text past the atom keeps its order");
     }
 
-    /// A document whose paragraph holds a bare inline span: the CommonMark
-    /// reader never builds one, because every span it makes carries the mark it
-    /// stands for, so this is assembled by hand.
-    fn doc_with_span(marks: MarkSet) -> (Schema, Node) {
-        let schema = commonmark_schema();
-        let span = schema
-            .node("inline_span", [schema.text("Cmd")])
-            .expect("text is valid span content")
-            .mark(marks);
-        let paragraph = schema
-            .node("paragraph", [schema.text("a"), span])
-            .expect("a span is valid paragraph content");
-        let doc = schema.doc([paragraph]).expect("a valid document");
-        (schema, doc)
-    }
-
-    fn hints_for(marks: impl Fn(&Schema) -> MarkSet) -> Vec<std::ops::Range<usize>> {
-        let schema = commonmark_schema();
-        let (schema, doc) = doc_with_span(marks(&schema));
-        let projection = Projection::of(&doc, &schema);
-        let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
-        let style = EditorStyle::notes();
-        let input = ShapeInput {
-            doc: &doc,
-            types: &types,
-            projection: &projection,
-            style: &style,
-            single_line: false,
-        };
-        hints_of(&input, &projection.lines()[0])
-    }
-
-    /// An inline span is the one construct a line can carry without showing
-    /// anything for it — unless its own marks already say it is there.
+    /// HTML is never rendered: an inline primitive is drawn as the source it
+    /// stands for, so the row reserves the width of exactly that text and
+    /// nothing around it.
     #[test]
-    fn only_a_span_with_nothing_to_show_is_hinted() {
-        assert_eq!(hints_for(|_| MarkSet::empty()), vec![1..4]);
+    fn a_raw_inline_atom_reserves_the_width_of_its_own_source() {
+        let state = state_of("press <kbd>K</kbd> twice");
+        let projection = projection_of(&state);
+        let schema = commonmark_schema();
+        let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
+        let drawn: Vec<(AtomShape, &str)> = projection.lines()[0]
+            .runs
+            .iter()
+            .filter_map(|run| match &run.content {
+                RunContent::Atom(node) => atom_label(&types, node),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            hints_for(|schema| {
-                let strong = schema.mark_id("strong").expect("the preset has strong");
-                MarkSet::from_marks(schema, [Mark::new(strong)])
-            }),
-            Vec::<std::ops::Range<usize>>::new(),
-            "a span that became bold already shows what it is"
+            drawn,
+            vec![(AtomShape::Source, "<kbd>"), (AtomShape::Source, "</kbd>")],
+            "both tags read as they were written"
+        );
+        assert_eq!(
+            AtomShape::Source.chrome(),
+            px(0.),
+            "source text reserves its own width and no padding"
         );
     }
 
