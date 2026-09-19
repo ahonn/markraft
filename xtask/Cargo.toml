@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+ed25519-dalek = "2"
+plist = "1"
+roxmltree = "0.21"
+serde_json = "1"
+tempfile = "3"
+tiny_http = "0.12"

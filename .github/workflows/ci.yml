@@ -16,16 +16,15 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      # rust-cache prunes non-Cargo files but can restore their empty directories.
+      - name: Discard incomplete cached Sparkle installation
+        run: rm -rf target/sparkle
       - run: bash scripts/download-sparkle.sh
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo test -p markraft-app --features updater-mock --locked updater::tests
-      - run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
       - run: cargo install cargo-bundle --version 0.11.0 --locked
-      - run: bash scripts/bundle-app.sh
+      - run: cargo xtask bundle
       - name: Verify embedded framework without development paths
         run: env -u DYLD_FRAMEWORK_PATH 'target/debug/bundle/osx/Markraft Notes.app/Contents/MacOS/markraft-app' --help

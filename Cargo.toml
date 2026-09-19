@@ -6,6 +6,7 @@ members = [
     "crates/markraft-gpui",
     "crates/markraft-vim",
     "crates/markraft-app",
+    "xtask",
 ]
 
 [workspace.package]

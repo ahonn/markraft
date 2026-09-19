@@ -34,9 +34,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-universal
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      # rust-cache prunes non-Cargo files but can restore their empty directories.
+      - name: Discard incomplete cached Sparkle installation
+        run: rm -rf target/sparkle
       - run: cargo install cargo-bundle --version 0.11.0 --locked
       - name: Set temporary credential paths
         run: |
@@ -63,12 +63,15 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$SIGNING_KEYCHAIN"
           security list-keychains -d user -s "$SIGNING_KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db"
       - name: Build, sign, notarize and generate appcast
-        run: bash scripts/release-app.sh "$GITHUB_REF_NAME"
+        run: cargo xtask release "$GITHUB_REF_NAME"
       - name: Publish all artifacts together
         run: |
           set -euo pipefail
-          if gh release view "$GITHUB_REF_NAME" --json isDraft > "$RUNNER_TEMP/release.json" 2> "$RUNNER_TEMP/release-error"; then
-            python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["isDraft"] else "Release is already published; do not overwrite it")' "$RUNNER_TEMP/release.json"
+          if is_draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft); then
+            if [ "$is_draft" != true ]; then
+              echo 'Release is already published; do not overwrite it' >&2
+              exit 1
+            fi
           else
             gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Markraft $GITHUB_REF_NAME" --generate-notes
           fi
