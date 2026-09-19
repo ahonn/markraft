@@ -78,7 +78,6 @@ const CODE_RADIUS: Pixels = px(12.);
 const CELL_PADDING_X: Pixels = px(8.);
 const CELL_PADDING_Y: Pixels = px(6.);
 const CELL_MIN_WIDTH: Pixels = px(56.);
-const TABLE_RADIUS: Pixels = px(6.);
 const TABLE_LINE: Pixels = px(1.);
 
 /// The byte index of the `n`th `char` of `text`, clamped to its length.
@@ -2349,14 +2348,7 @@ fn paint_table(cells: &[LayoutLine], style: &EditorStyle, caret: usize, window: 
         .map(|(_, bounds)| *bounds)
         .reduce(|all, bounds| all.union(&bounds))
     {
-        window.paint_quad(
-            fill(header, style.table_header_background).corner_radii(Corners {
-                top_left: TABLE_RADIUS,
-                top_right: TABLE_RADIUS,
-                bottom_right: px(0.),
-                bottom_left: px(0.),
-            }),
-        );
+        window.paint_quad(fill(header, style.table_header_background));
     }
     for (cell, bounds) in &boxes {
         if cell.row + 1 < cell.rows {
@@ -2380,7 +2372,7 @@ fn paint_table(cells: &[LayoutLine], style: &EditorStyle, caret: usize, window: 
     }
     window.paint_quad(quad(
         outer,
-        Corners::all(TABLE_RADIUS),
+        Corners::all(px(0.)),
         gpui::transparent_black(),
         TABLE_LINE,
         style.rule,
