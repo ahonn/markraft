@@ -291,6 +291,24 @@ pub(crate) struct LayoutLine {
     pub(crate) table: Option<TableCell>,
 }
 
+/// Host popovers also anchor document and node selections, whose opening token can
+/// precede the first text row. A caret outside the layout still has no anchor.
+pub(crate) fn selection_anchor_row(
+    layout: &[LayoutLine],
+    start: usize,
+    end: usize,
+) -> Option<&LayoutLine> {
+    layout.iter().find(|row| row.contains(start)).or_else(|| {
+        (start < end)
+            .then(|| {
+                layout
+                    .iter()
+                    .find(|row| row.from >= start && row.from < end)
+            })
+            .flatten()
+    })
+}
+
 impl LayoutLine {
     /// The document position just past the line's own content.
     pub(crate) fn to(&self) -> usize {
@@ -3083,6 +3101,33 @@ mod tests {
             .enumerate()
             .map(|(index, line)| probe(index, line))
             .collect()
+    }
+
+    #[test]
+    fn popovers_anchor_all_selection_at_the_first_content_row() {
+        for source in ["Markraft interface check", "- Parent\n  - Child"] {
+            let state = state_of(source);
+            let selection = markraft_core::Selection::All;
+            let rows = rows_of(source);
+            let start = selection.from(state.doc());
+            let end = selection.to(state.doc());
+            assert!(
+                !rows[0].contains(start),
+                "the document starts before its text"
+            );
+            let anchor = super::selection_anchor_row(&rows, start, end).unwrap();
+            assert_eq!(anchor.index, 0);
+            assert_eq!(anchor.pos_to_offset(start), 0);
+        }
+
+        let rows = rows_of("First\n\nSecond");
+        let start = rows[1].from + 1;
+        let anchor = super::selection_anchor_row(&rows, start, start + 2).unwrap();
+        assert_eq!(anchor.index, 1, "a partial selection stays on its own row");
+        assert_eq!(anchor.pos_to_offset(start), 1);
+        assert!(super::selection_anchor_row(&rows, 0, 0).is_none());
+        let outside = rows.last().unwrap().to() + 1;
+        assert!(super::selection_anchor_row(&rows, outside, outside + 2).is_none());
     }
 
     /// The document the live session ended with: every shape that makes a row

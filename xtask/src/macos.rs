@@ -9,7 +9,7 @@ use plist::{Dictionary, Value};
 
 use crate::{output, run};
 
-const APP_NAME: &str = "Markraft Notes.app";
+const APP_NAME: &str = "Markraft.app";
 const FEED_URL: &str = "https://github.com/ahonn/markraft/releases/latest/download/appcast.xml";
 
 #[derive(Default)]
@@ -169,8 +169,8 @@ fn configure_metadata(info: &mut Dictionary, public_key: &str, mock: bool) -> Re
         info.insert("NSAppTransportSecurity".into(), transport.into());
     } else {
         info.insert("CFBundleIdentifier".into(), "dev.markraft.app".into());
-        info.insert("CFBundleName".into(), "Markraft Notes".into());
-        info.insert("CFBundleDisplayName".into(), "Markraft Notes".into());
+        info.insert("CFBundleName".into(), "Markraft".into());
+        info.insert("CFBundleDisplayName".into(), "Markraft".into());
         info.insert("SUFeedURL".into(), FEED_URL.into());
         info.remove("MarkraftMockUpdates");
         if let Some(Value::Dictionary(transport)) = info.get_mut("NSAppTransportSecurity") {

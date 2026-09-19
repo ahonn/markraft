@@ -32,7 +32,7 @@ pub fn prepare(
     check_collisions(&work, &install, &settings, reset)?;
 
     let source = if skip_build {
-        root.join("target/debug/bundle/osx/Markraft Notes.app")
+        root.join("target/debug/bundle/osx/Markraft.app")
     } else {
         crate::macos::bundle(
             root,

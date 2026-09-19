@@ -1,387 +1,182 @@
-use gpui::{Bounds, Hsla, IntoElement, PathBuilder, Styled, canvas, fill, point, px, rgb, size};
+use crate::platform::symbols;
+use gpui::{Hsla, IntoElement, RenderImage, Rgba, Styled, canvas, px};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
-#[derive(Clone, Copy)]
-pub(super) enum Icon {
-    Plus,
-    Notes,
-    Command,
-    Text,
-    Close,
-    ChevronDown,
-    Check,
-    Pin,
-    Trash,
-    Copy,
-    Export,
-    Settings,
-    Bold,
-    Italic,
-    Code,
-    Strikethrough,
-    Underline,
-    Link,
-    Edit,
-    Open,
-    Heading,
-    Quote,
-    CodeBlock,
-    Paragraph,
-    Ordered,
-    Bullet,
-    Task,
-    Divider,
-    Restore,
-    Table,
-    RowAdd,
-    RowDelete,
-    ColumnAdd,
-    ColumnDelete,
-    AlignLeft,
-    AlignCenter,
-    AlignRight,
+macro_rules! define_icons {
+    ($($variant:ident => $symbol:literal),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+        pub(super) enum Icon { $($variant),+ }
+
+        impl Icon {
+            fn symbol(self) -> &'static str {
+                match self { $(Self::$variant => $symbol),+ }
+            }
+
+            #[cfg(test)]
+            const ALL: &[Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+
+// Semantic names stay independent of AppKit. Prefer symbols present on macOS 13,
+// the minimum supported version; the native-render test checks the host catalog.
+define_icons! {
+    Plus => "plus",
+    Notes => "doc.on.doc",
+    Command => "command",
+    Text => "textformat",
+    Close => "xmark.circle.fill",
+    ChevronDown => "chevron.down",
+    Check => "checkmark",
+    Pin => "pin",
+    Trash => "trash",
+    Copy => "doc.on.clipboard",
+    Export => "square.and.arrow.up",
+    Settings => "gearshape",
+    Bold => "bold",
+    Italic => "italic",
+    Code => "chevron.left.forwardslash.chevron.right",
+    Strikethrough => "strikethrough",
+    Underline => "underline",
+    Link => "link",
+    Edit => "pencil",
+    Open => "folder",
+    Heading => "textformat.size",
+    Quote => "text.quote",
+    CodeBlock => "curlybraces.square",
+    Paragraph => "paragraphsign",
+    Ordered => "list.number",
+    Bullet => "list.bullet",
+    Task => "checklist",
+    Divider => "minus",
+    Restore => "arrow.uturn.backward",
+    Table => "tablecells",
+    RowAdd => "rectangle.stack.badge.plus",
+    RowDelete => "rectangle.stack.badge.minus",
+    ColumnAdd => "rectangle.badge.plus",
+    ColumnDelete => "rectangle.badge.minus",
+    AlignLeft => "text.alignleft",
+    AlignCenter => "text.aligncenter",
+    AlignRight => "text.alignright",
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+struct Key {
+    icon: Icon,
+    extent: u32,
+    scale: u32,
+    color: u32,
+}
+
+type SymbolCache = HashMap<Key, Option<Arc<RenderImage>>>;
+thread_local! {
+    // AppKit rendering stays on GPUI's UI thread; only pixel buffers enter GPUI.
+    static CACHE: RefCell<SymbolCache> = RefCell::new(HashMap::new());
+}
+
+fn load(kind: Icon, color: Hsla, extent: f32, scale: f32) -> Option<Arc<RenderImage>> {
+    let color = Rgba::from(color);
+    let key = Key {
+        icon: kind,
+        extent: extent.to_bits(),
+        scale: scale.to_bits(),
+        color: color.into(),
+    };
+    CACHE.with_borrow_mut(|cache| {
+        if let Some(image) = cache.get(&key) {
+            return image.clone();
+        }
+        let image = symbols::render(kind.symbol(), extent, scale, color).or_else(|| {
+            eprintln!("Markraft: could not render SF Symbol {}", kind.symbol());
+            symbols::render("questionmark", extent, scale, color)
+        });
+        // Bound textures retained across repeated theme/display changes. Current
+        // frame elements retain their Arcs when the cache is recycled.
+        if cache.len() >= 512 {
+            cache.clear();
+        }
+        cache.insert(key, image.clone());
+        image
+    })
 }
 
 pub(super) fn icon(kind: Icon, color: Hsla) -> impl IntoElement {
+    sized_icon(kind, color, 16.)
+}
+
+pub(super) fn sized_icon(kind: Icon, color: Hsla, extent: f32) -> impl IntoElement {
     canvas(
-        |_, _, _| (),
-        move |bounds, (), window, _| {
-            let mut path = PathBuilder::stroke(px(1.3));
-            match kind {
-                Icon::Plus => {
-                    line(&mut path, &[(8., 3.), (8., 13.)]);
-                    line(&mut path, &[(3., 8.), (13., 8.)]);
-                }
-                Icon::Notes => {
-                    line(
-                        &mut path,
-                        &[(4., 4.), (2., 4.), (2., 14.), (10., 14.), (10., 12.)],
-                    );
-                    rounded_rect(&mut path, 5., 1.5, 8., 10., 1.5);
-                }
-                Icon::Command => {
-                    rounded_rect(&mut path, 2., 2., 4., 4., 2.);
-                    rounded_rect(&mut path, 10., 2., 4., 4., 2.);
-                    rounded_rect(&mut path, 2., 10., 4., 4., 2.);
-                    rounded_rect(&mut path, 10., 10., 4., 4., 2.);
-                    line(&mut path, &[(6., 2.), (6., 14.)]);
-                    line(&mut path, &[(10., 2.), (10., 14.)]);
-                    line(&mut path, &[(2., 6.), (14., 6.)]);
-                    line(&mut path, &[(2., 10.), (14., 10.)]);
-                }
-                Icon::Text => {
-                    line(&mut path, &[(3., 4.), (3., 2.5), (13., 2.5), (13., 4.)]);
-                    line(&mut path, &[(8., 2.5), (8., 13.5)]);
-                    line(&mut path, &[(5.5, 13.5), (10.5, 13.5)]);
-                }
-                Icon::Close => {
-                    window.paint_quad(
-                        fill(
-                            Bounds::new(
-                                bounds.origin + point(px(2.), px(2.)),
-                                size(px(12.), px(12.)),
-                            ),
-                            color,
-                        )
-                        .corner_radii(px(6.)),
-                    );
-                    line(&mut path, &[(6., 6.), (10., 10.)]);
-                    line(&mut path, &[(10., 6.), (6., 10.)]);
-                }
-                Icon::ChevronDown => line(&mut path, &[(5., 6.5), (8., 9.5), (11., 6.5)]),
-                Icon::Check => line(&mut path, &[(3., 8.), (6.5, 11.5), (13., 4.5)]),
-                Icon::Pin => {
-                    line(
-                        &mut path,
-                        &[
-                            (5., 2.5),
-                            (11., 2.5),
-                            (10.5, 7.),
-                            (12.5, 9.5),
-                            (3.5, 9.5),
-                            (5.5, 7.),
-                            (5., 2.5),
-                        ],
-                    );
-                    line(&mut path, &[(8., 9.5), (8., 14.)]);
-                }
-                Icon::Trash => {
-                    line(&mut path, &[(2.5, 4.5), (13.5, 4.5)]);
-                    line(
-                        &mut path,
-                        &[(5.5, 4.5), (5.5, 2.5), (10.5, 2.5), (10.5, 4.5)],
-                    );
-                    line(
-                        &mut path,
-                        &[(4., 4.5), (4.5, 13.5), (11.5, 13.5), (12., 4.5)],
-                    );
-                    line(&mut path, &[(6.5, 7.), (6.5, 11.)]);
-                    line(&mut path, &[(9.5, 7.), (9.5, 11.)]);
-                }
-                Icon::Copy => {
-                    rounded_rect(&mut path, 5.5, 5.5, 8., 8., 1.5);
-                    line(
-                        &mut path,
-                        &[
-                            (10.5, 3.5),
-                            (10.5, 2.5),
-                            (2.5, 2.5),
-                            (2.5, 10.5),
-                            (3.5, 10.5),
-                        ],
-                    );
-                }
-                Icon::Export => {
-                    line(&mut path, &[(3., 8.5), (3., 13.5), (13., 13.5), (13., 8.5)]);
-                    line(&mut path, &[(8., 10.), (8., 2.)]);
-                    line(&mut path, &[(4.5, 5.5), (8., 2.), (11.5, 5.5)]);
-                }
-                Icon::Settings => {
-                    for (y, knob) in [(4., 6.), (8., 10.), (12., 5.)] {
-                        line(&mut path, &[(2., y), (knob - 1.5, y)]);
-                        line(&mut path, &[(knob + 1.5, y), (14., y)]);
-                        circle(&mut path, knob, y, 1.5);
-                    }
-                }
-                Icon::Bold => {
-                    path.move_to(point(px(5.), px(2.5)));
-                    path.line_to(point(px(8.5), px(2.5)));
-                    path.cubic_bezier_to(
-                        point(px(8.5), px(7.5)),
-                        point(px(12.5), px(2.5)),
-                        point(px(12.5), px(7.5)),
-                    );
-                    path.line_to(point(px(5.), px(7.5)));
-                    path.move_to(point(px(8.5), px(7.5)));
-                    path.cubic_bezier_to(
-                        point(px(8.5), px(13.5)),
-                        point(px(13.), px(7.5)),
-                        point(px(13.), px(13.5)),
-                    );
-                    path.line_to(point(px(5.), px(13.5)));
-                    path.line_to(point(px(5.), px(2.5)));
-                }
-                Icon::Italic => {
-                    line(&mut path, &[(7., 2.5), (12., 2.5)]);
-                    line(&mut path, &[(9.5, 2.5), (6.5, 13.5)]);
-                    line(&mut path, &[(4., 13.5), (9., 13.5)]);
-                }
-                Icon::Strikethrough => {
-                    line(&mut path, &[(11.5, 4.), (9.5, 2.5), (6., 2.5), (4.5, 4.5)]);
-                    line(&mut path, &[(4.5, 4.5), (5., 6.5)]);
-                    line(&mut path, &[(11., 9.5), (11.5, 11.5), (10., 13.5)]);
-                    line(&mut path, &[(10., 13.5), (6., 13.5), (4.5, 12.)]);
-                    line(&mut path, &[(2., 8.), (14., 8.)]);
-                }
-                Icon::Underline => {
-                    line(
-                        &mut path,
-                        &[(4.5, 2.5), (4.5, 8.), (6., 10.5), (10., 10.5), (11.5, 8.)],
-                    );
-                    line(&mut path, &[(11.5, 8.), (11.5, 2.5)]);
-                    line(&mut path, &[(3.5, 13.5), (12.5, 13.5)]);
-                }
-                Icon::Edit => {
-                    line(
-                        &mut path,
-                        &[
-                            (3., 13.),
-                            (3.5, 10.5),
-                            (10.5, 3.5),
-                            (12.5, 5.5),
-                            (5.5, 12.5),
-                            (3., 13.),
-                        ],
-                    );
-                    line(&mut path, &[(9., 5.), (11., 7.)]);
-                }
-                Icon::Open => {
-                    line(&mut path, &[(4., 12.), (12., 4.)]);
-                    line(&mut path, &[(6., 4.), (12., 4.), (12., 10.)]);
-                }
-                Icon::Link => {
-                    line(
-                        &mut path,
-                        &[(7., 5.), (9., 3.), (11.5, 3.), (13., 4.5), (13., 7.)],
-                    );
-                    line(&mut path, &[(13., 7.), (11., 9.)]);
-                    line(
-                        &mut path,
-                        &[(9., 11.), (7., 13.), (4.5, 13.), (3., 11.5), (3., 9.)],
-                    );
-                    line(&mut path, &[(3., 9.), (5., 7.)]);
-                    line(&mut path, &[(6., 10.), (10., 6.)]);
-                }
-                Icon::Code => {
-                    line(&mut path, &[(5., 4.), (1.5, 8.), (5., 12.)]);
-                    line(&mut path, &[(11., 4.), (14.5, 8.), (11., 12.)]);
-                    line(&mut path, &[(9., 2.5), (7., 13.5)]);
-                }
-                Icon::Heading => {
-                    line(&mut path, &[(3.5, 2.5), (3.5, 13.5)]);
-                    line(&mut path, &[(12.5, 2.5), (12.5, 13.5)]);
-                    line(&mut path, &[(3.5, 8.), (12.5, 8.)]);
-                }
-                Icon::Quote => {
-                    line(&mut path, &[(3., 3.), (3., 13.)]);
-                    line(&mut path, &[(6.5, 5.), (13., 5.)]);
-                    line(&mut path, &[(6.5, 8.), (13., 8.)]);
-                    line(&mut path, &[(6.5, 11.), (10.5, 11.)]);
-                }
-                Icon::Ordered => {
-                    line(&mut path, &[(2., 3.5), (3.5, 2.5), (3.5, 6.5)]);
-                    line(&mut path, &[(2., 10.), (4.5, 10.), (2., 13.5), (4.5, 13.5)]);
-                    line(&mut path, &[(7.5, 4.5), (14., 4.5)]);
-                    line(&mut path, &[(7.5, 11.5), (14., 11.5)]);
-                }
-                Icon::CodeBlock => {
-                    rounded_rect(&mut path, 1.5, 2.5, 13., 11., 2.);
-                    line(&mut path, &[(6., 5.5), (3.8, 8.), (6., 10.5)]);
-                    line(&mut path, &[(10., 5.5), (12.2, 8.), (10., 10.5)]);
-                }
-                Icon::Divider => line(&mut path, &[(2., 8.), (14., 8.)]),
-                Icon::Paragraph => {
-                    path.move_to(point(px(9.), px(8.5)));
-                    path.line_to(point(px(6.5), px(8.5)));
-                    path.cubic_bezier_to(
-                        point(px(6.5), px(2.5)),
-                        point(px(2.), px(8.5)),
-                        point(px(2.), px(2.5)),
-                    );
-                    path.line_to(point(px(13.), px(2.5)));
-                    line(&mut path, &[(9., 2.5), (9., 13.5)]);
-                    line(&mut path, &[(12., 2.5), (12., 13.5)]);
-                }
-                Icon::Bullet => {
-                    for y in [4., 8., 12.] {
-                        circle(&mut path, 3., y, 0.65);
-                        line(&mut path, &[(6., y), (13.5, y)]);
-                    }
-                }
-                Icon::Task => {
-                    rounded_rect(&mut path, 2.5, 2.5, 11., 11., 2.);
-                    line(&mut path, &[(5., 8.), (7., 10.), (11., 6.)]);
-                }
-                // The table set: a grid, then one row or one column of it beside the
-                // sign of what the control does to it.
-                Icon::Table => {
-                    rounded_rect(&mut path, 2.5, 2.5, 11., 11., 2.);
-                    line(&mut path, &[(8., 2.5), (8., 13.5)]);
-                    line(&mut path, &[(2.5, 8.), (13.5, 8.)]);
-                }
-                Icon::RowAdd | Icon::RowDelete => {
-                    rounded_rect(&mut path, 2.5, 2.5, 11., 5., 1.5);
-                    line(&mut path, &[(5.5, 11.), (10.5, 11.)]);
-                    if matches!(kind, Icon::RowAdd) {
-                        line(&mut path, &[(8., 8.5), (8., 13.5)]);
-                    }
-                }
-                Icon::ColumnAdd | Icon::ColumnDelete => {
-                    rounded_rect(&mut path, 2.5, 2.5, 5., 11., 1.5);
-                    line(&mut path, &[(9., 8.), (14., 8.)]);
-                    if matches!(kind, Icon::ColumnAdd) {
-                        line(&mut path, &[(11.5, 5.5), (11.5, 10.5)]);
-                    }
-                }
-                Icon::AlignLeft | Icon::AlignCenter | Icon::AlignRight => {
-                    line(&mut path, &[(3., 4.), (13., 4.)]);
-                    line(&mut path, &[(3., 12.), (13., 12.)]);
-                    // The middle line is the short one, set where the column would be.
-                    let (from, to) = match kind {
-                        Icon::AlignCenter => (5., 11.),
-                        Icon::AlignRight => (7., 13.),
-                        _ => (3., 9.),
-                    };
-                    line(&mut path, &[(from, 8.), (to, 8.)]);
-                }
-                Icon::Restore => {
-                    path.move_to(point(px(3.), px(6.5)));
-                    path.cubic_bezier_to(
-                        point(px(13.5), px(8.)),
-                        point(px(5.), px(0.5)),
-                        point(px(13.5), px(2.5)),
-                    );
-                    path.cubic_bezier_to(
-                        point(px(4.), px(12.)),
-                        point(px(13.5), px(13.5)),
-                        point(px(7.), px(15.5)),
-                    );
-                    line(&mut path, &[(2.5, 2.5), (2.5, 6.5), (6.5, 6.5)]);
-                }
-            }
-            path.translate(bounds.origin);
-            if let Ok(path) = path.build() {
-                window.paint_path(
-                    path,
-                    if matches!(kind, Icon::Close) {
-                        if color.l < 0.5 {
-                            rgb(0xffffff).into()
-                        } else {
-                            rgb(0x2e2f33).into()
-                        }
-                    } else {
-                        color
-                    },
-                );
+        move |_, window, _| load(kind, color, extent, window.scale_factor()),
+        |bounds, image, window, _| {
+            if let Some(image) = image {
+                let _ = window.paint_image(bounds, bounds, Default::default(), image, 0, false);
             }
         },
     )
-    .size(px(16.))
+    .size(px(extent))
     .flex_shrink_0()
 }
 
-fn line(path: &mut PathBuilder, points: &[(f32, f32)]) {
-    if let Some((first, rest)) = points.split_first() {
-        path.move_to(point(px(first.0), px(first.1)));
-        for &(x, y) in rest {
-            path.line_to(point(px(x), px(y)));
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::rgb;
+
+    #[test]
+    fn all_symbols_render_at_standard_and_retina_scales() {
+        for &kind in Icon::ALL {
+            for (extent, scale) in [(12., 1.), (16., 2.), (20., 2.)] {
+                let image = symbols::render(kind.symbol(), extent, scale, rgb(0x333333))
+                    .unwrap_or_else(|| panic!("missing SF Symbol: {}", kind.symbol()));
+                let pixels = image.as_bytes(0).unwrap();
+                let expected_side = (extent * scale) as i32;
+                assert_eq!(image.size(0).width.0, expected_side);
+                assert_eq!(image.size(0).height.0, expected_side);
+                assert!(
+                    pixels.chunks_exact(4).any(|p| p[3] > 0),
+                    "empty {kind:?} at {extent} x {scale}"
+                );
+                assert!(pixels.chunks_exact(4).any(|p| p[3] == 0), "opaque {kind:?}");
+            }
         }
     }
-}
 
-fn circle(path: &mut PathBuilder, x: f32, y: f32, radius: f32) {
-    let tangent = radius * 0.552_284_8;
-    path.move_to(point(px(x + radius), px(y)));
-    path.cubic_bezier_to(
-        point(px(x), px(y + radius)),
-        point(px(x + radius), px(y + tangent)),
-        point(px(x + tangent), px(y + radius)),
-    );
-    path.cubic_bezier_to(
-        point(px(x - radius), px(y)),
-        point(px(x - tangent), px(y + radius)),
-        point(px(x - radius), px(y + tangent)),
-    );
-    path.cubic_bezier_to(
-        point(px(x), px(y - radius)),
-        point(px(x - radius), px(y - tangent)),
-        point(px(x - tangent), px(y - radius)),
-    );
-    path.cubic_bezier_to(
-        point(px(x + radius), px(y)),
-        point(px(x + tangent), px(y - radius)),
-        point(px(x + radius), px(y - tangent)),
-    );
-    path.close();
-}
+    #[test]
+    fn command_symbol_keeps_all_four_loops() {
+        let image = symbols::render("command", 20., 2., rgb(0x000000)).unwrap();
+        let side = image.size(0).width.0 as usize;
+        let mut quadrants = [0_u64; 4];
+        for (index, pixel) in image.as_bytes(0).unwrap().chunks_exact(4).enumerate() {
+            let quadrant =
+                usize::from(index % side >= side / 2) + 2 * usize::from(index / side >= side / 2);
+            quadrants[quadrant] += u64::from(pixel[3]);
+        }
+        // Cropping to NSImage.alignmentRect instead of its full image bounds can
+        // clip the lower loops. This symmetric glyph must keep balanced ink.
+        let min = *quadrants.iter().min().unwrap();
+        let max = *quadrants.iter().max().unwrap();
+        assert!(
+            min > 0 && min * 100 >= max * 85,
+            "unbalanced symbol: {quadrants:?}"
+        );
+    }
 
-fn rounded_rect(path: &mut PathBuilder, x: f32, y: f32, width: f32, height: f32, radius: f32) {
-    path.move_to(point(px(x + radius), px(y)));
-    path.line_to(point(px(x + width - radius), px(y)));
-    path.curve_to(
-        point(px(x + width), px(y + radius)),
-        point(px(x + width), px(y)),
-    );
-    path.line_to(point(px(x + width), px(y + height - radius)));
-    path.curve_to(
-        point(px(x + width - radius), px(y + height)),
-        point(px(x + width), px(y + height)),
-    );
-    path.line_to(point(px(x + radius), px(y + height)));
-    path.curve_to(
-        point(px(x), px(y + height - radius)),
-        point(px(x), px(y + height)),
-    );
-    path.line_to(point(px(x), px(y + radius)));
-    path.curve_to(point(px(x + radius), px(y)), point(px(x), px(y)));
-    path.close();
+    #[test]
+    fn tint_and_cache_follow_theme_and_display_scale() {
+        let dark = load(Icon::Command, rgb(0xffffff).into(), 16., 2.).unwrap();
+        let same = load(Icon::Command, rgb(0xffffff).into(), 16., 2.).unwrap();
+        assert!(Arc::ptr_eq(&dark, &same));
+        let light = load(Icon::Command, rgb(0x000000).into(), 16., 2.).unwrap();
+        assert_ne!(dark.as_bytes(0), light.as_bytes(0));
+        let standard = load(Icon::Command, rgb(0xffffff).into(), 16., 1.).unwrap();
+        assert_ne!(dark.size(0), standard.size(0));
+        // GPUI stores BGRA; use a non-neutral tint to catch swapped channels.
+        let red = symbols::render("plus", 16., 2., rgb(0xff0000)).unwrap();
+        assert!(
+            red.as_bytes(0)
+                .unwrap()
+                .chunks_exact(4)
+                .any(|p| p[2] > 200 && p[0] < 10 && p[3] > 200)
+        );
+    }
 }

@@ -175,6 +175,9 @@ impl NotesApp {
             Surface::Picker => {
                 let deleted = self.panel == Panel::Trash;
                 stops.push(Stop::query());
+                if deleted {
+                    stops.push(Stop::run("trash-back", Intent::Browse));
+                }
                 let query = self.query.read(cx).text().to_owned();
                 for (index, note) in self
                     .matching_notes(query.trim(), deleted)
@@ -204,14 +207,6 @@ impl NotesApp {
                         );
                     }
                 }
-                stops.push(Stop::run(
-                    "browse-trash",
-                    if deleted {
-                        Intent::Browse
-                    } else {
-                        Intent::Trash
-                    },
-                ));
             }
             Surface::Actions => {
                 stops.push(Stop::query());

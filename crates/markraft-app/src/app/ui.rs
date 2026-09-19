@@ -11,7 +11,7 @@ mod vim;
 
 use super::*;
 use focus::Surface;
-use icons::{Icon, icon};
+use icons::{Icon, icon, sized_icon};
 use slash::{Command, SlashEffect};
 use table::TableEdit;
 pub(in crate::app) use tokens::playback;
@@ -74,6 +74,40 @@ enum Intent {
     Table(TableEdit),
 }
 
+/// Shared ordering and separators for the command menu, including filtered results.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ActionGroup {
+    Notes,
+    Editing,
+    Formatting,
+    Context,
+    Files,
+    View,
+    Recovery,
+}
+
+impl Intent {
+    fn action_group(&self) -> ActionGroup {
+        match self {
+            Self::New | Self::Browse | Self::Pin => ActionGroup::Notes,
+            Self::Undo | Self::Redo | Self::Copy | Self::PastePlain | Self::PasteMarkdown => {
+                ActionGroup::Editing
+            }
+            Self::Mark(_) | Self::Block(_) | Self::Link | Self::InsertTable => {
+                ActionGroup::Formatting
+            }
+            Self::Table(_) | Self::EditLink | Self::CopyLink | Self::OpenLink | Self::Unlink => {
+                ActionGroup::Context
+            }
+            Self::Save | Self::Export | Self::Import | Self::Reveal | Self::SaveCopy => {
+                ActionGroup::Files
+            }
+            Self::Trash | Self::Delete | Self::EmptyTrash => ActionGroup::Recovery,
+            _ => ActionGroup::View,
+        }
+    }
+}
+
 /// Where the caret is, for the commands that only apply in one place. The editor's `/`
 /// menu is built before there is an editor to ask, so it takes the default: every
 /// command that does not depend on where the caret is.
@@ -93,6 +127,7 @@ fn is_switch(id: &str) -> bool {
 /// Critically damped, settling in about 150 ms: the switch knob eases into its new
 /// end and reverses from wherever it is when the row is flipped back.
 const SWITCH_SPRING: SpringConfig = SpringConfig::new(3700., 121.7, 1.);
+const ACTION_ROW_HEIGHT: Pixels = px(36.);
 
 /// A stored timestamp read on this Mac's clock. Notes carry UTC; a date label has to be
 /// the one on the user's calendar, so both ends of a comparison are shifted before they
@@ -133,7 +168,7 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::New => Icon::Plus,
         Intent::Browse => Icon::Notes,
         Intent::Pin => Icon::Pin,
-        Intent::Delete | Intent::PurgeNote(_) | Intent::EmptyTrash => Icon::Trash,
+        Intent::Trash | Intent::Delete | Intent::PurgeNote(_) | Intent::EmptyTrash => Icon::Trash,
         Intent::Copy | Intent::SaveCopy | Intent::CopyLink => Icon::Copy,
         Intent::Export | Intent::Import => Icon::Export,
         Intent::Settings => Icon::Settings,
@@ -516,9 +551,33 @@ impl NotesApp {
             Intent::Actions => Some(self.panel == Panel::Actions),
             _ => None,
         };
+        let chrome = matches!(
+            intent,
+            Intent::Actions | Intent::Browse | Intent::New | Intent::ToggleFormatToolbar
+        );
+        let hover = if chrome {
+            self.chrome_fill(0.05)
+        } else {
+            self.hover_color()
+        };
+        let pressed = if chrome {
+            self.chrome_fill(0.10)
+        } else {
+            self.pressed_color()
+        };
+        let selected = if chrome {
+            pressed
+        } else {
+            self.selected_color()
+        };
+        let icon_size = if chrome && !matches!(intent, Intent::ToggleFormatToolbar) {
+            20.
+        } else {
+            16.
+        };
         self.ring(
             &id.clone(),
-            px(6.),
+            px(if chrome { 16. } else { 6. }),
             div()
                 .id(id)
                 .role(Role::Button)
@@ -526,9 +585,7 @@ impl NotesApp {
                 .size(px(28.))
                 .opacity(0.7)
                 .when_some(expanded, |s, expanded| s.aria_expanded(expanded))
-                .when(expanded == Some(true), |s| {
-                    s.bg(self.selected_color()).opacity(1.)
-                })
+                .when(expanded == Some(true), |s| s.bg(selected).opacity(1.))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -536,20 +593,20 @@ impl NotesApp {
                 .cursor_pointer()
                 .hover(|s| {
                     s.bg(if expanded == Some(true) {
-                        self.selected_color()
+                        selected
                     } else {
-                        self.hover_color()
+                        hover
                     })
                     .opacity(1.)
                 })
-                .active(|s| s.bg(self.pressed_color()).opacity(1.))
+                .active(|s| s.bg(pressed).opacity(1.))
                 .tooltip(self.hint(label))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.intent(intent.clone(), window, cx);
                 }))
-                .child(icon(kind, self.chrome_icon_color())),
+                .child(sized_icon(kind, self.chrome_icon_color(), icon_size)),
         )
     }
     /// Toolbar icons recede while another application is active.
@@ -577,6 +634,15 @@ impl NotesApp {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let kind = intent_icon(&intent);
+        let destructive = matches!(
+            intent,
+            Intent::Delete | Intent::EmptyTrash | Intent::Table(TableEdit::DeleteTable)
+        );
+        let ink = if destructive {
+            self.danger()
+        } else {
+            self.control_text()
+        };
         self.ring(
             id,
             ROW_RADIUS,
@@ -592,20 +658,13 @@ impl NotesApp {
                 .rounded(ROW_RADIUS)
                 .cursor_pointer()
                 .text_size(px(13.))
-                .text_color(self.control_text())
+                .text_color(ink)
                 .hover(|s| s.bg(self.selected_color()))
                 .active(|s| s.bg(self.pressed_color()))
-                .when(
-                    matches!(
-                        intent,
-                        Intent::Delete | Intent::EmptyTrash | Intent::Table(TableEdit::DeleteTable)
-                    ),
-                    |s| s.text_color(self.danger()),
-                )
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.intent(intent.clone(), window, cx)),
                 )
-                .child(icon(kind, self.control_text()))
+                .child(icon(kind, ink))
                 .child(div().flex_1().min_w_0().truncate().child(label))
                 .child(self.shortcut(hint)),
         )
@@ -670,9 +729,18 @@ impl NotesApp {
             let id = note.id.clone();
             let current = note.id == self.library.active_id;
             let selected = index == self.selected;
+            let status = if current && !deleted {
+                "Current".to_owned()
+            } else {
+                let date = relative_day(note.deleted_at.unwrap_or(note.updated_at), now);
+                let date = match date.as_str() {
+                    "Today" | "Yesterday" => date.to_lowercase(),
+                    _ => date,
+                };
+                format!("{} {date}", if deleted { "Deleted" } else { "Edited" })
+            };
             let meta = format!(
-                "{} · {}",
-                relative_day(note.updated_at, now),
+                "{status} · {}",
                 self.count_label(&doc::plain_text(&note.document))
             );
             // A deleted note's buttons are spelled out, so they sit on the row's second
@@ -771,7 +839,11 @@ impl NotesApp {
                     div()
                         .id(row_id.clone())
                         .role(Role::Button)
-                        .aria_label(note.title())
+                        .aria_label(format!(
+                            "{}, {meta}{}",
+                            note.title(),
+                            if note.pinned { ", Pinned" } else { "" }
+                        ))
                         .aria_selected(selected)
                         .aria_position_in_set(index + 1)
                         .aria_size_of_set(total)
@@ -861,50 +933,20 @@ impl NotesApp {
                 s.child(
                     div()
                         .flex_shrink_0()
-                        .px_4()
-                        .pt_1()
-                        .pb_2()
+                        .h(px(if deleted { 32. } else { 26. }))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .justify_between()
                         .text_size(px(11.))
                         .text_color(self.muted())
-                        .child(if deleted { "Recently Deleted" } else { "Notes" }),
+                        .child(if deleted { "Recently Deleted" } else { "Notes" })
+                        .when(deleted, |s| {
+                            s.child(self.button("trash-back", "All Notes", Intent::Browse, cx))
+                        }),
                 )
             })
             .child(self.scroll_area(list, &self.picker_scroll, cx))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(36.))
-                    .flex_shrink_0()
-                    .px_2()
-                    .border_t_1()
-                    .border_color(self.border_color())
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(self.muted())
-                            .child(if deleted {
-                                "↑↓  navigate   ⇥  controls   ↵  restore"
-                            } else {
-                                "↑↓  navigate   ⇥  controls   ↵  open"
-                            }),
-                    )
-                    .child(self.button(
-                        "browse-trash",
-                        if deleted {
-                            "All Notes"
-                        } else {
-                            "Recently Deleted"
-                        },
-                        if deleted {
-                            Intent::Browse
-                        } else {
-                            Intent::Trash
-                        },
-                        cx,
-                    )),
-            )
     }
     fn settings(&self, cx: &mut Context<Self>) -> Div {
         let mut themes = div()
@@ -1120,7 +1162,7 @@ impl NotesApp {
                     .mt_3()
                     .text_size(px(11.))
                     .text_color(self.muted())
-                    .child("Saved on this Mac. Closing the window keeps Notes running."),
+                    .child("Saved on this Mac. Closing the window keeps Markraft running."),
             );
         self.scroll_area(content, &self.settings_scroll, cx)
     }
@@ -1209,7 +1251,6 @@ impl NotesApp {
     fn action_items(&self, caret: Caret) -> Vec<Command> {
         let mut items = vec![
             Command::new("new-action", "New Note", "⌘N", Intent::New),
-            Command::new("browse-action", "Browse Notes", "⌘P", Intent::Browse),
             Command::new(
                 "pin-note",
                 if self.library.active_note().pinned {
@@ -1220,6 +1261,7 @@ impl NotesApp {
                 "",
                 Intent::Pin,
             ),
+            Command::new("browse-action", "Browse Notes", "⌘P", Intent::Browse),
             Command::new("undo-edit", "Undo", "⌘Z", Intent::Undo),
             Command::new("redo-edit", "Redo", "⇧⌘Z", Intent::Redo),
             Command::new("save-now", "Save Now", "⌘S", Intent::Save),
@@ -1371,6 +1413,12 @@ impl NotesApp {
         }
         items.extend([
             Command::new(
+                "show-trash",
+                "Show Recently Deleted Notes",
+                "",
+                Intent::Trash,
+            ),
+            Command::new(
                 "delete-note",
                 "Move to Recently Deleted",
                 "",
@@ -1406,7 +1454,12 @@ impl NotesApp {
                 "",
                 Intent::VimMode,
             ),
-            Command::new("open-settings", "Settings…", "⌘,", Intent::Settings),
+            Command::new(
+                "open-settings",
+                "Open Markraft Settings",
+                "⌘,",
+                Intent::Settings,
+            ),
         ]);
         // Only offered while there is something to empty.
         if !self.library.search("", true).is_empty() {
@@ -1554,12 +1607,15 @@ impl NotesApp {
             in_code: doc::Block::active(editor.state(), &editor.projection())
                 == Some(doc::Block::Code),
         };
-        self.action_items(caret)
+        let mut items: Vec<_> = self
+            .action_items(caret)
             .into_iter()
             .filter(|command| {
                 command.intent.is_some() && command.label.to_lowercase().contains(&query)
             })
-            .collect()
+            .collect();
+        items.sort_by_key(|command| command.intent.as_ref().map(Intent::action_group));
+        items
     }
     fn actions_panel(&self, cx: &mut Context<Self>) -> Div {
         let items = self.filtered_actions(cx);
@@ -1582,6 +1638,7 @@ impl NotesApp {
                     .child("No matching actions"),
             );
         }
+        let mut previous_group = None;
         for (index, command) in items.into_iter().enumerate() {
             let Command {
                 id,
@@ -1592,8 +1649,9 @@ impl NotesApp {
                 ..
             } = command;
             let Some(intent) = intent else { continue };
-            let separator =
-                index > 0 && matches!(id, "format-bold" | "delete-note" | "table-row-above");
+            let group = intent.action_group();
+            let separator = previous_group.is_some_and(|previous| previous != group);
+            previous_group = Some(group);
             list = list.child(
                 div()
                     .when(separator, |s| {
@@ -1607,6 +1665,8 @@ impl NotesApp {
                     })
                     .child(
                         self.row(id, label, shortcut, intent, cx)
+                            .h(ACTION_ROW_HEIGHT)
+                            .text_size(px(14.))
                             .role(Role::Button)
                             .aria_selected(index == self.selected)
                             .aria_position_in_set(index + 1)
@@ -1638,19 +1698,6 @@ impl NotesApp {
             .min_h_0()
             .child(self.search_field(cx))
             .child(self.scroll_area(list, &self.actions_scroll, cx))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .h(px(28.))
-                    .flex_shrink_0()
-                    .px_4()
-                    .border_t_1()
-                    .border_color(self.border_color())
-                    .text_size(px(10.))
-                    .text_color(self.muted())
-                    .child("↑↓  navigate   ↵  run"),
-            )
     }
     fn overlay(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let viewport = window.bounds().size;
@@ -1658,8 +1705,10 @@ impl NotesApp {
         // edge, so a short window shows a shorter card rather than one running off it.
         let top = if viewport.height < px(400.) {
             px(44.)
-        } else {
+        } else if self.panel == Panel::Settings {
             px(72.)
+        } else {
+            px(100.)
         };
         let width = px(if self.panel == Panel::Settings {
             360.
@@ -1677,35 +1726,40 @@ impl NotesApp {
                         self.panel == Panel::Trash,
                     )
                     .len();
-                px(110. + 58. * n.max(1) as f32)
+                let heading = if self.panel == Panel::Trash { 32. } else { 26. };
+                let rows = if n == 0 { 72. } else { 58. * n as f32 };
+                px(44. + heading + rows + 8.)
             }
             Panel::Actions => {
                 let items = self.filtered_actions(cx);
                 let count = items.len();
                 let separators = items
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, command)| {
-                        *index > 0
-                            && matches!(
-                                command.id,
-                                "format-bold" | "delete-note" | "table-row-above"
-                            )
+                    .windows(2)
+                    .filter(|pair| {
+                        pair[0].intent.as_ref().map(Intent::action_group)
+                            != pair[1].intent.as_ref().map(Intent::action_group)
                     })
                     .count();
-                // The search field, the rows and their separators, and the hint footer.
+                // The search field, bottom inset, rows and group separators.
                 if count == 0 {
-                    px(160.)
+                    px(124.)
                 } else {
-                    px(80.) + ROW_HEIGHT * count as f32 + px(17. * separators as f32)
+                    px(52.) + ACTION_ROW_HEIGHT * count as f32 + px(17. * separators as f32)
                 }
             }
             _ => px(470.),
         };
-        let height = desired.min(px(440.)).min(available);
+        // Include both border pixels so a fully visible short list does not scroll.
+        let height = (desired + px(2.))
+            .min(px(if self.panel == Panel::Settings {
+                440.
+            } else {
+                420.
+            }))
+            .min(available);
         let contents = match self.panel {
             // A short card gives what room it has to the rows rather than to a heading.
-            Panel::Browse | Panel::Trash => self.picker(height >= px(280.), cx),
+            Panel::Browse | Panel::Trash => self.picker(height >= px(136.), cx),
             Panel::Actions => self.actions_panel(cx),
             _ => div()
                 .flex()
@@ -1864,9 +1918,8 @@ impl Render for NotesApp {
             .on_action(cx.listener(|this, _: &Export, w, cx| this.intent(Intent::Export, w, cx)))
             .on_action(cx.listener(|this, _: &Import, w, cx| this.intent(Intent::Import, w, cx)));
         let actions = self
-            .capsule()
-            .p(px(3.))
-            .gap(px(1.))
+            .chrome_capsule()
+            .p(px(4.))
             .child(
                 self.icon_button(
                     "actions",
@@ -1875,7 +1928,7 @@ impl Render for NotesApp {
                     Intent::Actions,
                     cx,
                 )
-                .size(px(24.))
+                .size(px(28.))
                 .rounded_full()
                 .opacity(1.),
             )
@@ -1887,13 +1940,13 @@ impl Render for NotesApp {
                     Intent::Browse,
                     cx,
                 )
-                .size(px(24.))
+                .size(px(28.))
                 .rounded_full()
                 .opacity(1.),
             )
             .child(
                 self.icon_button("new-note", "New Note · ⌘N", Icon::Plus, Intent::New, cx)
-                    .size(px(24.))
+                    .size(px(28.))
                     .rounded_full()
                     .opacity(1.),
             );
@@ -1922,11 +1975,13 @@ impl Render for NotesApp {
                 div()
                     .absolute()
                     .right(px(8.))
-                    .top(px(11.))
+                    .top(px(8.))
                     .child(actions)
-                    .with_spring("capsule-fade", chrome.clone(), |s, phase| {
-                        s.opacity(phase.interpolate_clamped(CHROME_REST, 1.))
-                    }),
+                    .with_spring(
+                        "capsule-fade",
+                        Self::chrome_spring(self.pointer_inside, reduce_motion),
+                        |s, phase| s.opacity(phase.interpolate_clamped(0., 1.)),
+                    ),
             );
         if self.persistence.is_none() {
             // Either no folder has been chosen yet, or the chosen one could not be opened.

@@ -30,12 +30,16 @@ url = "2"
 global-hotkey = "0.7"
 tray-icon = { version = "0.21", default-features = false }
 objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSBitmapImageRep", "NSColor", "NSFontDescriptor", "NSGraphics",
+    "NSGraphicsContext", "NSImage", "NSImageRep", "objc2-core-foundation",
+] }
 raw-window-handle = "0.6"
 sparkle-updater = "=0.1.0"
 objc2-foundation = { version = "0.3", features = ["NSBundle", "NSString"] }
 
 [package.metadata.bundle]
-name = "Markraft Notes"
+name = "Markraft"
 identifier = "dev.markraft.app"
 icon = ["target/Markraft.icns"]
 category = "Productivity"

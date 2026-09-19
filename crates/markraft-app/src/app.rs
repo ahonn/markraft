@@ -132,7 +132,7 @@ pub struct NotesApp {
     format_selected: usize,
     format_snapshot: Option<(MarkSet, Option<doc::Block>)>,
     dark: bool,
-    // The pointer is over the window; toolbar chrome recedes while it is away.
+    // Corner action buttons and traffic lights follow window hover alone.
     pointer_inside: bool,
     /// When the keyboard was last used here. Someone typing is present even with the
     /// pointer parked outside the window, so the chrome stays up for a moment after.
@@ -254,6 +254,10 @@ impl NotesApp {
                 }
             }
         });
+        let pointer_inside = platform.as_ref().is_none_or(|p| p.pointer_inside(window));
+        if let Some(platform) = &platform {
+            platform.set_traffic_lights_alpha(window, if pointer_inside { 1. } else { 0. }, false);
+        }
         let mut app = Self {
             library,
             persistence: store.map(Persistence::new),
@@ -296,7 +300,7 @@ impl NotesApp {
             format_selected: 0,
             format_snapshot: None,
             dark,
-            pointer_inside: true,
+            pointer_inside,
             last_key_at: None,
             chrome_shown: true,
             window_active: window.is_window_active(),
@@ -549,11 +553,9 @@ impl NotesApp {
         cx.notify();
         !self.dirty
     }
-    /// Window controls, the action capsule and the formatting toggle are up while
-    /// someone is present: the pointer is over the window, the window is the one being
-    /// typed into, a key was pressed a moment ago, or a keyboard-opened panel needs
-    /// them. Away from all of that they recede to [`CHROME_REST`] rather than
-    /// disappearing, so what the window can do stays discoverable.
+    /// The title recedes while the window is idle. Corner action buttons and native
+    /// traffic lights follow `pointer_inside` alone and fade out completely;
+    /// typing, focus and open panels must not keep those buttons visible.
     fn chrome_visible(&self) -> bool {
         self.pointer_inside
             || self.window_active
@@ -589,6 +591,11 @@ impl NotesApp {
             let inside = platform.pointer_inside(window);
             if inside != self.pointer_inside {
                 self.pointer_inside = inside;
+                platform.set_traffic_lights_alpha(
+                    window,
+                    if inside { 1. } else { 0. },
+                    !cx.reduce_motion(),
+                );
                 cx.notify();
             }
         }
@@ -597,13 +604,6 @@ impl NotesApp {
         let chrome = self.chrome_visible();
         if chrome != self.chrome_shown {
             self.chrome_shown = chrome;
-            if let Some(platform) = &self.platform {
-                platform.set_traffic_lights_alpha(
-                    window,
-                    if chrome { 1. } else { CHROME_REST },
-                    !cx.reduce_motion(),
-                );
-            }
             cx.notify();
         }
         if self.instance.requested_show() {
@@ -1290,7 +1290,7 @@ impl NotesApp {
         let Some(folder) = self.path.clone() else {
             return;
         };
-        let prompt = cx.prompt_for_new_path(&folder, Some("Markraft Notes Backup.json"));
+        let prompt = cx.prompt_for_new_path(&folder, Some("Markraft Backup.json"));
         let original = folder;
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = prompt.await {
@@ -1456,9 +1456,6 @@ impl NotesApp {
 /// Heights of the toolbar and footer, which float over the top and bottom of the note.
 const TOOLBAR_HEIGHT: Pixels = px(52.);
 const FOOTER_HEIGHT: Pixels = px(44.);
-/// What the chrome fades to while nobody is there. Far enough back to leave the note
-/// alone, near enough that the controls can still be found.
-const CHROME_REST: f32 = 0.35;
 /// How long a keystroke counts as someone being at the window.
 const KEY_PRESENCE: Duration = Duration::from_millis(2500);
 /// A queued notice is a sentence, not an acknowledgment, so it is given time to read.
@@ -1513,12 +1510,12 @@ pub fn bind_app_keys(cx: &mut App) {
         KeyBinding::new("cmd-o", Import, Some("MarkraftApp")),
     ]);
     cx.set_menus([
-        Menu::new("Markraft Notes").items([
+        Menu::new("Markraft").items([
             MenuItem::action("Show Notes", Show),
             MenuItem::action("Settings…", Settings),
             MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::separator(),
-            MenuItem::action("Quit Markraft Notes", Quit),
+            MenuItem::action("Quit Markraft", Quit),
         ]),
         Menu::new("File").items([
             MenuItem::action("New Note", NewNote),

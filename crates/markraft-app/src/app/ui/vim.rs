@@ -56,15 +56,29 @@ impl NotesApp {
         cx.notify();
     }
 
-    /// A quiet `NORMAL` / `INSERT` / `VISUAL` label, first in the footer's left group
-    /// and ahead of the count. Nothing is drawn while vim is off.
-    pub(in crate::app) fn vim_badge(&self) -> Option<Div> {
+    /// The left-hand mode indicator stays visible beside the centered format bar.
+    /// Abbreviate only when the full label would overlap it in a narrow window.
+    pub(in crate::app) fn vim_badge(&self, compact: bool) -> Option<Stateful<Div>> {
         if !self.library.preferences.vim_mode {
             return None;
         }
         let mode = self.sessions.get(&self.library.active_id)?.vim_mode;
+        let label = if compact {
+            match mode {
+                Mode::Normal => "N",
+                Mode::Insert => "I",
+                Mode::Visual => "V",
+                Mode::VisualLine => "V-L",
+            }
+        } else {
+            mode.label()
+        };
         Some(
             div()
+                .id("vim-mode-indicator")
+                .role(Role::Status)
+                .aria_label(format!("Vim: {}", mode.label()))
+                .tooltip(self.hint(mode.label()))
                 .flex_shrink_0()
                 .h(px(18.))
                 .px(px(6.))
@@ -74,7 +88,7 @@ impl NotesApp {
                 .bg(self.hover_color())
                 .text_size(px(10.))
                 .text_color(self.muted())
-                .child(mode.label()),
+                .child(label),
         )
     }
 }

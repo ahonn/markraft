@@ -876,7 +876,8 @@ impl EditorView {
             self.state.selection().from(doc),
             self.state.selection().to(doc),
         );
-        let (row, offset) = self.row_at(start)?;
+        let row = surface::selection_anchor_row(&self.layout, start, end)?;
+        let offset = row.pos_to_offset(start);
         let range = if start != end {
             offset..row.pos_to_offset(end)
         } else if let Some((span, _)) = self

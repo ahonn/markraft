@@ -2,6 +2,8 @@
 //!
 //! Create and use this object on AppKit's main thread. GPUI owns the native
 //! window; native pointers below are borrowed only for the duration of a call.
+pub(crate) mod symbols;
+
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use objc2::{
     class,
@@ -85,7 +87,7 @@ impl Platform {
         let new_note = MenuItem::new("New Note", true, None);
         let settings = MenuItem::new("Settings…", true, None);
         let updates = MenuItem::new("Check for Updates…", true, None);
-        let quit = MenuItem::new("Quit Markraft Notes", true, None);
+        let quit = MenuItem::new("Quit Markraft", true, None);
         menu.append_items(&[
             &toggle,
             &new_note,
@@ -107,7 +109,7 @@ impl Platform {
             .with_menu(Box::new(menu))
             .with_icon(note_icon()?)
             .with_icon_as_template(true)
-            .with_tooltip("Markraft Notes")
+            .with_tooltip("Markraft")
             .build()
             .map_err(menu_bar_failure)?;
         let mut platform = Self {
@@ -210,7 +212,7 @@ impl Platform {
                 ns_string_text(description).unwrap_or_else(|| "Unknown macOS error".to_owned())
             };
             return Err(format!(
-                "Could not {} launch at login: {detail}. Use a signed Markraft Notes app \
+                "Could not {} launch at login: {detail}. Use a signed Markraft app \
                  installed in Applications, and check {LOGIN_ITEMS}.",
                 if enabled { "enable" } else { "disable" },
             ));
@@ -234,13 +236,7 @@ impl Platform {
             let _: () = msg_send![native, setBecomesKeyOnlyIfNeeded: Bool::NO];
             let _: () = msg_send![native, setLevel: 3_isize]; // NSFloatingWindowLevel
             let _: () = msg_send![native, setExcludedFromWindowsMenu: Bool::YES];
-            // Keep the close button while reserving window sizing for edge dragging.
-            // FullScreenNone cannot be combined with the FullScreenAuxiliary behavior
-            // required above. A disabled standard button draws itself from an image
-            // AppKit does not recolour for the dark appearance, where it comes out as a
-            // black dot rather than the platform's grey; there is no supported way to
-            // restyle it, and neither control does anything here, so both are taken out
-            // of the window instead of being shown dead.
+            // Keep only close. Window sizing remains available through edge dragging.
             for button_kind in [1_usize, 2_usize] {
                 // NSWindowMiniaturizeButton, NSWindowZoomButton.
                 let button: *mut AnyObject = msg_send![native, standardWindowButton: button_kind];
@@ -276,9 +272,7 @@ impl Platform {
         }
     }
 
-    /// Fade the native window buttons together with the GPUI chrome, to the same resting
-    /// opacity. Faded buttons stay in place and stay clickable, which is what keeps the
-    /// window closable while the chrome is at rest.
+    /// Fade the native close button with window hover, independently of activation.
     pub fn set_traffic_lights_alpha(&self, window: &gpui::Window, alpha: f32, animated: bool) {
         let Ok(native) = native_window(window) else {
             return;
@@ -291,7 +285,7 @@ impl Platform {
                 let context: *mut AnyObject = msg_send![context_class, currentContext];
                 let _: () = msg_send![context, setDuration: 0.2_f64];
             }
-            // Only the close button: `configure_window` takes the other two out.
+            // Minimize and zoom stay hidden, regardless of window hover.
             for button_kind in [0_usize] {
                 let button: *mut AnyObject = msg_send![native, standardWindowButton: button_kind];
                 if button.is_null() {
@@ -435,7 +429,7 @@ fn main_app_service() -> Result<Retained<AnyObject>, String> {
     let class = AnyClass::get(c"SMAppService")
         .ok_or_else(|| "Launch at login requires macOS 13 or later.".to_owned())?;
     let service: Option<Retained<AnyObject>> = unsafe { msg_send![class, mainAppService] };
-    service.ok_or_else(|| "macOS could not find the Markraft Notes app bundle.".to_owned())
+    service.ok_or_else(|| "macOS could not find the Markraft app bundle.".to_owned())
 }
 
 fn ensure_installed_bundle() -> Result<(), String> {
@@ -448,17 +442,15 @@ fn ensure_installed_bundle() -> Result<(), String> {
     let installed = path.starts_with("/Applications")
         || user_applications.is_some_and(|applications| path.starts_with(applications));
     if path.extension().is_none_or(|extension| extension != "app") || !installed {
-        return Err(
-            "Move Markraft Notes.app to Applications and launch that copy \
+        return Err("Move Markraft.app to Applications and launch that copy \
                     before enabling launch at login."
-                .into(),
-        );
+            .into());
     }
     Ok(())
 }
 
 fn login_approval_message() -> String {
-    format!("Allow Markraft Notes in {LOGIN_ITEMS} to enable launch at login.")
+    format!("Allow Markraft in {LOGIN_ITEMS} to enable launch at login.")
 }
 
 fn ns_string_text(string: *mut AnyObject) -> Option<String> {

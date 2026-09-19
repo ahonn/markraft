@@ -17,7 +17,7 @@ use storage::{Library, Settings};
 use vault::Store;
 
 const HELP: &str = "\
-Markraft Notes — a floating, local-first notepad.
+Markraft — a floating, local-first notepad.
 
 Usage: markraft-app [--dir PATH] [--settings PATH]
 
@@ -129,7 +129,7 @@ fn main() {
                 window_min_size: Some(gpui::size(px(360.), px(220.))),
                 is_minimizable: false,
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Markraft Notes".into()),
+                    title: Some("Markraft".into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(20.), px(20.))),
                 }),
@@ -183,7 +183,7 @@ fn main() {
                 app
             },
         )
-        .expect("open Markraft Notes");
+        .expect("open Markraft");
         cx.activate(true);
     });
 }

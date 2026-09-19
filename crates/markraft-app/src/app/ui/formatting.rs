@@ -2,9 +2,9 @@ use super::*;
 
 type FormatItem = (&'static str, &'static str, Intent, bool);
 
-/// How wide the formatting toolbar sits in the middle of the footer. It is fixed: the
-/// same five controls, whatever the note is.
-const TOOLBAR_CAPSULE: Pixels = px(171.);
+// Three 38px menus, four 24px actions, two 9px separators, eight 4px gaps,
+// and 4px padding on each side. Keep menu anchors tied to this geometry.
+const TOOLBAR_CAPSULE: Pixels = px(268.);
 
 impl NotesApp {
     pub(super) fn capsule(&self) -> Div {
@@ -15,6 +15,37 @@ impl NotesApp {
             .bg(self.surface_color())
             .border_1()
             .border_color(self.border_color())
+    }
+
+    /// Chrome uses a foreground tint rather than the stronger list selection fill.
+    pub(super) fn chrome_fill(&self, opacity: f32) -> Hsla {
+        let mut color: Hsla = if self.dark {
+            rgb(0xffffff)
+        } else {
+            rgb(0x000000)
+        }
+        .into();
+        color.a = opacity;
+        color
+    }
+
+    pub(super) fn chrome_capsule(&self) -> Div {
+        self.capsule().border_0().shadow(vec![BoxShadow {
+            color: self.chrome_fill(0.08),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(1.),
+            inset: true,
+        }])
+    }
+
+    fn format_divider(&self) -> Div {
+        div()
+            .w(px(1.))
+            .h(px(16.))
+            .mx(px(4.))
+            .flex_shrink_0()
+            .bg(self.chrome_fill(0.10))
     }
 
     pub(super) fn open_format_menu(
@@ -84,18 +115,6 @@ impl NotesApp {
                         kind == Some(doc::Block::Heading(level)),
                     ));
                 }
-                items.push((
-                    "Quote",
-                    "⇧⌘B",
-                    Intent::Block(doc::Block::Quote),
-                    kind == Some(doc::Block::Quote),
-                ));
-                items.push((
-                    "Code Block",
-                    "⌥⌘C",
-                    Intent::Block(doc::Block::Code),
-                    kind == Some(doc::Block::Code),
-                ));
                 items
             }
             Some(FormatMenu::Inline) => vec![
@@ -123,13 +142,6 @@ impl NotesApp {
                     Intent::Mark(doc::Inline::Underline),
                     doc::Inline::Underline.is_active(&marks),
                 ),
-                (
-                    "Inline Code",
-                    "⌘E",
-                    Intent::Mark(doc::Inline::Code),
-                    doc::Inline::Code.is_active(&marks),
-                ),
-                ("Link", "⌘L", Intent::Link, editor.active_link().is_some()),
             ],
             Some(FormatMenu::List) => vec![
                 (
@@ -198,6 +210,20 @@ impl NotesApp {
         toggled: Option<bool>,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        self.format_button_base(id, label, kind, intent, toggled, cx)
+            .hover(|s| s.bg(self.hover_color()))
+            .active(|s| s.bg(self.pressed_color()))
+    }
+
+    fn format_button_base(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        kind: Icon,
+        intent: Intent,
+        toggled: Option<bool>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let menu = match intent {
             Intent::FormatMenu(menu) => Some(menu),
             _ => None,
@@ -238,8 +264,6 @@ impl NotesApp {
                 .rounded(ROW_RADIUS)
                 .cursor_pointer()
                 .when(active || expanded, |s| s.bg(self.selected_color()))
-                .hover(|s| s.bg(self.hover_color()))
-                .active(|s| s.bg(self.pressed_color()))
                 .tooltip(self.hint(label))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -248,29 +272,59 @@ impl NotesApp {
                 }))
                 .child(icon(kind, ink))
                 .when(menu.is_some(), |s| {
-                    s.child(icon(Icon::ChevronDown, self.muted()))
+                    s.gap(px(2.))
+                        .child(sized_icon(Icon::ChevronDown, self.muted(), 12.))
                 }),
         )
     }
 
-    /// One row along the bottom of the note: what mode the editor is in and how much
-    /// text there is on the left, the formatting toolbar in the middle, and the toggle
-    /// that opens it on the right. Opening the toolbar adds to the row rather than
-    /// taking the count's place, so nothing the row says moves.
+    fn toolbar_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        kind: Icon,
+        intent: Intent,
+        toggled: Option<bool>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let menu = match intent {
+            Intent::FormatMenu(menu) => Some(menu),
+            _ => None,
+        };
+        let expanded = menu.is_some() && self.format_menu == menu;
+        let selected = toggled == Some(true) && menu.is_none();
+        self.format_button_base(id, label, kind, intent, toggled, cx)
+            .h(px(24.))
+            .w(px(if menu.is_some() { 38. } else { 24. }))
+            .flex_shrink_0()
+            .rounded(px(4.))
+            .when(menu == Some(FormatMenu::Block), |s| s.rounded_l(px(12.)))
+            .when(menu == Some(FormatMenu::List), |s| s.rounded_r(px(12.)))
+            .bg(self.chrome_fill(if selected {
+                0.10
+            } else if expanded {
+                0.05
+            } else {
+                0.
+            }))
+            .opacity(if expanded { 0.8 } else { 1. })
+            .hover(|s| s.bg(self.chrome_fill(if selected { 0.10 } else { 0.05 })))
+            .active(|s| {
+                s.bg(self.chrome_fill(if selected { 0.10 } else { 0.05 }))
+                    .opacity(0.8)
+            })
+    }
+
+    /// The count and formatting toolbar share the center, while the toggle stays put.
+    /// Vim keeps a separate mode indicator on the left, compact in a narrow window.
     pub(super) fn footer(&self, count: String, viewport: Pixels, cx: &mut Context<Self>) -> Div {
         let editor = self.editor().read(cx);
         let marks = editor.active_marks();
         let kind = doc::Block::active(editor.state(), &editor.projection());
         let reduce_motion = cx.reduce_motion();
-        // What is left of the row's left half once the centred toolbar has its width.
-        // In a window too narrow for both, the toolbar is the one that has to be there.
-        let room = if self.format_toolbar {
-            (viewport - TOOLBAR_CAPSULE) / 2. - px(20.)
-        } else {
-            viewport
-        };
+        let linked = editor.active_link().is_some();
         div()
-            .h(px(44.))
+            .h(px(48.))
             .flex_shrink_0()
             .relative()
             .flex()
@@ -280,40 +334,37 @@ impl NotesApp {
                 div()
                     .absolute()
                     .left(px(12.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .children(self.vim_badge())
-                    .when(room > px(110.), |s| {
-                        s.child(
-                            div()
-                                .id("word-count")
-                                .role(Role::Button)
-                                .aria_label("Toggle character and word count")
-                                .h(px(24.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .rounded(ROW_RADIUS)
-                                .text_size(px(12.))
-                                .text_color(self.muted())
-                                .cursor_pointer()
-                                .hover(|s| s.bg(self.hover_color()))
-                                .active(|s| s.bg(self.pressed_color()))
-                                .tooltip(self.hint("Toggle between character count and word count"))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.intent(Intent::ToggleCount, window, cx)
-                                }))
-                                .child(count),
-                        )
-                    }),
+                    .children(self.vim_badge(self.format_toolbar && viewport < px(450.))),
             )
+            .when(!self.format_toolbar, |s| {
+                s.child(
+                    div()
+                        .id("word-count")
+                        .role(Role::Button)
+                        .aria_label("Toggle character and word count")
+                        .h(px(24.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .rounded(ROW_RADIUS)
+                        .text_size(px(12.))
+                        .text_color(self.muted())
+                        .cursor_pointer()
+                        .hover(|s| s.bg(self.hover_color()))
+                        .active(|s| s.bg(self.pressed_color()))
+                        .tooltip(self.hint("Toggle between character count and word count"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.intent(Intent::ToggleCount, window, cx)
+                        }))
+                        .child(count),
+                )
+            })
             .child(
                 div()
                     .absolute()
                     .right(px(8.))
                     .child(
-                        self.capsule().size(px(32.)).justify_center().child(
+                        self.chrome_capsule().size(px(32.)).justify_center().child(
                             self.icon_button(
                                 "format-toolbar-toggle",
                                 if self.format_toolbar {
@@ -329,7 +380,7 @@ impl NotesApp {
                                 Intent::ToggleFormatToolbar,
                                 cx,
                             )
-                            .size(px(30.))
+                            .size(px(32.))
                             .rounded_full()
                             .opacity(1.)
                             .aria_expanded(self.format_toolbar),
@@ -337,29 +388,27 @@ impl NotesApp {
                     )
                     .with_spring(
                         "format-toggle-fade",
-                        // An expanded toolbar keeps its close button regardless of the pointer.
-                        Self::chrome_spring(
-                            self.chrome_visible() || self.format_toolbar,
-                            reduce_motion,
-                        ),
-                        |s, phase| s.opacity(phase.interpolate_clamped(CHROME_REST, 1.)),
+                        // The close button follows window hover even while the
+                        // center formatting toolbar remains expanded.
+                        Self::chrome_spring(self.pointer_inside, reduce_motion),
+                        |s, phase| s.opacity(phase.interpolate_clamped(0., 1.)),
                     ),
             )
             .when(self.format_toolbar, |s| {
                 s.child(
-                    self.capsule()
-                        .p(px(3.))
-                        .gap(px(2.))
-                        .child(self.format_button(
+                    self.chrome_capsule()
+                        .p(px(4.))
+                        .gap(px(4.))
+                        .child(self.toolbar_button(
                             "format-block-menu",
-                            "Text Style",
+                            "Headings",
                             Icon::Heading,
                             Intent::FormatMenu(FormatMenu::Block),
                             Some(matches!(kind, Some(doc::Block::Heading(_)))),
                             cx,
                         ))
                         .child(
-                            self.format_button(
+                            self.toolbar_button(
                                 "format-inline-menu",
                                 "Text Formatting",
                                 Icon::Italic,
@@ -377,7 +426,15 @@ impl NotesApp {
                                 cx,
                             ),
                         )
-                        .child(self.format_button(
+                        .child(self.toolbar_button(
+                            "format-link",
+                            "Link · ⌘L",
+                            Icon::Link,
+                            Intent::Link,
+                            Some(linked),
+                            cx,
+                        ))
+                        .child(self.toolbar_button(
                             "format-inline-code",
                             "Inline Code · ⌘E",
                             Icon::Code,
@@ -385,14 +442,25 @@ impl NotesApp {
                             Some(doc::Inline::Code.is_active(&marks)),
                             cx,
                         ))
-                        .child(
-                            div()
-                                .w(px(1.))
-                                .h(px(16.))
-                                .mx(px(4.))
-                                .bg(self.border_color()),
-                        )
-                        .child(self.format_button(
+                        .child(self.format_divider())
+                        .child(self.toolbar_button(
+                            "format-code-block",
+                            "Code Block · ⌥⌘C",
+                            Icon::CodeBlock,
+                            Intent::Block(doc::Block::Code),
+                            Some(kind == Some(doc::Block::Code)),
+                            cx,
+                        ))
+                        .child(self.toolbar_button(
+                            "format-quote",
+                            "Quote · ⇧⌘B",
+                            Icon::Quote,
+                            Intent::Block(doc::Block::Quote),
+                            Some(kind == Some(doc::Block::Quote)),
+                            cx,
+                        ))
+                        .child(self.format_divider())
+                        .child(self.toolbar_button(
                             "format-list-menu",
                             "Lists",
                             match kind {
@@ -414,8 +482,16 @@ impl NotesApp {
     pub(super) fn format_popover(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let items = self.format_items(cx);
         let width = px(216.);
+        let viewport = window.bounds().size.width;
+        let toolbar_left = (viewport - TOOLBAR_CAPSULE) / 2.;
+        let left = match self.format_menu {
+            Some(FormatMenu::Inline) => toolbar_left + px(42.),
+            Some(FormatMenu::List) => toolbar_left + TOOLBAR_CAPSULE - width,
+            _ => toolbar_left,
+        }
+        .clamp(px(8.), viewport - width - px(8.));
         let height =
-            (px(8.) + ROW_HEIGHT * items.len() as f32).min(window.bounds().size.height - px(100.));
+            (px(10.) + ROW_HEIGHT * items.len() as f32).min(window.bounds().size.height - px(100.));
         let total = items.len();
         let mut list = div()
             .id("format-menu-items")
@@ -480,7 +556,7 @@ impl NotesApp {
             .id("format-menu")
             .absolute()
             .bottom(px(48.))
-            .left((window.bounds().size.width - width) / 2.)
+            .left(left)
             .w(width)
             .h(height)
             .rounded(POPOVER_RADIUS)
