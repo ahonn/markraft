@@ -110,6 +110,7 @@ pub struct NotesApp {
     code_language_block: Option<usize>,
     code_language_focus_pending: bool,
     code_language_selected: usize,
+    html_editor: Option<ui::html::HtmlEditor>,
     dirty: bool,
     revision: u64,
     save_at: Option<Instant>,
@@ -279,6 +280,7 @@ impl NotesApp {
             code_language_block: None,
             code_language_focus_pending: false,
             code_language_selected: 0,
+            html_editor: None,
             dirty: false,
             revision: 0,
             save_at: None,
@@ -359,6 +361,7 @@ impl NotesApp {
                 cx,
             )
             .with_style(style)
+            .with_image_base(self.path.clone())
             .with_placeholder("Start writing…")
         });
         // Only note editors get the menus; the host's query field gets no extension.
@@ -402,6 +405,12 @@ impl NotesApp {
                 if let EditorEvent::CodeLanguageRequested { pos } = event {
                     if this.library.active_id == note_id && this.panel == Panel::Editor {
                         this.open_code_language(*pos, cx);
+                    }
+                    return;
+                }
+                if let EditorEvent::RawHtmlRequested { pos } = event {
+                    if this.library.active_id == note_id && this.panel == Panel::Editor {
+                        this.open_html_source(*pos, window, cx);
                     }
                     return;
                 }
@@ -464,6 +473,7 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let editor_was_focused = self.editor().focus_handle(cx).is_focused(window);
         self.sync_documents(cx);
         let mut ids = Vec::new();
         let mut kept = 0;
@@ -497,6 +507,11 @@ impl NotesApp {
             ids.push(id);
         }
         self.ensure_session(window, cx);
+        // Replacing an editor session drops its focus handle. Restore editing
+        // focus without taking it away from a picker or settings input.
+        if editor_was_focused {
+            self.focus_editor(window, cx);
+        }
         if let Some(persistence) = &self.persistence {
             persistence.acknowledge(ids);
         }
@@ -566,6 +581,10 @@ impl NotesApp {
         }
     }
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panel == Panel::Editor {
+            self.editor()
+                .update(cx, |editor, cx| editor.refresh_images(cx));
+        }
         if let Some(platform) = &self.platform {
             let inside = platform.pointer_inside(window);
             if inside != self.pointer_inside {
@@ -711,7 +730,9 @@ impl NotesApp {
     }
     fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.chrome_focus = None;
-        window.focus(&self.editor().focus_handle(cx), cx);
+        if !self.focus_html_source(window, cx) {
+            window.focus(&self.editor().focus_handle(cx), cx);
+        }
     }
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(p) = &mut self.platform {
@@ -724,6 +745,8 @@ impl NotesApp {
         self.chrome_focus = None;
         if self.persistence.is_none() {
             window.focus(&self.panel_focus, cx);
+        } else if self.focus_html_source(window, cx) {
+            // Keep the source draft as the keyboard owner after hiding the app.
         } else if self.panel != Panel::Editor {
             window.focus(&self.query.focus_handle(cx), cx);
         } else {
@@ -775,6 +798,9 @@ impl NotesApp {
         }
     }
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cancel_html_source(window, cx) {
+            return;
+        }
         if self.query.read(cx).is_composing() {
             self.query.update(cx, |e, cx| e.cancel_composition(cx));
             return;

@@ -3896,6 +3896,7 @@ dependencies = [
  "syntect",
  "two-face",
  "unicode-segmentation",
+ "url",
 ]
 
 [[package]]

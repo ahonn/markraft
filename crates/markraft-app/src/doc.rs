@@ -424,18 +424,26 @@ mod tests {
 
     #[test]
     fn a_block_command_toggles_back_to_a_paragraph() {
-        let state = state_of("text");
-        let heading = markraft_core::commands::run_command(&state, &Block::Heading(1).command())
-            .expect("the heading applies")
-            .expect("a transaction")
-            .state()
-            .clone();
-        assert_eq!(to_markdown(heading.doc()), "# text");
-        let back = markraft_core::commands::run_command(&heading, &Block::Heading(1).command())
-            .expect("the heading toggles")
-            .expect("a transaction")
-            .state()
-            .clone();
-        assert_eq!(to_markdown(back.doc()), "text");
+        for level in 1..=6 {
+            let state = state_of("text");
+            let heading =
+                markraft_core::commands::run_command(&state, &Block::Heading(level).command())
+                    .expect("the heading applies")
+                    .expect("a transaction")
+                    .state()
+                    .clone();
+            assert_eq!(
+                to_markdown(heading.doc()),
+                format!("{} text", "#".repeat(usize::from(level)))
+            );
+            assert_eq!(active(&heading), Some(Block::Heading(level)));
+            let back =
+                markraft_core::commands::run_command(&heading, &Block::Heading(level).command())
+                    .expect("the heading toggles")
+                    .expect("a transaction")
+                    .state()
+                    .clone();
+            assert_eq!(to_markdown(back.doc()), "text");
+        }
     }
 }

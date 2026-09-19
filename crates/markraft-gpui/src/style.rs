@@ -5,12 +5,12 @@ use gpui::{Hsla, Pixels, px, rgb, rgba};
 pub struct EditorStyle {
     pub padding: Pixels,
     pub body_size: Pixels,
-    pub heading_sizes: [Pixels; 3],
+    pub heading_sizes: [Pixels; 6],
     pub line_height_ratio: f32,
     pub paragraph_gap: Pixels,
     pub list_gap: Pixels,
-    /// Space above a heading of level 1, 2, and 3 or deeper, except at the top.
-    pub heading_top_gaps: [Pixels; 3],
+    /// Space above each of the six heading levels, except at the top.
+    pub heading_top_gaps: [Pixels; 6],
     pub heading_bottom_gap: Pixels,
     pub list_indent: Pixels,
     pub background: Hsla,
@@ -56,11 +56,11 @@ impl Default for EditorStyle {
         Self {
             padding: px(32.),
             body_size: px(17.),
-            heading_sizes: [px(30.), px(25.), px(21.)],
+            heading_sizes: [px(30.), px(25.), px(21.), px(19.), px(18.), px(17.)],
             line_height_ratio: 1.5,
             paragraph_gap: px(10.),
             list_gap: px(10.),
-            heading_top_gaps: [px(0.); 3],
+            heading_top_gaps: [px(0.); 6],
             heading_bottom_gap: px(10.),
             list_indent: px(28.),
             background: rgb(0xfcfbf8).into(),
@@ -94,13 +94,13 @@ impl EditorStyle {
         Self {
             padding: px(24.),
             body_size: px(14.),
-            heading_sizes: [px(24.), px(19.), px(16.)],
+            heading_sizes: [px(24.), px(19.), px(17.), px(16.), px(15.), px(14.)],
             line_height_ratio: 1.5,
             paragraph_gap: px(7.),
             list_gap: px(7.),
             // A heading belongs to the text under it, so the space above it has
             // to beat the gap below it at every level.
-            heading_top_gaps: [px(18.), px(14.), px(10.)],
+            heading_top_gaps: [px(18.), px(16.), px(14.), px(12.), px(10.), px(8.)],
             heading_bottom_gap: px(6.),
             list_indent: px(22.),
             background: rgb(0xefefef).into(),
@@ -154,9 +154,7 @@ impl EditorStyle {
     /// is code.
     pub(crate) fn font_size(&self, heading: Option<u8>, code: bool) -> Pixels {
         match (heading, code) {
-            (Some(1), _) => self.heading_sizes[0],
-            (Some(2), _) => self.heading_sizes[1],
-            (Some(_), _) => self.heading_sizes[2],
+            (Some(level), _) => self.heading_sizes[usize::from(level).clamp(1, 6) - 1],
             (None, true) => self.body_size - px(2.),
             (None, false) => self.body_size,
         }
@@ -164,7 +162,7 @@ impl EditorStyle {
 
     /// The space above a heading of `level`, except at the top of the document.
     pub(crate) fn heading_top_gap(&self, level: u8) -> Pixels {
-        self.heading_top_gaps[usize::from(level).clamp(1, 3) - 1]
+        self.heading_top_gaps[usize::from(level).clamp(1, 6) - 1]
     }
 }
 
@@ -293,15 +291,14 @@ mod tests {
     #[test]
     fn a_note_heading_is_bound_to_the_text_under_it() {
         for style in [EditorStyle::notes(), EditorStyle::notes_dark()] {
-            for level in 1..=3u8 {
+            for level in 1..=6u8 {
                 assert!(
                     style.heading_top_gap(level) > style.heading_bottom_gap,
                     "h{level} is not bound to its body"
                 );
             }
-            assert!(style.heading_sizes[0] > style.heading_sizes[1]);
-            assert!(style.heading_sizes[1] > style.heading_sizes[2]);
-            assert!(style.heading_sizes[2] > style.body_size);
+            assert!(style.heading_sizes.windows(2).all(|pair| pair[0] > pair[1]));
+            assert!(style.heading_sizes[5] >= style.body_size);
         }
     }
 

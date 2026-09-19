@@ -13,6 +13,8 @@ mod completion;
 mod emoji;
 mod extension;
 mod format_state;
+mod html;
+mod images;
 pub mod ime;
 mod keymap;
 mod links;
@@ -89,12 +91,18 @@ actions!(
         Heading,
         Heading2,
         Heading3,
+        Heading4,
+        Heading5,
+        Heading6,
         Quote,
         CodeBlock,
         Ordered,
         Bullet,
         Task,
         ToggleTask,
+        ChooseCodeLanguage,
+        EditRawHtml,
+        CopyCodeBlock,
         CharacterPalette,
         WordLeft,
         WordRight,
@@ -158,8 +166,12 @@ pub fn bind_keys(cx: &mut App) {
         "cmd-i" => Italic, "cmd-e" => Code,
         "cmd-shift-s" => Strikethrough, "cmd-u" => Underline, "cmd-alt-0" => Paragraph,
         "cmd-alt-1" => Heading, "cmd-alt-2" => Heading2,
-        "cmd-alt-3" => Heading3, "cmd-shift-b" => Quote, "cmd-alt-c" => CodeBlock,
+        "cmd-alt-3" => Heading3, "cmd-alt-4" => Heading4,
+        "cmd-alt-5" => Heading5, "cmd-alt-6" => Heading6,
+        "cmd-shift-b" => Quote, "cmd-alt-c" => CodeBlock,
         "cmd-enter" => ToggleTask,
+        "cmd-alt-l" => ChooseCodeLanguage, "cmd-alt-shift-c" => CopyCodeBlock,
+        "cmd-alt-r" => EditRawHtml,
         "ctrl-cmd-space" => CharacterPalette,
         "alt-left" => WordLeft, "alt-right" => WordRight,
         "alt-shift-left" => SelectWordLeft, "alt-shift-right" => SelectWordRight,
@@ -197,6 +209,10 @@ pub enum EditorEvent {
         pos: usize,
     },
     CodeCopied,
+    /// An opaque inline HTML primitive was clicked; the host can edit its source.
+    RawHtmlRequested {
+        pos: usize,
+    },
     /// An extension asked the host to do something only the host can do. Hosts that
     /// register no extension never see it.
     Extension {
@@ -289,6 +305,7 @@ pub struct EditorView {
     /// The selection the extensions were last told about.
     pub(crate) extension_selection: Selection,
     pub(crate) style: EditorStyle,
+    pub(crate) images: images::Images,
     pub(crate) placeholder: SharedString,
     /// What the editor calls itself to assistive technology. A host that lends one
     /// editor to several surfaces renames it as it hands it over.
@@ -377,6 +394,7 @@ impl EditorView {
             host_extensions: extensions,
             extensions: Vec::new(),
             style: EditorStyle::default(),
+            images: images::Images::default(),
             placeholder: SharedString::default(),
             aria_label: DEFAULT_ARIA_LABEL.into(),
             single_line: false,
@@ -417,6 +435,18 @@ impl EditorView {
     pub fn with_style(mut self, style: EditorStyle) -> Self {
         self.style = style;
         self
+    }
+    /// Resolve relative image URLs against the directory containing the document.
+    pub fn with_image_base(mut self, directory: Option<std::path::PathBuf>) -> Self {
+        self.images = images::Images::new(directory);
+        self
+    }
+
+    /// Refresh changed image files without modifying document state or history.
+    pub fn refresh_images(&mut self, cx: &mut Context<Self>) {
+        if self.images.refresh() {
+            cx.notify();
+        }
     }
     pub fn with_placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
@@ -474,6 +504,7 @@ impl EditorView {
             projection: &self.projection,
             style: &self.style,
             single_line: self.single_line,
+            images: &self.images,
         }
     }
     /// The laid-out row holding `pos`, and the `char` offset into it.
@@ -1178,19 +1209,28 @@ impl EditorView {
             return;
         }
         let position = self.hit(event.position);
+        if !event.modifiers.shift
+            && let Some(pos) = self.raw_html_under(event.position)
+        {
+            self.selecting = false;
+            cx.emit(EditorEvent::RawHtmlRequested { pos });
+            return;
+        }
         // Task markers are presentation outside the text coordinate space.
         if let Some((row, _)) = self.row_at(position)
             && row
-                .marker_bounds()
-                .is_some_and(|bounds| bounds.contains(&event.position))
+                .task_marker()
+                .is_some_and(|(_, bounds)| bounds.contains(&event.position))
         {
-            let types = self.types.clone();
-            let toggle = keymap::toggle_task(&types);
-            self.select(position, false, cx);
-            if self.run_command(&toggle, cx) {
-                self.selecting = false;
-                return;
-            }
+            let target = row.from;
+            self.selecting = false;
+            self.run_control(
+                accessibility::ControlAction::ToggleTask(target),
+                true,
+                window,
+                cx,
+            );
+            return;
         }
         self.select_point(event.position, event.modifiers.shift, cx);
         if event.click_count == 1
@@ -1509,6 +1549,21 @@ impl EditorView {
             types.heading,
             Attrs::from_pairs([("level", 3i64)])
         ));
+        rich!(Heading4, |types: &DocTypes| block(
+            types,
+            types.heading,
+            Attrs::from_pairs([("level", 4i64)])
+        ));
+        rich!(Heading5, |types: &DocTypes| block(
+            types,
+            types.heading,
+            Attrs::from_pairs([("level", 5i64)])
+        ));
+        rich!(Heading6, |types: &DocTypes| block(
+            types,
+            types.heading,
+            Attrs::from_pairs([("level", 6i64)])
+        ));
         rich!(CodeBlock, |types: &DocTypes| block(
             types,
             types.code_block,
@@ -1531,6 +1586,38 @@ impl EditorView {
             types.task_item
         ));
         rich!(ToggleTask, keymap::toggle_task);
+        root = root
+            .on_action(cx.listener(|this, _: &EditRawHtml, _, cx| {
+                if let Some(pos) = this.raw_html_at_caret() {
+                    cx.emit(EditorEvent::RawHtmlRequested { pos });
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ChooseCodeLanguage, window, cx| {
+                if let Some(pos) = this.active_code_pos() {
+                    this.run_control(
+                        accessibility::ControlAction::CodeLanguage(pos),
+                        true,
+                        window,
+                        cx,
+                    );
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CopyCodeBlock, window, cx| {
+                if let Some(pos) = this.active_code_pos() {
+                    this.run_control(
+                        accessibility::ControlAction::CopyCode(pos),
+                        true,
+                        window,
+                        cx,
+                    );
+                } else {
+                    cx.propagate();
+                }
+            }));
         root = root
             .on_action(cx.listener(|this, _: &Up, _, cx| this.vertical(-1, false, cx)))
             .on_action(cx.listener(|this, _: &Down, _, cx| this.vertical(1, false, cx)))

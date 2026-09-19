@@ -165,6 +165,21 @@ fn main() {
                         let _ = weak.update(cx, |app, cx| app.check_for_updates(window, cx));
                     });
                 });
+                forward_menu_action::<app::Settings>(handle, cx);
+                forward_menu_action::<app::Quit>(handle, cx);
+                forward_menu_action::<app::NewNote>(handle, cx);
+                forward_menu_action::<app::Browse>(handle, cx);
+                forward_menu_action::<app::Save>(handle, cx);
+                forward_menu_action::<app::Import>(handle, cx);
+                forward_menu_action::<app::Export>(handle, cx);
+                forward_menu_action::<markraft_gpui::Undo>(handle, cx);
+                forward_menu_action::<markraft_gpui::Redo>(handle, cx);
+                forward_menu_action::<markraft_gpui::Cut>(handle, cx);
+                forward_menu_action::<markraft_gpui::Copy>(handle, cx);
+                forward_menu_action::<markraft_gpui::Paste>(handle, cx);
+                forward_menu_action::<markraft_gpui::PastePlain>(handle, cx);
+                forward_menu_action::<markraft_gpui::PasteMarkdown>(handle, cx);
+                forward_menu_action::<markraft_gpui::SelectAll>(handle, cx);
                 app
             },
         )
@@ -172,6 +187,24 @@ fn main() {
         cx.activate(true);
     });
 }
+
+fn forward_menu_action<A: Action>(handle: AnyWindowHandle, cx: &mut App) {
+    // GPUI's macOS active-window lookup excludes NSPanel, so native menus need
+    // an application listener even though keyboard actions reach this window.
+    cx.on_action(move |action: &A, cx| {
+        let _ = handle.update(cx, |_, window, cx| {
+            if window.is_action_available(action, cx)
+                && let Some(focus) = window.focused(cx)
+            {
+                window.activate_window();
+                // Dispatch synchronously while this global listener is removed
+                // by GPUI, avoiding recursion if a focused control propagates.
+                focus.dispatch_action(action, window, cx);
+            }
+        });
+    });
+}
+
 /// How far a point lies outside a display: zero for the one holding it, so the
 /// display a window was last on wins and the closest remaining one takes over
 /// when it is gone.

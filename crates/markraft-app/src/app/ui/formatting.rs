@@ -73,6 +73,9 @@ impl NotesApp {
                     (1, "Heading 1", "⌥⌘1"),
                     (2, "Heading 2", "⌥⌘2"),
                     (3, "Heading 3", "⌥⌘3"),
+                    (4, "Heading 4", "⌥⌘4"),
+                    (5, "Heading 5", "⌥⌘5"),
+                    (6, "Heading 6", "⌥⌘6"),
                 ] {
                     items.push((
                         label,

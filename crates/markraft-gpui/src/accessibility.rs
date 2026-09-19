@@ -1,6 +1,6 @@
 //! AccessKit text coordinates are selectable units, not UTF-16 offsets.
 use crate::surface::LayoutLine;
-use gpui::{A11ySubtreeBuilder, Role, accesskit};
+use gpui::{A11ySubtreeBuilder, App, Bounds, Entity, Pixels, Role, Window, accesskit};
 use markraft_core::projection::Projection;
 use markraft_core::{EditorState, Selection};
 use unicode_segmentation::UnicodeSegmentation;
@@ -9,6 +9,74 @@ use unicode_segmentation::UnicodeSegmentation;
 pub(crate) struct AccessibleText {
     runs: Vec<TextRun>,
     selection: (usize, usize),
+    controls: Vec<AccessibleControl>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ControlAction {
+    ToggleTask(usize),
+    CodeLanguage(usize),
+    CopyCode(usize),
+    EditHtml(usize),
+}
+
+struct AccessibleControl {
+    node_id: Option<accesskit::NodeId>,
+    action: ControlAction,
+    label: String,
+    checked: Option<bool>,
+    bounds: accesskit::Rect,
+}
+
+fn accessible_bounds(bounds: Bounds<Pixels>, scale: f32) -> accesskit::Rect {
+    accesskit::Rect {
+        x0: f64::from(f32::from(bounds.left()) * scale),
+        y0: f64::from(f32::from(bounds.top()) * scale),
+        x1: f64::from(f32::from(bounds.right()) * scale),
+        y1: f64::from(f32::from(bounds.bottom()) * scale),
+    }
+}
+
+fn html_label(source: &str) -> String {
+    let source = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut graphemes = source.graphemes(true);
+    let mut preview = graphemes.by_ref().take(60).collect::<String>();
+    if graphemes.next().is_some() {
+        preview.push('…');
+    }
+    if preview.is_empty() {
+        "Edit empty HTML source".into()
+    } else {
+        format!("Edit HTML source: {preview}")
+    }
+}
+
+impl AccessibleControl {
+    fn node(&self) -> accesskit::Node {
+        let mut node = accesskit::Node::new(if self.checked.is_some() {
+            Role::CheckBox
+        } else {
+            Role::Button
+        });
+        node.set_label(self.label.clone());
+        node.set_bounds(self.bounds);
+        node.add_action(accesskit::Action::Click);
+        node.add_action(accesskit::Action::Focus);
+        if let Some(checked) = self.checked {
+            node.set_toggled(if checked {
+                accesskit::Toggled::True
+            } else {
+                accesskit::Toggled::False
+            });
+        }
+        node.set_keyboard_shortcut(match self.action {
+            ControlAction::ToggleTask(_) => "Command+Enter",
+            ControlAction::CodeLanguage(_) => "Command+Option+L",
+            ControlAction::CopyCode(_) => "Command+Option+Shift+C",
+            ControlAction::EditHtml(_) => "Command+Option+R",
+        });
+        node
+    }
 }
 
 struct TextRun {
@@ -56,18 +124,89 @@ impl AccessibleText {
         &mut self,
         projection: &Projection,
         state: &EditorState,
+        types: &crate::DocTypes,
         rows: &[LayoutLine],
         scale: f32,
     ) {
         let doc = state.doc();
         self.selection = (state.selection().anchor(doc), state.selection().head(doc));
         self.runs.clear();
+        self.controls.clear();
         let last_line = projection.line_count().saturating_sub(1);
         for row in rows {
             let Some(line) = projection.line(row.index) else {
                 continue;
             };
             let text = projection.line_text(row.index).unwrap_or_default();
+            for run in &line.runs {
+                if let markraft_core::projection::RunContent::Atom(node) = &run.content
+                    && Some(node.type_id()) == types.raw_inline
+                    && let Some(bounds) = row
+                        .rectangles(
+                            row.pos_to_offset(run.from)..row.pos_to_offset(run.to),
+                            false,
+                        )
+                        .first()
+                {
+                    self.controls.push(AccessibleControl {
+                        node_id: None,
+                        action: ControlAction::EditHtml(run.from),
+                        label: html_label(
+                            node.attrs()
+                                .get("source")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default(),
+                        ),
+                        checked: None,
+                        bounds: accessible_bounds(*bounds, scale),
+                    });
+                }
+            }
+            if let Some((checked, bounds)) = row.task_marker() {
+                self.controls.push(AccessibleControl {
+                    node_id: None,
+                    action: ControlAction::ToggleTask(row.from),
+                    label: if text.is_empty() {
+                        "Task".into()
+                    } else {
+                        text.into()
+                    },
+                    checked: Some(checked),
+                    bounds: accessible_bounds(bounds, scale),
+                });
+            }
+            if let Some(pos) = row.code_pos {
+                if let Some(bounds) = row.code_language_bounds() {
+                    let language = doc
+                        .node_at(pos)
+                        .and_then(|node| {
+                            node.attrs()
+                                .get("language")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned)
+                        })
+                        .unwrap_or_default();
+                    self.controls.push(AccessibleControl {
+                        node_id: None,
+                        action: ControlAction::CodeLanguage(pos),
+                        label: format!(
+                            "Code language: {}",
+                            crate::syntax::language_label(&language)
+                        ),
+                        checked: None,
+                        bounds: accessible_bounds(bounds, scale),
+                    });
+                }
+                if let Some(bounds) = row.code_copy_bounds() {
+                    self.controls.push(AccessibleControl {
+                        node_id: None,
+                        action: ControlAction::CopyCode(pos),
+                        label: "Copy code".into(),
+                        checked: None,
+                        bounds: accessible_bounds(bounds, scale),
+                    });
+                }
+            }
             for (visual, inner) in row.accessible_rows().into_iter().enumerate() {
                 let mut value: String = text
                     .chars()
@@ -140,6 +279,11 @@ impl AccessibleText {
             }
             builder.push_child(id, node);
         }
+        for control in &mut self.controls {
+            let id = builder.synthetic_node_id(("control", control.action));
+            control.node_id = Some(id);
+            builder.push_child(id, control.node());
+        }
         if let (Some(anchor), Some(focus)) = (
             self.text_position(self.selection.0),
             self.text_position(self.selection.1),
@@ -147,6 +291,29 @@ impl AccessibleText {
             builder
                 .parent_node()
                 .set_text_selection(accesskit::TextSelection { anchor, focus });
+        }
+    }
+
+    pub(crate) fn bind_controls(&self, editor: &Entity<crate::EditorView>, window: &mut Window) {
+        for control in &self.controls {
+            let Some(id) = control.node_id else { continue };
+            for activate in [false, true] {
+                let editor = editor.clone();
+                let action = control.action;
+                window.on_a11y_action(
+                    id,
+                    if activate {
+                        accesskit::Action::Click
+                    } else {
+                        accesskit::Action::Focus
+                    },
+                    move |_, window: &mut Window, cx: &mut App| {
+                        editor.update(cx, |editor, cx| {
+                            editor.run_control(action, activate, window, cx);
+                        });
+                    },
+                );
+            }
         }
     }
 
@@ -184,9 +351,189 @@ impl AccessibleText {
     }
 }
 
+impl crate::EditorView {
+    pub(crate) fn active_code_pos(&self) -> Option<usize> {
+        let (index, _) = self.projection.pos_to_line_offset(self.head())?;
+        let line = self.projection.line(index)?;
+        self.types
+            .is_code_block(line)
+            .then(|| line.ancestors.last().map(|a| a.before))
+            .flatten()
+    }
+
+    pub(crate) fn run_control(
+        &mut self,
+        action: ControlAction,
+        activate: bool,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if self.single_line {
+            return;
+        }
+        if self.is_composing() {
+            // Cancelling may restore different positions; require a fresh control activation.
+            self.cancel_composition(cx);
+            return;
+        }
+        let (index, position) = match action {
+            ControlAction::EditHtml(position) => {
+                if self.raw_html_at(position).is_none() {
+                    return;
+                }
+                let Some((index, _)) = self.projection.pos_to_line_offset(position) else {
+                    return;
+                };
+                (index, position)
+            }
+            ControlAction::ToggleTask(position) => {
+                let Some((index, _)) = self.projection.pos_to_line_offset(position) else {
+                    return;
+                };
+                let Some(line) = self.projection.line(index) else {
+                    return;
+                };
+                if self
+                    .types
+                    .item_of(line)
+                    .is_none_or(|(item, _)| Some(item.node_type) != self.types.task_item)
+                {
+                    return;
+                }
+                (index, position)
+            }
+            ControlAction::CodeLanguage(pos) | ControlAction::CopyCode(pos) => {
+                let Some((index, line)) =
+                    self.projection
+                        .lines()
+                        .iter()
+                        .enumerate()
+                        .find(|(_, line)| {
+                            self.types.is_code_block(line)
+                                && line.ancestors.last().is_some_and(|a| a.before == pos)
+                        })
+                else {
+                    return;
+                };
+                (index, line.from)
+            }
+        };
+        if !activate || matches!(action, ControlAction::ToggleTask(_)) {
+            window.focus(&self.focus, cx);
+            self.select(position, false, cx);
+        }
+        if !activate {
+            return;
+        }
+        match action {
+            ControlAction::EditHtml(pos) => cx.emit(crate::EditorEvent::RawHtmlRequested { pos }),
+            ControlAction::ToggleTask(_) => {
+                self.run_command(&crate::keymap::toggle_task(&self.types), cx);
+            }
+            ControlAction::CodeLanguage(pos) => {
+                cx.emit(crate::EditorEvent::CodeLanguageRequested { pos })
+            }
+            ControlAction::CopyCode(_) => {
+                if let Some(text) = self.projection.line_text(index) {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_owned()));
+                    cx.emit(crate::EditorEvent::CodeCopied);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn html_control_labels_identify_source_without_splitting_graphemes() {
+        assert_eq!(
+            html_label("<span\n title=\"hello\">"),
+            "Edit HTML source: <span title=\"hello\">"
+        );
+        assert_ne!(html_label("<span>"), html_label("</span>"));
+        let cluster = "👩🏽‍💻";
+        assert_eq!(
+            html_label(&cluster.repeat(61)),
+            format!("Edit HTML source: {}…", cluster.repeat(60))
+        );
+        assert_eq!(html_label(" \n "), "Edit empty HTML source");
+    }
+
+    #[test]
+    fn controls_expose_states_actions_and_document_targets() {
+        let state = crate::typeahead::tests::state_of(
+            "7. [ ] open\n8. [x] done\n\n```rust\nlet x = 1;\n```\n\ntext <span>raw</span>",
+        );
+        let projection = markraft_core::projection::projection_of(&state);
+        let types = crate::DocTypes::from_schema_names(
+            state.schema(),
+            &markraft_commonmark::commonmark_doc_type_names(),
+        );
+        let style = crate::EditorStyle::notes();
+        let images = crate::images::Images::default();
+        let text_system = gpui::WindowTextSystem::new(std::sync::Arc::new(gpui::TextSystem::new(
+            std::sync::Arc::new(gpui::NoopTextSystem::new()),
+        )));
+        let rows = crate::surface::shape(
+            &crate::surface::ShapeInput {
+                doc: state.doc(),
+                types: &types,
+                projection: &projection,
+                style: &style,
+                single_line: false,
+                images: &images,
+            },
+            gpui::px(400.),
+            &text_system,
+        );
+        let mut text = AccessibleText::default();
+        text.update(&projection, &state, &types, &rows, 2.);
+        assert_eq!(text.controls.len(), 6);
+        for (control, checked) in text.controls[..2].iter().zip([false, true]) {
+            let node = control.node();
+            assert_eq!(node.role(), Role::CheckBox);
+            assert_eq!(
+                node.toggled(),
+                Some(if checked {
+                    accesskit::Toggled::True
+                } else {
+                    accesskit::Toggled::False
+                })
+            );
+            assert!(node.supports_action(accesskit::Action::Click));
+            assert!(node.supports_action(accesskit::Action::Focus));
+            assert!(matches!(control.action, ControlAction::ToggleTask(_)));
+        }
+        let code_pos = rows[2].code_pos.unwrap();
+        assert_eq!(
+            text.controls[2].action,
+            ControlAction::CodeLanguage(code_pos)
+        );
+        assert_eq!(text.controls[3].action, ControlAction::CopyCode(code_pos));
+        for control in &text.controls[2..] {
+            assert_eq!(control.node().role(), Role::Button);
+            assert!(control.node().supports_action(accesskit::Action::Click));
+        }
+        assert_eq!(text.controls[2].label, "Code language: Rust");
+        assert_eq!(text.controls[3].label, "Copy code");
+        for control in &text.controls[4..] {
+            let ControlAction::EditHtml(pos) = control.action else {
+                panic!("HTML control")
+            };
+            assert_eq!(
+                Some(state.doc().node_at(pos).unwrap().type_id()),
+                types.raw_inline
+            );
+            let node = state.doc().node_at(pos).unwrap();
+            assert_eq!(
+                control.label,
+                html_label(node.attrs().get("source").unwrap().as_str().unwrap())
+            );
+        }
+    }
 
     #[test]
     fn accessible_units_preserve_graphemes_and_represent_every_byte() {
@@ -223,6 +570,7 @@ mod tests {
                 cell: None,
             }],
             selection: (line.from, line.to),
+            controls: Vec::new(),
         };
         for (index, pos) in positions.into_iter().enumerate() {
             let accessible = text.text_position(pos).unwrap();
@@ -251,6 +599,7 @@ mod tests {
         let text = AccessibleText {
             runs: vec![run(1, 1, 2, "你"), run(2, 2, 3, "好\n")],
             selection: (1, 1),
+            controls: Vec::new(),
         };
         let boundary = 2;
         let accessible = text.text_position(boundary).unwrap();

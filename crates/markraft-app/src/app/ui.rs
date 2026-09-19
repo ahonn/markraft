@@ -1,6 +1,7 @@
 mod code;
 mod focus;
 mod formatting;
+pub(super) mod html;
 mod icons;
 mod link;
 pub(in crate::app) mod slash;
@@ -19,6 +20,9 @@ use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone)]
 enum Intent {
+    SaveHtml,
+    CancelHtml,
+    EditHtml(usize),
     New,
     Browse,
     Trash,
@@ -159,7 +163,15 @@ fn intent_icon(intent: &Intent) -> Icon {
 
 impl NotesApp {
     fn intent(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.html_editor.is_some() && !matches!(intent, Intent::SaveHtml | Intent::CancelHtml) {
+            return;
+        }
         match intent {
+            Intent::SaveHtml => self.save_html_source(window, cx),
+            Intent::CancelHtml => {
+                self.cancel_html_source(window, cx);
+            }
+            Intent::EditHtml(pos) => self.open_html_source(pos, window, cx),
             Intent::New => self.new_note(window, cx),
             Intent::Browse => self.open_panel(Panel::Browse, window, cx),
             Intent::Trash => self.open_panel(Panel::Trash, window, cx),
@@ -1113,6 +1125,9 @@ impl NotesApp {
         self.scroll_area(content, &self.settings_scroll, cx)
     }
     fn panel_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.html_editor.is_some() {
+            return self.html_key(key, window, cx);
+        }
         // A ringed control answers first, whichever surface it belongs to.
         if key == "enter" && self.focus_activate(window, cx) {
             return true;
@@ -1254,7 +1269,7 @@ impl NotesApp {
                 "⌘E",
                 Intent::Mark(doc::Inline::Code),
             ),
-            Command::new("format-link", "Link", "⌘L", Intent::Link).slash(10, SlashEffect::Host),
+            Command::new("format-link", "Link", "⌘L", Intent::Link).slash(13, SlashEffect::Host),
             Command::new(
                 "format-heading",
                 "Heading 1",
@@ -1277,19 +1292,40 @@ impl NotesApp {
             )
             .slash(3, SlashEffect::Block(doc::Block::Heading(3))),
             Command::new(
+                "format-heading-4",
+                "Heading 4",
+                "⌥⌘4",
+                Intent::Block(doc::Block::Heading(4)),
+            )
+            .slash(4, SlashEffect::Block(doc::Block::Heading(4))),
+            Command::new(
+                "format-heading-5",
+                "Heading 5",
+                "⌥⌘5",
+                Intent::Block(doc::Block::Heading(5)),
+            )
+            .slash(5, SlashEffect::Block(doc::Block::Heading(5))),
+            Command::new(
+                "format-heading-6",
+                "Heading 6",
+                "⌥⌘6",
+                Intent::Block(doc::Block::Heading(6)),
+            )
+            .slash(6, SlashEffect::Block(doc::Block::Heading(6))),
+            Command::new(
                 "format-quote",
                 "Quote",
                 "⇧⌘B",
                 Intent::Block(doc::Block::Quote),
             )
-            .slash(7, SlashEffect::Block(doc::Block::Quote)),
+            .slash(10, SlashEffect::Block(doc::Block::Quote)),
             Command::new(
                 "format-code-block",
                 "Code Block",
                 "⌥⌘C",
                 Intent::Block(doc::Block::Code),
             )
-            .slash(8, SlashEffect::Block(doc::Block::Code)),
+            .slash(11, SlashEffect::Block(doc::Block::Code)),
             Command::new(
                 "format-paragraph",
                 "Paragraph",
@@ -1303,26 +1339,26 @@ impl NotesApp {
                 "⇧⌘7",
                 Intent::Block(doc::Block::Ordered),
             )
-            .slash(5, SlashEffect::Block(doc::Block::Ordered)),
+            .slash(8, SlashEffect::Block(doc::Block::Ordered)),
             Command::new(
                 "format-bullet",
                 "Bullet List",
                 "⇧⌘8",
                 Intent::Block(doc::Block::Bullet),
             )
-            .slash(4, SlashEffect::Block(doc::Block::Bullet)),
+            .slash(7, SlashEffect::Block(doc::Block::Bullet)),
             Command::new(
                 "format-task",
                 "Task List",
                 "⇧⌘9",
                 Intent::Block(doc::Block::Task),
             )
-            .slash(6, SlashEffect::Block(doc::Block::Task)),
+            .slash(9, SlashEffect::Block(doc::Block::Task)),
             // A rule replaces the line it is on, so only the `/` menu offers it.
             Command::editor(
                 "insert-divider",
                 "Divider",
-                9,
+                12,
                 SlashEffect::Block(doc::Block::Divider),
             ),
         ];
@@ -1330,7 +1366,7 @@ impl NotesApp {
         if caret.table.is_none() && !caret.in_code {
             items.push(
                 Command::new("insert-table", "Table", "", Intent::InsertTable)
-                    .slash(11, SlashEffect::Host),
+                    .slash(14, SlashEffect::Host),
             );
         }
         items.extend([
@@ -1767,14 +1803,14 @@ impl Render for NotesApp {
             // Tab walks the open surface's controls. With nothing open it falls through,
             // so the note still indents.
             .capture_action(cx.listener(|this, _: &markraft_gpui::Indent, w, cx| {
-                if this.focus_step(true, w, cx) {
+                if this.html_focus_step(true, w, cx) || this.focus_step(true, w, cx) {
                     cx.stop_propagation();
                 } else {
                     cx.propagate();
                 }
             }))
             .capture_action(cx.listener(|this, _: &markraft_gpui::Outdent, w, cx| {
-                if this.focus_step(false, w, cx) {
+                if this.html_focus_step(false, w, cx) || this.focus_step(false, w, cx) {
                     cx.stop_propagation();
                 } else {
                     cx.propagate();
@@ -1786,9 +1822,17 @@ impl Render for NotesApp {
             // field owns the keyboard.
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, w, cx| {
                 this.note_key_press(cx);
+                if this.html_editor.is_some()
+                    && event.keystroke.key == "enter"
+                    && event.keystroke.modifiers.platform
+                {
+                    this.save_html_source(w, cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 if event.keystroke.key == "space"
                     && !event.keystroke.modifiers.modified()
-                    && this.focus_activate(w, cx)
+                    && (this.html_key("space", w, cx) || this.focus_activate(w, cx))
                 {
                     cx.stop_propagation();
                 }
@@ -1800,23 +1844,25 @@ impl Render for NotesApp {
             .bg(style.background)
             .text_color(style.text)
             .font_family(".SystemUIFont")
-            .on_action(cx.listener(|this, _: &Save, _, cx| {
-                this.flush(cx);
+            .on_action(cx.listener(|this, _: &Save, w, cx| {
+                if this.html_editor.is_some() {
+                    this.save_html_source(w, cx);
+                } else {
+                    this.flush(cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &CopyMarkdown, _, cx| this.copy_markdown(cx)))
             .on_action(cx.listener(|this, _: &Quit, _, cx| this.quit(cx)))
             .on_action(cx.listener(|this, _: &Hide, w, cx| this.dismiss(w, cx)))
-            .on_action(cx.listener(|this, _: &NewNote, w, cx| this.new_note(w, cx)))
-            .on_action(cx.listener(|this, _: &Browse, w, cx| this.open_panel(Panel::Browse, w, cx)))
+            .on_action(cx.listener(|this, _: &NewNote, w, cx| this.intent(Intent::New, w, cx)))
+            .on_action(cx.listener(|this, _: &Browse, w, cx| this.intent(Intent::Browse, w, cx)))
+            .on_action(cx.listener(|this, _: &Actions, w, cx| this.intent(Intent::Actions, w, cx)))
             .on_action(
-                cx.listener(|this, _: &Actions, w, cx| this.open_panel(Panel::Actions, w, cx)),
+                cx.listener(|this, _: &Settings, w, cx| this.intent(Intent::Settings, w, cx)),
             )
-            .on_action(
-                cx.listener(|this, _: &Settings, w, cx| this.open_panel(Panel::Settings, w, cx)),
-            )
-            .on_action(cx.listener(|this, _: &Link, w, cx| this.open_link_popover(w, cx)))
-            .on_action(cx.listener(|this, _: &Export, _, cx| this.export(cx)))
-            .on_action(cx.listener(|this, _: &Import, w, cx| this.import(w, cx)));
+            .on_action(cx.listener(|this, _: &Link, w, cx| this.intent(Intent::Link, w, cx)))
+            .on_action(cx.listener(|this, _: &Export, w, cx| this.intent(Intent::Export, w, cx)))
+            .on_action(cx.listener(|this, _: &Import, w, cx| this.intent(Intent::Import, w, cx)));
         let actions = self
             .capsule()
             .p(px(3.))
@@ -2116,6 +2162,9 @@ impl Render for NotesApp {
             .when_some(self.table_toolbar(window, cx), |s, toolbar| {
                 s.child(popover_enter("table-enter", toolbar, true, reduce_motion))
             })
+            .when_some(self.html_source_entry(window, cx), |s, entry| {
+                s.child(entry)
+            })
             .when(self.panel != Panel::Editor, |s| {
                 s.child(popover_enter(
                     "overlay-enter",
@@ -2123,6 +2172,9 @@ impl Render for NotesApp {
                     false,
                     reduce_motion,
                 ))
+            })
+            .when_some(self.html_source_popover(window, cx), |s, popover| {
+                s.child(popover_enter("html-enter", popover, false, reduce_motion))
             })
     }
 }

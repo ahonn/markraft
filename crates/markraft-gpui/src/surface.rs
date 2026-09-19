@@ -14,12 +14,11 @@
 
 use crate::style::EditorStyle;
 use crate::types::DocTypes;
-use crate::{CaretShape, EditorEvent, EditorView};
+use crate::{CaretShape, EditorView};
 use gpui::{prelude::*, *};
 use markraft_core::commands::ColumnAlignment;
 use markraft_core::projection::{Line, LineKind, Projection, Run, RunContent};
 use markraft_core::{MarkSet, Node};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
@@ -58,10 +57,6 @@ const PILL_MAX_RATIO: f32 = 0.9;
 /// format no decoder handles, an image sharing its line with text — keeps the
 /// placeholder pill.
 const IMAGE_MAX_HEIGHT: Pixels = px(320.);
-/// A file this large is not worth blocking a layout pass on.
-const IMAGE_MAX_BYTES: u64 = 16 * 1024 * 1024;
-/// How many decoded images are kept, keyed by source.
-const IMAGE_CACHE_LIMIT: usize = 24;
 // SF Mono; Menlo is wider and heavier at this size.
 const CODE_FONT: &str = ".AppleSystemUIFontMonospaced";
 const CODE_PADDING: Pixels = px(12.);
@@ -196,6 +191,7 @@ enum Marker {
     },
     Task {
         checked: bool,
+        number: Option<Rc<ShapedLine>>,
     },
 }
 
@@ -404,7 +400,7 @@ impl LayoutLine {
         ))
     }
 
-    fn code_copy_bounds(&self) -> Option<Bounds<Pixels>> {
+    pub(crate) fn code_copy_bounds(&self) -> Option<Bounds<Pixels>> {
         self.code_header.as_ref()?;
         Some(Bounds::new(
             point(
@@ -433,6 +429,13 @@ impl LayoutLine {
             self.origin + point(-offset, (self.line_height - height) * 0.5),
             size(width, height),
         ))
+    }
+
+    pub(crate) fn task_marker(&self) -> Option<(bool, Bounds<Pixels>)> {
+        let Marker::Task { checked, .. } = self.marker.as_ref()? else {
+            return None;
+        };
+        Some((*checked, self.marker_bounds()?))
     }
 
     /// The top-left of the caret at `offset`, a `char` offset into the line.
@@ -634,6 +637,7 @@ fn caret_quad(
 
 /// Everything shaping needs that is not the window.
 pub(crate) struct ShapeInput<'a> {
+    pub images: &'a crate::images::Images,
     pub doc: &'a Node,
     pub types: &'a DocTypes,
     pub projection: &'a Projection,
@@ -658,6 +662,22 @@ pub(crate) fn shape(
     width: Pixels,
     text_system: &WindowTextSystem,
 ) -> Vec<LayoutLine> {
+    input.images.retain_sources(
+        input
+            .projection
+            .lines()
+            .iter()
+            .flat_map(|line| &line.runs)
+            .filter_map(|run| {
+                if let RunContent::Atom(node) = &run.content
+                    && Some(node.type_id()) == input.types.image
+                {
+                    Some(attr(node, "src"))
+                } else {
+                    None
+                }
+            }),
+    );
     let mut lines: Vec<LayoutLine> = (0..input.projection.line_count())
         .map(|index| {
             let cell = table_cell(input, index).map(|_| CellWidth::Natural);
@@ -686,6 +706,7 @@ fn shape_line(
         projection,
         style,
         single_line,
+        ..
     } = *input;
     let line = &projection.lines()[index];
     let heading = types.heading_level(line);
@@ -1394,12 +1415,7 @@ fn display_text(
     column: Pixels,
     text_system: &WindowTextSystem,
 ) -> DisplayText {
-    let ShapeInput {
-        types,
-        projection,
-        style,
-        ..
-    } = *input;
+    let projection = input.projection;
     if line.kind == LineKind::LeafBlock {
         return DisplayText::stand_in(" ".to_owned());
     }
@@ -1423,7 +1439,7 @@ fn display_text(
         let len: usize = source[byte..].chars().take(chars).map(char::len_utf8).sum();
         let slice = &source[byte..byte + len];
         byte += len;
-        match atom_of(types, run, style, font_size, column, alone, text_system) {
+        match atom_of(input, run, font_size, column, alone, text_system) {
             Some(atom) => {
                 // One atom is one character, and it advances nowhere near far
                 // enough for what is drawn over it, so the row reserves the
@@ -1527,9 +1543,8 @@ fn atom_label<'a>(types: &DocTypes, node: &'a Node) -> Option<(AtomShape, &'a st
 
 /// The atom an inline run is drawn as, shaped and measured.
 fn atom_of(
-    types: &DocTypes,
+    input: &ShapeInput<'_>,
     run: &Run,
-    style: &EditorStyle,
     font_size: Pixels,
     column: Pixels,
     alone: bool,
@@ -1538,11 +1553,26 @@ fn atom_of(
     let RunContent::Atom(node) = &run.content else {
         return None;
     };
-    let (shape, text) = atom_label(types, node)?;
+    let ShapeInput {
+        types,
+        style,
+        images,
+        ..
+    } = *input;
+    let (shape, original) = atom_label(types, node)?;
+    let text = if Some(node.type_id()) == types.image {
+        match images.load(attr(node, "src")) {
+            Err(error) => format!("{}: {original}", error.label()),
+            Ok(_) if !alone => format!("Inline image: {original}"),
+            Ok(_) => original.to_owned(),
+        }
+    } else {
+        original.to_owned()
+    };
     // A local file the note can read is drawn for real where it has the line to
     // itself; the placeholder is still built, and stands in wherever it is not.
     let drawn = (alone && Some(node.type_id()) == types.image)
-        .then(|| drawn_image(attr(node, "src"), column))
+        .then(|| drawn_image(images, attr(node, "src"), column))
         .flatten();
     // A pill's label is smaller than the text around it, as inline code is;
     // source text sits in the sentence at the sentence's own size.
@@ -1587,8 +1617,12 @@ fn atom_of(
 
 /// A decoded local image and the size it is drawn at: the column's width, or
 /// the image's own where that is narrower, capped at [`IMAGE_MAX_HEIGHT`].
-fn drawn_image(src: &str, column: Pixels) -> Option<(Arc<RenderImage>, Size<Pixels>)> {
-    let image = local_image(src)?;
+fn drawn_image(
+    images: &crate::images::Images,
+    src: &str,
+    column: Pixels,
+) -> Option<(Arc<RenderImage>, Size<Pixels>)> {
+    let image = images.load(src).ok()?;
     let intrinsic = image.size(0);
     let (native_width, native_height) = (intrinsic.width.0 as f32, intrinsic.height.0 as f32);
     if native_width <= 0. || native_height <= 0. {
@@ -1601,54 +1635,6 @@ fn drawn_image(src: &str, column: Pixels) -> Option<(Arc<RenderImage>, Size<Pixe
         width = height * (native_width / native_height);
     }
     Some((image, size(width, height)))
-}
-
-thread_local! {
-    /// Decoding happens on the layout pass, so every source — including one
-    /// that cannot be read — is decided exactly once.
-    static IMAGES: RefCell<HashMap<String, Option<Arc<RenderImage>>>> =
-        RefCell::new(HashMap::new());
-}
-
-fn local_image(src: &str) -> Option<Arc<RenderImage>> {
-    IMAGES.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if let Some(decoded) = cache.get(src) {
-            return decoded.clone();
-        }
-        let decoded = decode_image(src);
-        if cache.len() >= IMAGE_CACHE_LIMIT {
-            cache.clear();
-        }
-        cache.insert(src.to_owned(), decoded.clone());
-        decoded
-    })
-}
-
-/// Read and decode a local file. A remote source has no path and never reaches
-/// a decoder here.
-fn decode_image(src: &str) -> Option<Arc<RenderImage>> {
-    let path = std::path::Path::new(src);
-    if !path.is_file() || std::fs::metadata(path).ok()?.len() > IMAGE_MAX_BYTES {
-        return None;
-    }
-    let format = match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
-        "png" => ImageFormat::Png,
-        "jpg" | "jpeg" => ImageFormat::Jpeg,
-        "webp" => ImageFormat::Webp,
-        "gif" => ImageFormat::Gif,
-        "svg" => ImageFormat::Svg,
-        "bmp" => ImageFormat::Bmp,
-        "tif" | "tiff" => ImageFormat::Tiff,
-        "ico" => ImageFormat::Ico,
-        _ => return None,
-    };
-    let bytes = std::fs::read(path).ok()?;
-    // The renderer is only consulted for SVG, and nothing here loads an
-    // embedded asset, so an empty asset source is all it needs.
-    Image::from_bytes(format, bytes)
-        .to_image_data(SvgRenderer::new(Arc::new(())))
-        .ok()
 }
 
 /// The file name an image source ends in, for a placeholder with no alt text.
@@ -1858,12 +1844,18 @@ fn indent_of(
     number_width: Option<Pixels>,
 ) -> Pixels {
     let mut indent = px(0.);
-    for ancestor in &line.ancestors {
+    for (index, ancestor) in line.ancestors.iter().enumerate() {
         let ty = ancestor.node_type;
         if Some(ty) == types.blockquote {
             indent += style.quote_indent;
         } else if types.is_list(ty) {
             indent += style.list_indent;
+        } else if Some(ty) == types.task_item
+            && index > 0
+            && Some(line.ancestors[index - 1].node_type) == types.ordered_list
+        {
+            // Nested blocks and lists keep the checkbox slot of every enclosing item.
+            indent += px(22.);
         } else if Some(ty) == types.code_block {
             indent += CODE_PADDING;
         }
@@ -1875,8 +1867,8 @@ fn indent_of(
     indent
 }
 
-/// The shaped ordinal for a line that starts an ordered-list item, and the width
-/// every item of that list reserves.
+/// The shaped ordinal and width every line of an ordered-list item reserves.
+/// Only its first line paints the ordinal, but continuation lines align with it.
 fn ordered_marker(
     doc: &Node,
     types: &DocTypes,
@@ -1886,7 +1878,7 @@ fn ordered_marker(
     text_system: &WindowTextSystem,
 ) -> Option<(Rc<ShapedLine>, Pixels)> {
     let (item, list) = types.item_of(line)?;
-    if Some(list.node_type) != types.ordered_list || !starts_item(types, line) {
+    if Some(list.node_type) != types.ordered_list {
         return None;
     }
     let start = list
@@ -1945,18 +1937,22 @@ fn marker_of(
     style: &EditorStyle,
     number: Option<Rc<ShapedLine>>,
 ) -> Option<Marker> {
-    if let Some(number) = number {
-        return Some(Marker::Number(number));
-    }
     let (item, list) = types.item_of(line)?;
-    if !starts_item(types, line) || Some(list.node_type) != types.bullet_list {
+    if !starts_item(types, line) {
         return None;
     }
     let _ = style;
     if Some(item.node_type) == types.task_item {
         return Some(Marker::Task {
             checked: DocTypes::task_checked(&item.attrs),
+            number,
         });
+    }
+    if let Some(number) = number {
+        return Some(Marker::Number(number));
+    }
+    if Some(list.node_type) != types.bullet_list {
+        return None;
     }
     Some(Marker::Bullet {
         depth: types.list_depth(line),
@@ -2286,6 +2282,7 @@ impl Element for EditorSurface {
             view.accessible_text.borrow_mut().update(
                 &view.projection(),
                 view.state(),
+                &view.types,
                 &rows,
                 window.scale_factor(),
             );
@@ -2340,6 +2337,12 @@ impl Element for EditorSurface {
         cx: &mut App,
     ) {
         let editor = self.editor.read(cx);
+        if window.is_a11y_active() {
+            editor
+                .accessible_text
+                .borrow()
+                .bind_controls(&self.editor, window);
+        }
         let projection = editor.projection();
         let state = editor.state();
         let doc = state.doc();
@@ -2892,7 +2895,17 @@ fn paint_marker(
                 window.paint_quad(fill(bounds, style.marker).corner_radii(radius));
             }
         }
-        Marker::Task { checked } => {
+        Marker::Task { checked, number } => {
+            if let Some(number) = number {
+                let _ = number.paint(
+                    point(bounds.left() - NUMBER_GAP - number.width, row.origin.y),
+                    row.line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            }
             window.paint_quad(quad(
                 bounds,
                 px(3.),
@@ -2973,7 +2986,6 @@ fn paint_code_header(
     let language_box = language_box.clone();
     let copy_box = copy_box.clone();
     let editor = surface.editor.clone();
-    let index = row.index;
     let code_pos = row.code_pos;
     window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
         if !phase.bubble() || event.button != MouseButton::Left {
@@ -2990,16 +3002,26 @@ fn paint_code_header(
         }
         if language_clicked {
             if let Some(pos) = code_pos {
-                editor.update(cx, |_, cx| {
-                    cx.emit(EditorEvent::CodeLanguageRequested { pos });
+                editor.update(cx, |editor, cx| {
+                    editor.run_control(
+                        crate::accessibility::ControlAction::CodeLanguage(pos),
+                        true,
+                        window,
+                        cx,
+                    );
                 });
             }
             cx.stop_propagation();
         } else if copy_clicked {
-            let view = editor.read(cx);
-            if let Some(text) = view.projection().line_text(index) {
-                cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
-                editor.update(cx, |_, cx| cx.emit(EditorEvent::CodeCopied));
+            if let Some(pos) = code_pos {
+                editor.update(cx, |editor, cx| {
+                    editor.run_control(
+                        crate::accessibility::ControlAction::CopyCode(pos),
+                        true,
+                        window,
+                        cx,
+                    );
+                });
             }
             cx.stop_propagation();
         }
@@ -3153,7 +3175,9 @@ mod tests {
         let projection = projection_of(&state);
         let schema = commonmark_schema();
         let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
+        let images = crate::images::Images::default();
         let input = ShapeInput {
+            images: &images,
             doc: state.doc(),
             types: &types,
             projection: &projection,
@@ -3294,7 +3318,9 @@ mod tests {
         let schema = commonmark_schema();
         let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
         let style = EditorStyle::notes();
+        let images = crate::images::Images::default();
         let input = ShapeInput {
+            images: &images,
             doc: state.doc(),
             types: &types,
             projection: &projection,
@@ -3349,11 +3375,12 @@ mod tests {
         let path = std::env::temp_dir().join("markraft-surface-test.png");
         std::fs::write(&path, PNG).expect("a writable temp directory");
         let src = path.to_str().expect("a UTF-8 temp path");
-        let (_, drawn) = drawn_image(src, px(100.)).expect("the PNG decodes");
+        let images = crate::images::Images::default();
+        let (_, drawn) = drawn_image(&images, src, px(100.)).expect("the PNG decodes");
         assert_eq!(drawn.width, px(2.), "a small image is not blown up");
         assert_eq!(drawn.height, px(1.));
-        assert!(drawn_image("https://host/a.png", px(100.)).is_none());
-        assert!(drawn_image("/no/such/file.png", px(100.)).is_none());
+        assert!(drawn_image(&images, "https://host/a.png", px(100.)).is_none());
+        assert!(drawn_image(&images, "/no/such/file.png", px(100.)).is_none());
         let _ = std::fs::remove_file(&path);
     }
 
@@ -3729,6 +3756,42 @@ mod tests {
         assert_eq!(
             markers_of("- a\n- [x] b\n  - c\n"),
             vec![Some("bullet"), Some("task"), Some("bullet")]
+        );
+    }
+
+    #[test]
+    fn ordered_tasks_draw_separate_checkbox_and_keep_continuation_indent() {
+        let rows = shaped("7. [ ] open\n\n   continuation\n\n8. [x] done\n9. plain");
+        let first = &rows[0];
+        let (checked, checkbox) = first.task_marker().expect("ordered task has checkbox");
+        assert!(!checked);
+        let Some(Marker::Task {
+            number: Some(number),
+            ..
+        }) = &first.marker
+        else {
+            panic!("ordered task also keeps its number");
+        };
+        let ordinal_center = point(
+            checkbox.left() - super::NUMBER_GAP - number.width / 2.,
+            checkbox.center().y,
+        );
+        assert!(
+            !checkbox.contains(&ordinal_center),
+            "the number is not a checkbox hit target"
+        );
+        assert_eq!(
+            first.origin.x, rows[1].origin.x,
+            "continuation text keeps its alignment"
+        );
+        assert!(
+            rows[1].task_marker().is_none(),
+            "only the task's first line has a checkbox"
+        );
+        assert!(rows[2].task_marker().unwrap().0);
+        assert!(
+            rows[3].task_marker().is_none(),
+            "plain ordered items never toggle tasks"
         );
     }
 
