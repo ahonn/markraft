@@ -72,13 +72,23 @@ const CODE_RADIUS: Pixels = px(12.);
 
 /// A table is a grid: the projection gives every cell a line of its own, and
 /// the table pass puts the cells of one row on one band of y. A column is as
-/// wide as its widest cell wants to be, never narrower than
-/// [`CELL_MIN_WIDTH`], and the grid as a whole is content-sized rather than
-/// stretched to the editor's width.
+/// wide as its widest cell wants to be, never narrower than its own
+/// min-content width, and the grid as a whole is content-sized rather than
+/// stretched to the editor's width; a grid that still does not fit scrolls
+/// sideways within the note.
 const CELL_PADDING_X: Pixels = px(8.);
 const CELL_PADDING_Y: Pixels = px(6.);
 const CELL_MIN_WIDTH: Pixels = px(56.);
+/// How much of one unbreakable unit a column reserves room for. Past this a
+/// very long word — a bare URL, a path — is left to wrap at whatever
+/// opportunities the wrapper does find inside it rather than widening the grid
+/// without bound.
+const CELL_MAX_MIN_CONTENT: Pixels = px(240.);
 const TABLE_LINE: Pixels = px(1.);
+/// How wide the fade at a clipped edge of a scrolling grid is.
+const TABLE_FADE: Pixels = px(14.);
+/// A quote bar, drawn beside a line and beside a whole grid alike.
+const QUOTE_BAR: Pixels = px(2.);
 
 /// The byte index of the `n`th `char` of `text`, clamped to its length.
 fn char_to_byte(text: &str, n: usize) -> usize {
@@ -192,6 +202,9 @@ pub(crate) struct TableCell {
     pub(crate) columns: usize,
     /// The alignment of the cell's own column.
     pub(crate) alignment: ColumnAlignment,
+    /// How many block quotes the grid sits in. A cell carries no decoration of
+    /// its own, so the grid draws those bars for all of its cells at once.
+    quotes: usize,
     /// The cell box's top-left corner, relative to the line's origin.
     offset: Point<Pixels>,
     /// The cell box, padding included.
@@ -249,6 +262,10 @@ pub(crate) struct LayoutLine {
     /// Text height plus the gap below the line.
     pub height: Pixels,
     pub width: Pixels,
+    /// The narrowest the content can be drawn at without splitting a unit the
+    /// line wrapper keeps together. Measured on the table pass only, which is
+    /// the one caller that has to know how far a box may shrink.
+    pub(crate) min_width: Pixels,
     pub(crate) top_gap: Pixels,
     /// Position directly before a code block's node, for the host's language picker.
     pub(crate) code_pos: Option<usize>,
@@ -673,9 +690,7 @@ fn shape_line(
     // the document could not interpret, not prose.
     let raw = types.is_raw_block(line);
     let font_size = style.font_size(heading, code);
-    // Keep deeply nested imported content editable in a narrow note. Only its
-    // visual indentation is capped; document depth is preserved.
-    let max_indent = (width - px(80.)).max(style.quote_indent);
+    let max_indent = max_indent(style, width);
     let quote_levels = types.quote_depth(line);
     let number = ordered_marker(doc, types, line, style, font_size, window);
     let indent = indent_of(types, line, style, number.as_ref().map(|(_, w)| *w)).min(max_indent);
@@ -778,6 +793,7 @@ fn shape_line(
         } else {
             wrap_width
         },
+        min_width: px(0.),
         top_gap,
         code_pos: code
             .then(|| line.ancestors.last().map(|a| a.before))
@@ -796,17 +812,117 @@ fn shape_line(
     }
     if cell == Some(CellWidth::Natural) {
         // What the content wants, not what it was given: the grid reads each
-        // column's preferred width off this.
+        // column's preferred width off this, and how far the column may shrink
+        // off the min-content width beside it.
         layout.width = layout
             .rows
             .iter()
             .map(|row| row.line.size(line_height).width)
             .fold(px(0.), |widest, width| widest.max(width));
+        layout.min_width = min_content_width(&layout, &runs.code);
     }
     layout.height = layout.text_height() + gap;
     shape_inline_code(&mut layout, &text.text, &runs.code, font_size, window);
     place_pills(&mut layout, text.pills);
     layout
+}
+
+/// The narrowest a line's content can be drawn at without splitting a unit the
+/// line wrapper keeps together.
+///
+/// The line has to have been shaped unwrapped, which is what the measuring pass
+/// gives a cell: every row then sits on one visual row, so the advance between
+/// two byte offsets is the width of the text between them. A unit wider than
+/// [`CELL_MAX_MIN_CONTENT`] only counts for that much, so one very long word
+/// cannot widen a column without bound.
+fn min_content_width(layout: &LayoutLine, code: &[(Range<usize>, Font, Hsla)]) -> Pixels {
+    let mut widest = px(0.);
+    for (index, row) in layout.rows.iter().enumerate() {
+        let start = row_byte_start(layout, index);
+        let text = row.text();
+        // A code span is drawn as one pill; split over two rows of a cell it
+        // reads as two spans, so it is held together as one unit.
+        let glue: Vec<Range<usize>> = code
+            .iter()
+            .filter(|(range, _, _)| range.end > start && range.start < start + text.len())
+            .map(|(range, _, _)| range.start.saturating_sub(start)..range.end - start)
+            .collect();
+        let x = |byte: usize| {
+            row.line
+                .position_for_index(byte, layout.line_height)
+                .map_or(px(0.), |position| position.x)
+        };
+        for unit in unbreakable_units(text, &glue) {
+            widest = widest.max((x(unit.end) - x(unit.start)).min(CELL_MAX_MIN_CONTENT));
+        }
+    }
+    widest
+}
+
+/// The byte ranges of `text` the line wrapper never breaks inside, each with
+/// its surrounding whitespace trimmed off.
+///
+/// A break opportunity opens before a word character that follows a space, and
+/// before any character that is neither a space nor a word character — so CJK
+/// text breaks between any two characters, and `/`, `?` and `&` break a path or
+/// a query apart. An opportunity strictly inside a range of `glue` is ignored.
+fn unbreakable_units(text: &str, glue: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut starts = vec![0usize];
+    let mut previous = '\0';
+    let mut seen = false;
+    for (byte, c) in text.char_indices() {
+        let opportunity = if is_word_char(c) {
+            previous == ' ' && seen
+        } else {
+            c != ' ' && seen
+        };
+        if opportunity
+            && !glue
+                .iter()
+                .any(|range| range.start < byte && byte < range.end)
+        {
+            starts.push(byte);
+        }
+        seen |= c != ' ';
+        previous = c;
+    }
+    starts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &start)| {
+            let end = starts.get(index + 1).copied().unwrap_or(text.len());
+            let unit = &text[start..end];
+            let lead = unit.len() - unit.trim_start().len();
+            let trimmed = unit.trim();
+            (!trimmed.is_empty()).then(|| start + lead..start + lead + trimmed.len())
+        })
+        .collect()
+}
+
+/// Whether the line wrapper treats `c` as part of a word, which is what decides
+/// where a cell's text may break.
+///
+/// Mirrors gpui's own `LineWrapper::is_word_char`, which is not public: Latin,
+/// Cyrillic, Vietnamese and Bengali letters, digits, the punctuation that binds
+/// to a word and the closing punctuation that never starts a line. Everything
+/// else — CJK above all — is a break opportunity of its own.
+fn is_word_char(c: char) -> bool {
+    // The punctuation that binds to a word — `a-b`, `var_name`, `3.14`,
+    // `Self::new` — together with the closing marks that never start a line and
+    // the glue characters that never break at all.
+    const BINDING: &str = "-_.'\u{2019}\u{2018}$%@#^~,=:;!)]}\"\u{201d}\u{00bb}\u{2026}\u{22ef}\u{202f}\u{00a0}\u{2011}";
+    // Latin-1 Supplement through Latin Extended-B, combining diacritics,
+    // Cyrillic, Bengali, and Latin Extended Additional for Vietnamese.
+    const SCRIPTS: [std::ops::RangeInclusive<char>; 5] = [
+        '\u{00c0}'..='\u{024f}',
+        '\u{0300}'..='\u{036f}',
+        '\u{0400}'..='\u{04ff}',
+        '\u{0980}'..='\u{09ff}',
+        '\u{1e00}'..='\u{1eff}',
+    ];
+    c.is_ascii_alphanumeric()
+        || BINDING.contains(c)
+        || SCRIPTS.iter().any(|range| range.contains(&c))
 }
 
 /// Lay every table out as a grid.
@@ -855,11 +971,15 @@ fn shape_table(
         gap_below(input, last.index, &last.source, None, false, &None)
     };
 
-    let mut preferred = vec![CELL_MIN_WIDTH; columns];
-    for (cell, (_, column)) in cells.iter().zip(&grid) {
-        preferred[*column] = preferred[*column].max(cell.width + CELL_PADDING_X * 2.);
-    }
-    let widths = column_widths(&preferred, (width - left).max(CELL_MIN_WIDTH));
+    // How many quote levels the grid draws its own bars for; a cell carries no
+    // decoration, so the ordinary quote painter never sees one.
+    let quotes = input
+        .types
+        .quote_depth(&first.source)
+        .min(visible_levels(input.style, max_indent(input.style, width)));
+
+    let (preferred, minimum) = column_demands(cells, &grid, columns);
+    let widths = column_widths(&preferred, &minimum, (width - left).max(CELL_MIN_WIDTH));
     // Taken before the reshape, which replaces each cell's width with the
     // column's: this is what an alignment offsets inside the column.
     let natural: Vec<Pixels> = cells.iter().map(|cell| cell.width).collect();
@@ -893,6 +1013,41 @@ fn shape_table(
         left,
         gap,
     );
+    for line in cells.iter_mut() {
+        if let Some(cell) = &mut line.table {
+            cell.quotes = quotes;
+        }
+    }
+}
+
+/// What each column asks for, and the narrowest it may be drawn: its widest
+/// cell's content plus the padding, and its widest cell's min-content plus the
+/// padding, neither below [`CELL_MIN_WIDTH`].
+///
+/// Both come off the cells as the frame will paint them. Every one of those
+/// widths was measured on the line the measuring pass shaped with that cell's
+/// own runs, so a header cell — which [`text_runs`] draws bold — floors its
+/// column at the width the bold text needs, and an emphasised or code cell at
+/// the width of its own face.
+///
+/// Both are rounded up to whole pixels. A column hands its cell a content box
+/// of its width less the padding again, and the wrapper breaks on strictly
+/// greater — but adding and then subtracting the padding is not lossless in
+/// `f32` once a width passes 48px, where the sum crosses into the next
+/// exponent. A bold "Second" measuring 52.0004px came back as 52.000397px and
+/// split as `Secon / d`. Whole pixels make that round trip exact.
+fn column_demands(
+    cells: &[LayoutLine],
+    grid: &[(usize, usize)],
+    columns: usize,
+) -> (Vec<Pixels>, Vec<Pixels>) {
+    let mut preferred = vec![CELL_MIN_WIDTH; columns];
+    let mut minimum = vec![CELL_MIN_WIDTH; columns];
+    for (cell, (_, column)) in cells.iter().zip(grid) {
+        preferred[*column] = preferred[*column].max(cell.width.ceil() + CELL_PADDING_X * 2.);
+        minimum[*column] = minimum[*column].max(cell.min_width.ceil() + CELL_PADDING_X * 2.);
+    }
+    (preferred, minimum)
 }
 
 /// The width every column is drawn at.
@@ -901,11 +1056,12 @@ fn shape_table(
 /// they are rather than stretched to the editor's width — a two-word table
 /// stays two words wide, as it does in Bear, rather than being blown up to the
 /// column the way Typora does it. Only when they do not fit are the columns
-/// shrunk, proportionally to what they asked for and never below
-/// [`CELL_MIN_WIDTH`]; a table that will not fit even at that minimum overflows
-/// to the right, where the editor's own bounds clip it, because this view has
-/// no horizontal scrolling to offer instead.
-fn column_widths(preferred: &[Pixels], available: Pixels) -> Vec<Pixels> {
+/// shrunk, proportionally to what they asked for and never below their own
+/// entry in `minimum`, which is the widest unbreakable unit the column holds:
+/// shrinking may wrap a cell's text, never split a word. A grid that will not
+/// fit even at those minimums keeps its width and scrolls sideways inside the
+/// note.
+fn column_widths(preferred: &[Pixels], minimum: &[Pixels], available: Pixels) -> Vec<Pixels> {
     let mut widths = preferred.to_vec();
     if widths.iter().copied().sum::<Pixels>() <= available {
         return widths;
@@ -931,12 +1087,13 @@ fn column_widths(preferred: &[Pixels], available: Pixels) -> Vec<Pixels> {
             break;
         }
         let mut hit_the_floor = false;
-        for (width, floored) in widths.iter_mut().zip(floored.iter_mut()) {
+        for (index, (width, floored)) in widths.iter_mut().zip(floored.iter_mut()).enumerate() {
             if *floored {
                 continue;
             }
-            if *width * scale < CELL_MIN_WIDTH {
-                *width = CELL_MIN_WIDTH;
+            let floor = minimum.get(index).copied().unwrap_or(CELL_MIN_WIDTH);
+            if *width * scale < floor {
+                *width = floor;
                 *floored = true;
                 hit_the_floor = true;
             } else {
@@ -1006,10 +1163,100 @@ fn place_table(
             rows,
             columns,
             alignment: alignments[column],
+            // Filled in by the caller, which is the pass that knows the grid's
+            // ancestors.
+            quotes: 0,
             offset: point(-(CELL_PADDING_X + shift), -CELL_PADDING_Y),
             size: size(widths[column], heights[row]),
         });
     }
+}
+
+/// How far one grid is scrolled sideways, and how far it may be.
+///
+/// A grid whose columns will not fit even at their min-content widths keeps its
+/// natural width and scrolls as a unit inside the note. The offset outlives the
+/// frame — it is the reader's position in the grid — so the view holds it,
+/// keyed by the position before the table node; a grid the next frame does not
+/// find takes its entry with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct TableScroll {
+    /// How far left the grid is drawn, never outside `0..=overflow`.
+    pub(crate) offset: Pixels,
+    /// The grid's width less the strip of the note it is drawn in.
+    pub(crate) overflow: Pixels,
+}
+
+/// What every grid in `lines` overruns `content` by, before any offset is
+/// applied, keyed as [`TableCell::table`] is.
+pub(crate) fn table_overflows(
+    lines: &[LayoutLine],
+    content: Bounds<Pixels>,
+) -> HashMap<usize, Pixels> {
+    let mut grids: HashMap<usize, Bounds<Pixels>> = HashMap::new();
+    for (table, bounds) in lines
+        .iter()
+        .filter_map(|line| Some((line.table?.table, line.cell_bounds()?)))
+    {
+        grids
+            .entry(table)
+            .and_modify(|all| *all = all.union(&bounds))
+            .or_insert(bounds);
+    }
+    grids
+        .into_iter()
+        .map(|(table, grid)| {
+            let room = content.right() - grid.left();
+            (table, (grid.size.width - room).max(px(0.)))
+        })
+        .collect()
+}
+
+/// The offset that brings `cell` fully into `strip`, starting from `offset`.
+///
+/// Mirrors the vertical reveal: a cell already inside the strip keeps the
+/// reader's position, and one hanging off an edge is pulled in from that edge
+/// only. A cell wider than the strip shows its start.
+pub(crate) fn reveal_offset(
+    cell: Bounds<Pixels>,
+    strip: Bounds<Pixels>,
+    offset: Pixels,
+    overflow: Pixels,
+) -> Pixels {
+    let wanted = if cell.left() - offset < strip.left() {
+        cell.left() - strip.left()
+    } else if cell.right() - offset > strip.right() {
+        cell.right() - strip.right()
+    } else {
+        offset
+    };
+    wanted.clamp(px(0.), overflow.max(px(0.)))
+}
+
+/// The part of each scrolling grid in `rows` the reader can see, for the wheel
+/// and for the toolbar's anchor. Grids that fit are left out.
+pub(crate) fn visible_strips(
+    rows: &[LayoutLine],
+    scroll: &HashMap<usize, TableScroll>,
+    content: Bounds<Pixels>,
+) -> Vec<(usize, Bounds<Pixels>)> {
+    let mut strips: Vec<(usize, Bounds<Pixels>)> = Vec::new();
+    for (table, bounds) in rows
+        .iter()
+        .filter_map(|row| Some((row.table?.table, row.cell_bounds()?)))
+    {
+        if scroll.get(&table).is_none_or(|it| it.overflow <= px(0.)) {
+            continue;
+        }
+        match strips.iter_mut().find(|(at, _)| *at == table) {
+            Some((_, all)) => *all = all.union(&bounds),
+            None => strips.push((table, bounds)),
+        }
+    }
+    for (_, bounds) in &mut strips {
+        *bounds = bounds.intersect(&content);
+    }
+    strips
 }
 
 /// The cell of `table` that `point` falls in.
@@ -1079,14 +1326,17 @@ fn place_pills(layout: &mut LayoutLine, pending: Vec<PendingPill>) {
     }
 }
 
-/// What a raw block's header calls it. Only a GFM table and an HTML block ever
-/// reach one, and the first line of the source says which.
+/// What a raw block's header calls it. Only a GFM table, an HTML comment and an
+/// HTML block ever reach one, and the first line of the source says which.
 fn raw_block_label(source: &str) -> &'static str {
     let first = source
         .lines()
         .find(|line| !line.trim().is_empty())
-        .unwrap_or_default();
-    if first.trim_start().starts_with('|') {
+        .unwrap_or_default()
+        .trim_start();
+    if first.starts_with("<!--") {
+        "Comment"
+    } else if first.starts_with('|') {
         "Table"
     } else {
         "HTML"
@@ -1650,6 +1900,14 @@ fn has(ty: Option<markraft_core::MarkTypeId>, marks: &MarkSet) -> bool {
     ty.is_some_and(|ty| marks.contains_type(ty))
 }
 
+/// How far a line may be indented before its text would be squeezed away.
+///
+/// Keeps deeply nested imported content editable in a narrow note. Only the
+/// visual indentation is capped; document depth is preserved.
+fn max_indent(style: &EditorStyle, width: Pixels) -> Pixels {
+    (width - px(80.)).max(style.quote_indent)
+}
+
 /// How many indentation levels fit before the text would be squeezed away.
 fn visible_levels(style: &EditorStyle, max_indent: Pixels) -> usize {
     ((max_indent / style.quote_indent.max(px(1.))) as usize).max(1)
@@ -1690,7 +1948,7 @@ fn ordered_marker(
     window: &Window,
 ) -> Option<(Rc<ShapedLine>, Pixels)> {
     let (item, list) = types.item_of(line)?;
-    if Some(list.node_type) != types.ordered_list || !starts_item(line) {
+    if Some(list.node_type) != types.ordered_list || !starts_item(types, line) {
         return None;
     }
     let start = list
@@ -1721,12 +1979,26 @@ fn ordered_marker(
     Some((shape_number(start + item.index as i64), widest))
 }
 
-/// Whether a line is the first block of its list item, which is where the
-/// marker is drawn.
-fn starts_item(line: &Line) -> bool {
-    line.ancestors
-        .last()
-        .is_some_and(|own| own.index == 0 && line.ancestors.len() >= 2)
+/// Whether a line is its list item's very first line, which is where the marker
+/// is drawn.
+///
+/// Every ancestor between the item and the line has to be the first child of
+/// the one above it, not just the line's own block: a table or a quote inside an
+/// item is a container whose own first block starts it, and asking only about
+/// the immediate parent drew a bullet beside every row of such a table and a
+/// second check box beside such a quote.
+fn starts_item(types: &DocTypes, line: &Line) -> bool {
+    let Some(item) = line
+        .ancestors
+        .iter()
+        .rposition(|ancestor| types.is_item(ancestor.node_type))
+    else {
+        return false;
+    };
+    item + 1 < line.ancestors.len()
+        && line.ancestors[item + 1..]
+            .iter()
+            .all(|ancestor| ancestor.index == 0)
 }
 
 fn marker_of(
@@ -1739,7 +2011,7 @@ fn marker_of(
         return Some(Marker::Number(number));
     }
     let (item, list) = types.item_of(line)?;
-    if !starts_item(line) || Some(list.node_type) != types.bullet_list {
+    if !starts_item(types, line) || Some(list.node_type) != types.bullet_list {
         return None;
     }
     let _ = style;
@@ -2037,10 +2309,39 @@ impl Element for EditorSurface {
         } else {
             px(0.)
         };
+        // Where each grid stands before it is moved: a grid that does not fit
+        // keeps whatever the reader scrolled it to, clamped to what is left of
+        // it, and one this frame does not draw loses its entry.
+        let overflows = table_overflows(&rows, bounds);
+        let mut scroll = view.tables.clone();
+        scroll.retain(|table, _| overflows.contains_key(table));
+        for (table, overflow) in &overflows {
+            let entry = scroll.entry(*table).or_default();
+            entry.overflow = *overflow;
+            entry.offset = entry.offset.clamp(px(0.), *overflow);
+        }
+        // The caret's own cell is brought into the visible strip, as the
+        // vertical reveal below brings its line into the viewport. Nothing is
+        // animated either way, so reduced motion has nothing to turn off.
+        if view.reveal
+            && !view.single_line
+            && let Some((cell, box_)) = rows
+                .iter()
+                .find(|row| row.contains(head))
+                .and_then(|row| Some((row.table?, row.cell_bounds()?)))
+            && let Some(grid) = scroll.get_mut(&cell.table)
+        {
+            grid.offset = reveal_offset(box_, bounds, grid.offset, grid.overflow);
+        }
         // Every consumer uses these translated rows: paint, hit testing,
         // selection, input-method rectangles, and accessible text bounds.
         for row in &mut rows {
             row.origin.x -= single_line_scroll_x;
+            if let Some(cell) = row.table
+                && let Some(entry) = scroll.get(&cell.table)
+            {
+                row.origin.x -= entry.offset;
+            }
             if let (Some(language), Some(copy)) =
                 (row.code_language_bounds(), row.code_copy_bounds())
             {
@@ -2060,6 +2361,8 @@ impl Element for EditorSurface {
         }
         self.editor.update(cx, |editor, cx| {
             editor.single_line_scroll_x = single_line_scroll_x;
+            editor.tables = scroll;
+            editor.content_bounds = bounds;
             editor.layout = rows.clone();
             if editor.reveal {
                 editor.reveal = false;
@@ -2124,6 +2427,7 @@ impl Element for EditorSurface {
         let focus = editor.focus.clone();
         let upstream = editor.upstream;
         let style = editor.style.clone();
+        let scroll = editor.tables.clone();
         let placeholder = (projection.line_count() == 1 && projection.plain_text().is_empty())
             .then(|| editor.placeholder.clone());
         window.handle_input(
@@ -2131,139 +2435,118 @@ impl Element for EditorSurface {
             ElementInputHandler::new(bounds, self.editor.clone()),
             cx,
         );
-        // The grids first: their bands and lines sit under everything a cell
-        // draws, including the selection.
-        paint_tables(rows, &style, caret_pos, window);
-        for row in rows.iter() {
-            for inner in &row.rows {
-                for code in &inner.inline_code {
-                    // A pill shorter than the line.
-                    let inset = (row.line_height * 0.1).round();
-                    let pill = Bounds::new(
-                        row.origin
-                            + point(code.left, row.line_height * code.visual_row as f32 + inset),
-                        size(code.slot, row.line_height - inset * 2.),
-                    );
-                    window.paint_quad(
-                        fill(pill, style.inline_code_background).corner_radii(style.code_radius),
-                    );
+        // A grid wider than the note is drawn scrolled, so the painting below is
+        // held inside the editor's own content box. Nothing else ever draws
+        // outside it, and the mask only goes up where a grid needs it.
+        let strips = visible_strips(rows, &scroll, bounds);
+        route_table_wheel(&self.editor, &strips, window);
+        let mask = (!strips.is_empty()).then_some(ContentMask { bounds });
+        window.with_content_mask(mask, |window| {
+            // The grids first: their bands and lines sit under everything a cell
+            // draws, including the selection.
+            paint_tables(rows, &style, caret_pos, &scroll, window);
+            for row in rows.iter() {
+                for inner in &row.rows {
+                    for code in &inner.inline_code {
+                        // A pill shorter than the line.
+                        let inset = (row.line_height * 0.1).round();
+                        let pill = Bounds::new(
+                            row.origin
+                                + point(
+                                    code.left,
+                                    row.line_height * code.visual_row as f32 + inset,
+                                ),
+                            size(code.slot, row.line_height - inset * 2.),
+                        );
+                        window.paint_quad(
+                            fill(pill, style.inline_code_background)
+                                .corner_radii(style.code_radius),
+                        );
+                    }
                 }
-            }
-            for pill in &row.pills {
-                paint_pill(row, pill, &style, window, cx);
-            }
-            match row.decoration {
-                Some(Decoration::Quote { levels, joined }) => {
-                    for level in 0..levels {
-                        let height = if level < joined {
-                            row.height
+                for pill in &row.pills {
+                    paint_pill(row, pill, &style, window, cx);
+                }
+                match row.decoration {
+                    Some(Decoration::Quote { levels, joined }) => {
+                        for level in 0..levels {
+                            let height = if level < joined {
+                                row.height
+                            } else {
+                                row.text_height()
+                            };
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    point(
+                                        row.origin.x - style.quote_indent * (levels - level) as f32,
+                                        row.origin.y,
+                                    ),
+                                    size(QUOTE_BAR, height),
+                                ),
+                                style.marker,
+                            ));
+                        }
+                    }
+                    Some(Decoration::Divider) => window.paint_quad(fill(
+                        Bounds::new(
+                            point(row.origin.x, row.origin.y + row.line_height * 0.5),
+                            size(row.width, px(1.5)),
+                        ),
+                        style.rule,
+                    )),
+                    Some(Decoration::Panel) => {
+                        window.paint_quad(
+                            fill(
+                                Bounds::new(
+                                    point(
+                                        row.origin.x - CODE_PADDING,
+                                        row.origin.y - CODE_PADDING - CODE_HEADER_HEIGHT,
+                                    ),
+                                    size(
+                                        row.width + CODE_PADDING * 2.,
+                                        row.text_height() + CODE_PADDING * 2. + CODE_HEADER_HEIGHT,
+                                    ),
+                                ),
+                                style.code_background,
+                            )
+                            .corner_radii(Corners::all(CODE_RADIUS)),
+                        );
+                    }
+                    None => {}
+                }
+                if let Some(header) = &row.code_header {
+                    paint_code_header(self, row, header, &style, window, cx);
+                }
+                if a != b {
+                    let from = row.pos_to_offset(a);
+                    let to = row.pos_to_offset(b);
+                    if b > row.from && a <= row.to() {
+                        let spans_next = b > row.to();
+                        let selection = if focused {
+                            style.selection
                         } else {
-                            row.text_height()
+                            style.selection_inactive
                         };
-                        window.paint_quad(fill(
-                            Bounds::new(
-                                point(
-                                    row.origin.x - style.quote_indent * (levels - level) as f32,
-                                    row.origin.y,
-                                ),
-                                size(px(2.), height),
-                            ),
-                            style.marker,
-                        ));
+                        for rect in row.rectangles(from..to.min(row.char_len), spans_next) {
+                            window.paint_quad(fill(rect, selection));
+                        }
                     }
                 }
-                Some(Decoration::Divider) => window.paint_quad(fill(
-                    Bounds::new(
-                        point(row.origin.x, row.origin.y + row.line_height * 0.5),
-                        size(row.width, px(1.5)),
-                    ),
-                    style.rule,
-                )),
-                Some(Decoration::Panel) => {
-                    window.paint_quad(
-                        fill(
-                            Bounds::new(
-                                point(
-                                    row.origin.x - CODE_PADDING,
-                                    row.origin.y - CODE_PADDING - CODE_HEADER_HEIGHT,
-                                ),
-                                size(
-                                    row.width + CODE_PADDING * 2.,
-                                    row.text_height() + CODE_PADDING * 2. + CODE_HEADER_HEIGHT,
-                                ),
-                            ),
-                            style.code_background,
-                        )
-                        .corner_radii(Corners::all(CODE_RADIUS)),
-                    );
-                }
-                None => {}
-            }
-            if let Some(header) = &row.code_header {
-                paint_code_header(self, row, header, &style, window, cx);
-            }
-            if a != b {
-                let from = row.pos_to_offset(a);
-                let to = row.pos_to_offset(b);
-                if b > row.from && a <= row.to() {
-                    let spans_next = b > row.to();
-                    let selection = if focused {
-                        style.selection
-                    } else {
-                        style.selection_inactive
-                    };
-                    for rect in row.rectangles(from..to.min(row.char_len), spans_next) {
-                        window.paint_quad(fill(rect, selection));
-                    }
-                }
-            }
-            for inner in &row.rows {
-                let origin =
-                    row.origin + point(px(0.), row.line_height * inner.visual_start as f32);
-                let _ =
-                    inner
-                        .line
-                        .paint(origin, row.line_height, TextAlign::Left, None, window, cx);
-                for code in &inner.inline_code {
-                    let _ = code.line.paint(
-                        row.origin
-                            + point(code.text_left(), row.line_height * code.visual_row as f32),
+                for inner in &row.rows {
+                    let origin =
+                        row.origin + point(px(0.), row.line_height * inner.visual_start as f32);
+                    let _ = inner.line.paint(
+                        origin,
                         row.line_height,
                         TextAlign::Left,
                         None,
                         window,
                         cx,
                     );
-                }
-            }
-            for hint in &row.hints {
-                paint_hint(row, hint.clone(), &style, window);
-            }
-            if let Some(marker) = &row.marker {
-                paint_marker(row, marker, &style, window, cx);
-            }
-            if row.index == 0
-                && let Some(text) = placeholder.as_ref().filter(|text| !text.is_empty())
-            {
-                // Presentation only: the empty block still owns hit testing and IME coordinates.
-                let run = TextRun {
-                    len: text.len(),
-                    font: font(".SystemUIFont"),
-                    color: style.muted_text,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-                if let Ok(lines) = window.text_system().shape_text(
-                    text.clone(),
-                    style.body_size,
-                    &[run],
-                    Some(row.width),
-                    Some(1),
-                ) {
-                    for line in lines {
-                        let _ = line.paint(
-                            row.origin,
+                    for code in &inner.inline_code {
+                        let _ = code.line.paint(
+                            row.origin
+                                + point(code.text_left(), row.line_height * code.visual_row as f32),
                             row.line_height,
                             TextAlign::Left,
                             None,
@@ -2272,43 +2555,164 @@ impl Element for EditorSurface {
                         );
                     }
                 }
-            }
-            if let Some((start, end)) = marked
-                && end > row.from
-                && start <= row.to()
-            {
-                let from = row.pos_to_offset(start);
-                let to = row.pos_to_offset(end);
-                for mut rect in row.rectangles(from..to, false) {
-                    rect.origin.y += rect.size.height - px(2.);
-                    rect.size.height = px(1.5);
-                    window.paint_quad(fill(rect, style.marker));
+                for hint in &row.hints {
+                    paint_hint(row, hint.clone(), &style, window);
+                }
+                if let Some(marker) = &row.marker {
+                    paint_marker(row, marker, &style, window, cx);
+                }
+                if row.index == 0
+                    && let Some(text) = placeholder.as_ref().filter(|text| !text.is_empty())
+                {
+                    // Presentation only: the empty block still owns hit testing and IME coordinates.
+                    let run = TextRun {
+                        len: text.len(),
+                        font: font(".SystemUIFont"),
+                        color: style.muted_text,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    if let Ok(lines) = window.text_system().shape_text(
+                        text.clone(),
+                        style.body_size,
+                        &[run],
+                        Some(row.width),
+                        Some(1),
+                    ) {
+                        for line in lines {
+                            let _ = line.paint(
+                                row.origin,
+                                row.line_height,
+                                TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+                        }
+                    }
+                }
+                if let Some((start, end)) = marked
+                    && end > row.from
+                    && start <= row.to()
+                {
+                    let from = row.pos_to_offset(start);
+                    let to = row.pos_to_offset(end);
+                    for mut rect in row.rectangles(from..to, false) {
+                        rect.origin.y += rect.size.height - px(2.);
+                        rect.size.height = px(1.5);
+                        window.paint_quad(fill(rect, style.marker));
+                    }
+                }
+                if focused && caret_visible && a == b && row.contains(caret_pos) {
+                    let mut color = style.marker;
+                    if caret_shape == CaretShape::Block {
+                        color.a = BLOCK_CARET_ALPHA;
+                    }
+                    window.paint_quad(fill(
+                        caret_quad(
+                            row,
+                            row.pos_to_offset(caret_pos),
+                            caret_next
+                                .filter(|next| row.contains(*next))
+                                .map(|next| row.pos_to_offset(next)),
+                            upstream,
+                            caret_shape,
+                        ),
+                        color,
+                    ));
                 }
             }
-            if focused && caret_visible && a == b && row.contains(caret_pos) {
-                let mut color = style.marker;
-                if caret_shape == CaretShape::Block {
-                    color.a = BLOCK_CARET_ALPHA;
+            // Last, over the cells: the fade is what says a clipped grid continues.
+            for (table, strip) in &strips {
+                if let Some(grid) = scroll.get(table) {
+                    paint_table_fades(*strip, *grid, &style, window);
                 }
-                window.paint_quad(fill(
-                    caret_quad(
-                        row,
-                        row.pos_to_offset(caret_pos),
-                        caret_next
-                            .filter(|next| row.contains(*next))
-                            .map(|next| row.pos_to_offset(next)),
-                        upstream,
-                        caret_shape,
-                    ),
-                    color,
-                ));
             }
-        }
+        });
     }
 }
 
+/// Send a horizontal wheel over a scrolling grid to that grid.
+///
+/// The note's own scroller reads a purely horizontal delta as a vertical one, so
+/// an event a grid takes has to be stopped before it bubbles there. An event
+/// that also carries a vertical component keeps going, and still scrolls the
+/// note.
+fn route_table_wheel(
+    editor: &Entity<EditorView>,
+    strips: &[(usize, Bounds<Pixels>)],
+    window: &mut Window,
+) {
+    if strips.is_empty() {
+        return;
+    }
+    let strips = strips.to_vec();
+    let editor = editor.clone();
+    let line_height = window.line_height();
+    window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
+        let delta = event.delta.pixel_delta(line_height);
+        // Only a gesture that is mostly sideways; the stray x of a vertical
+        // swipe would otherwise drag the grid along with the note.
+        if phase != DispatchPhase::Capture || delta.x.abs() <= delta.y.abs() {
+            return;
+        }
+        let Some((table, _)) = strips
+            .iter()
+            .find(|(_, bounds)| bounds.contains(&event.position))
+        else {
+            return;
+        };
+        editor.update(cx, |editor, cx| {
+            let Some(grid) = editor.tables.get_mut(table) else {
+                return;
+            };
+            let moved = (grid.offset - delta.x).clamp(px(0.), grid.overflow);
+            if moved != grid.offset {
+                grid.offset = moved;
+                cx.notify();
+            }
+        });
+        if delta.y == px(0.) {
+            cx.stop_propagation();
+        }
+    });
+}
+
+/// The quote bars a grid draws for the quote levels it sits in.
+///
+/// A cell's own height is zero except on the last of its row, so the ordinary
+/// quote painter has nothing to draw against inside a grid; the grid draws one
+/// bar per level over its whole height instead, at the x positions that painter
+/// uses. `offset` undoes the grid's own horizontal scroll, so a bar stays at
+/// the quote's indent.
+fn quote_bars(
+    grid: Bounds<Pixels>,
+    quotes: usize,
+    offset: Pixels,
+    indent: Pixels,
+) -> Vec<Bounds<Pixels>> {
+    (0..quotes)
+        .map(|level| {
+            Bounds::new(
+                point(
+                    grid.left() + offset - indent * (quotes - level) as f32,
+                    grid.top(),
+                ),
+                size(QUOTE_BAR, grid.size.height),
+            )
+        })
+        .collect()
+}
+
 /// Draw the chrome of every table in `rows`.
-fn paint_tables(rows: &[LayoutLine], style: &EditorStyle, caret: usize, window: &mut Window) {
+fn paint_tables(
+    rows: &[LayoutLine],
+    style: &EditorStyle,
+    caret: usize,
+    scroll: &HashMap<usize, TableScroll>,
+    window: &mut Window,
+) {
     let mut start = 0usize;
     while start < rows.len() {
         let Some(cell) = rows[start].table else {
@@ -2319,29 +2723,78 @@ fn paint_tables(rows: &[LayoutLine], style: &EditorStyle, caret: usize, window: 
         while end < rows.len() && rows[end].table.is_some_and(|next| next.table == cell.table) {
             end += 1;
         }
-        paint_table(&rows[start..end], style, caret, window);
+        let offset = scroll.get(&cell.table).map_or(px(0.), |grid| grid.offset);
+        paint_table(&rows[start..end], style, caret, offset, window);
         start = end;
     }
 }
 
-/// Draw one table: the header band, the grid, and the border round the cell
-/// the caret is in.
+/// The fades at the clipped edges of a scrolling grid, drawn over its cells: a
+/// band of the background thinning out towards the part of the grid that is
+/// still on screen, on whichever side there is more of it.
+fn paint_table_fades(
+    strip: Bounds<Pixels>,
+    grid: TableScroll,
+    style: &EditorStyle,
+    window: &mut Window,
+) {
+    for (leading, more) in [
+        (true, grid.offset > px(0.)),
+        (false, grid.offset < grid.overflow),
+    ] {
+        if !more {
+            continue;
+        }
+        let opaque = linear_color_stop(style.background, if leading { 0. } else { 1. });
+        let clear = linear_color_stop(style.background.opacity(0.), if leading { 1. } else { 0. });
+        let (from, to) = if leading {
+            (opaque, clear)
+        } else {
+            (clear, opaque)
+        };
+        let at = if leading {
+            strip.left()
+        } else {
+            strip.right() - TABLE_FADE
+        };
+        window.paint_quad(fill(
+            Bounds::new(point(at, strip.top()), size(TABLE_FADE, strip.size.height)),
+            linear_gradient(90., from, to),
+        ));
+    }
+}
+
+/// Draw one table: the quote bars it sits in, the header band, the grid, and
+/// the border round the cell the caret is in.
 ///
 /// The separators are hairlines drawn along each cell's own bottom and right
 /// edge rather than a border per cell, so a shared edge is one pixel wide and
 /// not two, and the outer rectangle is drawn last so its rounded corners sit
 /// over the band.
-fn paint_table(cells: &[LayoutLine], style: &EditorStyle, caret: usize, window: &mut Window) {
+///
+/// `offset` is how far the grid is drawn left of where it sits, which the quote
+/// bars are taken back out of: the bars belong to the quote's indent and stay
+/// there while the grid scrolls under them.
+fn paint_table(
+    cells: &[LayoutLine],
+    style: &EditorStyle,
+    caret: usize,
+    offset: Pixels,
+    window: &mut Window,
+) {
     let boxes: Vec<(TableCell, Bounds<Pixels>)> = cells
         .iter()
         .filter_map(|line| Some((line.table?, line.cell_bounds()?)))
         .collect();
-    let Some((_, first)) = boxes.first() else {
+    let Some((first_cell, first)) = boxes.first() else {
         return;
     };
     let outer = boxes
         .iter()
         .fold(*first, |all, (_, bounds)| all.union(bounds));
+    for bar in quote_bars(outer, first_cell.quotes, offset, style.quote_indent) {
+        window.paint_quad(fill(bar, style.marker));
+    }
     if let Some(header) = boxes
         .iter()
         .filter(|(cell, _)| cell.row == 0)
@@ -2639,9 +3092,11 @@ fn paint_code_header(
 #[cfg(test)]
 mod tests {
     use super::{
-        CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_PADDING, LayoutLine, ShapeInput,
-        Widening, cell_under, column_widths, drawn_image, file_name, gap_below, hints_of,
-        marker_of, merge_row_centers, place_table, raw_block_label,
+        CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_PADDING, LayoutLine, Marker,
+        QUOTE_BAR, ShapeInput, TableScroll, Widening, cell_under, column_demands, column_widths,
+        drawn_image, file_name, gap_below, hints_of, marker_of, merge_row_centers, place_table,
+        quote_bars, raw_block_label, reveal_offset, table_overflows, unbreakable_units,
+        visible_strips,
     };
     use crate::style::EditorStyle;
     use crate::typeahead::tests::state_of;
@@ -2651,6 +3106,7 @@ mod tests {
     use markraft_core::commands::ColumnAlignment;
     use markraft_core::projection::{Projection, projection_of};
     use markraft_core::{Mark, MarkSet, Node, Schema};
+    use std::collections::HashMap;
 
     /// A row carrying only the token range it stands for, which is all the
     /// caret and selection geometry decides with.
@@ -2665,6 +3121,7 @@ mod tests {
             line_height: px(10.),
             height: px(10.),
             width: px(100.),
+            min_width: px(0.),
             top_gap: Pixels::ZERO,
             code_pos: None,
             marker: None,
@@ -2863,13 +3320,16 @@ mod tests {
         assert_eq!(gaps[1], style.paragraph_gap, "leaving both quotes");
     }
 
-    /// The source says whether a raw block holds a table or an HTML block; only
-    /// those two ever reach one.
+    /// The source says what a raw block holds; only a GFM table, an HTML comment
+    /// and an HTML block ever reach one.
     #[test]
     fn a_raw_block_is_captioned_by_its_source() {
         assert_eq!(raw_block_label("| a | b |\n| - | - |"), "Table");
         assert_eq!(raw_block_label("\n\n  | a |"), "Table");
+        assert_eq!(raw_block_label("<!-- a note -->"), "Comment");
+        assert_eq!(raw_block_label("\n  <!--\n  many lines\n  -->"), "Comment");
         assert_eq!(raw_block_label("<div>x</div>"), "HTML");
+        assert_eq!(raw_block_label("<!DOCTYPE html>"), "HTML");
         assert_eq!(raw_block_label(""), "HTML");
     }
 
@@ -3023,20 +3483,109 @@ mod tests {
     #[test]
     fn a_table_keeps_its_content_width_until_the_grid_has_to_shrink() {
         let preferred = [px(100.), px(200.), px(100.)];
+        let floor = [CELL_MIN_WIDTH; 3];
         assert_eq!(
-            column_widths(&preferred, px(400.)),
+            column_widths(&preferred, &floor, px(400.)),
             preferred.to_vec(),
             "room to spare leaves every column as it asked"
         );
         assert_eq!(
-            column_widths(&preferred, px(200.)),
+            column_widths(&preferred, &floor, px(200.)),
             vec![CELL_MIN_WIDTH, px(88.), CELL_MIN_WIDTH],
             "the two narrow columns stop at the floor and the wide one takes the rest"
         );
-        // A grid that will not fit even at the floor overflows to the right
-        // rather than squeezing its text away.
+        // A grid that will not fit even at the floor keeps its width, and the
+        // view scrolls it sideways rather than squeezing its text away.
         let tight = [CELL_MIN_WIDTH; 3];
-        assert_eq!(column_widths(&tight, px(100.)), tight.to_vec());
+        assert_eq!(column_widths(&tight, &floor, px(100.)), tight.to_vec());
+        // A column whose widest word needs more than the flat floor keeps it:
+        // shrinking may wrap a cell, never split a word.
+        let minimum = [px(120.), CELL_MIN_WIDTH, CELL_MIN_WIDTH];
+        assert_eq!(
+            column_widths(&preferred, &minimum, px(200.)),
+            vec![px(120.), CELL_MIN_WIDTH, CELL_MIN_WIDTH],
+            "the word's column holds its width and the grid overflows instead"
+        );
+    }
+
+    /// A column is floored by the widest word of the widest cell in it, as that
+    /// cell will be painted — a header cell is bold, so the floor is the bold
+    /// width, not the regular one.
+    ///
+    /// The live bug this pins: the bold header "Second" measured 52.0004px, the
+    /// column reserved `52.0004 + 16`, and handing the cell back `that - 16`
+    /// returned 52.000397px — a fraction short in `f32`, which is all the
+    /// wrapper needs to break on strictly greater and split the word as
+    /// `Secon / d`. Whole pixels at both ends make the round trip exact.
+    #[test]
+    fn a_bold_header_floors_its_column_at_the_width_the_bold_word_needs() {
+        // What the measuring pass leaves behind: a bold one-word header and the
+        // narrow body cell under it. One word, so content and min-content are
+        // the same width.
+        let bold = px(52.0004);
+        let body = px(9.1);
+        let mut cells = table_cells(px(0.));
+        for (index, cell) in cells.iter_mut().enumerate() {
+            let measured = if index < 2 { bold } else { body };
+            cell.width = measured;
+            cell.min_width = measured;
+        }
+        let grid = [(0, 0), (0, 1), (1, 0), (1, 1)];
+        let (preferred, minimum) = column_demands(&cells, &grid, 2);
+        assert_eq!(
+            preferred, minimum,
+            "a one-word column cannot give anything up"
+        );
+        for (column, floor) in minimum.iter().enumerate() {
+            assert!(
+                *floor >= bold + CELL_PADDING_X * 2.,
+                "column {column} floors below the bold header it holds"
+            );
+            // The width the cell is actually reshaped at, which is what the
+            // wrapper compares the word against.
+            let content = *floor - CELL_PADDING_X * 2.;
+            assert!(
+                content >= bold,
+                "column {column} hands back {content:?}, short of the {bold:?} word"
+            );
+        }
+        // And it holds through a grid far too narrow for those columns, which
+        // is exactly when the shrinking runs.
+        for content in column_widths(&preferred, &minimum, px(80.))
+            .iter()
+            .map(|width| *width - CELL_PADDING_X * 2.)
+        {
+            assert!(content >= bold, "shrinking split the word after all");
+        }
+    }
+
+    /// What a column may never be narrower than: the widest run of text the
+    /// line wrapper would not break. These ranges have to agree with where gpui
+    /// actually wraps, or a column floors at a width that still splits a word.
+    #[test]
+    fn a_cells_unbreakable_units_are_the_runs_the_wrapper_keeps_together() {
+        let units = |text: &str, glue: &[std::ops::Range<usize>]| -> Vec<String> {
+            unbreakable_units(text, glue)
+                .into_iter()
+                .map(|range| text[range].to_owned())
+                .collect()
+        };
+        assert_eq!(units("gamma delta", &[]), ["gamma", "delta"]);
+        assert_eq!(units("  leading  spaces ", &[]), ["leading", "spaces"]);
+        // A hyphen and an underscore bind a word together; a path separator and
+        // a query do not, so a long URL still has somewhere to break.
+        assert_eq!(units("well-known_name", &[]), ["well-known_name"]);
+        assert_eq!(units("a/b?c&d", &[]), ["a", "/b", "?c", "&d"]);
+        // CJK breaks between any two characters, so one character is all a
+        // column has to reserve room for.
+        assert_eq!(units("表格标题", &[]), ["表", "格", "标", "题"]);
+        // A code span is drawn as one pill, so it counts as one unit however
+        // many words it holds.
+        let span = std::slice::from_ref(&(4usize..14usize));
+        assert_eq!(
+            units("say cargo test now", span),
+            ["say", "cargo test", "now"]
+        );
     }
 
     /// The grid is expressed in the terms `prepaint` stacks lines in: the cells
@@ -3158,6 +3707,159 @@ mod tests {
         assert_eq!(gaps[0], style.paragraph_gap, "above the table");
         assert_eq!(&gaps[1..4], [Pixels::ZERO; 3], "between its cells");
         assert_eq!(gaps[4], style.paragraph_gap, "below the table");
+    }
+
+    /// What marker, if any, each line of a document draws.
+    fn markers_of(source: &str) -> Vec<Option<&'static str>> {
+        let state = state_of(source);
+        let projection = projection_of(&state);
+        let schema = commonmark_schema();
+        let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
+        let style = EditorStyle::notes();
+        projection
+            .lines()
+            .iter()
+            .map(|line| {
+                marker_of(&types, line, &style, None).map(|marker| match marker {
+                    Marker::Number(_) => "number",
+                    Marker::Bullet { .. } => "bullet",
+                    Marker::Task { .. } => "task",
+                })
+            })
+            .collect()
+    }
+
+    /// A container inside a list item is not a second start of that item. The
+    /// marker used to be attached to the first block of whatever held the line,
+    /// which drew a check box beside a nested quote and one beside every row of
+    /// a nested table.
+    #[test]
+    fn only_an_items_very_first_line_carries_its_marker() {
+        assert_eq!(
+            markers_of("- [ ] task\n\n  > quoted\n"),
+            vec![Some("task"), None],
+            "the quote inside the item starts nothing"
+        );
+        assert_eq!(
+            markers_of("- item\n\n  | a | b |\n  | - | - |\n  | c | d |\n"),
+            vec![Some("bullet"), None, None, None, None],
+            "every cell of the nested table used to start the item again"
+        );
+        // Two items still get one marker each, and a nested list its own.
+        assert_eq!(
+            markers_of("- a\n- [x] b\n  - c\n"),
+            vec![Some("bullet"), Some("task"), Some("bullet")]
+        );
+    }
+
+    /// A cell's own height is zero except on the last of its row, so the quote
+    /// a grid sits in has nothing to draw a bar against; the grid draws them
+    /// itself, over its whole height.
+    #[test]
+    fn a_grid_inside_a_quote_draws_its_own_bars() {
+        let mut cells = placed_table(ColumnAlignment::None, px(10.));
+        stack(&mut cells, px(0.));
+        let grid = cells
+            .iter()
+            .filter_map(LayoutLine::cell_bounds)
+            .reduce(|all, bounds| all.union(&bounds))
+            .expect("a placed table has a grid");
+        assert_eq!(grid.size.height, px(70.), "rows of 30 and 40");
+        assert_eq!(
+            quote_bars(grid, 2, px(0.), px(12.)),
+            vec![
+                Bounds::new(point(px(-20.), px(0.)), size(QUOTE_BAR, px(70.))),
+                Bounds::new(point(px(-8.), px(0.)), size(QUOTE_BAR, px(70.))),
+            ],
+            "one bar per level, at the indents the ordinary painter uses"
+        );
+        // A scrolling grid slides under its bars rather than taking them along.
+        assert_eq!(
+            quote_bars(grid, 1, px(30.), px(12.))[0].left(),
+            px(4.) + px(30.) - px(12.)
+        );
+        assert!(quote_bars(grid, 0, px(0.), px(12.)).is_empty());
+    }
+
+    /// The caret's cell is brought into the visible strip, as the vertical
+    /// reveal brings its line into the viewport.
+    #[test]
+    fn the_caret_pulls_its_own_cell_into_the_visible_strip() {
+        let strip = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(50.)));
+        let cell = |left: f32| Bounds::new(point(px(left), px(0.)), size(px(40.), px(20.)));
+        assert_eq!(
+            reveal_offset(cell(10.), strip, px(0.), px(200.)),
+            px(0.),
+            "a cell already in view keeps the reader's place"
+        );
+        assert_eq!(
+            reveal_offset(cell(150.), strip, px(0.), px(200.)),
+            px(90.),
+            "one off the right edge is pulled just inside it"
+        );
+        assert_eq!(
+            reveal_offset(cell(10.), strip, px(80.), px(200.)),
+            px(10.),
+            "and one off the left edge of a scrolled grid is pulled back"
+        );
+        assert_eq!(
+            reveal_offset(cell(500.), strip, px(0.), px(200.)),
+            px(200.),
+            "never past what there is to scroll"
+        );
+    }
+
+    /// A grid too wide for the note keeps its width and is drawn scrolled. Every
+    /// geometry query reads the moved origins, so a click lands in the cell the
+    /// reader sees under the pointer.
+    #[test]
+    fn a_grid_wider_than_the_note_scrolls_as_one_and_takes_its_geometry_along() {
+        let mut cells = placed_table(ColumnAlignment::None, px(10.));
+        stack(&mut cells, px(0.));
+        let content = Bounds::new(point(px(0.), px(0.)), size(px(120.), px(200.)));
+        // The grid runs from 4 to 184 and the note's content ends at 120.
+        assert_eq!(
+            table_overflows(&cells, content).get(&6).copied(),
+            Some(px(64.))
+        );
+        assert!(
+            table_overflows(
+                &cells,
+                Bounds::new(point(px(0.), px(0.)), size(px(400.), px(200.)))
+            )
+            .values()
+            .all(|overflow| *overflow == Pixels::ZERO),
+            "a grid that fits has nothing to scroll"
+        );
+        for cell in &mut cells {
+            cell.origin.x -= px(64.);
+        }
+        assert_eq!(
+            cell_under(&cells, 6, point(px(60.), px(10.)))
+                .expect("a table has a nearest cell")
+                .index,
+            1,
+            "the second column is what sits under that point now"
+        );
+        let scroll = HashMap::from([(
+            6usize,
+            TableScroll {
+                offset: px(64.),
+                overflow: px(64.),
+            },
+        )]);
+        assert_eq!(
+            visible_strips(&cells, &scroll, content),
+            vec![(
+                6,
+                Bounds::new(point(px(0.), px(0.)), size(px(120.), px(70.)))
+            )],
+            "the strip the wheel and the toolbar answer for is the visible part"
+        );
+        assert!(
+            visible_strips(&cells, &HashMap::new(), content).is_empty(),
+            "a grid with nothing to scroll takes no wheel"
+        );
     }
 
     /// A layout left over from a document with fewer lines draws no caret at

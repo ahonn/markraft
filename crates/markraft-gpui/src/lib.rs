@@ -41,8 +41,9 @@ use markraft_core::{
     Attrs, EditorState, EditorStateConfig, HistoryConfig, MarkSet, MarkTypeId, Node, NodeTypeId,
     Schema, Selection, Transaction, TransactionSpec,
 };
+use std::collections::HashMap;
 use std::{cell::RefCell, rc::Rc, sync::Arc};
-use surface::{EditorSurface, LayoutLine, ShapeInput};
+use surface::{EditorSurface, LayoutLine, ShapeInput, TableScroll};
 
 /// How long a pause splits one typing session from the next, in milliseconds.
 const TYPING_GROUP_DELAY: u64 = 750;
@@ -296,6 +297,13 @@ pub struct EditorView {
     pub(crate) single_line_scroll_x: Pixels,
     pub(crate) focus: FocusHandle,
     pub(crate) layout: Vec<LayoutLine>,
+    /// How far each grid that does not fit the note is scrolled sideways, keyed
+    /// by the position before its table node. Kept across frames — it is the
+    /// reader's place in the grid — and dropped when the grid is gone.
+    pub(crate) tables: HashMap<usize, TableScroll>,
+    /// The box the last frame drew the note's content in, which is what a grid
+    /// is clipped to and what the table toolbar anchors inside.
+    pub(crate) content_bounds: Bounds<Pixels>,
     pub(crate) scroll: ScrollHandle,
     pub(crate) reveal: bool,
     pub(crate) upstream: bool,
@@ -375,6 +383,8 @@ impl EditorView {
             single_line_scroll_x: px(0.),
             focus: cx.focus_handle(),
             layout: vec![],
+            tables: HashMap::new(),
+            content_bounds: Bounds::default(),
             scroll: ScrollHandle::new(),
             reveal: false,
             upstream: false,
@@ -524,6 +534,7 @@ impl EditorView {
         self.extension_selection = self.state.selection().clone();
         self.undo_group_depth = 0;
         self.layout.clear();
+        self.tables.clear();
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.reset_caret_blink(cx);
         self.publish(cx);
@@ -737,6 +748,9 @@ impl EditorView {
             .filter(|line| line.table.is_some_and(|other| other.table == cell.table))
             .filter_map(LayoutLine::cell_bounds)
             .reduce(|all, bounds| all.union(&bounds))?;
+        // A grid wider than the note is scrolled inside it, so the toolbar
+        // anchors to the part of it the reader can actually see.
+        let bounds = bounds.intersect(&self.content_bounds);
         Some(TableInfo {
             bounds,
             cell_bounds: line.cell_bounds()?,
