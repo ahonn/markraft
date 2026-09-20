@@ -62,7 +62,7 @@ impl EditorView {
         {
             return true;
         }
-        self.edit(cx, false, vec![spec])
+        self.edit(cx, false, vec![spec]).unwrap_or(false)
     }
 
     pub(crate) fn raw_html_under(&self, point: Point<Pixels>) -> Option<usize> {

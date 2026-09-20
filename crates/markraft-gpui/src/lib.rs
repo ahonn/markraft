@@ -198,6 +198,8 @@ fn list_key_bindings() -> [KeyBinding; 3] {
 
 #[derive(Clone, Debug)]
 pub enum EditorEvent {
+    /// The host owns writing pasted files and images to its document location.
+    FilesPasted(ClipboardItem),
     Changed {
         revision: u64,
     },
@@ -293,7 +295,32 @@ impl Setup {
     }
 }
 
+type DocumentGuard = Box<dyn Fn(&Node) -> Result<(), String>>;
+
+/// Build all transactions before publishing any state. Unlike a transaction
+/// filter, this boundary also covers no-filter edits, undo and appender output.
+fn apply_guarded(
+    state: &mut EditorState,
+    specs: impl IntoIterator<Item = TransactionSpec>,
+    guard: Option<&DocumentGuard>,
+) -> Result<Vec<Transaction>, String> {
+    let transactions = state
+        .update_with_appended(specs)
+        .map_err(|error| error.to_string())?;
+    let last = transactions.last().ok_or("No transaction was produced.")?;
+    if last.new_doc() != state.doc()
+        && let Some(guard) = guard
+    {
+        guard(last.new_doc())?;
+    }
+    *state = last.state().clone();
+    Ok(transactions)
+}
+
 pub struct EditorView {
+    document_guard: Option<DocumentGuard>,
+    edit_error: Option<String>,
+    file_paste: bool,
     state: EditorState,
     projection: Arc<Projection>,
     pub(crate) types: DocTypes,
@@ -386,6 +413,9 @@ impl EditorView {
         let state = build_state(&schema, &extensions, doc);
         let projection = projection_of(&state);
         Self {
+            document_guard: None,
+            edit_error: None,
+            file_paste: false,
             types,
             codecs,
             extension_selection: state.selection().clone(),
@@ -394,7 +424,7 @@ impl EditorView {
             host_extensions: extensions,
             extensions: Vec::new(),
             style: EditorStyle::default(),
-            images: images::Images::default(),
+            images: images::Images::new(None),
             placeholder: SharedString::default(),
             aria_label: DEFAULT_ARIA_LABEL.into(),
             single_line: false,
@@ -438,8 +468,53 @@ impl EditorView {
     }
     /// Resolve relative image URLs against the directory containing the document.
     pub fn with_image_base(mut self, directory: Option<std::path::PathBuf>) -> Self {
-        self.images = images::Images::new(directory);
+        self.images.set_base(directory);
         self
+    }
+
+    /// Configure the preview root for slash-prefixed image URLs. Relative paths
+    /// still use the document directory, and explicit `file://` URLs stay absolute.
+    /// An unsupported root disables these previews instead of guessing a location.
+    pub fn with_image_root(mut self, root: Result<Option<std::path::PathBuf>, String>) -> Self {
+        self.images.set_root(root);
+        self
+    }
+
+    /// Update an image preview root without changing document content or history.
+    pub fn set_image_root(
+        &mut self,
+        root: Result<Option<std::path::PathBuf>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.images.set_root(root);
+        cx.notify();
+    }
+
+    /// Validate a complete candidate before changing state, including undo and IME.
+    pub fn with_document_guard(
+        mut self,
+        guard: impl Fn(&Node) -> Result<(), String> + 'static,
+    ) -> Self {
+        self.document_guard = Some(Box::new(guard));
+        self
+    }
+
+    pub fn take_edit_error(&mut self) -> Option<String> {
+        self.edit_error.take()
+    }
+
+    pub fn with_file_paste(mut self, enabled: bool) -> Self {
+        self.file_paste = enabled;
+        self
+    }
+
+    pub fn set_image_base(
+        &mut self,
+        directory: Option<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        self.images.set_base(directory);
+        cx.notify();
     }
 
     /// Refresh changed image files without modifying document state or history.
@@ -591,9 +666,14 @@ impl EditorView {
         &mut self,
         specs: impl IntoIterator<Item = TransactionSpec>,
     ) -> Option<Vec<Transaction>> {
-        let transactions = self.state.update_with_appended(specs).ok()?;
-        let last = transactions.last()?;
-        self.state = last.state().clone();
+        let transactions = match apply_guarded(&mut self.state, specs, self.document_guard.as_ref())
+        {
+            Ok(transactions) => transactions,
+            Err(error) => {
+                self.edit_error = Some(error);
+                return None;
+            }
+        };
         self.projection = projection_of(&self.state);
         Some(transactions)
     }
@@ -607,11 +687,9 @@ impl EditorView {
         cx: &mut Context<Self>,
         discarding: bool,
         specs: Vec<TransactionSpec>,
-    ) -> bool {
+    ) -> Option<bool> {
         let composing = self.is_composing();
-        let Some(transactions) = self.apply(specs) else {
-            return false;
-        };
+        let transactions = self.apply(specs)?;
         let changed = transactions.iter().any(Transaction::doc_changed);
         self.upstream = false;
         if changed || composing != self.is_composing() {
@@ -630,16 +708,13 @@ impl EditorView {
             },
             cx,
         );
-        changed
+        Some(changed)
     }
 
     /// Run a catalogue command. `false` when it does not apply.
     pub fn run_command(&mut self, command: &Command, cx: &mut Context<Self>) -> bool {
         match command(&self.state) {
-            Some(spec) => {
-                self.edit(cx, false, vec![spec]);
-                true
-            }
+            Some(spec) => self.edit(cx, false, vec![spec]).is_some(),
             None => false,
         }
     }
@@ -651,6 +726,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> bool {
         self.edit(cx, false, specs.into_iter().collect())
+            .unwrap_or(false)
     }
 
     /// Fold every undo entry made until [`EditorView::end_undo_group`] into one.
@@ -1162,6 +1238,18 @@ impl EditorView {
         let item = cx
             .read_from_clipboard()
             .unwrap_or_else(|| ClipboardItem::new_string(String::new()));
+        if self.file_paste
+            && !matches!(mode, clipboard::PasteMode::Plain)
+            && item.entries().iter().any(|entry| {
+                matches!(
+                    entry,
+                    ClipboardEntry::Image(_) | ClipboardEntry::ExternalPaths(_)
+                )
+            })
+        {
+            cx.emit(EditorEvent::FilesPasted(item));
+            return;
+        }
         let clipboard_text = item.text();
         let text = clipboard_text.as_deref().unwrap_or_default();
         let literal = self.single_line
@@ -1724,5 +1812,169 @@ mod key_binding_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod document_guard_tests {
+    use super::{DocumentGuard, apply_guarded, build_state, clipboard, ime};
+    use crate::typeahead::tests::{at, state_of, types_of};
+    use markraft_commonmark::{CommonMarkCodecs, commonmark_schema, from_markdown};
+    use markraft_core::{
+        Attrs, EditorState, Selection, TransactionAppenderFn, TransactionSpec, appended,
+        cancel_composition, commands, committed_document, composition_range, is_composing, origin,
+        redo, redo_depth, transaction_appender, undo, undo_depth, update_composition,
+    };
+    use std::sync::Arc;
+
+    fn read_only() -> DocumentGuard {
+        Box::new(|_| Err("This document is read-only.".into()))
+    }
+
+    fn assert_unchanged(before: &EditorState, after: &EditorState) {
+        assert_eq!(before.doc(), after.doc());
+        assert_eq!(before.selection(), after.selection());
+        assert_eq!(undo_depth(before), undo_depth(after));
+        assert_eq!(redo_depth(before), redo_depth(after));
+        assert_eq!(composition_range(before), composition_range(after));
+        assert_eq!(committed_document(before), committed_document(after));
+    }
+
+    #[test]
+    fn read_only_rejects_commands_no_filter_and_extension_edits_atomically() {
+        let initial = at(&state_of("original"), 4);
+        let spec = commands::insert_text("changed")(&initial).unwrap();
+        let attempts = [
+            spec.clone(),
+            spec.clone().no_filter(),
+            spec.annotate(origin().of("extension:test".into()))
+                .no_filter(),
+        ];
+        for spec in attempts {
+            let mut state = initial.clone();
+            assert!(apply_guarded(&mut state, [spec], Some(&read_only())).is_err());
+            assert_unchanged(&initial, &state);
+            assert_eq!(undo_depth(&state), 0);
+        }
+    }
+
+    #[test]
+    fn mark_only_commands_cannot_bypass_read_only() {
+        let mut state = state_of("original");
+        apply_guarded(
+            &mut state,
+            [TransactionSpec::new().selection(Selection::text(1, 5))],
+            None,
+        )
+        .unwrap();
+        let before = state.clone();
+        let strong = state.schema().mark_id("strong").unwrap();
+        let spec = commands::toggle_mark(strong, Attrs::empty())(&state).unwrap();
+        assert!(apply_guarded(&mut state, [spec.no_filter()], Some(&read_only())).is_err());
+        assert_unchanged(&before, &state);
+    }
+
+    #[test]
+    fn rejecting_undo_or_redo_does_not_consume_history() {
+        let original = state_of("base");
+        let mut state = original.clone();
+        let typed = commands::insert_text("new")(&state).unwrap();
+        apply_guarded(&mut state, [typed], None).unwrap();
+        let edited = state.clone();
+        let undo_spec = undo(&state).unwrap();
+        assert!(apply_guarded(&mut state, [undo_spec.clone()], Some(&read_only())).is_err());
+        assert_unchanged(&edited, &state);
+        apply_guarded(&mut state, [undo_spec], None).unwrap();
+        assert_eq!(state.doc(), original.doc());
+        let undone = state.clone();
+        let redo_spec = redo(&state).unwrap();
+        assert!(apply_guarded(&mut state, [redo_spec.clone()], Some(&read_only())).is_err());
+        assert_unchanged(&undone, &state);
+        apply_guarded(&mut state, [redo_spec], None).unwrap();
+        assert_eq!(state.doc(), edited.doc());
+    }
+
+    #[test]
+    fn rejected_first_ime_candidate_leaves_no_composition_or_history() {
+        let mut state = at(&state_of("before 😀"), 4);
+        let before = state.clone();
+        let candidate = update_composition(&state, "中", 1).unwrap();
+        assert!(apply_guarded(&mut state, [candidate], Some(&read_only())).is_err());
+        assert_unchanged(&before, &state);
+        assert!(!is_composing(&state));
+        assert!(cancel_composition(&state).is_none());
+    }
+
+    #[test]
+    fn rejected_ime_refinement_and_commit_preserve_the_live_candidate() {
+        let mut state = at(&state_of("before"), 4);
+        let original = state.clone();
+        let candidate = update_composition(&state, "中", 1).unwrap();
+        apply_guarded(&mut state, [candidate], None).unwrap();
+        let preview = state.clone();
+        let refinement = update_composition(&state, "中文", 2).unwrap();
+        assert!(apply_guarded(&mut state, [refinement], Some(&read_only())).is_err());
+        assert_unchanged(&preview, &state);
+        let commit = ime::commit_specs(&state, &types_of(&state), None, "中文");
+        assert!(apply_guarded(&mut state, commit, Some(&read_only())).is_err());
+        assert_unchanged(&preview, &state);
+        assert!(is_composing(&state));
+        let cancel = cancel_composition(&state).unwrap();
+        apply_guarded(&mut state, [cancel], None).unwrap();
+        assert_unchanged(&original, &state);
+    }
+
+    #[test]
+    fn appender_output_is_validated_before_any_transaction_is_published() {
+        let schema = commonmark_schema();
+        let doc = from_markdown(&schema, "base").unwrap();
+        let appender: TransactionAppenderFn = Arc::new(|transaction| {
+            if !transaction.doc_changed() || transaction.annotation(appended()).is_some() {
+                return None;
+            }
+            commands::insert_text("!")(transaction.state())
+        });
+        let mut state = build_state(&schema, &transaction_appender().of(appender), Some(doc));
+        let before = state.clone();
+        let guard_schema = schema.clone();
+        let forbid_exclamation: DocumentGuard = Box::new(move |doc| {
+            if guard_schema.describe(doc).contains('!') {
+                Err("Unsupported appender output.".into())
+            } else {
+                Ok(())
+            }
+        });
+        let edit = commands::insert_text("safe")(&state).unwrap();
+        assert!(apply_guarded(&mut state, [edit.clone()], Some(&forbid_exclamation)).is_err());
+        assert_unchanged(&before, &state);
+        let transactions = apply_guarded(&mut state, [edit], None).unwrap();
+        assert_eq!(transactions.len(), 2);
+        assert!(schema.describe(state.doc()).contains('!'));
+        assert_eq!(undo_depth(&state), 1);
+        let undo_spec = undo(&state).unwrap();
+        // This appender reacts to every document change, so inspect the inverse
+        // directly rather than asking it to append to an undo once again.
+        let undone = state.update([undo_spec]).unwrap();
+        assert_eq!(undone.new_doc(), before.doc());
+    }
+
+    #[test]
+    fn read_only_preserves_selection_and_copy_content() {
+        let mut state = state_of("copy **this**");
+        let before = state.doc().clone();
+        let selection = Selection::text(1, state.doc().content_size() - 1);
+        apply_guarded(
+            &mut state,
+            [TransactionSpec::new().selection(selection)],
+            Some(&read_only()),
+        )
+        .unwrap();
+        let slice = state
+            .selection()
+            .content_with_schema(state.doc(), state.schema());
+        let codecs = CommonMarkCodecs::new(state.schema().clone());
+        assert_eq!(clipboard::markup(&codecs, &slice), "copy **this**");
+        assert_eq!(state.doc(), &before);
+        assert_eq!(undo_depth(&state), 0);
     }
 }

@@ -18,6 +18,7 @@ pub(crate) enum ImageError {
     TooLarge,
     Unsupported,
     Unreadable,
+    UnsupportedRoot,
 }
 
 impl ImageError {
@@ -29,6 +30,7 @@ impl ImageError {
             Self::TooLarge => "Image exceeds 16 MB",
             Self::Unsupported => "Unsupported image format",
             Self::Unreadable => "Cannot read image",
+            Self::UnsupportedRoot => "Unsupported typora-root-url",
         }
     }
 }
@@ -59,6 +61,8 @@ struct CachedImage {
 #[derive(Default)]
 pub(crate) struct Images {
     base: Option<PathBuf>,
+    root: Option<PathBuf>,
+    root_invalid: bool,
     cache: RefCell<HashMap<PathBuf, CachedImage>>,
     checked_at: Option<Instant>,
 }
@@ -71,7 +75,32 @@ impl Images {
         }
     }
 
+    pub(crate) fn set_root(&mut self, root: Result<Option<PathBuf>, String>) {
+        self.root_invalid = root.is_err();
+        self.root = root
+            .ok()
+            .flatten()
+            .and_then(|root| match std::path::absolute(root) {
+                Ok(root) => Some(root),
+                Err(_) => {
+                    self.root_invalid = true;
+                    None
+                }
+            });
+        self.cache.get_mut().clear();
+        self.checked_at = None;
+    }
+
+    pub(crate) fn set_base(&mut self, base: Option<PathBuf>) {
+        self.base = base.and_then(|directory| std::path::absolute(directory).ok());
+        self.cache.get_mut().clear();
+        self.checked_at = None;
+    }
+
     fn resolve(&self, source: &str) -> Result<PathBuf, ImageError> {
+        if source.starts_with("//") {
+            return Err(ImageError::Remote);
+        }
         if let Ok(url) = url::Url::parse(source) {
             return if url.scheme() == "file" {
                 url.to_file_path().map_err(|_| ImageError::InvalidPath)
@@ -80,10 +109,16 @@ impl Images {
             };
         }
         let path = Path::new(source);
-        let base = if path.is_absolute() {
-            Path::new("/")
+        let (base, source) = if path.is_absolute() {
+            if self.root_invalid {
+                return Err(ImageError::UnsupportedRoot);
+            }
+            match self.root.as_deref() {
+                Some(root) => (root, source.trim_start_matches('/')),
+                None => (Path::new("/"), source),
+            }
         } else {
-            self.base.as_deref().ok_or(ImageError::InvalidPath)?
+            (self.base.as_deref().ok_or(ImageError::InvalidPath)?, source)
         };
         let base = url::Url::from_directory_path(base).map_err(|_| ImageError::InvalidPath)?;
         base.join(source)
@@ -209,6 +244,60 @@ mod tests {
         assert_eq!(
             relative.resolve("a.png").unwrap(),
             std::env::current_dir().unwrap().join("notes/a.png")
+        );
+    }
+
+    #[test]
+    fn typora_root_only_changes_slash_prefixed_urls() {
+        let mut images = Images::new(Some(PathBuf::from("/notes/posts")));
+        images.set_root(Ok(Some(PathBuf::from("/website"))));
+        assert_eq!(
+            images.resolve("/blog/img/test%20one.png").unwrap(),
+            PathBuf::from("/website/blog/img/test one.png")
+        );
+        assert_eq!(
+            images.resolve("img/test.png").unwrap(),
+            PathBuf::from("/notes/posts/img/test.png")
+        );
+        assert_eq!(
+            images.resolve("../test.png").unwrap(),
+            PathBuf::from("/notes/test.png")
+        );
+        assert_eq!(
+            images.resolve("file:///actual/test.png").unwrap(),
+            PathBuf::from("/actual/test.png")
+        );
+        images.set_base(Some(PathBuf::from("/moved/posts")));
+        assert_eq!(
+            images.resolve("/test.png").unwrap(),
+            PathBuf::from("/website/test.png")
+        );
+        assert_eq!(
+            images.resolve("test.png").unwrap(),
+            PathBuf::from("/moved/posts/test.png")
+        );
+    }
+
+    #[test]
+    fn unsupported_roots_do_not_fall_back_to_a_wrong_absolute_image() {
+        let mut images = Images::new(Some(PathBuf::from("/notes")));
+        images.set_root(Err("Unsupported YAML value".into()));
+        assert_eq!(
+            images.resolve("/test.png"),
+            Err(ImageError::UnsupportedRoot)
+        );
+        assert_eq!(
+            images.resolve("test.png").unwrap(),
+            PathBuf::from("/notes/test.png")
+        );
+        assert_eq!(
+            images.resolve("file:///actual/test.png").unwrap(),
+            PathBuf::from("/actual/test.png")
+        );
+        images.set_root(Ok(None));
+        assert_eq!(
+            images.resolve("/test.png").unwrap(),
+            PathBuf::from("/test.png")
         );
     }
 
