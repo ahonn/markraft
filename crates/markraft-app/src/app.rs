@@ -590,6 +590,7 @@ impl NotesApp {
         self.sync_documents(cx);
         let mut ids = Vec::new();
         let mut kept = 0;
+        let mut vanished = 0;
         for change in changes {
             let (External::Updated { note, .. } | External::Removed(note)) = &change;
             let id = note.id.clone();
@@ -597,21 +598,34 @@ impl NotesApp {
             let local = self.library.note(&id).cloned();
             match change {
                 External::Updated { previous, note } => {
-                    if let Some(local) = local
+                    // The bytes on disk still say what they said: only the file's
+                    // permissions moved. There is nothing to choose between, so keep
+                    // the document the user is looking at and take the new state,
+                    // rather than calling it a change by another app.
+                    let permissions_only = previous
+                        .as_ref()
+                        .is_some_and(|previous| previous.document == note.document);
+                    if let Some(mut local) = local
                         && local.deleted_at.is_none()
                         && local.document != note.document
-                        && previous.is_none_or(|previous| previous.document != local.document)
                     {
-                        if let Some(persistence) = &self.persistence
-                            && let Err(error) = persistence.recover(local.clone())
-                        {
-                            self.error = Some(error);
+                        if permissions_only {
+                            local.read_only = note.read_only.clone();
+                            self.library.adopt(local);
+                            ids.push(id);
+                            continue;
                         }
-                        let mut local = local;
-                        local.conflicted = true;
-                        self.library.adopt(local);
-                        kept += 1;
-                        continue;
+                        if previous.is_none_or(|previous| previous.document != local.document) {
+                            if let Some(persistence) = &self.persistence
+                                && let Err(error) = persistence.recover(local.clone())
+                            {
+                                self.error = Some(error);
+                            }
+                            local.conflicted = true;
+                            self.library.adopt(local);
+                            kept += 1;
+                            continue;
+                        }
                     }
                     self.library.adopt(note);
                 }
@@ -620,6 +634,14 @@ impl NotesApp {
                         .as_ref()
                         .is_none_or(|local| local.document == note.document)
                     {
+                        // A note the user still had is going without their asking, so
+                        // say so. One already in Recently Deleted is being tidied up.
+                        if local
+                            .as_ref()
+                            .is_some_and(|local| local.deleted_at.is_none())
+                        {
+                            vanished += 1;
+                        }
                         self.library.remove(&id);
                     } else if let Some(mut local) = local {
                         if let Some(persistence) = &self.persistence
@@ -652,6 +674,16 @@ impl NotesApp {
         }
         if kept > 0 {
             self.changed(cx);
+        }
+        if vanished > 0 {
+            self.queue_notice(if vanished == 1 {
+                "A note's file was deleted outside Markraft, so the note is gone too."
+                    .to_owned()
+            } else {
+                format!(
+                    "{vanished} notes' files were deleted outside Markraft, so those notes are gone too."
+                )
+            });
         }
         self.prompt_conflict(window, cx);
         cx.notify();
