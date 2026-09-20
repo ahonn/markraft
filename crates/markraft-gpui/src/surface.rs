@@ -184,6 +184,10 @@ struct Widening {
     /// What the placeholder holds, which is what says whether its own
     /// characters reach the screen.
     shape: AtomShape,
+    /// A wiki link the host says it cannot open. Decided while the atom is shaped,
+    /// because that is where the node is; read where the row's text is coloured,
+    /// because a link's label is the row's own text rather than the atom's.
+    broken: bool,
 }
 
 /// How many quote levels can carry a tone of their own; deeper ones fall back to
@@ -721,6 +725,9 @@ pub(crate) struct ShapeInput<'a> {
     pub projection: &'a Projection,
     pub style: &'a EditorStyle,
     pub single_line: bool,
+    /// Whether a wiki link target names something the host can open. Only the host
+    /// knows, and one that has not said treats every link as followable.
+    pub wiki: Option<&'a crate::WikiResolver>,
 }
 
 /// How wide a table cell is shaped.
@@ -1575,6 +1582,7 @@ fn display_text(
                     display,
                     len: count,
                     shape: atom.shape,
+                    broken: atom.broken,
                 });
                 display += count;
             }
@@ -1625,6 +1633,8 @@ struct Atom {
     label: Rc<ShapedLine>,
     width: Pixels,
     image: Option<(Arc<RenderImage>, Size<Pixels>)>,
+    /// A wiki link leading nowhere; see [`Widening::broken`].
+    broken: bool,
 }
 
 /// A node's attribute, trimmed, or the empty string where it has none.
@@ -1703,6 +1713,7 @@ fn atom_of(
         types,
         style,
         images,
+        wiki,
         ..
     } = *input;
     let (shape, original) = atom_label(types, node)?;
@@ -1730,7 +1741,15 @@ fn atom_of(
         AtomShape::Source => (font(CODE_FONT), font_size),
         AtomShape::Link => (font(".SystemUIFont"), font_size),
     };
+    // A link the host says it cannot open is still drawn as a link, because that is
+    // what the source says it is — but not in the colour that invites a click, since
+    // clicking it only reports that there is nothing there. A link's label is the
+    // row's own text, so the colour is applied where the row is coloured; this only
+    // decides it, while the node is at hand.
+    let broken = shape == AtomShape::Link
+        && wiki.is_some_and(|resolves| !resolves(&crate::wiki::wiki_link_target(node)));
     let ink = match shape {
+        AtomShape::Link if broken => style.broken_link,
         AtomShape::Link => style.link,
         AtomShape::Pill | AtomShape::Source => style.muted_text,
     };
@@ -1771,6 +1790,7 @@ fn atom_of(
         text: shown,
         label,
         image: drawn,
+        broken,
     })
 }
 
@@ -1889,11 +1909,11 @@ fn text_runs(
         // heading's weight, the emphasis around it — in the link colour an atom
         // draws in anyway; an HTML primitive is source, and reads as the quiet
         // monospaced markup it is wherever it sits.
-        let placeholder = text
+        let widening = text
             .widenings
             .iter()
-            .find(|widening| widening.source == run.char_from)
-            .map(|widening| widening.shape);
+            .find(|widening| widening.source == run.char_from);
+        let placeholder = widening.map(|widening| widening.shape);
         let source_atom = placeholder == Some(AtomShape::Source);
         if source_atom {
             face = font(CODE_FONT);
@@ -1901,6 +1921,8 @@ fn text_runs(
         let widened = placeholder == Some(AtomShape::Pill);
         let ink = if source_atom {
             style.muted_text
+        } else if widening.is_some_and(|widening| widening.broken) {
+            style.broken_link
         } else if is_link || (atom && !code_block) {
             style.link
         } else if has(types.code, marks) {
@@ -3414,6 +3436,7 @@ mod tests {
         let images = crate::images::Images::default();
         let input = ShapeInput {
             images: &images,
+            wiki: None,
             doc: state.doc(),
             types: &types,
             projection: &projection,
@@ -3557,6 +3580,7 @@ mod tests {
         let images = crate::images::Images::default();
         let input = ShapeInput {
             images: &images,
+            wiki: None,
             doc: state.doc(),
             types: &types,
             projection: &projection,
@@ -3641,6 +3665,7 @@ mod tests {
             display: 2,
             len: 5,
             shape: AtomShape::Pill,
+            broken: false,
         }];
         for offset in 0..=row.char_len {
             assert_eq!(row.to_source(row.to_display(offset)), offset, "at {offset}");

@@ -560,6 +560,7 @@ mod tests {
                 style: &style,
                 single_line: false,
                 images: &images,
+                wiki: None,
             },
             gpui::px(400.),
             &text_system,

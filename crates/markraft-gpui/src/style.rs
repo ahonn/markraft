@@ -18,6 +18,9 @@ pub struct EditorStyle {
     pub muted_text: Hsla,
     pub marker: Hsla,
     pub link: Hsla,
+    /// A wiki link whose target the host cannot open. It still reads as a link,
+    /// because that is what it is, but not as one worth clicking.
+    pub broken_link: Hsla,
     /// The selection fill, painted under the text: the first while the editor
     /// holds focus, the second while it does not. Both are translucent, so the
     /// text has to stay readable over what they composite to.
@@ -74,6 +77,7 @@ impl Default for EditorStyle {
             muted_text: rgb(0x6a6c64).into(),
             marker: rgb(0x74766e).into(),
             link: rgb(0x2a6fdb).into(),
+            broken_link: rgb(0x8f9298).into(),
             selection: rgba(0xb9d5efb0).into(),
             selection_inactive: rgba(0xd4d9de90).into(),
             code_background: rgb(0xedece7).into(),
@@ -123,6 +127,7 @@ impl EditorStyle {
             muted_text: rgb(0x686b71).into(),
             marker: rgb(0x1f63d6).into(),
             link: rgb(0x1f63d6).into(),
+            broken_link: rgb(0x8b8e95).into(),
             selection: rgba(0xb9d5efb0).into(),
             selection_inactive: rgba(0xd4d9de90).into(),
             code_background: rgb(0xe3e3e4).into(),
@@ -159,6 +164,7 @@ impl EditorStyle {
             muted_text: rgb(0x93979e).into(),
             marker: rgb(0x4c9bff).into(),
             link: rgb(0x4c9bff).into(),
+            broken_link: rgb(0x7f848c).into(),
             selection: rgba(0x3a6fb08c).into(),
             selection_inactive: rgba(0x5a5e6690).into(),
             code_background: rgb(0x34363b).into(),

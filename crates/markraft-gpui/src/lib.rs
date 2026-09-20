@@ -333,6 +333,11 @@ impl std::fmt::Display for EditRejection {
 
 type DocumentGuard = Box<dyn Fn(&Node) -> Result<(), EditRejection>>;
 
+/// Whether a wiki link target names something the host can open. Only the host can
+/// say, and it is asked once per link per layout, so it answers from what it already
+/// knows rather than by looking at the disk.
+pub type WikiResolver = Box<dyn Fn(&str) -> bool>;
+
 /// Build all transactions before publishing any state. Unlike a transaction
 /// filter, this boundary also covers no-filter edits, undo and appender output.
 fn apply_guarded(
@@ -369,6 +374,9 @@ pub struct EditorView {
     pub(crate) extensions: Vec<extension::Registration>,
     /// The selection the extensions were last told about.
     pub(crate) extension_selection: Selection,
+    /// What the host says a wiki link target can open, so that a link leading nowhere
+    /// is not drawn as one that leads somewhere. Absent until the host says.
+    wiki_resolver: Option<WikiResolver>,
     pub(crate) style: EditorStyle,
     pub(crate) images: images::Images,
     pub(crate) placeholder: SharedString,
@@ -457,6 +465,7 @@ impl EditorView {
             types,
             codecs,
             extension_selection: state.selection().clone(),
+            wiki_resolver: None,
             state,
             projection,
             host_extensions: extensions,
@@ -525,6 +534,18 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.images.set_root(root);
+        cx.notify();
+    }
+
+    /// Say which wiki link targets can be opened, so that a link leading nowhere is
+    /// not drawn as one that leads somewhere. Without this every link is drawn as
+    /// followable, which is what an editor with no notion of pages should do.
+    pub fn set_wiki_resolver(
+        &mut self,
+        resolves: impl Fn(&str) -> bool + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.wiki_resolver = Some(Box::new(resolves));
         cx.notify();
     }
 
@@ -618,6 +639,7 @@ impl EditorView {
             style: &self.style,
             single_line: self.single_line,
             images: &self.images,
+            wiki: self.wiki_resolver.as_ref(),
         }
     }
     /// The laid-out row holding `pos`, and the `char` offset into it.

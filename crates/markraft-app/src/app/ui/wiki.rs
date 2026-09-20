@@ -35,6 +35,23 @@ pub(in crate::app) struct LinkTarget {
 /// The notes the `[[` menu offers, shared with the provider that reads them.
 pub(in crate::app) type LinkTargets = Rc<RefCell<Vec<LinkTarget>>>;
 
+/// Every spelling of a link that reaches a note, lower-cased: each note's file stem and
+/// its path inside the folder, which are the two forms `resolve_wiki_link` reads. The
+/// editor asks it once per link per layout, so it answers from here rather than the disk.
+pub(in crate::app) type LinkIndex = Rc<RefCell<HashMap<String, ()>>>;
+
+/// Whether `target` reaches a note in `index`. The target is cut down the same way
+/// resolving cuts it: the place inside a note goes, then `./`, then `.md`.
+pub(in crate::app) fn reaches(index: &HashMap<String, ()>, target: &str) -> bool {
+    let page = crate::app::wiki_link_page(target);
+    // `[[#Heading]]` names a place in this very note, so it always reaches something.
+    if page.is_empty() {
+        return true;
+    }
+    let wanted = crate::app::without_markdown(page.trim_start_matches("./")).to_lowercase();
+    index.contains_key(&wanted)
+}
+
 struct WikiProvider {
     targets: LinkTargets,
 }
@@ -152,6 +169,41 @@ impl NotesApp {
             })
             .collect();
         *self.link_targets.borrow_mut() = targets;
+        // The index covers every note, the open one included: a link to the note it
+        // sits in still reaches somewhere, even though the menu does not offer it.
+        //
+        // Only a folder can answer for what a link reaches. A single file opened on its
+        // own has siblings on disk this never sees, so it indexes nothing and the
+        // resolver falls back to treating every link as followable — which is what
+        // `follow_wiki_link` does there anyway, by looking beside the file.
+        let mut index = HashMap::new();
+        if let Some(root) = root {
+            for note in live() {
+                let Some(path) = note.path.as_deref() else {
+                    continue;
+                };
+                if let Some(stem) = path.file_stem() {
+                    index.insert(stem.to_string_lossy().to_lowercase(), ());
+                }
+                let relative = path.strip_prefix(root).unwrap_or(path);
+                index.insert(
+                    crate::app::without_markdown(&relative.to_string_lossy()).to_lowercase(),
+                    (),
+                );
+            }
+        }
+        *self.link_index.borrow_mut() = index;
+    }
+
+    /// What the editor asks about each wiki link it draws. Nothing is known before the
+    /// folder has been read, and treating every link as broken then would be a page of
+    /// dead links that are not dead, so an empty index answers yes.
+    pub(in crate::app) fn wiki_resolver(&self) -> markraft_gpui::WikiResolver {
+        let index = self.link_index.clone();
+        Box::new(move |target: &str| {
+            let index = index.borrow();
+            index.is_empty() || reaches(&index, target)
+        })
     }
 }
 
@@ -159,7 +211,7 @@ impl NotesApp {
 mod tests {
     use super::{LinkTarget, TRIGGERS, WikiProvider};
     use markraft_gpui::TypeaheadProvider;
-    use std::{cell::RefCell, rc::Rc};
+    use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
     fn provider(targets: &[(&str, &str, &str)]) -> WikiProvider {
         WikiProvider {
@@ -204,5 +256,26 @@ mod tests {
         let menu = provider(&[("Index", "Index", "")]);
         assert_eq!(menu.items("【ind").len(), 1);
         assert!(TRIGGERS.contains(&'【'));
+    }
+
+    #[test]
+    fn a_link_reaches_a_note_by_stem_by_path_and_never_by_a_name_no_note_has() {
+        let index: HashMap<String, ()> = ["deep dive", "notes/deep dive", "index"]
+            .into_iter()
+            .map(|key| (key.to_owned(), ()))
+            .collect();
+        // Both spellings a link may use, and case never decides.
+        assert!(super::reaches(&index, "Deep Dive"));
+        assert!(super::reaches(&index, "deep dive"));
+        assert!(super::reaches(&index, "notes/Deep Dive"));
+        // The place inside the note, the `./` and the extension all come off first.
+        assert!(super::reaches(&index, "Deep Dive#Structure"));
+        assert!(super::reaches(&index, "./Deep Dive"));
+        assert!(super::reaches(&index, "Deep Dive.md"));
+        // A heading in this very note names no other note, so it always reaches.
+        assert!(super::reaches(&index, "#Structure"));
+        // What no note is called does not reach.
+        assert!(!super::reaches(&index, "Nowhere"));
+        assert!(!super::reaches(&index, "deep"));
     }
 }

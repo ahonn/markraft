@@ -146,6 +146,9 @@ pub struct NotesApp {
     /// The notes the `[[` menu offers, shared with the editor's provider so that a note
     /// written after this editor opened can still be linked to.
     link_targets: ui::wiki::LinkTargets,
+    /// Every spelling that reaches a note, for the editor's question about each wiki
+    /// link it draws.
+    link_index: ui::wiki::LinkIndex,
     /// The revision the shared list was built from, so it is rebuilt when the library
     /// moves on rather than on every tick.
     link_targets_revision: Option<u64>,
@@ -318,6 +321,7 @@ impl NotesApp {
             file_status_popover: false,
             file_status_flash: None,
             link_targets: Default::default(),
+            link_index: Default::default(),
             link_targets_revision: None,
             chrome_focus: None,
             show_words: false,
@@ -432,7 +436,9 @@ impl NotesApp {
         self.refresh_link_targets();
         let menu = self.slash_menu();
         let links = self.wiki_menu();
+        let resolver = self.wiki_resolver();
         let extensions = editor.update(cx, |editor, cx| {
+            editor.set_wiki_resolver(resolver, cx);
             [
                 editor.add_extension(menu, cx),
                 editor.add_extension(links, cx),
