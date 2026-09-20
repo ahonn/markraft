@@ -50,10 +50,11 @@ enum Intent {
     PastePlain,
     PasteMarkdown,
     Export,
-    Import,
+    OpenMarkdown,
     NewNoteLocation,
     ImageLocation,
     ResetImageLocation,
+    ResetNewNoteLocation,
     Select(String),
     Restore(String),
     /// Asked twice: the first one turns the row's button into the question.
@@ -69,8 +70,14 @@ enum Intent {
     ChooseFolder,
     DefaultFolder,
     Retry,
+    RevealNote,
     SaveCopy,
     Reload,
+    /// The lower-left file status indicator: the conflict dialog for a note waiting
+    /// on one, and the card of ways out for a read-only file.
+    FileStatus,
+    ReviewConflict,
+    OpenExternally,
     Mark(doc::Inline),
     Block(doc::Block),
     InsertTable,
@@ -102,9 +109,14 @@ impl Intent {
             Self::Table(_) | Self::EditLink | Self::CopyLink | Self::OpenLink | Self::Unlink => {
                 ActionGroup::Context
             }
-            Self::Save | Self::Export | Self::Import | Self::Reveal | Self::SaveCopy => {
-                ActionGroup::Files
-            }
+            Self::Save
+            | Self::Export
+            | Self::OpenMarkdown
+            | Self::Reveal
+            | Self::RevealNote
+            | Self::SaveCopy
+            | Self::ReviewConflict
+            | Self::OpenExternally => ActionGroup::Files,
             Self::Trash | Self::Delete | Self::EmptyTrash => ActionGroup::Recovery,
             _ => ActionGroup::View,
         }
@@ -173,15 +185,21 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::Pin => Icon::Pin,
         Intent::Trash | Intent::Delete | Intent::PurgeNote(_) | Intent::EmptyTrash => Icon::Trash,
         Intent::Copy | Intent::SaveCopy | Intent::CopyLink => Icon::Copy,
-        Intent::Export | Intent::Import => Icon::Export,
+        Intent::Export => Icon::Export,
+        Intent::OpenMarkdown => Icon::Document,
         Intent::Settings => Icon::Settings,
         Intent::Save => Icon::Check,
         Intent::Undo | Intent::Redo | Intent::UndoDelete => Icon::Restore,
         Intent::ToggleFormatToolbar | Intent::ToggleCount => Icon::Text,
-        Intent::OpenLink | Intent::Reveal | Intent::NewNoteLocation | Intent::ChooseFolder => {
-            Icon::Open
-        }
+        Intent::OpenLink
+        | Intent::Reveal
+        | Intent::RevealNote
+        | Intent::NewNoteLocation
+        | Intent::ChooseFolder
+        | Intent::OpenExternally => Icon::Open,
+        Intent::ReviewConflict | Intent::FileStatus => Icon::Pause,
         Intent::ImageLocation | Intent::ResetImageLocation => Icon::Image,
+        Intent::ResetNewNoteLocation => Icon::Plus,
         Intent::Unlink => Icon::Link,
         Intent::Mark(doc::Inline::Bold) => Icon::Bold,
         Intent::Mark(doc::Inline::Italic) => Icon::Italic,
@@ -257,6 +275,7 @@ impl NotesApp {
             Intent::Back => {
                 self.code_language_block = None;
                 self.link_popover = None;
+                self.file_status_popover = false;
                 self.query.update(cx, |e, cx| e.cancel_composition(cx));
                 self.panel = Panel::Editor;
                 self.focus_editor(window, cx);
@@ -264,7 +283,7 @@ impl NotesApp {
             }
             Intent::Save => {
                 self.intent(Intent::Back, window, cx);
-                self.flush(cx);
+                self.save_now(window, cx);
             }
             // The editor owns the note's history, so these reach it as its own actions.
             Intent::Undo | Intent::Redo => {
@@ -317,11 +336,17 @@ impl NotesApp {
                 self.intent(Intent::Back, window, cx);
                 self.export(cx);
             }
-            Intent::Import => self.import(window, cx),
+            Intent::OpenMarkdown => self.open_markdown(window, cx),
             Intent::NewNoteLocation => self.configure_new_notes(window, cx),
             Intent::ImageLocation => self.configure_images(window, cx),
             Intent::ResetImageLocation => {
                 self.library.workspace.attachments = crate::storage::AttachmentPolicy::Default;
+                self.changed(cx);
+            }
+            // An empty relative path is the folder itself, which is where new notes
+            // go until another location is chosen.
+            Intent::ResetNewNoteLocation => {
+                self.library.workspace.new_note_directory = PathBuf::new();
                 self.changed(cx);
             }
             Intent::Theme(mode) => {
@@ -347,16 +372,44 @@ impl NotesApp {
             }
             Intent::VimMode => self.toggle_vim(window, cx),
             Intent::Shortcut => self.apply_shortcut(cx),
+            // Two destinations, so two commands: the folder the notes live in, and
+            // the one file this note is.
             Intent::Reveal => {
-                if let Some(path) = self
-                    .library
-                    .active_note()
-                    .path
-                    .as_ref()
-                    .or(self.path.as_ref())
-                {
+                if let Some(path) = &self.path {
                     cx.reveal_path(path);
                 }
+            }
+            Intent::RevealNote => {
+                if let Some(path) = &self.library.active_note().path {
+                    cx.reveal_path(path);
+                }
+                self.file_status_popover = false;
+                cx.notify();
+            }
+            // The indicator answers for whichever state it is showing: a conflict has
+            // its dialog, and a read-only file has the card of ways around it.
+            Intent::FileStatus => {
+                if self.library.active_note().read_only.is_none() {
+                    self.reopen_conflict(window, cx);
+                    return;
+                }
+                self.format_menu = None;
+                self.link_popover = None;
+                self.code_language_block = None;
+                self.chrome_focus = None;
+                self.file_status_popover = !self.file_status_popover;
+                cx.notify();
+            }
+            Intent::ReviewConflict => {
+                self.intent(Intent::Back, window, cx);
+                self.reopen_conflict(window, cx);
+            }
+            Intent::OpenExternally => {
+                if let Some(path) = self.library.active_note().path.clone() {
+                    cx.open_with_system(&path);
+                }
+                self.file_status_popover = false;
+                cx.notify();
             }
             Intent::ChooseFolder => self.choose_folder(window, cx),
             Intent::DefaultFolder => {
@@ -726,6 +779,7 @@ impl NotesApp {
         let notes = self.matching_notes(query.trim(), deleted);
         let total = notes.len();
         let now = crate::storage::timestamp();
+        let home = std::env::var("HOME").ok();
         let mut list = div()
             .id("note-results")
             // Rows keep `Role::Button` inside the list: a `ListBoxOption` reaches VoiceOver as
@@ -764,20 +818,20 @@ impl NotesApp {
                 };
                 format!("{} {date}", if deleted { "Deleted" } else { "Edited" })
             };
-            let meta = format!(
-                "{status} · {}",
-                note.path
-                    .as_ref()
-                    .map(|path| {
-                        self.path
-                            .as_ref()
-                            .and_then(|root| path.strip_prefix(root).ok())
-                            .unwrap_or(path)
-                            .display()
-                            .to_string()
-                    })
-                    .unwrap_or_else(|| "Unsaved draft".into())
-            );
+            let location = note.path.as_ref().map(|path| {
+                shorten_location(
+                    &note_location(path, self.path.as_deref(), home.as_deref()),
+                    location_budget(&status, current && !deleted, deleted, selected),
+                )
+            });
+            // A draft has nowhere on disk yet, which the accent says without adding
+            // a badge of its own: the row already speaks in dots and muted text.
+            let location_color = match &location {
+                Some(_) => self.muted(),
+                None => notes_style(self.dark).marker,
+            };
+            let location = location.unwrap_or_else(|| "Unsaved draft".to_owned());
+            let meta = format!("{status} · {location}");
             // A deleted note's buttons are spelled out, so they sit on the row's second
             // line and leave its title the full width.
             let mut controls = div()
@@ -944,13 +998,24 @@ impl NotesApp {
                                                     .bg(notes_style(self.dark).marker),
                                             )
                                         })
+                                        // Two parts, so the location can be shortened
+                                        // on its own while the status stays whole.
                                         .child(
                                             div()
+                                                .flex_shrink_0()
                                                 .text_size(px(12.))
                                                 .line_height(px(18.))
                                                 .text_color(self.muted())
+                                                .child(format!("{status} ·")),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .text_size(px(12.))
+                                                .line_height(px(18.))
+                                                .text_color(location_color)
                                                 .truncate()
-                                                .child(meta),
+                                                .child(location),
                                         ),
                                 ),
                         )
@@ -982,6 +1047,46 @@ impl NotesApp {
                 )
             })
             .child(self.scroll_area(list, &self.picker_scroll, cx))
+    }
+    /// One "where do these files go" setting: what it is, where it points now, and
+    /// the buttons that move it. `id` names the Change… control, so it is also the
+    /// keyboard stop; a reset is only offered while there is something to undo.
+    fn location_group(
+        &self,
+        id: &'static str,
+        (label, aria): (&'static str, &'static str),
+        location: String,
+        change: Intent,
+        reset: Option<Intent>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        div()
+            .id(SharedString::from(format!("{id}-group")))
+            .role(Role::Group)
+            .aria_label(aria)
+            .py_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div().flex_1().min_w_0().child(label).child(
+                    div()
+                        .mt_1()
+                        .truncate()
+                        .text_size(px(11.))
+                        .text_color(self.muted())
+                        .child(location),
+                ),
+            )
+            .child(self.button(id, "Change…", change, cx))
+            .when_some(reset, |s, reset| {
+                s.child(self.button(
+                    SharedString::from(format!("reset-{id}")),
+                    "Reset",
+                    reset,
+                    cx,
+                ))
+            })
     }
     fn settings(&self, cx: &mut Context<Self>) -> Div {
         let mut themes = div()
@@ -1019,6 +1124,7 @@ impl NotesApp {
             .platform
             .as_ref()
             .is_some_and(|p| p.launch_at_login_enabled());
+        let folder = self.path.clone();
         let content = div()
             .id("settings-content")
             .track_scroll(&self.settings_scroll)
@@ -1120,86 +1226,63 @@ impl NotesApp {
                             .w_0()
                             .truncate()
                             .text_size(px(12.))
-                            .child(
-                                self.path
-                                    .as_ref()
-                                    .map(|path| path.display().to_string())
-                                    .unwrap_or_default(),
-                            ),
+                            .when(folder.is_none(), |s| s.text_color(self.muted()))
+                            .child(match &folder {
+                                Some(path) => path.display().to_string(),
+                                None => "No folder — editing individual files".to_owned(),
+                            }),
                     )
-                    .child(self.button("change-folder", "Change…", Intent::ChooseFolder, cx)),
-            )
-            .child(self.row(
-                "new-note-location",
-                "New Notes Location…",
-                "",
-                Intent::NewNoteLocation,
-                cx,
-            ))
-            .child(
-                div()
-                    .px_2()
-                    .text_size(px(11.))
-                    .text_color(self.muted())
-                    .child(
-                        self.path
-                            .as_ref()
-                            .map(|_| {
-                                let relative = &self.library.workspace.new_note_directory;
-                                if relative.as_os_str().is_empty() {
-                                    "Workspace root".into()
-                                } else {
-                                    format!("Workspace / {}", relative.display())
-                                }
-                            })
-                            .unwrap_or_else(|| "Choose a location for each new file".into()),
-                    ),
-            )
-            .child(
-                div()
-                    .id("image-location-group")
-                    .role(Role::Group)
-                    .aria_label("Image location")
-                    .px_2()
-                    .py_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div().flex_1().min_w_0().child("Images").child(
-                            div()
-                                .mt_1()
-                                .truncate()
-                                .text_size(px(11.))
-                                .text_color(self.muted())
-                                .child(match &self.library.workspace.attachments {
-                                    crate::storage::AttachmentPolicy::Default => {
-                                        "assets beside each note".to_owned()
-                                    }
-                                    crate::storage::AttachmentPolicy::WorkspaceFolder(path) => {
-                                        if path.as_os_str().is_empty() {
-                                            "Workspace root".to_owned()
-                                        } else {
-                                            format!("Workspace / {}", path.display())
-                                        }
-                                    }
-                                }),
-                        ),
-                    )
-                    .child(self.button("image-location", "Change…", Intent::ImageLocation, cx))
-                    .when(
-                        self.library.workspace.attachments
-                            != crate::storage::AttachmentPolicy::Default,
-                        |s| {
-                            s.child(self.button(
-                                "reset-image-location",
-                                "Reset",
-                                Intent::ResetImageLocation,
-                                cx,
-                            ))
+                    .child(self.button(
+                        "change-folder",
+                        if folder.is_some() {
+                            "Change…"
+                        } else {
+                            "Open Folder…"
                         },
-                    ),
+                        Intent::ChooseFolder,
+                        cx,
+                    )),
             )
+            // Both of these place files inside the folder, so neither has anything to
+            // say while individual files are being edited. They are the same kind of
+            // setting, so they are drawn by the same part.
+            .when_some(folder.clone(), |s, root| {
+                let attachments = &self.library.workspace.attachments;
+                s.child(
+                    self.location_group(
+                        "new-note-location",
+                        ("New notes", "New notes location"),
+                        folder_label(&root, &self.library.workspace.new_note_directory),
+                        Intent::NewNoteLocation,
+                        (!self
+                            .library
+                            .workspace
+                            .new_note_directory
+                            .as_os_str()
+                            .is_empty())
+                        .then_some(Intent::ResetNewNoteLocation),
+                        cx,
+                    ),
+                )
+                .child(
+                    self.location_group(
+                        "image-location",
+                        ("Images", "Image location"),
+                        match attachments {
+                            crate::storage::AttachmentPolicy::Default => {
+                                "assets beside each note".to_owned()
+                            }
+                            crate::storage::AttachmentPolicy::WorkspaceFolder(path) => {
+                                folder_label(&root, path)
+                            }
+                        },
+                        Intent::ImageLocation,
+                        (*attachments != crate::storage::AttachmentPolicy::Default)
+                            .then_some(Intent::ResetImageLocation),
+                        cx,
+                    ),
+                )
+            })
             .child(
                 div()
                     .mt_2()
@@ -1247,7 +1330,13 @@ impl NotesApp {
                     .pt_2()
                     .border_t_1()
                     .border_color(self.border_color())
-                    .child(self.row("import-notes", "Open Markdown…", "⌘O", Intent::Import, cx))
+                    .child(self.row(
+                        "open-markdown-setting",
+                        "Open Markdown…",
+                        "⌘O",
+                        Intent::OpenMarkdown,
+                        cx,
+                    ))
                     .child(self.row(
                         "export-library",
                         "Export Library Backup…",
@@ -1255,13 +1344,15 @@ impl NotesApp {
                         Intent::SaveCopy,
                         cx,
                     ))
-                    .child(self.row(
-                        "show-storage",
-                        "Show Notes Folder in Finder",
-                        "",
-                        Intent::Reveal,
-                        cx,
-                    )),
+                    .when(folder.is_some(), |s| {
+                        s.child(self.row(
+                            "show-storage",
+                            "Show Folder in Finder",
+                            "",
+                            Intent::Reveal,
+                            cx,
+                        ))
+                    }),
             )
             .child(
                 div()
@@ -1370,7 +1461,18 @@ impl NotesApp {
             Command::new("browse-action", "Browse Notes", "⌘P", Intent::Browse),
             Command::new("undo-edit", "Undo", "⌘Z", Intent::Undo),
             Command::new("redo-edit", "Redo", "⇧⌘Z", Intent::Redo),
-            Command::new("save-now", "Save Now", "⌘S", Intent::Save),
+            // A draft with no folder behind it has to be given a file before it can
+            // be written, so ⌘S asks for one and the command says as much.
+            Command::new(
+                "save-now",
+                if self.unfiled_draft() {
+                    "Save As…"
+                } else {
+                    "Save Now"
+                },
+                "⌘S",
+                Intent::Save,
+            ),
             Command::new("copy-markdown", "Copy as Markdown", "⇧⌘C", Intent::Copy),
             Command::new(
                 "paste-plain",
@@ -1385,13 +1487,22 @@ impl NotesApp {
                 Intent::PasteMarkdown,
             ),
             Command::new("export-note", "Export Markdown…", "⇧⌘E", Intent::Export),
-            Command::new("import-action", "Open Markdown…", "⌘O", Intent::Import),
-            Command::new("folder-action", "Open Folder…", "", Intent::ChooseFolder),
             Command::new(
-                "reveal-folder",
-                "Show Notes Folder in Finder",
+                "open-markdown-action",
+                "Open Markdown…",
+                "⌘O",
+                Intent::OpenMarkdown,
+            ),
+            // Choosing a folder puts the open one away, which the label has to say.
+            Command::new(
+                "folder-action",
+                if self.path.is_some() {
+                    "Switch Folder…"
+                } else {
+                    "Open Folder…"
+                },
                 "",
-                Intent::Reveal,
+                Intent::ChooseFolder,
             ),
             Command::new("format-bold", "Bold", "⌘B", Intent::Mark(doc::Inline::Bold)),
             Command::new(
@@ -1568,8 +1679,35 @@ impl NotesApp {
                 Intent::Settings,
             ),
         ]);
+        // Each of these reveals a different thing, and only while there is one.
+        if self.library.active_note().path.is_some() {
+            items.push(Command::new(
+                "reveal-note",
+                "Reveal Note in Finder",
+                "",
+                Intent::RevealNote,
+            ));
+        }
+        if self.path.is_some() {
+            items.push(Command::new(
+                "reveal-folder",
+                "Show Folder in Finder",
+                "",
+                Intent::Reveal,
+            ));
+        }
+        // A conflict outlives the dialog that announced it, so the way back to that
+        // dialog is a command as well as the footer indicator.
+        if self.library.active_note().conflicted {
+            items.push(Command::new(
+                "review-conflict",
+                "Resolve Conflict…",
+                "⌘S",
+                Intent::ReviewConflict,
+            ));
+        }
         // Only offered while there is something to empty.
-        if !self.library.search("", true).is_empty() {
+        if !self.library.search("", true, None).is_empty() {
             items.push(Command::new(
                 "empty-trash",
                 "Empty Recently Deleted",
@@ -1826,6 +1964,7 @@ impl NotesApp {
                     .search(
                         self.query.read(cx).text().trim(),
                         self.panel == Panel::Trash,
+                        self.path.as_deref(),
                     )
                     .len();
                 let heading = if self.panel == Panel::Trash { 32. } else { 26. };
@@ -1932,6 +2071,8 @@ impl Render for NotesApp {
         let style = notes_style(self.dark);
         let reduce_motion = cx.reduce_motion();
         let chrome = Self::chrome_spring(self.chrome_visible(), reduce_motion);
+        // The window outlines itself while something droppable is over it.
+        let accent = style.marker;
         let root = div()
             .key_context("MarkraftApp")
             .track_focus(&self.panel_focus)
@@ -2000,14 +2141,22 @@ impl Render for NotesApp {
             .bg(style.background)
             .text_color(style.text)
             .font_family(".SystemUIFont")
+            // Dropping belongs to the whole window: the Browse panel and the screens
+            // that have no folder yet are where a dropped file or folder is most
+            // likely to be aimed.
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.drop_paths(paths.0.iter().cloned().collect(), window, cx);
+            }))
+            // The outline only exists while something is being dragged over, so the
+            // note keeps the whole window the rest of the time.
+            .drag_over::<ExternalPaths>(move |s, _, _, _| s.border_2().border_color(accent))
             .on_action(cx.listener(|this, _: &Save, w, cx| {
                 if this.html_editor.is_some() {
                     this.save_html_source(w, cx);
                 } else if this.library.active_note().conflicted {
-                    this.conflict_prompted.remove(&this.library.active_id);
-                    this.prompt_conflict(w, cx);
+                    this.reopen_conflict(w, cx);
                 } else {
-                    this.flush(cx);
+                    this.save_now(w, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &CopyMarkdown, _, cx| this.copy_markdown(cx)))
@@ -2021,7 +2170,9 @@ impl Render for NotesApp {
             )
             .on_action(cx.listener(|this, _: &Link, w, cx| this.intent(Intent::Link, w, cx)))
             .on_action(cx.listener(|this, _: &Export, w, cx| this.intent(Intent::Export, w, cx)))
-            .on_action(cx.listener(|this, _: &Import, w, cx| this.intent(Intent::Import, w, cx)));
+            .on_action(cx.listener(|this, _: &OpenMarkdown, w, cx| {
+                this.intent(Intent::OpenMarkdown, w, cx)
+            }));
         let actions = self
             .chrome_capsule()
             .p(px(4.))
@@ -2093,9 +2244,9 @@ impl Render for NotesApp {
             let first_launch = self.path.is_none();
             let (title, explanation) = if first_launch {
                 (
-                    "Choose where to keep your notes",
-                    "Each note is a Markdown file in this folder, so other apps can read, \
-                     sync and back them up. You can change the folder later in Settings.",
+                    "Open a folder of Markdown files",
+                    "Markraft edits the files already in it, in place — nothing is imported, \
+                     moved or renamed. Its own settings and drafts stay outside the folder.",
                 )
             } else {
                 (
@@ -2128,7 +2279,7 @@ impl Render for NotesApp {
                     s.child(self.button("retry-open", "Retry", Intent::Retry, cx))
                 })
                 .child(primary)
-                .child(self.button("open-markdown", "Open Markdown…", Intent::Import, cx))
+                .child(self.button("open-markdown", "Open Markdown…", Intent::OpenMarkdown, cx))
                 .when(first_launch && Self::default_folder().is_some(), |s| {
                     s.child(self.button(
                         "default-folder",
@@ -2191,17 +2342,6 @@ impl Render for NotesApp {
         };
         let body = div()
             .id("document-body")
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
-                if paths.0.iter().all(|path| assets::is_image(path)) {
-                    this.insert_assets(
-                        paths.0.iter().cloned().map(assets::Asset::File).collect(),
-                        window,
-                        cx,
-                    );
-                } else {
-                    this.open_paths(paths.0.iter().cloned().collect(), window, cx);
-                }
-            }))
             .flex_1()
             .min_h_0()
             .relative()
@@ -2323,6 +2463,14 @@ impl Render for NotesApp {
             )
             .when_some(self.link_pill(window, cx), |s, pill| {
                 s.child(popover_enter("link-enter", pill, true, reduce_motion))
+            })
+            .when_some(self.file_status_card(window, cx), |s, card| {
+                s.child(popover_enter(
+                    "file-status-enter",
+                    card,
+                    true,
+                    reduce_motion,
+                ))
             })
             .when_some(self.code_language_popover(window, cx), |s, popover| {
                 s.child(popover_enter(

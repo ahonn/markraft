@@ -132,7 +132,7 @@ impl Store {
         let manifest =
             match read_optional(&manifest_path).map_err(|e| describe(&manifest_path, &e))? {
                 Some(bytes) => serde_json::from_slice(&bytes)
-                    .map_err(|e| format!("Cannot read workspace state: {e}"))?,
+                    .map_err(|e| format!("Cannot read the folder's saved state: {e}"))?,
                 None => Manifest::default(),
             };
         let settings = Settings::read(&settings_path)?;
@@ -662,6 +662,8 @@ impl Store {
                     });
                 if self.reviewed.contains_key(&note.id) || locally_changed {
                     self.recover(note)?;
+                    // `app::unexplained_error` recognises a conflicted note's line by
+                    // its quoted title; keep the quotes when rewording this.
                     errors.push(format!(
                         "Unsaved changes for “{}” are held in recovery.",
                         note.title()
@@ -679,6 +681,22 @@ impl Store {
                 continue;
             }
             if saved.is_none() && (doc::is_blank(&note.document) || note.deleted_at.is_some()) {
+                // A note that was never filed has no file to remove, but an earlier
+                // save may have left it a private copy. Emptied or thrown away, that
+                // copy is no longer what the note says, so it is retired to history
+                // rather than restored on the next launch. Conflicted and pending
+                // notes continue above and never reach here, and a note that has
+                // been given a path keeps its copy for the write that is still due.
+                if note.path.is_none() {
+                    self.archive_recovery(&note.id)?;
+                }
+                continue;
+            }
+            // Without a folder there is nowhere to file a new note, so a standalone
+            // draft is held in recovery until the user names a file for it. It is
+            // waiting for a location, not failing to be written.
+            if saved.is_none() && note.path.is_none() && self.standalone {
+                self.write_recovery(note, false)?;
                 continue;
             }
             let result = self.save_note(note, saved.as_ref(), library);
@@ -732,6 +750,8 @@ impl Store {
         {
             let current = read_optional(&saved.path).map_err(|e| describe(&saved.path, &e))?;
             if current.as_ref() != Some(&saved.bytes) {
+                // `app::unexplained_error` recognises a conflicted note's line by its
+                // quoted title; keep the quotes when rewording this.
                 return Err(format!(
                     "“{}” changed on disk. Your changes are preserved in recovery; resolve the conflict before saving.",
                     note.title()
@@ -759,11 +779,13 @@ impl Store {
             }
             None => {
                 if self.standalone {
+                    // `save` holds standalone drafts in recovery instead of coming
+                    // here, so this only catches one that slipped past that check.
                     return Err("Choose a location with Save As before saving this draft.".into());
                 }
                 let relative = &library.workspace.new_note_directory;
                 if !safe_relative(relative) {
-                    return Err("The new-note directory must stay inside the workspace.".into());
+                    return Err("The new-note location must stay inside the notes folder.".into());
                 }
                 let folder = self.directory.join(relative);
                 reject_symlink_components(&self.directory, &folder)?;
@@ -928,6 +950,16 @@ impl Store {
                 }
                 self.deleted.remove(id);
             }
+            // Throwing the note away for good retires whatever private copy it still
+            // has, or the next launch reads that copy back as a live note. A note
+            // whose conflict is still open is not one of these.
+            if !self.files.contains_key(id)
+                && !self.pending.contains(id)
+                && !self.reviewed.contains_key(id)
+                && let Err(error) = self.archive_recovery(id)
+            {
+                return (removed, Err(error));
+            }
             removed.push(id.clone());
         }
         (removed, Ok(()))
@@ -1014,7 +1046,7 @@ fn reject_symlink_components(root: &Path, path: &Path) -> Result<(), String> {
     let mut current = root.to_owned();
     for part in path
         .strip_prefix(root)
-        .map_err(|_| "Path is outside the workspace")?
+        .map_err(|_| "Path is outside the notes folder")?
         .components()
     {
         current.push(part);
@@ -1620,6 +1652,91 @@ mod tests {
         assert!(library.note(&note.id).is_some());
         let restored: HashSet<_> = store.paths().into_iter().collect();
         assert_eq!(restored, paths.into_iter().collect());
+    }
+    #[test]
+    fn a_standalone_draft_survives_until_it_is_given_a_file() {
+        let root = tempfile::tempdir().unwrap();
+        let first = fixture(root.path(), "one.md", b"One");
+        let settings = root.path().join("settings.json");
+        let (mut store, mut library) = Store::open_file(first.clone(), settings.clone()).unwrap();
+        let id = library.new_note(doc::from_markdown("Draft text"));
+        // There is no folder to file it in, which is not a failure to write it.
+        store.save(&library).unwrap();
+        assert!(
+            store
+                .state
+                .join("recovery")
+                .join(format!("{id}.json"))
+                .exists()
+        );
+        drop(store);
+        let (mut store, mut library) = Store::open_file(first, settings).unwrap();
+        let draft = library.note(&id).expect("the draft came back");
+        assert_eq!(draft.path, None);
+        assert_eq!(doc::plain_text(&draft.document), "Draft text");
+        let target = root.path().join("notes/draft.md");
+        library.notes.iter_mut().find(|n| n.id == id).unwrap().path = Some(target.clone());
+        store.save(&library).unwrap();
+        assert_eq!(fs::read_to_string(target).unwrap(), "Draft text\n");
+        assert!(
+            !store
+                .state
+                .join("recovery")
+                .join(format!("{id}.json"))
+                .exists()
+        );
+    }
+    #[test]
+    fn a_discarded_standalone_draft_does_not_come_back() {
+        for discard in ["trash", "blank", "purge"] {
+            let root = tempfile::tempdir().unwrap();
+            let first = fixture(root.path(), "one.md", b"One");
+            let settings = root.path().join("settings.json");
+            let (mut store, mut library) =
+                Store::open_file(first.clone(), settings.clone()).unwrap();
+            let id = library.new_note(doc::from_markdown("Draft text"));
+            store.save(&library).unwrap();
+            match discard {
+                "trash" => assert!(library.delete(&id)),
+                "blank" => assert!(library.set_document(&id, doc::empty())),
+                _ => library.remove(&id),
+            }
+            if discard == "purge" {
+                assert!(store.purge(std::slice::from_ref(&id)).1.is_ok());
+            }
+            store.save(&library).unwrap();
+            drop(store);
+            let (_, library) = Store::open_file(first, settings).unwrap();
+            assert!(
+                library
+                    .note(&id)
+                    .is_none_or(|note| note.deleted_at.is_some() || doc::is_blank(&note.document)),
+                "a {discard}ed draft came back"
+            );
+        }
+    }
+    #[test]
+    fn a_conflicted_note_keeps_its_recovery_through_a_purge() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "note.md", b"Original");
+        let (mut store, mut library) = open(root.path());
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown("Local"));
+        fs::write(&path, b"External").unwrap();
+        assert!(store.save(&library).is_err());
+        let record = store.state.join("recovery").join(format!("{id}.json"));
+        assert!(record.exists());
+        // An unrelated purge never reaches a note whose conflict is still open.
+        assert!(store.purge(std::slice::from_ref(&id)).1.is_ok());
+        assert!(record.exists());
+        library
+            .notes
+            .iter_mut()
+            .find(|n| n.id == id)
+            .unwrap()
+            .conflicted = true;
+        store.save(&library).unwrap();
+        assert!(record.exists());
     }
     #[test]
     fn standalone_new_file_is_remembered_after_restart() {

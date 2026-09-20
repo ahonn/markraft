@@ -20,6 +20,8 @@ pub(super) enum Surface {
     CodeLanguage,
     LinkView,
     LinkEdit,
+    /// The card over the lower-left file status indicator.
+    FileStatus,
     /// The pill over the table the caret is in. Unlike the others it is not modal: the
     /// note keeps the keyboard, and Tab belongs to the grid's cells until the ring has
     /// stepped up onto the pill.
@@ -94,6 +96,9 @@ impl NotesApp {
             Some(LinkPopover::View) => return Surface::LinkView,
             None => {}
         }
+        if self.file_status_popover {
+            return Surface::FileStatus;
+        }
         if self.table.is_some() {
             return Surface::Table;
         }
@@ -130,6 +135,7 @@ impl NotesApp {
                     stops.push(Stop::run("retry-open", Intent::Retry));
                 }
                 stops.push(Stop::run("choose-folder", Intent::ChooseFolder));
+                stops.push(Stop::run("open-markdown", Intent::OpenMarkdown));
                 if first_launch && Self::default_folder().is_some() {
                     stops.push(Stop::run("default-folder", Intent::DefaultFolder));
                 }
@@ -166,6 +172,15 @@ impl NotesApp {
                 stops.push(Stop::query());
                 stops.push(Stop::run("link-apply", Intent::ApplyLink));
                 stops.push(Stop::run("link-remove", Intent::Unlink));
+            }
+            Surface::FileStatus => {
+                if self.library.active_note().path.is_some() {
+                    stops.push(Stop::run("file-status-open", Intent::OpenExternally));
+                }
+                stops.push(Stop::run("file-status-reveal", Intent::RevealNote));
+                if self.library.active_note().conflicted {
+                    stops.push(Stop::run("file-status-conflict", Intent::ReviewConflict));
+                }
             }
             Surface::Table => {
                 for (id, intent) in self.table_stops() {
@@ -229,19 +244,39 @@ impl NotesApp {
                 stops.push(Stop::run("vim-mode", Intent::VimMode));
                 stops.push(Stop::run("launch-at-login", Intent::Login));
                 stops.push(Stop::run("change-folder", Intent::ChooseFolder));
-                stops.push(Stop::run("new-note-location", Intent::NewNoteLocation));
-                stops.push(Stop::run("image-location", Intent::ImageLocation));
-                if self.library.workspace.attachments != crate::storage::AttachmentPolicy::Default {
-                    stops.push(Stop::run(
-                        "reset-image-location",
-                        Intent::ResetImageLocation,
-                    ));
+                // The file-placement rows are only drawn while there is a folder to
+                // place files in.
+                if self.path.is_some() {
+                    stops.push(Stop::run("new-note-location", Intent::NewNoteLocation));
+                    if !self
+                        .library
+                        .workspace
+                        .new_note_directory
+                        .as_os_str()
+                        .is_empty()
+                    {
+                        stops.push(Stop::run(
+                            "reset-new-note-location",
+                            Intent::ResetNewNoteLocation,
+                        ));
+                    }
+                    stops.push(Stop::run("image-location", Intent::ImageLocation));
+                    if self.library.workspace.attachments
+                        != crate::storage::AttachmentPolicy::Default
+                    {
+                        stops.push(Stop::run(
+                            "reset-image-location",
+                            Intent::ResetImageLocation,
+                        ));
+                    }
                 }
                 stops.push(Stop::query());
                 stops.push(Stop::run("apply-shortcut", Intent::Shortcut));
-                stops.push(Stop::run("import-notes", Intent::Import));
+                stops.push(Stop::run("open-markdown-setting", Intent::OpenMarkdown));
                 stops.push(Stop::run("export-library", Intent::SaveCopy));
-                stops.push(Stop::run("show-storage", Intent::Reveal));
+                if self.path.is_some() {
+                    stops.push(Stop::run("show-storage", Intent::Reveal));
+                }
             }
         }
         stops

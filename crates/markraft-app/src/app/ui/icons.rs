@@ -32,6 +32,7 @@ define_icons! {
     Trash => "trash",
     Copy => "doc.on.clipboard",
     Export => "square.and.arrow.up",
+    Document => "doc.text",
     Settings => "gearshape",
     Bold => "bold",
     Italic => "italic",

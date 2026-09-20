@@ -101,13 +101,21 @@ fn relative_url(parent: &Path, path: &Path) -> Result<String, String> {
 
 /// Write assets before returning their references. A partial failure leaves files
 /// intact: another application may already have discovered or referenced them.
+/// The Markdown to insert, and where each image ended up relative to the note. A
+/// caller that can no longer insert the Markdown still has to be able to say what
+/// is now on disk.
+pub(super) struct Inserted {
+    pub markdown: String,
+    pub urls: Vec<String>,
+}
+
 pub(super) fn insert(
     assets: Vec<Asset>,
     document: &Path,
     root: &Path,
     policy: &AttachmentPolicy,
     journal: &Path,
-) -> Result<String, String> {
+) -> Result<Inserted, String> {
     let parent = document
         .parent()
         .ok_or("Save the document before inserting images.")?
@@ -115,6 +123,7 @@ pub(super) fn insert(
         .map_err(|error| error.to_string())?;
     let root = root.canonicalize().map_err(|error| error.to_string())?;
     let mut references = Vec::new();
+    let mut urls = Vec::new();
     for asset in assets {
         let copy = matches!(asset, Asset::Copy(_));
         let (existing, bytes, extension) = match asset {
@@ -175,9 +184,14 @@ pub(super) fn insert(
                 .map_err(|error| error.to_string())?;
             path.canonicalize().map_err(|error| error.to_string())?
         };
-        references.push(format!("![image]({})", relative_url(&parent, &path)?));
+        let url = relative_url(&parent, &path)?;
+        references.push(format!("![image]({url})"));
+        urls.push(url);
     }
-    Ok(references.join("\n\n"))
+    Ok(Inserted {
+        markdown: references.join("\n\n"),
+        urls,
+    })
 }
 
 /// Read the supported scalar form of Typora's image-preview root from actual
@@ -423,7 +437,8 @@ mod tests {
             &root.join("unused-journal"),
         )
         .unwrap();
-        assert_eq!(markdown, "![image](../a%20%E4%B8%AD%E6%96%87.png)");
+        assert_eq!(markdown.markdown, "![image](../a%20%E4%B8%AD%E6%96%87.png)");
+        assert_eq!(markdown.urls, ["../a%20%E4%B8%AD%E6%96%87.png"]);
         assert_eq!(fs::read_dir(root.join("notes")).unwrap().count(), 0);
     }
 
@@ -449,15 +464,15 @@ mod tests {
                 AttachmentPolicy::WorkspaceFolder("assets".into()),
             ] {
                 let assets = from_clipboard(clipboard.clone());
-                let markdown =
+                let inserted =
                     insert(assets, &root.join("note.md"), &root, &policy, &journal).unwrap();
+                let markdown = inserted.markdown;
                 assert!(markdown.starts_with("![image](assets/image-"));
                 assert_ne!(previous.as_ref(), Some(&markdown));
-                let relative = markdown
-                    .strip_prefix("![image](")
-                    .unwrap()
-                    .strip_suffix(')')
-                    .unwrap();
+                let [relative] = inserted.urls.as_slice() else {
+                    panic!("one image, one url");
+                };
+                assert!(markdown.contains(relative));
                 assert_eq!(fs::read(root.join(relative)).unwrap(), b"original image");
                 previous = Some(markdown);
             }
@@ -488,7 +503,7 @@ mod tests {
             journal.path(),
         )
         .unwrap();
-        assert_ne!(first, second);
+        assert_ne!(first.markdown, second.markdown);
         assert_eq!(fs::read_dir(root.path().join("assets")).unwrap().count(), 2);
         let records: Vec<_> = fs::read_dir(journal.path()).unwrap().collect();
         assert_eq!(records.len(), 2);

@@ -62,6 +62,16 @@ impl Note {
             .take(64)
             .collect()
     }
+
+    /// Where the file is, as a search matches it: the path under the notes folder
+    /// when it is inside one, and otherwise the file's own name.
+    pub fn location(&self, root: Option<&Path>) -> Option<String> {
+        let path = self.path.as_ref()?;
+        match root.and_then(|root| path.strip_prefix(root).ok()) {
+            Some(relative) => Some(relative.display().to_string()),
+            None => Some(path.file_name()?.to_string_lossy().into_owned()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -142,7 +152,11 @@ impl Library {
         {
             return;
         }
-        match self.search("", false).first().map(|note| note.id.clone()) {
+        match self
+            .search("", false, None)
+            .first()
+            .map(|note| note.id.clone())
+        {
             Some(id) => self.active_id = id,
             None => {
                 self.new_note(doc::empty());
@@ -168,7 +182,7 @@ impl Library {
         }
         note.deleted_at = Some(timestamp());
         if self.active_id == id {
-            if let Some(next) = self.search("", false).first() {
+            if let Some(next) = self.search("", false, None).first() {
                 self.active_id = next.id.clone();
             } else {
                 self.new_note(doc::empty());
@@ -201,7 +215,10 @@ impl Library {
         true
     }
 
-    pub fn search(&self, query: &str, deleted: bool) -> Vec<&Note> {
+    /// Notes matching `query`, by what they say or by where their file is. Names are
+    /// independent of titles now, so a search has to reach them; `root` is the notes
+    /// folder, which is what makes a match read like the path the Browse row shows.
+    pub fn search(&self, query: &str, deleted: bool, root: Option<&Path>) -> Vec<&Note> {
         let query = query.trim().to_lowercase();
         let mut notes: Vec<_> = self
             .notes
@@ -211,7 +228,10 @@ impl Library {
                     && (query.is_empty()
                         || doc::plain_text(&note.document)
                             .to_lowercase()
-                            .contains(&query))
+                            .contains(&query)
+                        || note
+                            .location(root)
+                            .is_some_and(|location| location.to_lowercase().contains(&query)))
             })
             .collect();
         notes.sort_by(|a, b| {
@@ -387,18 +407,74 @@ mod tests {
         let document = doc::from_markdown("# 中文 👩🏽‍💻\n\n- [x] **Idea** é");
         let id = library.new_note(document.clone());
         assert_eq!(library.active_note().title(), "中文 👩🏽‍💻");
-        assert_eq!(library.search("IDEA", false)[0].document, document);
+        assert_eq!(library.search("IDEA", false, None)[0].document, document);
         assert!(library.delete(&id));
         assert!(!library.select(&id));
         assert_eq!(library.active_id, initial);
-        assert_eq!(library.search("👩🏽‍💻", true)[0].id, id);
+        assert_eq!(library.search("👩🏽‍💻", true, None)[0].id, id);
         assert!(library.restore(&id));
         assert_eq!(library.active_note().document, document);
         assert!(library.delete(&initial));
         assert!(library.delete(&id));
-        assert_eq!(library.search("", false).len(), 1);
-        assert_eq!(library.search("", true).len(), 2);
+        assert_eq!(library.search("", false, None).len(), 1);
+        assert_eq!(library.search("", true, None).len(), 2);
         assert_eq!(library.active_note().document, doc::empty());
+    }
+
+    #[test]
+    fn notes_are_found_by_where_their_file_is_as_well_as_by_what_they_say() {
+        let root = PathBuf::from("/Users/someone/Notes");
+        let mut library = Library::default();
+        let filed = library.new_note(doc::from_markdown("# Standup\n\nagenda"));
+        library
+            .notes
+            .iter_mut()
+            .find(|n| n.id == filed)
+            .unwrap()
+            .path = Some(root.join("Work/Clients/quarterly-review.md"));
+        let loose = library.new_note(doc::from_markdown("# Elsewhere"));
+        library
+            .notes
+            .iter_mut()
+            .find(|n| n.id == loose)
+            .unwrap()
+            .path = Some(PathBuf::from("/tmp/scratch-pad.md"));
+
+        fn live(library: &Library, root: &Path, query: &str) -> Vec<String> {
+            library
+                .search(query, false, Some(root))
+                .iter()
+                .map(|note| note.id.clone())
+                .collect()
+        }
+        // By file name, by a directory on the way to it, and case-insensitively.
+        assert_eq!(
+            live(&library, &root, "quarterly"),
+            std::slice::from_ref(&filed)
+        );
+        assert_eq!(
+            live(&library, &root, "CLIENTS"),
+            std::slice::from_ref(&filed)
+        );
+        assert_eq!(
+            live(&library, &root, "work/clients"),
+            std::slice::from_ref(&filed)
+        );
+        // Outside the folder only the file's own name is matched, not its folders.
+        assert_eq!(
+            live(&library, &root, "scratch-pad"),
+            std::slice::from_ref(&loose)
+        );
+        assert!(live(&library, &root, "tmp").is_empty());
+        // Body text still matches, and the trash is still a separate list.
+        assert_eq!(
+            live(&library, &root, "agenda"),
+            std::slice::from_ref(&filed)
+        );
+        assert!(library.search("quarterly", true, Some(&root)).is_empty());
+        assert!(library.delete(&filed));
+        assert!(live(&library, &root, "quarterly").is_empty());
+        assert_eq!(library.search("quarterly", true, Some(&root))[0].id, filed);
     }
 
     #[test]

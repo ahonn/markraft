@@ -23,16 +23,35 @@ pub struct SourceDocument {
     newline: &'static str,
 }
 
-/// A source-preserving save could not safely represent an editor operation.
+/// A source-preserving save could not safely represent an editor operation. The
+/// variants say which part of the source stood in the way, so a host can tell the
+/// user what to do about it rather than only that something failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceError {
-    /// Retain the editor buffer and offer a separate export instead of overwriting.
+    /// The change lands inside source kept verbatim: a wiki link, a callout, math,
+    /// a block anchor or a link reference definition.
+    ProtectedSpan,
+    /// Writing the change needs its whole block replaced, and that block carries
+    /// source the semantic document does not, such as a reference definition.
+    ProtectedBlock,
+    /// Rewritten source did not reparse into the edited document. Retain the editor
+    /// buffer and offer a separate export instead of overwriting.
     UnsupportedEdit,
 }
 
 impl std::fmt::Display for SourceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("This edit cannot be saved without changing protected Markdown source. Your edits are retained; save a separate copy or use another editor.")
+        f.write_str(match self {
+            Self::ProtectedSpan => {
+                "This edit falls inside Markdown that is kept exactly as written, such as a wiki link, a callout or math."
+            }
+            Self::ProtectedBlock => {
+                "This edit would have to replace a block that also carries source the document does not, such as a link reference definition."
+            }
+            Self::UnsupportedEdit => {
+                "This edit cannot be saved without changing protected Markdown source. Your edits are retained; save a separate copy or use another editor."
+            }
+        })
     }
 }
 
@@ -235,6 +254,9 @@ impl SourceDocument {
         let prefix = self.with_newlines(prefix);
         let suffix = self.with_newlines(suffix);
         let protected = protected_ranges(raw);
+        // Whether a location the edit wanted was refused for overlapping protected
+        // source, which is what separates "not here" from "not like this".
+        let mut blocked = false;
         // Source and canonical Markdown can differ around the edit (reference
         // links, Setext headings, escapes). Prefer matching local context, then
         // prove the chosen location by parsing the entire resulting document.
@@ -242,6 +264,7 @@ impl SourceDocument {
             for offset in candidate_offsets(raw, &spelling, &prefix, &suffix) {
                 let changed = offset..offset + spelling.len();
                 if protected.iter().any(|span| overlaps(&changed, span)) {
+                    blocked = true;
                     continue;
                 }
                 let mut candidate = source.clone();
@@ -310,7 +333,13 @@ impl SourceDocument {
             candidate.replace_range(range, &self.with_newlines(after));
             return self.validate(schema, target, candidate);
         }
-        Err(SourceError::UnsupportedEdit)
+        if blocked {
+            Err(SourceError::ProtectedSpan)
+        } else if !protected.is_empty() {
+            Err(SourceError::ProtectedBlock)
+        } else {
+            Err(SourceError::UnsupportedEdit)
+        }
     }
 }
 

@@ -96,7 +96,7 @@ fn modifications_inside_unsupported_extension_syntax_are_refused() {
     ] {
         assert_eq!(
             edit(original, &original.replace("old", "new")),
-            Err(SourceError::UnsupportedEdit)
+            Err(SourceError::ProtectedSpan)
         );
     }
 }
@@ -128,7 +128,7 @@ fn structural_changes_cannot_remove_unrepresented_definitions() {
     let original = "first\n\n[unused]: /keep\n\nlast\n";
     assert_eq!(
         edit(original, "replacement"),
-        Err(SourceError::UnsupportedEdit)
+        Err(SourceError::ProtectedBlock)
     );
 }
 

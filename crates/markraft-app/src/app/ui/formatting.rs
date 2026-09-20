@@ -329,13 +329,21 @@ impl NotesApp {
             if note.conflicted {
                 label.push_str(" Autosave paused.");
             }
-            Some((Icon::Lock, label))
+            Some((Icon::Lock, label, "Read-only. Click for ways to edit it."))
         } else if note.conflicted {
-            Some((Icon::Pause, "Autosave paused".to_owned()))
+            Some((
+                Icon::Pause,
+                "Autosave paused".to_owned(),
+                "Autosave paused. Click to review.",
+            ))
         } else {
             None
         };
-        let compact_vim = self.format_toolbar && (viewport < px(450.) || file_status.is_some());
+        // The toolbar is 268px wide and centered, so its left edge sits 91px from a
+        // 450px window's. The full mode label takes about that much; adding the
+        // indicator and its gap needs some 22px more, which a 500px window has.
+        let compact_vim = self.format_toolbar
+            && (viewport < px(450.) || (file_status.is_some() && viewport < px(500.)));
         div()
             .h(px(48.))
             .flex_shrink_0()
@@ -351,22 +359,8 @@ impl NotesApp {
                     .items_center()
                     .gap(px(4.))
                     .children(self.vim_badge(compact_vim))
-                    .when_some(file_status, |s, (symbol, label)| {
-                        s.child(
-                            div()
-                                .id("file-status-indicator")
-                                .role(Role::Status)
-                                .aria_label(label.clone())
-                                .tooltip(self.hint(label))
-                                .flex_shrink_0()
-                                .size(px(18.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(4.))
-                                .bg(self.hover_color())
-                                .child(sized_icon(symbol, self.muted(), 11.)),
-                        )
+                    .when_some(file_status, |s, (symbol, label, hint)| {
+                        s.child(self.file_status_button(symbol, label, hint, cx))
                     }),
             )
             .when(!self.format_toolbar, |s| {
@@ -510,6 +504,142 @@ impl NotesApp {
                         )),
                 )
             })
+    }
+
+    /// The lower-left lock or pause. It says what state the file is in and opens the
+    /// way out of it, and it lights up when a keystroke was refused, because a
+    /// read-only file has no notice of its own to show for each one.
+    fn file_status_button(
+        &self,
+        symbol: Icon,
+        label: String,
+        hint: &'static str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let lit = self
+            .file_status_flash
+            .is_some_and(|until| Instant::now() < until);
+        let (resting, attention) = (self.hover_color(), self.pressed_color());
+        // Only the lock discloses a card; the pause opens a dialog, which is not a
+        // state this control is in.
+        let discloses = self.library.active_note().read_only.is_some();
+        div()
+            .id("file-status-indicator")
+            .role(Role::Button)
+            .aria_label(label)
+            .when(discloses, |s| s.aria_expanded(self.file_status_popover))
+            .tooltip(self.hint(hint))
+            .flex_shrink_0()
+            .size(px(18.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.))
+            .cursor_pointer()
+            .hover(|s| s.bg(self.selected_color()))
+            .active(|s| s.bg(attention))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                this.intent(Intent::FileStatus, window, cx);
+            }))
+            .child(sized_icon(symbol, self.muted(), 11.))
+            // Reduced motion keeps both fills and drops the travel between them, so
+            // the indicator simply stands out until the flash expires.
+            .with_spring(
+                "file-status-flash",
+                Self::chrome_spring(lit, cx.reduce_motion()),
+                move |s, phase| s.bg(phase.interpolate_clamped(resting, attention)),
+            )
+    }
+
+    /// What a read-only file is, and the two apps that can still change it. A note
+    /// that is also conflicted says so here and offers the dialog, since its own
+    /// indicator is taken by the lock.
+    pub(super) fn file_status_card(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        // Only a read-only note has a card; anything else closes it where it stands.
+        if self.panel != Panel::Editor || self.library.active_note().read_only.is_none() {
+            self.file_status_popover = false;
+        }
+        if !self.file_status_popover {
+            return None;
+        }
+        let note = self.library.active_note();
+        let reason = note.read_only.clone()?;
+        let conflicted = note.conflicted;
+        let openable = note.path.is_some();
+        let width = px(300.).min(window.bounds().size.width - px(16.));
+        Some(
+            div()
+                .id("file-status-card")
+                .absolute()
+                .bottom(px(48.))
+                .left(px(8.))
+                .w(width)
+                .p(px(12.))
+                .flex()
+                .flex_col()
+                .gap_2()
+                .rounded(POPOVER_RADIUS)
+                .bg(self.surface_color())
+                .border_1()
+                .border_color(self.border_color())
+                .shadow(popover_shadow())
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    // The indicator closes the card itself; preserve its click.
+                    if event.position.y < window.bounds().size.height - px(44.) {
+                        this.file_status_popover = false;
+                        this.focus_editor(window, cx);
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .line_height(px(17.))
+                        .text_color(self.control_text())
+                        .child(if conflicted {
+                            format!("{reason} Autosave is paused until the conflict is resolved.")
+                        } else {
+                            reason
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .when(openable, |s| {
+                            s.child(self.button(
+                                "file-status-open",
+                                "Open in Default Editor",
+                                Intent::OpenExternally,
+                                cx,
+                            ))
+                        })
+                        .child(self.button(
+                            "file-status-reveal",
+                            "Reveal in Finder",
+                            Intent::RevealNote,
+                            cx,
+                        ))
+                        .when(conflicted, |s| {
+                            s.child(self.button(
+                                "file-status-conflict",
+                                "Review Conflict…",
+                                Intent::ReviewConflict,
+                                cx,
+                            ))
+                        }),
+                ),
+        )
     }
 
     pub(super) fn format_popover(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {

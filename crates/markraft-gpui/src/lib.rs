@@ -295,7 +295,34 @@ impl Setup {
     }
 }
 
-type DocumentGuard = Box<dyn Fn(&Node) -> Result<(), String>>;
+/// Why an edit did not reach the document. The editor only keeps the cases apart;
+/// the host words each one, because only it knows what the document is stored in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditRejection {
+    /// Nothing can be edited here for as long as this holds, so repeating the
+    /// message per keystroke says nothing new.
+    ReadOnly(String),
+    /// This change cannot be kept where it lands, though others still can.
+    Protected(String),
+    /// The transaction itself could not be built.
+    Invalid(String),
+}
+
+impl EditRejection {
+    /// The sentence the host attached, whichever case it belongs to.
+    pub fn message(&self) -> &str {
+        let (Self::ReadOnly(message) | Self::Protected(message) | Self::Invalid(message)) = self;
+        message
+    }
+}
+
+impl std::fmt::Display for EditRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+type DocumentGuard = Box<dyn Fn(&Node) -> Result<(), EditRejection>>;
 
 /// Build all transactions before publishing any state. Unlike a transaction
 /// filter, this boundary also covers no-filter edits, undo and appender output.
@@ -303,11 +330,13 @@ fn apply_guarded(
     state: &mut EditorState,
     specs: impl IntoIterator<Item = TransactionSpec>,
     guard: Option<&DocumentGuard>,
-) -> Result<Vec<Transaction>, String> {
+) -> Result<Vec<Transaction>, EditRejection> {
     let transactions = state
         .update_with_appended(specs)
-        .map_err(|error| error.to_string())?;
-    let last = transactions.last().ok_or("No transaction was produced.")?;
+        .map_err(|error| EditRejection::Invalid(error.to_string()))?;
+    let last = transactions
+        .last()
+        .ok_or_else(|| EditRejection::Invalid("No transaction was produced.".to_owned()))?;
     if last.new_doc() != state.doc()
         && let Some(guard) = guard
     {
@@ -319,7 +348,7 @@ fn apply_guarded(
 
 pub struct EditorView {
     document_guard: Option<DocumentGuard>,
-    edit_error: Option<String>,
+    edit_error: Option<EditRejection>,
     file_paste: bool,
     state: EditorState,
     projection: Arc<Projection>,
@@ -493,13 +522,13 @@ impl EditorView {
     /// Validate a complete candidate before changing state, including undo and IME.
     pub fn with_document_guard(
         mut self,
-        guard: impl Fn(&Node) -> Result<(), String> + 'static,
+        guard: impl Fn(&Node) -> Result<(), EditRejection> + 'static,
     ) -> Self {
         self.document_guard = Some(Box::new(guard));
         self
     }
 
-    pub fn take_edit_error(&mut self) -> Option<String> {
+    pub fn take_edit_error(&mut self) -> Option<EditRejection> {
         self.edit_error.take()
     }
 
@@ -1817,7 +1846,7 @@ mod key_binding_tests {
 
 #[cfg(test)]
 mod document_guard_tests {
-    use super::{DocumentGuard, apply_guarded, build_state, clipboard, ime};
+    use super::{DocumentGuard, EditRejection, apply_guarded, build_state, clipboard, ime};
     use crate::typeahead::tests::{at, state_of, types_of};
     use markraft_commonmark::{CommonMarkCodecs, commonmark_schema, from_markdown};
     use markraft_core::{
@@ -1828,7 +1857,11 @@ mod document_guard_tests {
     use std::sync::Arc;
 
     fn read_only() -> DocumentGuard {
-        Box::new(|_| Err("This document is read-only.".into()))
+        Box::new(|_| {
+            Err(EditRejection::ReadOnly(
+                "This document is read-only.".into(),
+            ))
+        })
     }
 
     fn assert_unchanged(before: &EditorState, after: &EditorState) {
@@ -1939,7 +1972,9 @@ mod document_guard_tests {
         let guard_schema = schema.clone();
         let forbid_exclamation: DocumentGuard = Box::new(move |doc| {
             if guard_schema.describe(doc).contains('!') {
-                Err("Unsupported appender output.".into())
+                Err(EditRejection::Protected(
+                    "Unsupported appender output.".into(),
+                ))
             } else {
                 Ok(())
             }
@@ -1956,6 +1991,27 @@ mod document_guard_tests {
         // directly rather than asking it to append to an undo once again.
         let undone = state.update([undo_spec]).unwrap();
         assert_eq!(undone.new_doc(), before.doc());
+    }
+
+    #[test]
+    fn a_rejection_reaches_the_host_as_the_case_it_was_refused_for() {
+        let initial = at(&state_of("original"), 4);
+        let mut state = initial.clone();
+        // A guard's own case is carried through untouched, so the host can tell a
+        // file that takes no edit at all from one change it cannot keep.
+        let spec = commands::insert_text("changed")(&state).unwrap();
+        assert_eq!(
+            apply_guarded(&mut state, [spec.clone()], Some(&read_only())).unwrap_err(),
+            EditRejection::ReadOnly("This document is read-only.".into())
+        );
+        assert_unchanged(&initial, &state);
+        let protected: DocumentGuard =
+            Box::new(|_| Err(EditRejection::Protected("Protected source.".into())));
+        assert_eq!(
+            apply_guarded(&mut state, [spec], Some(&protected)).unwrap_err(),
+            EditRejection::Protected("Protected source.".into())
+        );
+        assert_unchanged(&initial, &state);
     }
 
     #[test]

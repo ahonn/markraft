@@ -13,7 +13,8 @@ use crate::{
 use gpui::{prelude::*, *};
 use markraft_core::MarkSet;
 use markraft_gpui::{
-    ColumnAlignment, EditorEvent, EditorStyle, EditorView, ExtensionHandle, Setup, TableInfo,
+    ColumnAlignment, EditRejection, EditorEvent, EditorStyle, EditorView, ExtensionHandle, Setup,
+    TableInfo,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -37,7 +38,7 @@ actions!(
         Link,
         Trash,
         Export,
-        Import
+        OpenMarkdown
     ]
 );
 
@@ -123,6 +124,13 @@ pub struct NotesApp {
     pending_notices: VecDeque<String>,
     conflict_prompted: HashSet<String>,
     conflict_dialog: bool,
+    /// The card over the lower-left indicator: why this file cannot be written, and
+    /// the ways out of that. Only a read-only note has one; a conflict opens its
+    /// dialog instead of a card.
+    file_status_popover: bool,
+    /// Until when that indicator stays lit, after a keystroke the file refused. It
+    /// is attention rather than a message, so it expires on its own.
+    file_status_flash: Option<Instant>,
     show_words: bool,
     format_toolbar: bool,
     format_menu: Option<FormatMenu>,
@@ -301,6 +309,8 @@ impl NotesApp {
             pending_notices: VecDeque::new(),
             conflict_prompted: HashSet::new(),
             conflict_dialog: false,
+            file_status_popover: false,
+            file_status_flash: None,
             chrome_focus: None,
             show_words: false,
             format_toolbar: false,
@@ -388,17 +398,18 @@ impl NotesApp {
             .with_file_paste(true)
             .with_document_guard(move |candidate| {
                 if let Some(reason) = &protected {
-                    return Err(format!("Read-only: {reason}"));
+                    return Err(EditRejection::ReadOnly(reason.clone()));
                 }
                 match &source {
                     Some(Ok(source)) => source
                         .render(doc::schema(), candidate)
                         .map(|_| ())
-                        .map_err(|_| {
-                            "This edit would rewrite protected Markdown and was not applied."
-                                .to_owned()
-                        }),
-                    Some(Err(error)) => Err(format!("Cannot safely edit this file: {error}")),
+                        .map_err(|error| EditRejection::Protected(rejection_message(&error))),
+                    // The file was read but its Markdown could not be lined up with
+                    // its source, so no keystroke could ever be written back.
+                    Some(Err(error)) => Err(EditRejection::Invalid(format!(
+                        "This file cannot be edited in Markraft: {error}"
+                    ))),
                     None => Ok(()),
                 }
             })
@@ -591,6 +602,79 @@ impl NotesApp {
         self.save_at = Some(Instant::now() + Duration::from_millis(350));
         cx.notify();
     }
+    /// Whether the active note is a draft the store has nowhere to file: without a
+    /// folder a new note is held privately until the user names a file for it.
+    fn unfiled_draft(&self) -> bool {
+        self.persistence.is_some()
+            && self.path.is_none()
+            && self.library.active_note().path.is_none()
+    }
+    /// ⌘S. A draft with no folder behind it asks where to go before it is written;
+    /// everywhere else the note already knows its file.
+    fn save_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.unfiled_draft() {
+            self.save_as(window, cx);
+        } else {
+            self.flush(cx);
+        }
+    }
+    /// Ask where the active note should live, then carry on with `next`. Everything
+    /// that needs a draft to have a file comes through here, so the rules are the
+    /// same each time: only a name nothing else holds, and the editor's image base
+    /// follows the note into its folder.
+    fn prompt_for_note_path(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        next: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let id = self.library.active_id.clone();
+        let directory = self
+            .path
+            .as_ref()
+            .map(|root| root.join(&self.library.workspace.new_note_directory))
+            .or_else(|| {
+                self.library
+                    .notes
+                    .iter()
+                    .find_map(|note| note.path.as_ref()?.parent().map(ToOwned::to_owned))
+            })
+            .unwrap_or_default();
+        let prompt = cx.prompt_for_new_path(&directory, Some("Untitled.md"));
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(path))) = prompt.await {
+                let _ = cx.update(|window, cx| {
+                    this.update(cx, |this, cx| {
+                        if this.library.active_id != id {
+                            return;
+                        }
+                        if path.exists() {
+                            this.queue_notice(
+                                "Choose a new filename; the existing file was not changed."
+                                    .to_owned(),
+                            );
+                            return;
+                        }
+                        let parent = path.parent().map(ToOwned::to_owned);
+                        if let Some(note) = this.library.notes.iter_mut().find(|n| n.id == id) {
+                            note.path = Some(path);
+                        }
+                        this.editor()
+                            .update(cx, |editor, cx| editor.set_image_base(parent, cx));
+                        next(this, window, cx);
+                    })
+                });
+            }
+        })
+        .detach();
+    }
+    /// Give the active draft a file, then write it there.
+    fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt_for_note_path(window, cx, |this, window, cx| {
+            this.flush(cx);
+            this.focus_editor(window, cx);
+        });
+    }
     fn flush(&mut self, cx: &mut Context<Self>) -> bool {
         self.sync_documents(cx);
         self.save_at = None;
@@ -654,11 +738,22 @@ impl NotesApp {
     }
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.prompt_conflict(window, cx);
-        if let Some(error) = self
+        if let Some(rejection) = self
             .editor()
             .update(cx, |editor, _| editor.take_edit_error())
         {
-            self.inform(error, cx);
+            match rejection {
+                // A read-only file refuses every keystroke, and one notice per key
+                // would bury the single thing that explains why. The footer's lock
+                // already says it, so the eye is sent there instead.
+                EditRejection::ReadOnly(_) => {
+                    self.file_status_flash = Some(Instant::now() + FILE_STATUS_FLASH);
+                    cx.notify();
+                }
+                EditRejection::Protected(message) | EditRejection::Invalid(message) => {
+                    self.queue_notice(message);
+                }
+            }
         }
         if self.panel == Panel::Editor {
             self.editor()
@@ -732,11 +827,7 @@ impl NotesApp {
                             self.dirty = false;
                             self.error = None;
                         }
-                        Err(e) => {
-                            if !self.library.active_note().conflicted {
-                                self.error = Some(e);
-                            }
-                        }
+                        Err(e) => self.error = unexplained_error(&e, &self.conflict_names()),
                     }
                     cx.notify();
                 }
@@ -776,6 +867,13 @@ impl NotesApp {
             .is_some_and(|notice| Instant::now() > notice.until)
         {
             self.notice = None;
+            cx.notify();
+        }
+        if self
+            .file_status_flash
+            .is_some_and(|until| Instant::now() >= until)
+        {
+            self.file_status_flash = None;
             cx.notify();
         }
         // One queued sentence at a time, once whatever was on screen has had its turn.
@@ -923,7 +1021,8 @@ impl NotesApp {
         self.chrome_focus = None;
         let had_popover = self.format_menu.take().is_some()
             | self.link_popover.take().is_some()
-            | self.code_language_block.take().is_some();
+            | self.code_language_block.take().is_some()
+            | std::mem::take(&mut self.file_status_popover);
         if had_popover {
             self.focus_editor(window, cx);
             cx.notify();
@@ -942,48 +1041,10 @@ impl NotesApp {
         self.format_menu = None;
         self.code_language_block = None;
         self.link_popover = None;
+        self.file_status_popover = false;
         self.query.update(cx, |e, cx| e.cancel_composition(cx));
         if self.persistence.is_none() {
             self.choose_folder(window, cx);
-            return;
-        }
-        if self.path.is_none() {
-            let directory = self
-                .library
-                .active_note()
-                .path
-                .as_ref()
-                .and_then(|path| path.parent())
-                .map(ToOwned::to_owned)
-                .unwrap_or_default();
-            let prompt = cx.prompt_for_new_path(&directory, Some("Untitled.md"));
-            cx.spawn_in(window, async move |this, cx| {
-                if let Ok(Ok(Some(path))) = prompt.await {
-                    let _ = cx.update(|window, cx| {
-                        this.update(cx, |this, cx| {
-                            if path.exists() {
-                                this.inform(
-                                    "Choose a new filename; the existing file was not changed.",
-                                    cx,
-                                );
-                                return;
-                            }
-                            this.sync_documents(cx);
-                            let id = this.library.new_note(doc::empty());
-                            if let Some(note) =
-                                this.library.notes.iter_mut().find(|note| note.id == id)
-                            {
-                                note.path = Some(path);
-                            }
-                            this.ensure_session(window, cx);
-                            this.panel = Panel::Editor;
-                            this.focus_editor(window, cx);
-                            this.changed(cx);
-                        })
-                    });
-                }
-            })
-            .detach();
             return;
         }
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
@@ -998,6 +1059,7 @@ impl NotesApp {
         self.format_menu = None;
         self.code_language_block = None;
         self.link_popover = None;
+        self.file_status_popover = false;
         self.query.update(cx, |e, cx| e.cancel_composition(cx));
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
         self.sync_documents(cx);
@@ -1049,7 +1111,7 @@ impl NotesApp {
         cx.notify();
     }
     fn matching_notes(&self, query: &str, deleted: bool) -> Vec<&crate::storage::Note> {
-        let mut notes = self.library.search(query, deleted);
+        let mut notes = self.library.search(query, deleted, self.path.as_deref());
         if !deleted {
             notes.sort_by_key(|note| note.id != self.library.active_id);
         }
@@ -1079,9 +1141,10 @@ impl NotesApp {
             self.sessions.remove(id);
             self.ensure_session(window, cx);
             let query = self.query.read(cx).text().to_owned();
+            let root = self.path.clone();
             self.selected = self.selected.min(
                 self.library
-                    .search(query.trim(), false)
+                    .search(query.trim(), false, root.as_deref())
                     .len()
                     .saturating_sub(1),
             );
@@ -1137,7 +1200,11 @@ impl NotesApp {
         self.ensure_session(window, cx);
         self.selected = self.selected.min(
             self.library
-                .search(self.query.read(cx).text().trim(), true)
+                .search(
+                    self.query.read(cx).text().trim(),
+                    true,
+                    self.path.as_deref(),
+                )
                 .len()
                 .saturating_sub(1),
         );
@@ -1157,7 +1224,7 @@ impl NotesApp {
     fn empty_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ids: Vec<String> = self
             .library
-            .search("", true)
+            .search("", true, None)
             .iter()
             .map(|note| note.id.clone())
             .collect();
@@ -1193,7 +1260,7 @@ impl NotesApp {
             self.changed(cx);
             self.selected = self.selected.min(
                 self.library
-                    .search(self.query.read(cx).text(), true)
+                    .search(self.query.read(cx).text(), true, self.path.as_deref())
                     .len()
                     .saturating_sub(1),
             );
@@ -1508,8 +1575,9 @@ impl NotesApp {
         snapshot.document = self.editor().read(cx).committed_document().clone();
         let document = match self.persistence.as_ref().unwrap().markdown(snapshot) {
             Ok(document) => document,
+            // Nothing was written, so this is not the save banner's business.
             Err(error) => {
-                self.error = Some(error);
+                self.queue_notice(format!("Could not prepare the export: {error}"));
                 cx.notify();
                 return;
             }
@@ -1543,7 +1611,7 @@ impl NotesApp {
         })
         .detach();
     }
-    fn import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_markdown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -1560,6 +1628,83 @@ impl NotesApp {
         .detach();
     }
 
+    /// Take a drop apart and give each kind of path the handler it belongs to. A
+    /// folder replaces everything that is open, so it is asked about first, and is
+    /// ignored when the drop does not clearly mean one folder.
+    fn drop_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let dropped = classify_drop(&paths, |path| path.is_dir());
+        // A folder replaces everything that is open, so it is only taken when the
+        // drop says nothing else.
+        let folder = (dropped.folders.len() == 1
+            && dropped.images.is_empty()
+            && dropped.markdown.is_empty())
+        .then(|| dropped.folders[0].clone());
+        if folder.is_none() && !dropped.folders.is_empty() {
+            self.queue_notice(
+                "Drop one folder on its own to open it; folders were left alone.".to_owned(),
+            );
+        }
+        if dropped.skipped > 0 {
+            self.queue_notice(format!(
+                "Skipped {} {} Markraft cannot open.",
+                dropped.skipped,
+                if dropped.skipped == 1 {
+                    "file"
+                } else {
+                    "files"
+                }
+            ));
+        }
+        if !dropped.images.is_empty() {
+            if self.panel == Panel::Editor && self.persistence.is_some() {
+                self.insert_assets(
+                    dropped
+                        .images
+                        .into_iter()
+                        .map(assets::Asset::File)
+                        .collect(),
+                    window,
+                    cx,
+                );
+            } else {
+                self.queue_notice(
+                    "Open a note before dropping images; they are inserted where the caret is."
+                        .to_owned(),
+                );
+            }
+        }
+        if !dropped.markdown.is_empty() {
+            self.open_paths(dropped.markdown, window, cx);
+        }
+        if let Some(folder) = folder {
+            self.confirm_folder(folder, window, cx);
+        }
+    }
+
+    /// Opening a folder puts every other note away, so it is a question rather than
+    /// something a stray drop can do on its own.
+    fn confirm_folder(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let name = folder
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| folder.display().to_string());
+        let answer = window.prompt(
+            PromptLevel::Info,
+            &format!("Switch to the folder “{name}”?"),
+            Some("Markraft shows one folder at a time. Nothing in either folder is moved or changed."),
+            &["Cancel", "Switch"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(1) {
+                let _ = cx.update(|window, cx| {
+                    this.update(cx, |this, cx| this.open_folder(folder, window, cx))
+                });
+            }
+        })
+        .detach();
+    }
+
     fn open_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_documents(cx);
         for path in paths {
@@ -1567,6 +1712,10 @@ impl NotesApp {
                 self.open_folder(path, window, cx);
                 continue;
             }
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
             let result = if let Some(persistence) = &self.persistence {
                 persistence.open_file(path).map(|note| {
                     let id = note.id.clone();
@@ -1586,8 +1735,10 @@ impl NotesApp {
                     self.session_order.clear();
                 })
             };
+            // Failing to open a file says nothing about saving, so it is a sentence
+            // rather than the save banner — and each file gets its own.
             if let Err(error) = result {
-                self.error = Some(error);
+                self.queue_notice(format!("Could not open “{name}”: {error}"));
             }
         }
         self.ensure_session(window, cx);
@@ -1612,16 +1763,38 @@ impl NotesApp {
         }
     }
 
+    /// How a save failure names the notes that are conflicted, so the lines about
+    /// them can be told from the rest of the same failure.
+    fn conflict_names(&self) -> Vec<String> {
+        self.library
+            .notes
+            .iter()
+            .filter(|note| note.conflicted)
+            .map(|note| format!("“{}”", note.title()))
+            .collect()
+    }
+
     fn update_conflicts(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
         for id in ids {
             if let Some(note) = self.library.notes.iter_mut().find(|note| note.id == id) {
                 note.conflicted = true;
             }
         }
-        if self.library.active_note().conflicted {
-            self.error = None;
+        // A note that has just become conflicted now explains its own failed write,
+        // so the banner drops that line — and keeps every other one.
+        if let Some(error) = self.error.take() {
+            self.error = unexplained_error(&error, &self.conflict_names());
         }
         cx.notify();
+    }
+
+    /// Bring the conflict dialog back for the active note. ⌘S, the footer indicator
+    /// and the command all arrive here, so a note that was answered "Not Now" can be
+    /// asked again from wherever the user looks for it.
+    fn reopen_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.library.active_id.clone();
+        self.conflict_prompted.remove(&id);
+        self.prompt_conflict(window, cx);
     }
 
     fn prompt_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1630,12 +1803,16 @@ impl NotesApp {
             return;
         }
         let id = note.id.clone();
+        let subject = conflict_subject(note);
         self.conflict_prompted.insert(id.clone());
         self.conflict_dialog = true;
         let answer = window.prompt(
             PromptLevel::Warning,
-            "File changed externally",
-            Some("Keep your edits or load the latest version."),
+            &format!("“{subject}” was changed by another app"),
+            Some(
+                "Load Changes replaces what you see with the version on disk. \
+                 Your edits are kept as a recovery copy either way.",
+            ),
             &["Not Now", "Load Changes"],
             cx,
         );
@@ -1675,8 +1852,10 @@ impl NotesApp {
                 self.changed(cx);
                 self.focus_editor(window, cx);
             }
+            // The note stays conflicted and its indicator keeps saying so, so this is
+            // one sentence about a failed load rather than a standing save banner.
             Err(error) => {
-                self.error = Some(error);
+                self.queue_notice(format!("Could not load the version on disk: {error}"));
                 cx.notify();
             }
         }
@@ -1704,14 +1883,16 @@ impl NotesApp {
                     .and_then(|(root, path)| {
                         path.strip_prefix(root)
                             .map(ToOwned::to_owned)
-                            .map_err(|_| "Choose a folder inside the current workspace.".to_owned())
+                            .map_err(|_| "Choose a folder inside the notes folder.".to_owned())
                     });
                 let _ = this.update(cx, |this, cx| match relative {
                     Ok(relative) if this.path.as_ref() == Some(&root) => {
                         this.library.workspace.new_note_directory = relative;
                         this.changed(cx);
                     }
-                    Ok(_) => this.inform("The workspace changed; choose the location again.", cx),
+                    Ok(_) => {
+                        this.inform("The notes folder changed; choose the location again.", cx)
+                    }
                     Err(error) => this.inform(error, cx),
                 });
             }
@@ -1741,7 +1922,7 @@ impl NotesApp {
                     .and_then(|(root, path)| {
                         path.strip_prefix(root)
                             .map(ToOwned::to_owned)
-                            .map_err(|_| "Choose a folder inside the workspace.".to_owned())
+                            .map_err(|_| "Choose a folder inside the notes folder.".to_owned())
                     });
                 let _ = this.update(cx, |this, cx| match relative {
                     Ok(relative) if this.path.as_ref() == Some(&root) => {
@@ -1749,7 +1930,9 @@ impl NotesApp {
                             crate::storage::AttachmentPolicy::WorkspaceFolder(relative);
                         this.changed(cx);
                     }
-                    Ok(_) => this.inform("The workspace changed; choose the location again.", cx),
+                    Ok(_) => {
+                        this.inform("The notes folder changed; choose the location again.", cx)
+                    }
                     Err(error) => this.inform(error, cx),
                 });
             }
@@ -1767,49 +1950,45 @@ impl NotesApp {
             return;
         }
         if self.library.active_note().read_only.is_some() || self.library.active_note().conflicted {
-            self.inform(
-                "Resolve the file's read-only or conflict state before inserting images.",
-                cx,
+            self.queue_notice(
+                "Resolve the file's read-only or conflict state before inserting images."
+                    .to_owned(),
             );
             return;
         }
-        // Capture document and selection before any prompt or asynchronous copy.
+        // The note must be on disk before an image can be placed beside it.
         let id = self.library.active_id.clone();
-        let document = self.editor().read(cx).committed_document().clone();
-        let selection = self.editor().read(cx).state().selection().clone();
         if !self.flush(cx) {
             return;
         }
+        // In a folder, that flush is what files a new note, so the path it was given
+        // arrives with these. Only a note the store had nothing to write — one that
+        // is still empty — comes back without one.
         if let Some(persistence) = &self.persistence
             && let Ok(paths) = persistence.paths()
         {
             self.update_paths(paths, cx);
         }
         let Some(path) = self.library.active_note().path.clone() else {
-            let directory = self
-                .path
-                .as_ref()
-                .map(|root| root.join(&self.library.workspace.new_note_directory))
-                .unwrap_or_default();
-            let prompt = cx.prompt_for_new_path(&directory, Some("Untitled.md"));
-            cx.spawn_in(window, async move |this, cx| {
-                if let Ok(Ok(Some(path))) = prompt.await {
-                    let _ = cx.update(|window, cx| this.update(cx, |this, cx| {
-                        if this.library.active_id != id || this.editor().read(cx).committed_document() != &document { return; }
-                        if path.exists() { this.inform("Choose a new Markdown filename; the existing file was not changed.", cx); return; }
-                        let parent = path.parent().map(ToOwned::to_owned);
-                        if let Some(note) = this.library.notes.iter_mut().find(|note| note.id == id) { note.path = Some(path); }
-                        this.editor().update(cx, |editor, cx| editor.set_image_base(parent, cx));
-                        this.insert_assets(assets, window, cx);
-                    }));
-                }
-            }).detach();
+            // The save panel has no room to say why it opened, so the reason goes
+            // before it rather than into it.
+            self.queue_notice(
+                "Save this note first — images are stored next to its file.".to_owned(),
+            );
+            self.prompt_for_note_path(window, cx, move |this, window, cx| {
+                this.insert_assets(assets, window, cx);
+            });
             return;
         };
         let root = self
             .path
             .clone()
             .or_else(|| path.parent().map(ToOwned::to_owned))
+            .unwrap_or_default();
+        // Named in the one notice that cannot point at the open note any more.
+        let beside = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         let policy = self.library.workspace.attachments.clone();
         let journal = self
@@ -1818,32 +1997,213 @@ impl NotesApp {
             .unwrap_or(std::path::Path::new("."))
             .join("image-imports");
         cx.spawn_in(window, async move |this, cx| {
-            let valid = this.update(cx, |this, cx| {
-                this.library.active_id == id && this.editor().read(cx).committed_document() == &document
-                    && this.editor().read(cx).state().selection() == &selection
-            }).unwrap_or(false);
-            if !valid { return; }
-            let result = cx.background_executor().spawn(async move { assets::insert(assets, &path, &root, &policy, &journal) }).await;
+            // The copy belongs to the note it was started in; where the caret is by
+            // the time it finishes is the user's business, not a reason to drop it.
+            if !this
+                .update(cx, |this, _| this.library.active_id == id)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            let result = cx
+                .background_executor()
+                .spawn(async move { assets::insert(assets, &path, &root, &policy, &journal) })
+                .await;
             let _ = this.update(cx, |this, cx| {
-                if this.library.active_id != id || this.editor().read(cx).committed_document() != &document
-                    || this.editor().read(cx).state().selection() != &selection {
-                    this.inform("The note or selection changed. Copied images were kept; insert them again at the intended position.", cx); return;
-                }
-                match result {
-                    Ok(markdown) => {
-                        match markraft_commonmark::from_markdown_fragment(doc::schema(), &markdown) {
-                            Ok(slice) => {
-                                this.editor().update(cx, |editor, cx| { editor.run_command(&markraft_core::commands::replace_selection(slice), cx); });
-                            }
-                            Err(error) => this.inform(error.to_string(), cx),
-                        }
+                let inserted = match result {
+                    Ok(inserted) => inserted,
+                    Err(error) => {
+                        this.queue_notice(error);
+                        return;
                     }
-                    Err(error) => this.inform(error, cx),
+                };
+                // Anything that could not be inserted is already on disk, so the
+                // sentence has to end with where it is or the file is lost to them.
+                let kept =
+                    |what: &str| format!("{what} The images are in {}.", inserted.urls.join(", "));
+                let note = this.library.active_note();
+                if this.library.active_id != id || note.read_only.is_some() || note.conflicted {
+                    this.queue_notice(format!(
+                        "The note changed before the images could be added. They are in {}, beside “{beside}”.",
+                        inserted.urls.join(", ")
+                    ));
+                    return;
+                }
+                let slice = match markraft_commonmark::from_markdown_fragment(
+                    doc::schema(),
+                    &inserted.markdown,
+                ) {
+                    Ok(slice) => slice,
+                    Err(error) => {
+                        this.queue_notice(kept(&error.to_string()));
+                        return;
+                    }
+                };
+                // Typing during the copy only moves the caret; the images go where
+                // it is now.
+                let applied = this.editor().update(cx, |editor, cx| {
+                    editor.run_command(&markraft_core::commands::replace_selection(slice), cx)
+                });
+                if !applied {
+                    this.queue_notice(kept("This note would not take the images."));
                 }
             });
-        }).detach();
+        })
+        .detach();
     }
 }
+/// What to tell someone whose keystroke the source-preserving codec refused. Each
+/// case names the syntax that stood in the way and something they can do about it,
+/// because "not saved" on its own leaves nowhere to go.
+fn rejection_message(error: &markraft_commonmark::SourceError) -> String {
+    use markraft_commonmark::SourceError;
+    match error {
+        SourceError::ProtectedSpan => {
+            "Markraft leaves this Markdown exactly as written — a wiki link, a callout, math or \
+             a block anchor. Edit that part in another editor."
+        }
+        SourceError::ProtectedBlock => {
+            "This change would drop source Markraft cannot represent, such as a link reference \
+             definition. Edit this section in another editor."
+        }
+        SourceError::UnsupportedEdit => {
+            "Markraft could not write this change back without rewriting source it does not \
+             represent. Your text is still here; use Export Markdown… for a copy."
+        }
+    }
+    .to_owned()
+}
+
+/// What a drop is made of. Each kind has somewhere different to go, so a mixed drop
+/// is split rather than sent whole to whichever handler the first path suggested.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Dropped {
+    images: Vec<PathBuf>,
+    markdown: Vec<PathBuf>,
+    folders: Vec<PathBuf>,
+    /// How many paths Markraft has nothing to do with, so one sentence can name them.
+    skipped: usize,
+}
+
+/// Sort dropped paths by what Markraft can do with each. `is_folder` is passed in so
+/// this stays a pure function; the caller asks the file system.
+fn classify_drop(paths: &[PathBuf], is_folder: impl Fn(&std::path::Path) -> bool) -> Dropped {
+    let mut dropped = Dropped::default();
+    for path in paths {
+        let markdown = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown")
+            });
+        if is_folder(path) {
+            dropped.folders.push(path.clone());
+        } else if assets::is_image(path) {
+            dropped.images.push(path.clone());
+        } else if markdown {
+            dropped.markdown.push(path.clone());
+        } else {
+            dropped.skipped += 1;
+        }
+    }
+    dropped
+}
+
+/// Where a note's file is, as a Browse row says it: relative to the notes folder
+/// when there is one, and otherwise the absolute path with the home folder written
+/// the way the user would write it.
+fn note_location(
+    path: &std::path::Path,
+    root: Option<&std::path::Path>,
+    home: Option<&str>,
+) -> String {
+    if let Some(relative) = root.and_then(|root| path.strip_prefix(root).ok()) {
+        return relative.display().to_string();
+    }
+    let path = path.display().to_string();
+    match home.filter(|home| !home.is_empty()) {
+        Some(home) if path == home => "~".to_owned(),
+        Some(home) => match path.strip_prefix(&format!("{}/", home.trim_end_matches('/'))) {
+            Some(rest) => format!("~/{rest}"),
+            None => path,
+        },
+        None => path,
+    }
+}
+
+/// Shorten a location so a narrow row still ends in the file name, which is the part
+/// `truncate` would otherwise cut. The name and the folder holding it identify the
+/// note, so the folders above them give way first.
+///
+/// `truncate` still handles whatever does not fit; see [`location_budget`] for how
+/// much a row has.
+fn shorten_location(location: &str, budget: usize) -> String {
+    if location.chars().count() <= budget {
+        return location.to_owned();
+    }
+    let parts: Vec<_> = location.split('/').collect();
+    for first in 1..parts.len() {
+        let candidate = format!("…/{}", parts[first..].join("/"));
+        // The last pair is kept whatever it measures: there is nothing else to drop.
+        if candidate.chars().count() <= budget || first + 1 >= parts.len() {
+            return candidate;
+        }
+    }
+    location.to_owned()
+}
+
+/// How many characters of a row's second line are left for the location once the
+/// status in front of it has been written. The status varies from "Current" to
+/// "Edited yesterday", so a fixed share would cut the file name on the long ones and
+/// waste room on the short ones.
+fn location_budget(status: &str, current: bool, deleted: bool, selected: bool) -> usize {
+    let line = match (deleted, selected) {
+        (false, _) => LIVE_META_CHARS,
+        (true, false) => DELETED_META_CHARS,
+        (true, true) => DELETED_SELECTED_META_CHARS,
+    };
+    // " ·" and the gap after it, and the dot that marks the current note.
+    let taken = status.chars().count() + 3 + usize::from(current);
+    line.saturating_sub(taken)
+}
+
+/// Where inside the notes folder a setting points, written the way the user reads
+/// the folder itself: its own name, then the path under it.
+fn folder_label(root: &std::path::Path, relative: &std::path::Path) -> String {
+    let name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.display().to_string());
+    if relative.as_os_str().is_empty() {
+        name
+    } else {
+        format!("{name}/{}", relative.display())
+    }
+}
+
+/// What the conflict dialog calls the note: the file another app changed, or the
+/// note's own title while it has no file yet.
+fn conflict_subject(note: &crate::storage::Note) -> String {
+    note.path
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| note.title())
+}
+
+/// The part of a save failure that nothing else on screen accounts for. The store
+/// reports one line per note it could not write and names each in quotes; a
+/// conflicted note already says so in the footer and in the dialog its indicator
+/// reopens, so repeating its line in the red banner adds nothing. Every other line
+/// has nowhere else to appear and is kept.
+fn unexplained_error(error: &str, conflicted: &[String]) -> Option<String> {
+    let rest: Vec<_> = error
+        .lines()
+        .filter(|line| !conflicted.iter().any(|name| line.contains(name.as_str())))
+        .collect();
+    (!rest.is_empty()).then(|| rest.join("\n"))
+}
+
 /// Heights of the toolbar and footer, which float over the top and bottom of the note.
 const TOOLBAR_HEIGHT: Pixels = px(52.);
 const FOOTER_HEIGHT: Pixels = px(44.);
@@ -1851,6 +2211,17 @@ const FOOTER_HEIGHT: Pixels = px(44.);
 const KEY_PRESENCE: Duration = Duration::from_millis(2500);
 /// A queued notice is a sentence, not an acknowledgment, so it is given time to read.
 const READING_NOTICE: Duration = Duration::from_secs(8);
+/// Characters a live Browse row's second line holds at 12px. The card is a fixed
+/// width and every live row keeps 60px clear for its buttons, which leaves about
+/// 226px; measured on a real run the line averages 6px a character.
+const LIVE_META_CHARS: usize = 38;
+/// The same line in Recently Deleted, whose buttons sit beside it only while the row
+/// is selected and then take 202px of it.
+const DELETED_META_CHARS: usize = 46;
+const DELETED_SELECTED_META_CHARS: usize = 12;
+/// How long the file status indicator stays lit after a keystroke the file refused.
+/// Long enough to be seen without following the typing that provoked it.
+const FILE_STATUS_FLASH: Duration = Duration::from_millis(900);
 fn notes_style(dark: bool) -> EditorStyle {
     let mut style = if dark {
         EditorStyle::notes_dark()
@@ -1893,7 +2264,7 @@ pub fn bind_app_keys(cx: &mut App) {
         KeyBinding::new("cmd-,", Settings, Some("MarkraftApp")),
         KeyBinding::new("cmd-l", Link, Some("MarkraftApp")),
         KeyBinding::new("cmd-shift-e", Export, Some("MarkraftApp")),
-        KeyBinding::new("cmd-o", Import, Some("MarkraftApp")),
+        KeyBinding::new("cmd-o", OpenMarkdown, Some("MarkraftApp")),
     ]);
     cx.set_menus([
         Menu::new("Markraft").items([
@@ -1907,7 +2278,7 @@ pub fn bind_app_keys(cx: &mut App) {
             MenuItem::action("New Note", NewNote),
             MenuItem::action("Browse Notes", Browse),
             MenuItem::action("Save Now", Save),
-            MenuItem::action("Open Markdown…", Import),
+            MenuItem::action("Open Markdown…", OpenMarkdown),
             MenuItem::action("Export Markdown…", Export),
         ]),
         Menu::new("Edit").items([
@@ -1922,4 +2293,194 @@ pub fn bind_app_keys(cx: &mut App) {
             MenuItem::action("Select All", markraft_gpui::SelectAll),
         ]),
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    // Not a glob: `gpui::prelude` carries a `test` attribute of its own, and these
+    // are ordinary unit tests.
+    use super::{
+        classify_drop, conflict_subject, folder_label, location_budget, note_location,
+        rejection_message, shorten_location, unexplained_error,
+    };
+    use crate::{doc, storage::Library};
+    use std::{
+        collections::HashSet,
+        path::{Path, PathBuf},
+    };
+
+    fn note(markdown: &str) -> crate::storage::Note {
+        let mut library = Library::default();
+        let id = library.new_note(doc::from_markdown(markdown));
+        library.note(&id).unwrap().clone()
+    }
+
+    #[test]
+    fn a_conflict_names_the_file_and_falls_back_to_the_title() {
+        let mut note = note("# Meeting\n\nnotes");
+        assert_eq!(conflict_subject(&note), "Meeting");
+        note.path = Some(PathBuf::from("/tmp/notes/2024-05 Meeting.md"));
+        assert_eq!(conflict_subject(&note), "2024-05 Meeting.md");
+    }
+
+    #[test]
+    fn every_refusal_says_which_syntax_stood_in_the_way() {
+        use markraft_commonmark::SourceError;
+        let messages: Vec<_> = [
+            SourceError::ProtectedSpan,
+            SourceError::ProtectedBlock,
+            SourceError::UnsupportedEdit,
+        ]
+        .iter()
+        .map(rejection_message)
+        .collect();
+        assert_eq!(
+            messages.iter().collect::<HashSet<_>>().len(),
+            messages.len(),
+            "each case needs its own sentence: {messages:?}"
+        );
+        assert!(messages[0].contains("wiki link"), "{}", messages[0]);
+        assert!(
+            messages[1].contains("link reference definition"),
+            "{}",
+            messages[1]
+        );
+    }
+
+    #[test]
+    fn a_drop_is_split_by_what_each_path_is_for() {
+        let paths = [
+            "/notes/photo.PNG",
+            "/notes/Readme.md",
+            "/notes/deep",
+            "/notes/archive.zip",
+            "/notes/other.markdown",
+            "/notes/notes.txt",
+        ]
+        .map(PathBuf::from);
+        let dropped = classify_drop(&paths, |path| path.ends_with("deep"));
+        assert_eq!(dropped.images, [PathBuf::from("/notes/photo.PNG")]);
+        assert_eq!(
+            dropped.markdown,
+            [
+                PathBuf::from("/notes/Readme.md"),
+                PathBuf::from("/notes/other.markdown")
+            ]
+        );
+        assert_eq!(dropped.folders, [PathBuf::from("/notes/deep")]);
+        assert_eq!(dropped.skipped, 2);
+        // A folder wins over its name looking like anything else.
+        let folder = [PathBuf::from("/notes/pictures.md")];
+        assert_eq!(classify_drop(&folder, |_| true).folders, folder);
+        assert!(classify_drop(&[], |_| false) == super::Dropped::default());
+    }
+
+    #[test]
+    fn a_longer_status_leaves_the_location_less_room() {
+        let current = location_budget("Current", true, false, false);
+        let today = location_budget("Edited today", false, false, true);
+        let yesterday = location_budget("Edited yesterday", false, false, false);
+        assert!(
+            current > today && today > yesterday,
+            "{current} {today} {yesterday}"
+        );
+        // Selection does not move a live row's text: its buttons' room is always kept.
+        assert_eq!(today, location_budget("Edited today", false, false, false));
+        // A selected deleted row gives the line to its buttons, and never underflows.
+        assert_eq!(location_budget("Deleted yesterday", false, true, true), 0);
+        assert!(location_budget("Deleted today", false, true, false) > today);
+    }
+
+    #[test]
+    fn a_narrow_row_keeps_the_file_name_and_the_folder_around_it() {
+        // Short enough already: nothing is elided.
+        assert_eq!(shorten_location("Inbox/Meeting.md", 24), "Inbox/Meeting.md");
+        // The folders above the last one give way first, one at a time.
+        assert_eq!(
+            shorten_location("Work/Clients/Acme/Q3/Meeting notes.md", 24),
+            "…/Q3/Meeting notes.md"
+        );
+        assert_eq!(
+            shorten_location("Work/Clients/Acme/A very long meeting name.md", 24),
+            "…/A very long meeting name.md"
+        );
+        // A bare name has nothing to drop, so it is left to `truncate`.
+        let long = "an extremely long file name that will not fit.md";
+        assert_eq!(shorten_location(long, 24), long);
+    }
+
+    #[test]
+    fn a_location_is_relative_to_the_folder_or_written_from_home() {
+        let root = PathBuf::from("/Users/someone/Notes");
+        assert_eq!(
+            note_location(
+                &root.join("Inbox/A.md"),
+                Some(&root),
+                Some("/Users/someone")
+            ),
+            "Inbox/A.md"
+        );
+        // Outside any folder the home directory is written the way it is typed.
+        assert_eq!(
+            note_location(
+                Path::new("/Users/someone/Desktop/A.md"),
+                None,
+                Some("/Users/someone")
+            ),
+            "~/Desktop/A.md"
+        );
+        assert_eq!(
+            note_location(Path::new("/tmp/A.md"), None, Some("/Users/someone")),
+            "/tmp/A.md"
+        );
+        // A prefix that is not a whole path component is not the home directory.
+        assert_eq!(
+            note_location(
+                Path::new("/Users/someone2/A.md"),
+                None,
+                Some("/Users/someone")
+            ),
+            "/Users/someone2/A.md"
+        );
+        assert_eq!(
+            note_location(Path::new("/tmp/A.md"), None, None),
+            "/tmp/A.md"
+        );
+    }
+
+    #[test]
+    fn a_placement_reads_as_the_folder_the_user_opened() {
+        let root = Path::new("/Users/someone/Documents/Notes");
+        assert_eq!(folder_label(root, Path::new("")), "Notes");
+        assert_eq!(
+            folder_label(root, Path::new("Inbox/Daily")),
+            "Notes/Inbox/Daily"
+        );
+    }
+
+    #[test]
+    fn a_conflicted_note_hides_only_its_own_line_of_a_save_failure() {
+        let conflicted = ["“Meeting”".to_owned()];
+        assert_eq!(
+            unexplained_error("“Meeting” changed on disk. Resolve it.", &conflicted),
+            None
+        );
+        assert_eq!(
+            unexplained_error(
+                "“Meeting” changed on disk. Resolve it.\nNotes is read-only",
+                &conflicted
+            )
+            .as_deref(),
+            Some("Notes is read-only")
+        );
+        // Nothing on screen explains a failure that names no conflicted note.
+        assert_eq!(
+            unexplained_error("The notes folder could not be opened.", &conflicted).as_deref(),
+            Some("The notes folder could not be opened.")
+        );
+        assert_eq!(
+            unexplained_error("“Meeting” changed on disk.", &[]).as_deref(),
+            Some("“Meeting” changed on disk.")
+        );
+    }
 }
