@@ -14,13 +14,19 @@
 //!
 //! # What this crate promises
 //!
-//! **Semantic fidelity, not byte fidelity.** A document that survives a round
+//! **Canonical codecs provide semantic fidelity, not byte fidelity.** A document that survives a round
 //! trip renders the same HTML; it does not come back as the same source text.
 //! Headings become ATX, code blocks become fenced, reference links become
 //! inline links, an autolink becomes the bare URL GFM reads back; soft breaks
 //! preserve whitespace semantics around raw HTML. Inline HTML a reader shows
 //! as a link, an image or a line break is read as one and written in Markdown:
 //! `<a href="u">x</a>` comes back as `[x](u)`.
+//!
+//! [`SourceDocument`] is the separate persistence codec for editing existing
+//! files. It retains original bytes, front matter and parser trivia, applies
+//! validated local patches, and refuses edits it cannot safely map to source.
+//! The normalization rules below describe the canonical codecs, not that
+//! source-preserving save path.
 //!
 //! **Nothing is silently lost.** Every construct either has a node type, or is
 //! kept in a `raw_block` or `raw_inline` primitive. A `raw_block` is a
@@ -120,6 +126,7 @@ mod preset;
 pub mod rules;
 pub mod schema;
 pub mod serialize;
+pub mod source;
 pub mod table;
 mod text;
 
@@ -145,6 +152,7 @@ pub use schema::{commonmark_schema, commonmark_schema_spec};
 pub use serialize::{
     MarkRule, MarkRules, MarkTarget, MarkdownSerializer, NodeRule, NodeRules, SerializerState,
 };
+pub use source::{SourceDocument, SourceError};
 pub use text::{slice_to_plain_text, to_plain_text};
 
 /// Parse `source` into a document on the CommonMark schema.
