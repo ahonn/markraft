@@ -166,6 +166,8 @@ struct InlineAtom {
     /// A decoded image drawn in place of the pill, at the size it was measured
     /// for.
     image: Option<(Arc<RenderImage>, Size<Pixels>)>,
+    /// The pill stands for a note rather than a picture, so it wears a page.
+    note: bool,
 }
 
 /// Where a line's display text holds more characters than the projection does.
@@ -1491,6 +1493,7 @@ fn place_atoms(layout: &mut LayoutLine, pending: Vec<PendingAtom>) {
             visual_row: ((slot.origin.y - layout.origin.y) / layout.line_height).round() as usize,
             label: atom.label,
             image: atom.image,
+            note: atom.note,
         });
     }
 }
@@ -1532,6 +1535,7 @@ struct PendingAtom {
     chars: Range<usize>,
     label: Rc<ShapedLine>,
     image: Option<(Arc<RenderImage>, Size<Pixels>)>,
+    note: bool,
 }
 
 fn display_text(
@@ -1590,6 +1594,7 @@ fn display_text(
                     }
                     atoms.push(PendingAtom {
                         chars: display..display + count,
+                        note: atom.note,
                         label: atom.label,
                         image: atom.image,
                     });
@@ -1653,6 +1658,9 @@ struct Atom {
     image: Option<(Arc<RenderImage>, Size<Pixels>)>,
     /// A wiki link leading nowhere; see [`Widening::broken`].
     broken: bool,
+    /// An `![[…]]` whose target is a note in the host's index rather than a file
+    /// beside it. The note is not unfolded here, so the pill stands for it.
+    note: bool,
 }
 
 /// A node's attribute, trimmed, or the empty string where it has none.
@@ -1767,8 +1775,19 @@ fn atom_of(
     } = *input;
     let (shape, original) = atom_label(types, node)?;
     let picture = picture_source(types, node);
+    // `![[…]]` is written for a file, but a note answers to the same spelling and
+    // the host's index is what knows which this is. Reporting a missing picture
+    // for a note that is plainly there tells the reader something untrue.
+    let embed = Some(node.type_id()) == types.wiki_link && crate::wiki::wiki_link_embed(node);
+    let note = embed && wiki.is_some_and(|resolves| resolves(attr(node, "target")));
     let text = match picture {
+        Some(_) if note => format!("Embedded note: {original}"),
         Some(source) => match images.load(source) {
+            // `![[…]]` never said the target was a picture, so when nothing of
+            // that name is there, neither did we.
+            Err(crate::images::ImageError::Missing) if embed => {
+                format!("Embed not found: {original}")
+            }
             Err(error) => format!("{}: {original}", error.label()),
             Ok(_) if !alone => format!("Inline image: {original}"),
             Ok(_) => original.to_owned(),
@@ -1777,7 +1796,7 @@ fn atom_of(
     };
     // A local file the note can read is drawn for real where it has the line to
     // itself; the placeholder is still built, and stands in wherever it is not.
-    let drawn = alone
+    let drawn = (alone && !note)
         .then_some(picture)
         .flatten()
         .and_then(|source| drawn_image(images, source, column));
@@ -1840,6 +1859,7 @@ fn atom_of(
         label,
         image: drawn,
         broken,
+        note,
     })
 }
 
@@ -3104,7 +3124,8 @@ fn paint_atom(
     window.paint_quad(fill(bounds, style.inline_code_background).corner_radii(style.code_radius));
     let icon = PILL_ICON + PILL_ICON_GAP;
     let left = bounds.origin.x + (bounds.size.width - icon - atom.label.width).max(px(0.)) / 2.;
-    paint_picture(
+    let glyph = if atom.note { paint_page } else { paint_picture };
+    glyph(
         point(left, bounds.center().y - PILL_ICON * 0.5),
         style,
         window,
@@ -3140,6 +3161,33 @@ fn paint_picture(origin: Point<Pixels>, style: &EditorStyle, window: &mut Window
     frame.move_to(at(8., 3.5));
     frame.line_to(at(9.5, 3.5));
     if let Ok(path) = frame.build() {
+        window.paint_path(path, style.muted_text);
+    }
+}
+
+/// A page glyph: a sheet with a folded corner and two lines of writing, drawn at
+/// [`PILL_ICON`] square from `origin`. It stands where a picture glyph would, for
+/// an embed that names a note.
+fn paint_page(origin: Point<Pixels>, style: &EditorStyle, window: &mut Window) {
+    let unit = PILL_ICON / 12.;
+    let at = |x: f32, y: f32| origin + point(unit * x, unit * y);
+    let mut sheet = PathBuilder::stroke(px(1.1));
+    sheet.move_to(at(2.5, 1.));
+    sheet.line_to(at(7.5, 1.));
+    sheet.line_to(at(9.5, 3.));
+    sheet.line_to(at(9.5, 11.));
+    sheet.line_to(at(2.5, 11.));
+    sheet.line_to(at(2.5, 1.));
+    // The folded corner, which is what tells a sheet from a plain rectangle.
+    sheet.move_to(at(7.5, 1.));
+    sheet.line_to(at(7.5, 3.));
+    sheet.line_to(at(9.5, 3.));
+    // Two lines of writing, short enough to read as text at this size.
+    sheet.move_to(at(4.5, 6.));
+    sheet.line_to(at(7.5, 6.));
+    sheet.move_to(at(4.5, 8.5));
+    sheet.line_to(at(7.5, 8.5));
+    if let Ok(path) = sheet.build() {
         window.paint_path(path, style.muted_text);
     }
 }
