@@ -144,6 +144,40 @@ fn configure_metadata(info: &mut Dictionary, public_key: &str, mock: bool) -> Re
     // cargo-bundle generates a timestamp; Sparkle must compare release versions.
     info.insert("CFBundleVersion".into(), version.into());
     info.insert("LSUIElement".into(), true.into());
+    // Advertise Open With support without claiming to be the default editor.
+    let mut markdown = Dictionary::new();
+    markdown.insert("CFBundleTypeName".into(), "Markdown document".into());
+    markdown.insert("CFBundleTypeRole".into(), "Editor".into());
+    markdown.insert("LSHandlerRank".into(), "Alternate".into());
+    markdown.insert(
+        "LSItemContentTypes".into(),
+        Value::Array(vec!["net.daringfireball.markdown".into()]),
+    );
+    info.insert(
+        "CFBundleDocumentTypes".into(),
+        Value::Array(vec![markdown.into()]),
+    );
+    let mut tags = Dictionary::new();
+    tags.insert(
+        "public.filename-extension".into(),
+        Value::Array(vec!["md".into(), "markdown".into()]),
+    );
+    tags.insert("public.mime-type".into(), "text/markdown".into());
+    let mut markdown_type = Dictionary::new();
+    markdown_type.insert(
+        "UTTypeIdentifier".into(),
+        "net.daringfireball.markdown".into(),
+    );
+    markdown_type.insert("UTTypeDescription".into(), "Markdown document".into());
+    markdown_type.insert(
+        "UTTypeConformsTo".into(),
+        Value::Array(vec!["public.plain-text".into()]),
+    );
+    markdown_type.insert("UTTypeTagSpecification".into(), tags.into());
+    info.insert(
+        "UTImportedTypeDeclarations".into(),
+        Value::Array(vec![markdown_type.into()]),
+    );
     info.insert("SUEnableAutomaticChecks".into(), (!mock).into());
     info.insert("SUAllowsAutomaticUpdates".into(), false.into());
     info.insert("SUAutomaticallyUpdate".into(), false.into());
@@ -252,6 +286,32 @@ mod tests {
         info.insert("CFBundleShortVersionString".into(), version.into());
         info.insert("CFBundleVersion".into(), "timestamp".into());
         info
+    }
+
+    #[test]
+    fn markdown_registration_offers_open_with_without_claiming_default_handler() {
+        let mut info = metadata("0.2.1");
+        configure_metadata(&mut info, "", false).unwrap();
+        let document = info["CFBundleDocumentTypes"].as_array().unwrap()[0]
+            .as_dictionary()
+            .unwrap();
+        assert_eq!(document["CFBundleTypeRole"].as_string(), Some("Editor"));
+        assert_eq!(document["LSHandlerRank"].as_string(), Some("Alternate"));
+        assert_eq!(
+            document["LSItemContentTypes"].as_array().unwrap()[0].as_string(),
+            Some("net.daringfireball.markdown")
+        );
+        assert!(!info.contains_key("UTExportedTypeDeclarations"));
+        let declaration = info["UTImportedTypeDeclarations"].as_array().unwrap()[0]
+            .as_dictionary()
+            .unwrap();
+        let tags = declaration["UTTypeTagSpecification"]
+            .as_dictionary()
+            .unwrap();
+        assert_eq!(
+            tags["public.filename-extension"].as_array().unwrap(),
+            &vec![Value::String("md".into()), Value::String("markdown".into())]
+        );
     }
 
     #[test]

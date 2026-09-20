@@ -38,9 +38,7 @@ impl Default for Preferences {
     }
 }
 
-/// One note. The library is only ever built from the notes folder or from the
-/// legacy import, so it carries no serde of its own: a document is a tree, and
-/// what is written to disk is the Markdown [`crate::vault`] encodes.
+/// A document and its local UI state. Paths never depend on the displayed title.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Note {
     pub id: String,
@@ -49,13 +47,10 @@ pub struct Note {
     pub updated_at: u64,
     pub deleted_at: Option<u64>,
     pub pinned: bool,
-    /// Front matter lines Markraft does not own, kept verbatim.
-    pub front_matter: Vec<String>,
-    /// The file this note was read from was not valid text, so what could not be
-    /// decoded now reads as `U+FFFD`. Writing the note makes that replacement
-    /// permanent, which is worth warning about before the first edit is saved.
-    /// It describes the file as it was read: a save does not clear it, a reload does.
-    pub lossy: bool,
+    /// Absolute location, independent of the displayed title.
+    pub path: Option<PathBuf>,
+    pub read_only: Option<String>,
+    pub conflicted: bool,
 }
 
 impl Note {
@@ -75,6 +70,7 @@ pub struct Library {
     pub active_id: String,
     pub notes: Vec<Note>,
     pub preferences: Preferences,
+    pub workspace: WorkspaceSettings,
 }
 
 impl Default for Library {
@@ -84,6 +80,7 @@ impl Default for Library {
             active_id: String::new(),
             notes: Vec::new(),
             preferences: Preferences::default(),
+            workspace: WorkspaceSettings::default(),
         };
         library.new_note(doc::empty());
         library
@@ -110,18 +107,12 @@ impl Library {
             updated_at: now,
             deleted_at: None,
             pinned: false,
-            front_matter: Vec::new(),
-            lossy: false,
+            path: None,
+            read_only: None,
+            conflicted: false,
         });
         self.active_id.clone_from(&id);
         id
-    }
-
-    /// Add a note without opening it.
-    pub fn keep_copy(&mut self, document: Node) {
-        let active = self.active_id.clone();
-        self.new_note(document);
-        self.active_id = active;
     }
 
     /// Take a note as another program left it on disk, replacing any note with its id.
@@ -202,7 +193,7 @@ impl Library {
         let Some(note) = self.notes.iter_mut().find(|note| note.id == id) else {
             return false;
         };
-        if note.deleted_at.is_some() || note.document == document {
+        if note.deleted_at.is_some() || note.read_only.is_some() || note.document == document {
             return false;
         }
         note.document = document;
@@ -284,16 +275,30 @@ pub(crate) fn timestamp() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// The default is assets beside the note, created only on insertion.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum AttachmentPolicy {
+    #[default]
+    Default,
+    WorkspaceFolder(PathBuf),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceSettings {
+    pub new_note_directory: PathBuf,
+    pub attachments: AttachmentPolicy,
+}
+
 /// Per-machine state kept outside the notes folder.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// The folder holding the notes; unset until the user has chosen one.
     pub notes_folder: Option<PathBuf>,
+    pub open_files: Vec<PathBuf>,
     pub active_id: String,
     pub preferences: Preferences,
-    /// The single-file library of earlier versions has been imported.
-    pub legacy_imported: bool,
     /// Where the unreadable settings file was kept when these settings had to
     /// fall back to the defaults. It belongs to this launch, not to the file, so
     /// it is never written back.

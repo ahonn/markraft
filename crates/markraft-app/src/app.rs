@@ -1,3 +1,4 @@
+mod assets;
 mod ui;
 
 use crate::doc;
@@ -120,8 +121,8 @@ pub struct NotesApp {
     /// Things the notes folder gave the user to read. They are sentences rather than
     /// acknowledgments, so they wait their turn instead of replacing one another.
     pending_notices: VecDeque<String>,
-    /// Notes already warned about being read from a file that is not valid text.
-    lossy_warned: HashSet<String>,
+    conflict_prompted: HashSet<String>,
+    conflict_dialog: bool,
     show_words: bool,
     format_toolbar: bool,
     format_menu: Option<FormatMenu>,
@@ -160,6 +161,7 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let path = path.map(|path| path.canonicalize().unwrap_or(path));
         let dark = library.preferences.dark_mode.unwrap_or(matches!(
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
@@ -230,6 +232,11 @@ impl NotesApp {
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
+            if this.window_active
+                && let Some(persistence) = &this.persistence
+            {
+                persistence.refresh();
+            }
             cx.notify();
         });
         let quit = cx.on_app_quit(|this, cx| {
@@ -292,7 +299,8 @@ impl NotesApp {
             platform_error,
             notice: None,
             pending_notices: VecDeque::new(),
-            lossy_warned: HashSet::new(),
+            conflict_prompted: HashSet::new(),
+            conflict_dialog: false,
             chrome_focus: None,
             show_words: false,
             format_toolbar: false,
@@ -318,7 +326,7 @@ impl NotesApp {
         } else {
             window.focus(&app.panel_focus, cx);
         }
-        // Persist a newly created library and any one-time legacy import.
+        // Application preferences and drafts live outside the document folder.
         app.changed(cx);
         if let Some(error) = app.updater.take_startup_error() {
             app.queue_notice(error);
@@ -331,18 +339,6 @@ impl NotesApp {
     fn ensure_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.code_language_block = None;
         let id = self.library.active_id.clone();
-        // Once per note: what the file cost to read is worth knowing before the first
-        // save writes the replacements back over it.
-        if self
-            .library
-            .note(&id)
-            .is_some_and(|note| note.lossy && !self.lossy_warned.contains(&id))
-        {
-            self.lossy_warned.insert(id.clone());
-            self.queue_notice(
-                "This file was not valid text; saving replaces the unreadable parts.".to_owned(),
-            );
-        }
         self.session_order.retain(|entry| entry != &id);
         self.session_order.push_back(id.clone());
         while self.session_order.len() > 8 {
@@ -354,6 +350,28 @@ impl NotesApp {
             return;
         }
         let document = self.library.active_note().document.clone();
+        let note = self.library.active_note();
+        let image_base = note
+            .path
+            .as_ref()
+            .and_then(|path| path.parent().map(ToOwned::to_owned));
+        let protected = note.read_only.clone();
+        let source = note
+            .path
+            .as_ref()
+            .and(self.persistence.as_ref())
+            .map(|persistence| {
+                persistence.markdown(note.clone()).and_then(|text| {
+                    markraft_commonmark::SourceDocument::parse(doc::schema(), &text)
+                        .map_err(|error| error.to_string())
+                })
+            });
+        let image_root = source
+            .as_ref()
+            .and_then(|source| source.as_ref().ok())
+            .zip(note.path.as_ref())
+            .map(|(source, path)| assets::image_root(source.source(), path))
+            .unwrap_or(Ok(None));
         let style = notes_style(self.dark);
         let editor = cx.new(|cx| {
             EditorView::new(
@@ -365,7 +383,25 @@ impl NotesApp {
                 cx,
             )
             .with_style(style)
-            .with_image_base(self.path.clone())
+            .with_image_base(image_base)
+            .with_image_root(image_root)
+            .with_file_paste(true)
+            .with_document_guard(move |candidate| {
+                if let Some(reason) = &protected {
+                    return Err(format!("Read-only: {reason}"));
+                }
+                match &source {
+                    Some(Ok(source)) => source
+                        .render(doc::schema(), candidate)
+                        .map(|_| ())
+                        .map_err(|_| {
+                            "This edit would rewrite protected Markdown and was not applied."
+                                .to_owned()
+                        }),
+                    Some(Err(error)) => Err(format!("Cannot safely edit this file: {error}")),
+                    None => Ok(()),
+                }
+            })
             .with_placeholder("Start writing…")
         });
         // Only note editors get the menus; the host's query field gets no extension.
@@ -392,6 +428,12 @@ impl NotesApp {
             &editor,
             window,
             move |this, editor, event: &EditorEvent, window, cx| {
+                if let EditorEvent::FilesPasted(item) = event {
+                    if this.library.active_id == note_id {
+                        this.insert_assets(assets::from_clipboard(item.clone()), window, cx);
+                    }
+                    return;
+                }
                 if let EditorEvent::Extension { id, payload } = event {
                     if *id == markraft_vim::VIM {
                         this.vim_effect(&note_id, payload, cx);
@@ -469,8 +511,7 @@ impl NotesApp {
                 .set_document(id, session.editor.read(cx).committed_document().clone());
         }
     }
-    /// Take over what other programs changed in the notes folder. Edits made here that
-    /// had not reached the disk are never dropped: they continue as a separate note.
+    /// Reconcile external changes without creating files or reviving deleted paths.
     fn apply_external(
         &mut self,
         changes: Vec<External>,
@@ -484,6 +525,7 @@ impl NotesApp {
         for change in changes {
             let (External::Updated { note, .. } | External::Removed(note)) = &change;
             let id = note.id.clone();
+            self.conflict_prompted.remove(&id);
             let local = self.library.note(&id).cloned();
             match change {
                 External::Updated { previous, note } => {
@@ -492,17 +534,35 @@ impl NotesApp {
                         && local.document != note.document
                         && previous.is_none_or(|previous| previous.document != local.document)
                     {
-                        self.library.keep_copy(local.document);
+                        if let Some(persistence) = &self.persistence
+                            && let Err(error) = persistence.recover(local.clone())
+                        {
+                            self.error = Some(error);
+                        }
+                        let mut local = local;
+                        local.conflicted = true;
+                        self.library.adopt(local);
                         kept += 1;
+                        continue;
                     }
                     self.library.adopt(note);
                 }
-                // With unsaved edits the note stays, and is written to a new file.
                 External::Removed(note) => {
-                    if local.is_none_or(|local| local.document == note.document) {
+                    if local
+                        .as_ref()
+                        .is_none_or(|local| local.document == note.document)
+                    {
                         self.library.remove(&id);
-                    } else {
+                    } else if let Some(mut local) = local {
+                        if let Some(persistence) = &self.persistence
+                            && let Err(error) = persistence.recover(local.clone())
+                        {
+                            self.error = Some(error);
+                        }
+                        local.conflicted = true;
+                        self.library.adopt(local);
                         kept += 1;
+                        continue;
                     }
                 }
             }
@@ -520,9 +580,9 @@ impl NotesApp {
             persistence.acknowledge(ids);
         }
         if kept > 0 {
-            self.inform("Kept your unsaved edits as a separate note", cx);
             self.changed(cx);
         }
+        self.prompt_conflict(window, cx);
         cx.notify();
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -549,6 +609,16 @@ impl NotesApp {
                 self.dirty = true;
                 self.error = Some(e);
             }
+        }
+        if let Some(persistence) = &self.persistence
+            && let Ok(paths) = persistence.paths()
+        {
+            self.update_paths(paths, cx);
+        }
+        if let Some(persistence) = &self.persistence
+            && let Ok(ids) = persistence.conflicts()
+        {
+            self.update_conflicts(ids, cx);
         }
         cx.notify();
         !self.dirty
@@ -583,6 +653,13 @@ impl NotesApp {
         }
     }
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt_conflict(window, cx);
+        if let Some(error) = self
+            .editor()
+            .update(cx, |editor, _| editor.take_edit_error())
+        {
+            self.inform(error, cx);
+        }
         if self.panel == Panel::Editor {
             self.editor()
                 .update(cx, |editor, cx| editor.refresh_images(cx));
@@ -606,8 +683,11 @@ impl NotesApp {
             self.chrome_shown = chrome;
             cx.notify();
         }
-        if self.instance.requested_show() {
-            self.show(window, cx);
+        for request in self.instance.requests() {
+            match request {
+                crate::instance::Request::Show => self.show(window, cx),
+                crate::instance::Request::OpenPaths(paths) => self.open_paths(paths, window, cx),
+            }
         }
         let events = self
             .platform
@@ -645,16 +725,25 @@ impl NotesApp {
         for event in events {
             match event {
                 Event::Saved(saved) if saved.revision == self.revision => {
+                    self.update_paths(saved.paths, cx);
+                    self.update_conflicts(saved.conflicts, cx);
                     match saved.result {
                         Ok(()) => {
                             self.dirty = false;
                             self.error = None;
                         }
-                        Err(e) => self.error = Some(e),
+                        Err(e) => {
+                            if !self.library.active_note().conflicted {
+                                self.error = Some(e);
+                            }
+                        }
                     }
                     cx.notify();
                 }
-                Event::Saved(_) => {}
+                Event::Saved(saved) => {
+                    self.update_paths(saved.paths, cx);
+                    self.update_conflicts(saved.conflicts, cx);
+                }
                 Event::External(changes) => self.apply_external(changes, window, cx),
             }
         }
@@ -855,6 +944,46 @@ impl NotesApp {
         self.link_popover = None;
         self.query.update(cx, |e, cx| e.cancel_composition(cx));
         if self.persistence.is_none() {
+            self.choose_folder(window, cx);
+            return;
+        }
+        if self.path.is_none() {
+            let directory = self
+                .library
+                .active_note()
+                .path
+                .as_ref()
+                .and_then(|path| path.parent())
+                .map(ToOwned::to_owned)
+                .unwrap_or_default();
+            let prompt = cx.prompt_for_new_path(&directory, Some("Untitled.md"));
+            cx.spawn_in(window, async move |this, cx| {
+                if let Ok(Ok(Some(path))) = prompt.await {
+                    let _ = cx.update(|window, cx| {
+                        this.update(cx, |this, cx| {
+                            if path.exists() {
+                                this.inform(
+                                    "Choose a new filename; the existing file was not changed.",
+                                    cx,
+                                );
+                                return;
+                            }
+                            this.sync_documents(cx);
+                            let id = this.library.new_note(doc::empty());
+                            if let Some(note) =
+                                this.library.notes.iter_mut().find(|note| note.id == id)
+                            {
+                                note.path = Some(path);
+                            }
+                            this.ensure_session(window, cx);
+                            this.panel = Panel::Editor;
+                            this.focus_editor(window, cx);
+                            this.changed(cx);
+                        })
+                    });
+                }
+            })
+            .detach();
             return;
         }
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
@@ -1002,7 +1131,6 @@ impl NotesApp {
             self.library.remove(id);
             self.sessions.remove(id);
             self.session_order.retain(|entry| entry != id);
-            self.lossy_warned.remove(id);
         }
         self.confirm_purge = None;
         self.chrome_focus = None;
@@ -1072,9 +1200,9 @@ impl NotesApp {
             self.inform("Restored note", cx);
         }
     }
-    fn inform(&mut self, text: &str, cx: &mut Context<Self>) {
+    fn inform(&mut self, text: impl AsRef<str>, cx: &mut Context<Self>) {
         self.notice = Some(Notice {
-            text: text.into(),
+            text: text.as_ref().to_owned().into(),
             until: Instant::now() + Duration::from_secs(3),
             undo: None,
         });
@@ -1246,7 +1374,6 @@ impl NotesApp {
             |(mut store, library)| {
                 store
                     .update_settings(|settings| settings.notes_folder = Some(directory.clone()))?;
-                let library = store.import_legacy(library, &legacy_library(&self.settings_path));
                 Ok((store, library))
             },
         );
@@ -1256,7 +1383,7 @@ impl NotesApp {
                 if !reopening {
                     library.preferences = self.library.preferences.clone();
                 }
-                self.path = Some(directory);
+                self.path = Some(store.directory().to_owned());
                 self.library = library;
                 self.persistence = Some(Persistence::new(store));
                 self.sessions.clear();
@@ -1377,14 +1504,33 @@ impl NotesApp {
         let note = self.library.active_note();
         let title = note.title();
         let filename = format!("{}.md", title.replace(['/', ':'], "-"));
-        let document = doc::to_markdown(self.editor().read(cx).committed_document());
+        let mut snapshot = note.clone();
+        snapshot.document = self.editor().read(cx).committed_document().clone();
+        let document = match self.persistence.as_ref().unwrap().markdown(snapshot) {
+            Ok(document) => document,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
         let directory = self.path.clone().unwrap_or_default();
         let prompt = cx.prompt_for_new_path(&directory, Some(&filename));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = prompt.await {
                 let result = cx
                     .background_executor()
-                    .spawn(async move { std::fs::write(path, document).map_err(|e| e.to_string()) })
+                    .spawn(async move {
+                        use std::io::Write;
+                        let mut file = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(path)
+                            .map_err(|e| e.to_string())?;
+                        file.write_all(document.as_bytes())
+                            .and_then(|_| file.sync_all())
+                            .map_err(|e| e.to_string())
+                    })
                     .await;
                 let _ = this.update(cx, |this, cx| match result {
                     Ok(()) => this.inform("Exported Markdown", cx),
@@ -1398,59 +1544,304 @@ impl NotesApp {
         .detach();
     }
     fn import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.persistence.is_none() {
-            return;
-        }
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: true,
-            prompt: None,
+            prompt: Some("Open Markdown".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = prompt.await {
-                let result = cx
-                    .background_executor()
-                    .spawn(async move {
-                        paths
-                            .into_iter()
-                            .map(|path| {
-                                let text = std::fs::read_to_string(&path)
-                                    .map_err(|e| crate::vault::describe(&path, &e))?;
-                                // A `.json` file is a backup an earlier version
-                                // wrote; everything else is Markdown.
-                                if path.extension().is_some_and(|e| e == "json") {
-                                    crate::legacy::read_document(&text)
-                                } else {
-                                    Ok(doc::from_markdown(&text))
-                                }
-                            })
-                            .collect::<Result<Vec<_>, String>>()
-                    })
-                    .await;
                 let _ = cx.update(|window, cx| {
-                    this.update(cx, |this, cx| match result {
-                        Ok(documents) => {
-                            this.query.update(cx, |e, cx| e.cancel_composition(cx));
-                            this.editor().update(cx, |e, cx| e.cancel_composition(cx));
-                            this.sync_documents(cx);
-                            for doc in documents {
-                                this.library.new_note(doc);
-                            }
-                            this.ensure_session(window, cx);
-                            this.panel = Panel::Editor;
-                            this.focus_editor(window, cx);
-                            this.changed(cx);
-                        }
-                        Err(e) => {
-                            this.error = Some(e);
-                            cx.notify();
-                        }
-                    })
+                    this.update(cx, |this, cx| this.open_paths(paths, window, cx))
                 });
             }
         })
         .detach();
+    }
+
+    fn open_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_documents(cx);
+        for path in paths {
+            if path.is_dir() {
+                self.open_folder(path, window, cx);
+                continue;
+            }
+            let result = if let Some(persistence) = &self.persistence {
+                persistence.open_file(path).map(|note| {
+                    let id = note.id.clone();
+                    // An already-open dirty session must not be replaced by disk.
+                    if self.library.note(&id).is_none() {
+                        self.library.adopt(note);
+                    }
+                    self.library.select(&id);
+                })
+            } else {
+                Store::open_file(path, self.settings_path.clone()).map(|(store, mut library)| {
+                    library.preferences = self.library.preferences.clone();
+                    self.library = library;
+                    self.persistence = Some(Persistence::new(store));
+                    self.path = None;
+                    self.sessions.clear();
+                    self.session_order.clear();
+                })
+            };
+            if let Err(error) = result {
+                self.error = Some(error);
+            }
+        }
+        self.ensure_session(window, cx);
+        self.panel = Panel::Editor;
+        self.show(window, cx);
+        self.focus_editor(window, cx);
+        self.changed(cx);
+    }
+
+    fn update_paths(&mut self, paths: Vec<(String, PathBuf)>, cx: &mut Context<Self>) {
+        for (id, path) in paths {
+            if let Some(note) = self.library.notes.iter_mut().find(|note| note.id == id)
+                && note.path.as_ref() != Some(&path)
+            {
+                note.path = Some(path.clone());
+                if let Some(session) = self.sessions.get(&id) {
+                    session.editor.update(cx, |editor, cx| {
+                        editor.set_image_base(path.parent().map(ToOwned::to_owned), cx)
+                    });
+                }
+            }
+        }
+    }
+
+    fn update_conflicts(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+        for id in ids {
+            if let Some(note) = self.library.notes.iter_mut().find(|note| note.id == id) {
+                note.conflicted = true;
+            }
+        }
+        if self.library.active_note().conflicted {
+            self.error = None;
+        }
+        cx.notify();
+    }
+
+    fn prompt_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let note = self.library.active_note();
+        if !note.conflicted || self.conflict_dialog || self.conflict_prompted.contains(&note.id) {
+            return;
+        }
+        let id = note.id.clone();
+        self.conflict_prompted.insert(id.clone());
+        self.conflict_dialog = true;
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "File changed externally",
+            Some("Keep your edits or load the latest version."),
+            &["Not Now", "Load Changes"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let load = answer.await == Ok(1);
+            let _ = cx.update(|window, cx| {
+                this.update(cx, |this, cx| {
+                    this.conflict_dialog = false;
+                    if load && this.library.active_id == id {
+                        this.resolve_conflict(window, cx);
+                    }
+                    cx.notify();
+                })
+            });
+        })
+        .detach();
+    }
+
+    fn resolve_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_documents(cx);
+        let note = self.library.active_note().clone();
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
+        let result = persistence
+            .review_conflict(note.clone())
+            .and_then(|_| persistence.resolve_conflict(note.clone()));
+        match result {
+            Ok(result) => {
+                match result {
+                    Some(note) => self.library.adopt(note),
+                    None => self.library.remove(&note.id),
+                }
+                self.sessions.remove(&note.id);
+                self.ensure_session(window, cx);
+                self.error = None;
+                self.changed(cx);
+                self.focus_editor(window, cx);
+            }
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+            }
+        }
+    }
+
+    fn configure_new_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.path.clone() else {
+            self.inform("Open a folder to set a default location for new notes.", cx);
+            return;
+        };
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("New Notes Folder".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = prompt.await
+                && let Some(path) = paths.first()
+            {
+                let relative = root
+                    .canonicalize()
+                    .and_then(|root| path.canonicalize().map(|path| (root, path)))
+                    .map_err(|error| error.to_string())
+                    .and_then(|(root, path)| {
+                        path.strip_prefix(root)
+                            .map(ToOwned::to_owned)
+                            .map_err(|_| "Choose a folder inside the current workspace.".to_owned())
+                    });
+                let _ = this.update(cx, |this, cx| match relative {
+                    Ok(relative) if this.path.as_ref() == Some(&root) => {
+                        this.library.workspace.new_note_directory = relative;
+                        this.changed(cx);
+                    }
+                    Ok(_) => this.inform("The workspace changed; choose the location again.", cx),
+                    Err(error) => this.inform(error, cx),
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn configure_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.path.clone() else {
+            self.inform("Open a folder to set an image location.", cx);
+            return;
+        };
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Image Folder".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = prompt.await
+                && let Some(path) = paths.first()
+            {
+                let relative = root
+                    .canonicalize()
+                    .and_then(|root| path.canonicalize().map(|path| (root, path)))
+                    .map_err(|error| error.to_string())
+                    .and_then(|(root, path)| {
+                        path.strip_prefix(root)
+                            .map(ToOwned::to_owned)
+                            .map_err(|_| "Choose a folder inside the workspace.".to_owned())
+                    });
+                let _ = this.update(cx, |this, cx| match relative {
+                    Ok(relative) if this.path.as_ref() == Some(&root) => {
+                        this.library.workspace.attachments =
+                            crate::storage::AttachmentPolicy::WorkspaceFolder(relative);
+                        this.changed(cx);
+                    }
+                    Ok(_) => this.inform("The workspace changed; choose the location again.", cx),
+                    Err(error) => this.inform(error, cx),
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn insert_assets(
+        &mut self,
+        assets: Vec<assets::Asset>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if assets.is_empty() {
+            return;
+        }
+        if self.library.active_note().read_only.is_some() || self.library.active_note().conflicted {
+            self.inform(
+                "Resolve the file's read-only or conflict state before inserting images.",
+                cx,
+            );
+            return;
+        }
+        // Capture document and selection before any prompt or asynchronous copy.
+        let id = self.library.active_id.clone();
+        let document = self.editor().read(cx).committed_document().clone();
+        let selection = self.editor().read(cx).state().selection().clone();
+        if !self.flush(cx) {
+            return;
+        }
+        if let Some(persistence) = &self.persistence
+            && let Ok(paths) = persistence.paths()
+        {
+            self.update_paths(paths, cx);
+        }
+        let Some(path) = self.library.active_note().path.clone() else {
+            let directory = self
+                .path
+                .as_ref()
+                .map(|root| root.join(&self.library.workspace.new_note_directory))
+                .unwrap_or_default();
+            let prompt = cx.prompt_for_new_path(&directory, Some("Untitled.md"));
+            cx.spawn_in(window, async move |this, cx| {
+                if let Ok(Ok(Some(path))) = prompt.await {
+                    let _ = cx.update(|window, cx| this.update(cx, |this, cx| {
+                        if this.library.active_id != id || this.editor().read(cx).committed_document() != &document { return; }
+                        if path.exists() { this.inform("Choose a new Markdown filename; the existing file was not changed.", cx); return; }
+                        let parent = path.parent().map(ToOwned::to_owned);
+                        if let Some(note) = this.library.notes.iter_mut().find(|note| note.id == id) { note.path = Some(path); }
+                        this.editor().update(cx, |editor, cx| editor.set_image_base(parent, cx));
+                        this.insert_assets(assets, window, cx);
+                    }));
+                }
+            }).detach();
+            return;
+        };
+        let root = self
+            .path
+            .clone()
+            .or_else(|| path.parent().map(ToOwned::to_owned))
+            .unwrap_or_default();
+        let policy = self.library.workspace.attachments.clone();
+        let journal = self
+            .settings_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("image-imports");
+        cx.spawn_in(window, async move |this, cx| {
+            let valid = this.update(cx, |this, cx| {
+                this.library.active_id == id && this.editor().read(cx).committed_document() == &document
+                    && this.editor().read(cx).state().selection() == &selection
+            }).unwrap_or(false);
+            if !valid { return; }
+            let result = cx.background_executor().spawn(async move { assets::insert(assets, &path, &root, &policy, &journal) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.library.active_id != id || this.editor().read(cx).committed_document() != &document
+                    || this.editor().read(cx).state().selection() != &selection {
+                    this.inform("The note or selection changed. Copied images were kept; insert them again at the intended position.", cx); return;
+                }
+                match result {
+                    Ok(markdown) => {
+                        match markraft_commonmark::from_markdown_fragment(doc::schema(), &markdown) {
+                            Ok(slice) => {
+                                this.editor().update(cx, |editor, cx| { editor.run_command(&markraft_core::commands::replace_selection(slice), cx); });
+                            }
+                            Err(error) => this.inform(error.to_string(), cx),
+                        }
+                    }
+                    Err(error) => this.inform(error, cx),
+                }
+            });
+        }).detach();
     }
 }
 /// Heights of the toolbar and footer, which float over the top and bottom of the note.
@@ -1482,11 +1873,6 @@ fn query_style(dark: bool) -> EditorStyle {
     style.bottom_overlay = px(0.);
     style
 }
-/// The single-file library of earlier versions, next to the settings file.
-pub fn legacy_library(settings_path: &std::path::Path) -> PathBuf {
-    settings_path.with_file_name("notes.json")
-}
-
 pub fn bind_app_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("up", markraft_gpui::Up, Some("MarkraftApp")),
@@ -1521,7 +1907,7 @@ pub fn bind_app_keys(cx: &mut App) {
             MenuItem::action("New Note", NewNote),
             MenuItem::action("Browse Notes", Browse),
             MenuItem::action("Save Now", Save),
-            MenuItem::action("Import…", Import),
+            MenuItem::action("Open Markdown…", Import),
             MenuItem::action("Export Markdown…", Export),
         ]),
         Menu::new("Edit").items([

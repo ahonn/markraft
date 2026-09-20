@@ -1,7 +1,7 @@
 //! One worker owns the notes folder: it preserves save ordering, and it watches the
 //! folder so that changes made by other programs reach the application.
 use crate::{
-    storage::{Library, Notices},
+    storage::{Library, Note, Notices},
     vault::{External, Store},
 };
 use notify::Watcher;
@@ -17,6 +17,8 @@ use std::{
 pub struct Saved {
     pub revision: u64,
     pub result: Result<(), String>,
+    pub paths: Vec<(String, std::path::PathBuf)>,
+    pub conflicts: Vec<String>,
 }
 pub enum Event {
     Saved(Saved),
@@ -27,9 +29,17 @@ pub enum Event {
 type Purged = (Vec<String>, Result<(), String>);
 enum Request {
     Save(u64, Library),
+    Recover(Note, Sender<Result<(), String>>),
+    Markdown(Note, Sender<Result<String, String>>),
+    Review(Note, Sender<Result<Option<String>, String>>),
+    Resolve(Note, Sender<Result<Option<Note>, String>>),
+    OpenFile(std::path::PathBuf, Sender<Result<Note, String>>),
+    Paths(Sender<Vec<(String, std::path::PathBuf)>>),
+    Conflicts(Sender<Vec<String>>),
     Flush(Library, Sender<Result<(), String>>),
     Reload(Sender<Result<Library, String>>),
     Refresh,
+    RefreshPaths(Vec<std::path::PathBuf>),
     Acknowledge(Vec<String>),
     Purge(Vec<String>, Sender<Purged>),
 }
@@ -40,7 +50,9 @@ pub struct Persistence {
     /// thread still reaches the interface.
     notices: Notices,
     // Dropping the watcher stops it; the worker ends when `requests` is dropped.
-    _watcher: Option<notify::RecommendedWatcher>,
+    _watcher: std::sync::Mutex<Option<notify::RecommendedWatcher>>,
+    watch_root: std::path::PathBuf,
+    extra_watches: std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
 }
 impl Persistence {
     pub fn new(store: Store) -> Self {
@@ -50,13 +62,42 @@ impl Persistence {
         let (requests, incoming) = mpsc::channel();
         let (outgoing, events) = mpsc::channel();
         let notices = store.notices();
+        let watch_root = store.directory().to_owned();
+        let extra_watches =
+            std::sync::Mutex::new(store.extra_watch_directories().into_iter().collect());
         let watcher = watching.then(|| watch(&store, requests.clone())).flatten();
         std::thread::spawn(move || {
             for request in incoming {
                 match request {
+                    Request::Conflicts(response) => {
+                        let _ = response.send(store.conflicts());
+                    }
+                    Request::Review(note, response) => {
+                        let _ = response.send(store.review_conflict(&note));
+                    }
+                    Request::Markdown(note, response) => {
+                        let _ = response.send(store.markdown(&note));
+                    }
+                    Request::Recover(note, response) => {
+                        let _ = response.send(store.recover(&note));
+                    }
+                    Request::Resolve(note, response) => {
+                        let _ = response.send(store.resolve_conflict(&note));
+                    }
+                    Request::OpenFile(path, response) => {
+                        let _ = response.send(store.add_file(path));
+                    }
+                    Request::Paths(response) => {
+                        let _ = response.send(store.paths());
+                    }
                     Request::Save(revision, library) => {
                         let result = store.save(&library);
-                        let _ = outgoing.send(Event::Saved(Saved { revision, result }));
+                        let _ = outgoing.send(Event::Saved(Saved {
+                            revision,
+                            result,
+                            paths: store.paths(),
+                            conflicts: store.conflicts(),
+                        }));
                     }
                     Request::Flush(library, response) => {
                         let _ = response.send(store.save(&library));
@@ -64,13 +105,20 @@ impl Persistence {
                     Request::Reload(response) => {
                         let _ = response.send(store.reload());
                     }
-                    Request::Refresh => {
-                        if let Ok(changes) = store.refresh()
-                            && !changes.is_empty()
-                        {
+                    Request::RefreshPaths(paths) => match store.refresh_paths(&paths) {
+                        Ok(changes) if !changes.is_empty() => {
                             let _ = outgoing.send(Event::External(changes));
                         }
-                    }
+                        Err(error) => store.notices().raise(error),
+                        _ => {}
+                    },
+                    Request::Refresh => match store.refresh() {
+                        Ok(changes) if !changes.is_empty() => {
+                            let _ = outgoing.send(Event::External(changes));
+                        }
+                        Err(error) => store.notices().raise(error),
+                        _ => {}
+                    },
                     Request::Acknowledge(ids) => store.acknowledge(&ids),
                     Request::Purge(ids, response) => {
                         let _ = response.send(store.purge(&ids));
@@ -82,8 +130,89 @@ impl Persistence {
             requests,
             events,
             notices,
-            _watcher: watcher,
+            _watcher: std::sync::Mutex::new(watcher),
+            watch_root,
+            extra_watches,
         }
+    }
+    pub fn refresh(&self) {
+        let _ = self.requests.send(Request::Refresh);
+    }
+    pub fn conflicts(&self) -> Result<Vec<String>, String> {
+        let (tx, rx) = mpsc::channel();
+        self.requests
+            .send(Request::Conflicts(tx))
+            .map_err(|_| "The save worker stopped")?;
+        rx.recv().map_err(|_| "The save worker stopped".into())
+    }
+    pub fn paths(&self) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+        let (tx, rx) = mpsc::channel();
+        self.requests
+            .send(Request::Paths(tx))
+            .map_err(|_| "The save worker stopped")?;
+        let paths = rx
+            .recv()
+            .map_err(|_| "The save worker stopped".to_owned())?;
+        for (_, path) in &paths {
+            self.watch_file(path);
+        }
+        Ok(paths)
+    }
+    fn watch_file(&self, path: &std::path::Path) {
+        if path.starts_with(&self.watch_root) {
+            return;
+        }
+        let Some(parent) = path.parent() else { return };
+        if let (Ok(mut watched), Ok(mut watcher)) =
+            (self.extra_watches.lock(), self._watcher.lock())
+            && !watched.contains(parent)
+            && let Some(watcher) = watcher.as_mut()
+        {
+            match watcher.watch(parent, notify::RecursiveMode::NonRecursive) {
+                Ok(()) => {
+                    watched.insert(parent.to_owned());
+                }
+                Err(error) => self.notices.raise(format!(
+                    "This file could not be watched: {error}. Refresh to check external changes."
+                )),
+            }
+        }
+    }
+    pub fn open_file(&self, path: std::path::PathBuf) -> Result<Note, String> {
+        self.watch_file(&path);
+        let (tx, rx) = mpsc::channel();
+        self.requests
+            .send(Request::OpenFile(path, tx))
+            .map_err(|_| "The save worker stopped")?;
+        rx.recv().map_err(|_| "The save worker stopped")?
+    }
+    pub fn markdown(&self, note: Note) -> Result<String, String> {
+        let (tx, rx) = mpsc::channel();
+        self.requests
+            .send(Request::Markdown(note, tx))
+            .map_err(|_| "The save worker stopped")?;
+        rx.recv().map_err(|_| "The save worker stopped")?
+    }
+    pub fn recover(&self, note: Note) -> Result<(), String> {
+        let (tx, rx) = mpsc::channel();
+        self.requests
+            .send(Request::Recover(note, tx))
+            .map_err(|_| "The save worker stopped")?;
+        rx.recv().map_err(|_| "The save worker stopped")?
+    }
+    pub fn review_conflict(&self, note: Note) -> Result<Option<String>, String> {
+        let (tx, rx) = mpsc::channel();
+        self.requests
+            .send(Request::Review(note, tx))
+            .map_err(|_| "The save worker stopped")?;
+        rx.recv().map_err(|_| "The save worker stopped")?
+    }
+    pub fn resolve_conflict(&self, note: Note) -> Result<Option<Note>, String> {
+        let (tx, rx) = mpsc::channel();
+        self.requests
+            .send(Request::Resolve(note, tx))
+            .map_err(|_| "The save worker stopped")?;
+        rx.recv().map_err(|_| "The save worker stopped")?
     }
     pub fn save(&self, revision: u64, library: Library) -> Result<(), String> {
         self.requests
@@ -132,7 +261,15 @@ impl Persistence {
     /// The caller compares save revisions with its current document revision. Old
     /// successful acknowledgments must not clear a newer pending change or its error.
     pub fn poll(&self) -> Vec<Event> {
-        self.events.try_iter().collect()
+        let events: Vec<_> = self.events.try_iter().collect();
+        for event in &events {
+            if let Event::Saved(saved) = event {
+                for (_, path) in &saved.paths {
+                    self.watch_file(path);
+                }
+            }
+        }
+        events
     }
     pub fn acknowledge(&self, ids: Vec<String>) {
         let _ = self.requests.send(Request::Acknowledge(ids));
@@ -185,22 +322,82 @@ impl Persistence {
 /// several, and Markraft's own writes produce them too; the store tells those apart.
 fn watch(store: &Store, requests: Sender<Request>) -> Option<notify::RecommendedWatcher> {
     let queued = Arc::new(AtomicBool::new(false));
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if event.is_ok() && !queued.swap(true, Ordering::SeqCst) {
+    let paths = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let full_scan = Arc::new(AtomicBool::new(false));
+    let notices = store.notices();
+    let callback_notices = notices.clone();
+    let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let relevant = match event {
+            Ok(event) => {
+                let mut relevant = false;
+                for path in event.paths {
+                    let markdown = path.extension().is_some_and(|e| {
+                        e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown")
+                    });
+                    if path.is_dir()
+                        || (!markdown
+                            && matches!(
+                                event.kind,
+                                notify::EventKind::Remove(notify::event::RemoveKind::Folder)
+                                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                            ))
+                    {
+                        full_scan.store(true, Ordering::SeqCst);
+                        relevant = true;
+                    } else if markdown {
+                        if let Ok(mut paths) = paths.lock() {
+                            paths.insert(path);
+                        }
+                        relevant = true;
+                    }
+                }
+                relevant
+            }
+            Err(error) => {
+                callback_notices.raise(format!(
+                    "File watching failed: {error}. Refresh the folder to check external edits."
+                ));
+                full_scan.store(true, Ordering::SeqCst);
+                true
+            }
+        };
+        if relevant && !queued.swap(true, Ordering::SeqCst) {
             let queued = queued.clone();
+            let paths = paths.clone();
+            let full_scan = full_scan.clone();
             let requests = requests.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(150));
+                // Release the scheduling flag before draining so an event arriving
+                // during this drain always schedules another pass.
                 queued.store(false, Ordering::SeqCst);
-                let _ = requests.send(Request::Refresh);
+                let paths = paths
+                    .lock()
+                    .map(|mut paths| paths.drain().collect())
+                    .unwrap_or_default();
+                let full = full_scan.swap(false, Ordering::SeqCst);
+                let _ = requests.send(if full {
+                    Request::Refresh
+                } else {
+                    Request::RefreshPaths(paths)
+                });
             });
         }
-    })
-    .ok()?;
-    watcher
-        .watch(store.directory(), notify::RecursiveMode::Recursive)
-        .ok()?;
-    Some(watcher)
+    });
+    let result = watcher.and_then(|mut watcher| {
+        watcher.watch(store.directory(), notify::RecursiveMode::Recursive)?;
+        for parent in store.extra_watch_directories() {
+            watcher.watch(&parent, notify::RecursiveMode::NonRecursive)?;
+        }
+        Ok(watcher)
+    });
+    match result {
+        Ok(watcher) => Some(watcher),
+        Err(error) => {
+            notices.raise(format!("File watching could not start: {error}. Refresh the folder to check external edits."));
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -260,7 +457,7 @@ mod tests {
             state = state.update([spec]).unwrap().state().clone();
             library.set_document(&id, committed_document(&state).clone());
             persistence.flush(library.clone()).unwrap();
-            assert!(only_note(directory.path()).1.ends_with("---\nhello\n"));
+            assert!(only_note(directory.path()).1.ends_with("hello\n"));
         }
 
         state = state
@@ -270,7 +467,7 @@ mod tests {
             .clone();
         library.set_document(&id, committed_document(&state).clone());
         persistence.flush(library).unwrap();
-        assert!(only_note(directory.path()).1.ends_with("---\n你\n"));
+        assert!(only_note(directory.path()).1.ends_with("你\n"));
     }
 
     #[test]
@@ -288,7 +485,7 @@ mod tests {
         assert!(
             only_note(directory.path())
                 .1
-                .ends_with("---\nTitle\n\nFinal é\n")
+                .ends_with("Title\n\nFinal é\n")
         );
         let acknowledgments = saves(&persistence);
         assert_eq!(
@@ -340,7 +537,9 @@ mod tests {
             requests,
             events: results,
             notices: Notices::default(),
-            _watcher: None,
+            _watcher: std::sync::Mutex::new(None),
+            watch_root: Default::default(),
+            extra_watches: Default::default(),
         };
         assert!(persistence.save(1, Library::default()).is_err());
         assert!(persistence.flush(Library::default()).is_err());
@@ -391,41 +590,56 @@ mod tests {
         std::fs::write(&path, text.replace("Original", "From another editor")).unwrap();
         std::fs::write(directory.path().join("notes/dropped.md"), "Dropped in").unwrap();
 
+        // Paths are refreshed as the watcher names them, so one write may be
+        // reported more than once; wait for both files rather than for two events.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let mut seen = Vec::new();
-        while seen.len() < 2 && std::time::Instant::now() < deadline {
+        let mut texts = Vec::new();
+        let wanted = ["From another editor", "Dropped in"];
+        while !wanted
+            .iter()
+            .all(|text| texts.contains(&(*text).to_owned()))
+            && std::time::Instant::now() < deadline
+        {
             for event in persistence.poll() {
                 if let Event::External(changes) = event {
-                    seen.extend(changes);
+                    texts.extend(changes.iter().map(|change| match change {
+                        External::Updated { note, .. } => doc::plain_text(&note.document),
+                        External::Removed(_) => panic!("nothing was removed"),
+                    }));
                 }
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        let texts: Vec<_> = seen
-            .iter()
-            .map(|change| match change {
-                External::Updated { note, .. } => doc::plain_text(&note.document),
-                External::Removed(_) => panic!("nothing was removed"),
-            })
-            .collect();
         assert!(
             texts.contains(&"From another editor".to_owned()),
             "{texts:?}"
         );
         assert!(texts.contains(&"Dropped in".to_owned()), "{texts:?}");
 
-        // A snapshot taken before the change must not undo it.
+        // A snapshot taken before the change must neither undo it nor claim a successful save.
         library.set_document(&id, doc::from_markdown("Stale local edit"));
-        persistence.flush(library.clone()).unwrap();
+        assert!(persistence.flush(library.clone()).is_err());
         assert!(folder_text(directory.path()).contains("From another editor"));
         assert!(!folder_text(directory.path()).contains("Stale local edit"));
-        persistence.acknowledge(vec![id]);
+        assert_eq!(persistence.conflicts().unwrap(), vec![id.clone()]);
+        library
+            .notes
+            .iter_mut()
+            .find(|n| n.id == id)
+            .unwrap()
+            .conflicted = true;
+        persistence.flush(library.clone()).unwrap();
+        let local = library.note(&id).unwrap().clone();
+        persistence.review_conflict(local.clone()).unwrap();
+        let disk = persistence.resolve_conflict(local).unwrap().unwrap();
+        library.adopt(disk);
+        library.set_document(&id, doc::from_markdown("From another editor, continued"));
         persistence.flush(library).unwrap();
-        assert!(folder_text(directory.path()).contains("Stale local edit"));
-        assert!(!folder_text(directory.path()).contains("From another editor"));
+        assert!(folder_text(directory.path()).contains("From another editor, continued"));
+        assert!(!folder_text(directory.path()).contains("Stale local edit"));
     }
 
-    /// Every note in the folder, concatenated; saving may rename a note's file.
+    /// Every note in the folder, concatenated.
     fn folder_text(directory: &std::path::Path) -> String {
         std::fs::read_dir(directory.join("notes"))
             .unwrap()

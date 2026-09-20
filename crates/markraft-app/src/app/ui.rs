@@ -51,6 +51,9 @@ enum Intent {
     PasteMarkdown,
     Export,
     Import,
+    NewNoteLocation,
+    ImageLocation,
+    ResetImageLocation,
     Select(String),
     Restore(String),
     /// Asked twice: the first one turns the row's button into the question.
@@ -175,7 +178,10 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::Save => Icon::Check,
         Intent::Undo | Intent::Redo | Intent::UndoDelete => Icon::Restore,
         Intent::ToggleFormatToolbar | Intent::ToggleCount => Icon::Text,
-        Intent::OpenLink | Intent::Reveal => Icon::Open,
+        Intent::OpenLink | Intent::Reveal | Intent::NewNoteLocation | Intent::ChooseFolder => {
+            Icon::Open
+        }
+        Intent::ImageLocation | Intent::ResetImageLocation => Icon::Image,
         Intent::Unlink => Icon::Link,
         Intent::Mark(doc::Inline::Bold) => Icon::Bold,
         Intent::Mark(doc::Inline::Italic) => Icon::Italic,
@@ -312,6 +318,12 @@ impl NotesApp {
                 self.export(cx);
             }
             Intent::Import => self.import(window, cx),
+            Intent::NewNoteLocation => self.configure_new_notes(window, cx),
+            Intent::ImageLocation => self.configure_images(window, cx),
+            Intent::ResetImageLocation => {
+                self.library.workspace.attachments = crate::storage::AttachmentPolicy::Default;
+                self.changed(cx);
+            }
             Intent::Theme(mode) => {
                 self.library.preferences.dark_mode = mode;
                 self.apply_theme(window, cx);
@@ -336,7 +348,13 @@ impl NotesApp {
             Intent::VimMode => self.toggle_vim(window, cx),
             Intent::Shortcut => self.apply_shortcut(cx),
             Intent::Reveal => {
-                if let Some(path) = &self.path {
+                if let Some(path) = self
+                    .library
+                    .active_note()
+                    .path
+                    .as_ref()
+                    .or(self.path.as_ref())
+                {
                     cx.reveal_path(path);
                 }
             }
@@ -620,10 +638,17 @@ impl NotesApp {
     /// Tooltip builder; a label may carry a shortcut after " · ".
     pub(super) fn hint(
         &self,
-        label: &'static str,
+        label: impl Into<SharedString>,
     ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
         let dark = self.dark;
-        move |_, cx| cx.new(|_| Hint { label, dark }).into()
+        let label = label.into();
+        move |_, cx| {
+            cx.new(|_| Hint {
+                label: label.clone(),
+                dark,
+            })
+            .into()
+        }
     }
     fn row(
         &self,
@@ -741,7 +766,17 @@ impl NotesApp {
             };
             let meta = format!(
                 "{status} · {}",
-                self.count_label(&doc::plain_text(&note.document))
+                note.path
+                    .as_ref()
+                    .map(|path| {
+                        self.path
+                            .as_ref()
+                            .and_then(|root| path.strip_prefix(root).ok())
+                            .unwrap_or(path)
+                            .display()
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "Unsaved draft".into())
             );
             // A deleted note's buttons are spelled out, so they sit on the row's second
             // line and leave its title the full width.
@@ -1094,6 +1129,77 @@ impl NotesApp {
                     )
                     .child(self.button("change-folder", "Change…", Intent::ChooseFolder, cx)),
             )
+            .child(self.row(
+                "new-note-location",
+                "New Notes Location…",
+                "",
+                Intent::NewNoteLocation,
+                cx,
+            ))
+            .child(
+                div()
+                    .px_2()
+                    .text_size(px(11.))
+                    .text_color(self.muted())
+                    .child(
+                        self.path
+                            .as_ref()
+                            .map(|_| {
+                                let relative = &self.library.workspace.new_note_directory;
+                                if relative.as_os_str().is_empty() {
+                                    "Workspace root".into()
+                                } else {
+                                    format!("Workspace / {}", relative.display())
+                                }
+                            })
+                            .unwrap_or_else(|| "Choose a location for each new file".into()),
+                    ),
+            )
+            .child(
+                div()
+                    .id("image-location-group")
+                    .role(Role::Group)
+                    .aria_label("Image location")
+                    .px_2()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div().flex_1().min_w_0().child("Images").child(
+                            div()
+                                .mt_1()
+                                .truncate()
+                                .text_size(px(11.))
+                                .text_color(self.muted())
+                                .child(match &self.library.workspace.attachments {
+                                    crate::storage::AttachmentPolicy::Default => {
+                                        "assets beside each note".to_owned()
+                                    }
+                                    crate::storage::AttachmentPolicy::WorkspaceFolder(path) => {
+                                        if path.as_os_str().is_empty() {
+                                            "Workspace root".to_owned()
+                                        } else {
+                                            format!("Workspace / {}", path.display())
+                                        }
+                                    }
+                                }),
+                        ),
+                    )
+                    .child(self.button("image-location", "Change…", Intent::ImageLocation, cx))
+                    .when(
+                        self.library.workspace.attachments
+                            != crate::storage::AttachmentPolicy::Default,
+                        |s| {
+                            s.child(self.button(
+                                "reset-image-location",
+                                "Reset",
+                                Intent::ResetImageLocation,
+                                cx,
+                            ))
+                        },
+                    ),
+            )
             .child(
                 div()
                     .mt_2()
@@ -1141,7 +1247,7 @@ impl NotesApp {
                     .pt_2()
                     .border_t_1()
                     .border_color(self.border_color())
-                    .child(self.row("import-notes", "Import Notes…", "⌘O", Intent::Import, cx))
+                    .child(self.row("import-notes", "Open Markdown…", "⌘O", Intent::Import, cx))
                     .child(self.row(
                         "export-library",
                         "Export Library Backup…",
@@ -1279,7 +1385,8 @@ impl NotesApp {
                 Intent::PasteMarkdown,
             ),
             Command::new("export-note", "Export Markdown…", "⇧⌘E", Intent::Export),
-            Command::new("import-action", "Import Notes…", "⌘O", Intent::Import),
+            Command::new("import-action", "Open Markdown…", "⌘O", Intent::Import),
+            Command::new("folder-action", "Open Folder…", "", Intent::ChooseFolder),
             Command::new(
                 "reveal-folder",
                 "Show Notes Folder in Finder",
@@ -1547,11 +1654,6 @@ impl NotesApp {
             ));
         }
         items
-    }
-    /// How much text there is, in the unit the footer is set to. The Browse rows use it
-    /// too, so a note's size is described the same way wherever it is shown.
-    pub(super) fn count_label(&self, text: &str) -> String {
-        self.count_of(self.count_units(text))
     }
     fn count_units(&self, text: &str) -> usize {
         if self.show_words {
@@ -1901,6 +2003,9 @@ impl Render for NotesApp {
             .on_action(cx.listener(|this, _: &Save, w, cx| {
                 if this.html_editor.is_some() {
                     this.save_html_source(w, cx);
+                } else if this.library.active_note().conflicted {
+                    this.conflict_prompted.remove(&this.library.active_id);
+                    this.prompt_conflict(w, cx);
                 } else {
                     this.flush(cx);
                 }
@@ -2023,6 +2128,7 @@ impl Render for NotesApp {
                     s.child(self.button("retry-open", "Retry", Intent::Retry, cx))
                 })
                 .child(primary)
+                .child(self.button("open-markdown", "Open Markdown…", Intent::Import, cx))
                 .when(first_launch && Self::default_folder().is_some(), |s| {
                     s.child(self.button(
                         "default-folder",
@@ -2084,6 +2190,18 @@ impl Render for NotesApp {
             ))
         };
         let body = div()
+            .id("document-body")
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                if paths.0.iter().all(|path| assets::is_image(path)) {
+                    this.insert_assets(
+                        paths.0.iter().cloned().map(assets::Asset::File).collect(),
+                        window,
+                        cx,
+                    );
+                } else {
+                    this.open_paths(paths.0.iter().cloned().collect(), window, cx);
+                }
+            }))
             .flex_1()
             .min_h_0()
             .relative()
@@ -2182,7 +2300,7 @@ impl Render for NotesApp {
                         .border_color(self.border_color())
                         .text_size(px(12.))
                         .text_color(self.control_text())
-                        .child(notice.text.clone())
+                        .child(div().flex_1().min_w_0().child(notice.text.clone()))
                         .when_some(notice.undo.as_ref(), |s, _| {
                             s.child(div().text_color(self.muted()).child("·")).child(
                                 self.button("notice-undo", "Undo", Intent::UndoDelete, cx)
@@ -2263,12 +2381,15 @@ fn popover_enter(
 }
 
 struct Hint {
-    label: &'static str,
+    label: SharedString,
     dark: bool,
 }
 impl Render for Hint {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let (text, keys) = self.label.split_once(" · ").unwrap_or((self.label, ""));
+        let (text, keys) = self
+            .label
+            .split_once(" · ")
+            .unwrap_or((self.label.as_ref(), ""));
         let (surface, ink) = if self.dark {
             (rgba(0x3a3b40f2), rgb(0xf2f2f3))
         } else {
@@ -2286,7 +2407,7 @@ impl Render for Hint {
             .border_color(tokens::border_color(self.dark))
             .text_color(ink)
             .text_size(px(11.))
-            .child(text)
+            .child(text.to_owned())
             .when(!keys.is_empty(), |s| s.child(keycaps(keys, self.dark)))
     }
 }

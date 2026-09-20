@@ -323,6 +323,19 @@ impl NotesApp {
         let kind = doc::Block::active(editor.state(), &editor.projection());
         let reduce_motion = cx.reduce_motion();
         let linked = editor.active_link().is_some();
+        let note = self.library.active_note();
+        let file_status = if let Some(reason) = &note.read_only {
+            let mut label = format!("Read-only: {reason}");
+            if note.conflicted {
+                label.push_str(" Autosave paused.");
+            }
+            Some((Icon::Lock, label))
+        } else if note.conflicted {
+            Some((Icon::Pause, "Autosave paused".to_owned()))
+        } else {
+            None
+        };
+        let compact_vim = self.format_toolbar && (viewport < px(450.) || file_status.is_some());
         div()
             .h(px(48.))
             .flex_shrink_0()
@@ -334,7 +347,27 @@ impl NotesApp {
                 div()
                     .absolute()
                     .left(px(12.))
-                    .children(self.vim_badge(self.format_toolbar && viewport < px(450.))),
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .children(self.vim_badge(compact_vim))
+                    .when_some(file_status, |s, (symbol, label)| {
+                        s.child(
+                            div()
+                                .id("file-status-indicator")
+                                .role(Role::Status)
+                                .aria_label(label.clone())
+                                .tooltip(self.hint(label))
+                                .flex_shrink_0()
+                                .size(px(18.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(4.))
+                                .bg(self.hover_color())
+                                .child(sized_icon(symbol, self.muted(), 11.)),
+                        )
+                    }),
             )
             .when(!self.format_toolbar, |s| {
                 s.child(

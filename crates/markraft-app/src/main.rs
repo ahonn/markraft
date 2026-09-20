@@ -1,7 +1,6 @@
 mod app;
 mod doc;
 mod instance;
-mod legacy;
 mod persistence;
 mod platform;
 mod storage;
@@ -10,7 +9,7 @@ mod vault;
 
 use app::{NotesApp, bind_app_keys};
 use gpui::*;
-use instance::{Instance, Launch};
+use instance::{Instance, Launch, Request};
 use platform::Platform;
 use std::{env, path::PathBuf};
 use storage::{Library, Settings};
@@ -19,36 +18,48 @@ use vault::Store;
 const HELP: &str = "\
 Markraft — a floating, local-first notepad.
 
-Usage: markraft-app [--dir PATH] [--settings PATH]
+Usage: markraft-app [--dir PATH] [--settings PATH] [--] [FILE.md ...]
 
   --dir PATH        Keep notes as Markdown files in this folder for this run,
                     instead of the one chosen in the app.
   --settings PATH   Use this settings file instead of the default:
                     ~/Library/Application Support/Markraft/settings.json
 
+Positional files are opened in place. Use -- before filenames beginning with -.
+
 The app stays in the menu bar while its window is hidden. ⌥N toggles the
 window and ⌘K lists every action with its shortcut.
 ";
 
 fn main() {
-    let mut args = env::args().skip(1);
+    let mut args = env::args_os().skip(1);
     let mut directory = None;
     let mut settings_path = None;
+    let mut paths = Vec::new();
+    let mut positional = false;
     while let Some(arg) = args.next() {
+        if positional {
+            paths.push(absolute(PathBuf::from(arg)));
+            continue;
+        }
         let mut value = |name: &str| {
             absolute(PathBuf::from(
                 args.next()
                     .unwrap_or_else(|| fail(&format!("{name} requires a path"))),
             ))
         };
-        match arg.as_str() {
-            "--dir" => directory = Some(value("--dir")),
-            "--settings" => settings_path = Some(value("--settings")),
-            "--help" | "-h" => {
+        match arg.to_str() {
+            Some("--dir") => directory = Some(value("--dir")),
+            Some("--settings") => settings_path = Some(value("--settings")),
+            Some("--help" | "-h") => {
                 print!("{HELP}");
                 return;
             }
-            _ => fail(&format!("Unknown argument: {arg}. Use --help.")),
+            Some("--") => positional = true,
+            Some(value) if value.starts_with('-') => {
+                fail(&format!("Unknown argument: {value}. Use --help."));
+            }
+            _ => paths.push(absolute(PathBuf::from(arg))),
         }
     }
     let support = || {
@@ -62,30 +73,53 @@ fn main() {
         })
     };
     let settings_path = settings_path.unwrap_or_else(|| support().join("settings.json"));
+    let restore_files = paths.is_empty();
+    let initial_request = if paths.is_empty() {
+        Request::Show
+    } else {
+        Request::OpenPaths(paths)
+    };
+    let instance =
+        match Instance::acquire(&settings_path, initial_request).unwrap_or_else(|e| fail(&e)) {
+            Launch::Forwarded => return,
+            Launch::Primary(instance) => instance,
+        };
     // This read is what sets a damaged settings file aside, so its notice travels
     // from here: the store's own read then finds no file at all.
     let settings = Settings::read(&settings_path).unwrap_or_default();
-    // Until a folder has been chosen the app opens on that question.
+    if restore_files {
+        // Only the primary process restores the previous session. A second
+        // ordinary launch just raises the current one. Queue individual paths
+        // so a saved session is not constrained by the IPC batch byte limit.
+        let sender = instance.sender();
+        for path in &settings.open_files {
+            if let Err(error) = sender.send(Request::OpenPaths(vec![path.clone()])) {
+                eprintln!("Markraft: could not reopen {}: {error}", path.display());
+            }
+        }
+    }
+    // An absent folder stays absent: queued paths create a standalone session.
     let directory = directory.or_else(|| settings.notes_folder.clone());
-    let instance = match Instance::acquire(&settings_path).unwrap_or_else(|e| fail(&e)) {
-        Launch::Forwarded => return,
-        Launch::Primary(instance) => instance,
-    };
     let opened = directory
         .clone()
         .map(|directory| Store::open(directory, settings_path.clone()));
     let (store, library, error) = match opened {
-        Some(Ok((mut store, library))) => {
+        Some(Ok((store, library))) => {
             if let Some(notice) = settings.recovery_notice() {
                 store.notices().raise(notice);
             }
-            let library = store.import_legacy(library, &app::legacy_library(&settings_path));
             (Some(store), library, None)
         }
         Some(Err(error)) => (None, Library::default(), Some(error)),
         None => (None, Library::default(), None),
     };
+    let sender = instance.sender();
     let application = gpui_platform::application();
+    application.on_open_urls(move |urls| {
+        if let Err(error) = sender.open_urls(urls) {
+            eprintln!("Markraft: {error}");
+        }
+    });
     application.on_reopen(|cx| {
         cx.dispatch_action(&app::Show);
     });

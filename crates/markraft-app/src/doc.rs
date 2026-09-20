@@ -59,8 +59,8 @@ pub fn empty() -> Node {
         .expect("one paragraph is a valid document")
 }
 
-/// Read a note's body. Nothing is rejected: what the model cannot interpret is
-/// kept verbatim, so a file another editor wrote survives a round trip.
+/// Construct semantic test fixtures. File loading uses SourceDocument instead.
+#[cfg(test)]
 pub fn from_markdown(source: &str) -> Node {
     markraft_commonmark::from_markdown(schema(), source).unwrap_or_else(|_| empty())
 }

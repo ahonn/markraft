@@ -229,6 +229,14 @@ impl NotesApp {
                 stops.push(Stop::run("vim-mode", Intent::VimMode));
                 stops.push(Stop::run("launch-at-login", Intent::Login));
                 stops.push(Stop::run("change-folder", Intent::ChooseFolder));
+                stops.push(Stop::run("new-note-location", Intent::NewNoteLocation));
+                stops.push(Stop::run("image-location", Intent::ImageLocation));
+                if self.library.workspace.attachments != crate::storage::AttachmentPolicy::Default {
+                    stops.push(Stop::run(
+                        "reset-image-location",
+                        Intent::ResetImageLocation,
+                    ));
+                }
                 stops.push(Stop::query());
                 stops.push(Stop::run("apply-shortcut", Intent::Shortcut));
                 stops.push(Stop::run("import-notes", Intent::Import));

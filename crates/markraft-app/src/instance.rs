@@ -1,11 +1,89 @@
-//! A second launch asks the existing process for this library to show its window.
+//! Typed, bounded launch requests shared by CLI, Finder, and the running app.
 use std::{
     fs::{File, OpenOptions, TryLockError},
     io::{self, Write},
     os::unix::{fs::OpenOptionsExt, net::UnixDatagram},
     path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, SyncSender},
     time::{Duration, Instant},
 };
+
+use serde::{Deserialize, Serialize};
+
+// Stay below macOS's default Unix datagram size. Reject oversized requests
+// before delivery rather than truncating a path or opening only part of a batch.
+const MAX_REQUEST_BYTES: usize = 2048;
+const MAX_PATHS: usize = 32;
+const MAX_PENDING: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "paths", deny_unknown_fields)]
+pub enum Request {
+    Show,
+    OpenPaths(Vec<PathBuf>),
+}
+
+impl Request {
+    fn validate(&self) -> Result<(), String> {
+        if let Self::OpenPaths(paths) = self
+            && (paths.is_empty()
+                || paths.len() > MAX_PATHS
+                || paths.iter().any(|p| !p.is_absolute()))
+        {
+            return Err(format!(
+                "An open request needs 1–{MAX_PATHS} absolute file paths."
+            ));
+        }
+        Ok(())
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, String> {
+        self.validate()?;
+        let message = serde_json::to_vec(self).map_err(|error| error.to_string())?;
+        if message.len() > MAX_REQUEST_BYTES {
+            return Err(
+                "Too many file paths for one launch. Open a smaller group of files.".into(),
+            );
+        }
+        Ok(message)
+    }
+
+    fn decode(message: &[u8]) -> Result<Self, String> {
+        if message.len() > MAX_REQUEST_BYTES {
+            return Err("Launch request is too large.".into());
+        }
+        let request: Self = serde_json::from_slice(message).map_err(|error| error.to_string())?;
+        request.validate()?;
+        Ok(request)
+    }
+}
+
+/// Native URL events can arrive before the main window exists. This bounded
+/// queue keeps them until the app polls, including Finder cold launches.
+#[derive(Clone)]
+pub struct RequestSender(SyncSender<Request>);
+
+impl RequestSender {
+    pub fn send(&self, request: Request) -> Result<(), String> {
+        request.encode()?;
+        self.0
+            .try_send(request)
+            .map_err(|error| format!("Could not queue the open request: {error}"))
+    }
+
+    pub fn open_urls(&self, urls: Vec<String>) -> Result<(), String> {
+        let paths = urls
+            .into_iter()
+            .map(|value| {
+                url::Url::parse(&value)
+                    .map_err(|error| format!("Invalid file URL: {error}"))?
+                    .to_file_path()
+                    .map_err(|_| "Only local file URLs can be opened.".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.send(Request::OpenPaths(paths))
+    }
+}
 
 pub enum Launch {
     Primary(Instance),
@@ -16,10 +94,13 @@ pub struct Instance {
     socket: UnixDatagram,
     _directory: tempfile::TempDir,
     _lock: File,
+    pending: Receiver<Request>,
+    sender: RequestSender,
 }
 
 impl Instance {
-    pub fn acquire(file: &Path) -> Result<Launch, String> {
+    pub fn acquire(file: &Path, request: Request) -> Result<Launch, String> {
+        let message = request.encode()?;
         let canonical = canonical_target(file)?;
         let mut lock_name = canonical.into_os_string();
         lock_name.push(".instance-lock");
@@ -55,10 +136,15 @@ impl Instance {
                     lock.write_all(path.as_os_str().as_encoded_bytes())
                         .and_then(|_| lock.sync_all())
                         .map_err(|error| crate::vault::describe(file, &error))?;
+                    let (sender, pending) = mpsc::sync_channel(MAX_PENDING);
+                    let sender = RequestSender(sender);
+                    sender.send(request)?;
                     return Ok(Launch::Primary(Self {
                         socket,
                         _directory: directory,
                         _lock: lock,
+                        pending,
+                        sender,
                     }));
                 }
                 Err(TryLockError::WouldBlock) => {
@@ -72,7 +158,7 @@ impl Instance {
                             .map_err(|error| relaunch_failure(&error))?;
                         // A datagram queues one complete request; no accept/read race or
                         // partial message can discard a show request on the UI thread.
-                        if sender.send_to(b"show", &address).is_ok() {
+                        if sender.send_to(&message, &address).is_ok() {
                             return Ok(Launch::Forwarded);
                         }
                     }
@@ -91,17 +177,32 @@ impl Instance {
         }
     }
 
-    pub fn requested_show(&self) -> bool {
-        let mut requested = false;
-        let mut message = [0; 16];
-        // Coalesce repeated launches, with a bound so a busy socket cannot monopolize UI work.
-        for _ in 0..64 {
+    pub fn sender(&self) -> RequestSender {
+        self.sender.clone()
+    }
+
+    pub fn requests(&self) -> Vec<Request> {
+        let mut requests = Vec::new();
+        // Alternate native/initial requests and IPC so neither source can starve
+        // the other; the fixed limit also bounds work on the UI thread.
+        let mut message = [0; MAX_REQUEST_BYTES + 1];
+        for _ in 0..MAX_PENDING / 2 {
+            if let Ok(request) = self.pending.try_recv() {
+                requests.push(request);
+            }
             match self.socket.recv(&mut message) {
-                Ok(length) => requested |= &message[..length] == b"show",
-                Err(_) => break,
+                Ok(length) => match Request::decode(&message[..length]) {
+                    Ok(request) => requests.push(request),
+                    Err(error) => eprintln!("Markraft: ignored invalid launch request: {error}"),
+                },
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => {
+                    eprintln!("Markraft: could not receive launch request: {error}");
+                    break;
+                }
             }
         }
-        requested
+        requests
     }
 }
 
@@ -141,25 +242,146 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     #[test]
-    fn second_launch_forwards_and_a_dropped_instance_can_be_reopened() {
+    fn cold_and_warm_launches_preserve_open_paths_without_creating_documents() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("notes.json");
-        let Launch::Primary(instance) = Instance::acquire(&path).unwrap() else {
+        let settings = dir.path().join("settings.json");
+        let first = Request::OpenPaths(vec![dir.path().join("中文 note #1.md")]);
+        let second = Request::OpenPaths(vec![
+            dir.path().join("other.md"),
+            dir.path().join("same name.md"),
+        ]);
+        let Launch::Primary(instance) = Instance::acquire(&settings, first.clone()).unwrap() else {
             panic!("primary");
         };
         assert!(matches!(
-            Instance::acquire(&path).unwrap(),
+            Instance::acquire(&settings, second.clone()).unwrap(),
+            Launch::Forwarded
+        ));
+        assert_eq!(instance.requests(), vec![first, second]);
+        assert!(instance.requests().is_empty());
+        assert!(!dir.path().join("中文 note #1.md").exists());
+        assert!(!dir.path().join("other.md").exists());
+    }
+
+    #[test]
+    fn native_urls_queue_before_a_window_exists_and_decode_escaped_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let Launch::Primary(instance) =
+            Instance::acquire(&dir.path().join("settings.json"), Request::Show).unwrap()
+        else {
+            panic!("primary");
+        };
+        instance.requests();
+        let paths = vec![
+            dir.path().join("中文 # 100%.md"),
+            dir.path().join("another.md"),
+        ];
+        instance
+            .sender()
+            .open_urls(
+                paths
+                    .iter()
+                    .map(|p| url::Url::from_file_path(p).unwrap().into())
+                    .collect(),
+            )
+            .unwrap();
+        assert_eq!(instance.requests(), vec![Request::OpenPaths(paths)]);
+        assert!(
+            instance
+                .sender()
+                .open_urls(vec!["https://example.com/note.md".into()])
+                .is_err()
+        );
+        assert!(
+            instance
+                .sender()
+                .open_urls(vec!["file://remote-host/note.md".into()])
+                .is_err()
+        );
+        assert!(instance.requests().is_empty());
+    }
+
+    #[test]
+    fn malformed_and_oversized_messages_are_rejected_without_partial_delivery() {
+        for message in [
+            br#"{"type":"Unknown"}"#.as_slice(),
+            br#"{"type":"OpenPaths","paths":[]}"#,
+            br#"{"type":"OpenPaths","paths":["relative.md"]}"#,
+            br#"{"type":"Show","extra":true}"#,
+        ] {
+            assert!(Request::decode(message).is_err());
+        }
+        assert!(Request::decode(&vec![b' '; MAX_REQUEST_BYTES + 1]).is_err());
+        assert!(
+            Request::OpenPaths(vec![PathBuf::from("/note.md"); MAX_PATHS + 1])
+                .encode()
+                .is_err()
+        );
+        assert!(
+            Request::OpenPaths(vec![PathBuf::from(format!(
+                "/{}.md",
+                "n".repeat(MAX_REQUEST_BYTES)
+            ))])
+            .encode()
+            .is_err()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let Launch::Primary(instance) =
+            Instance::acquire(&dir.path().join("settings.json"), Request::Show).unwrap()
+        else {
+            panic!("primary");
+        };
+        instance.requests();
+        let socket = UnixDatagram::unbound().unwrap();
+        socket
+            .send_to(b"not json", instance._directory.path().join("show.sock"))
+            .unwrap();
+        socket
+            .send_to(
+                &Request::Show.encode().unwrap(),
+                instance._directory.path().join("show.sock"),
+            )
+            .unwrap();
+        assert_eq!(instance.requests(), vec![Request::Show]);
+    }
+
+    #[test]
+    fn native_queue_is_bounded_and_remains_responsive_after_draining() {
+        let dir = tempfile::tempdir().unwrap();
+        let Launch::Primary(instance) =
+            Instance::acquire(&dir.path().join("settings.json"), Request::Show).unwrap()
+        else {
+            panic!("primary");
+        };
+        let sender = instance.sender();
+        for _ in 1..MAX_PENDING {
+            sender.send(Request::Show).unwrap();
+        }
+        assert!(sender.send(Request::Show).is_err());
+        assert_eq!(instance.requests().len(), MAX_PENDING / 2);
+        sender.send(Request::Show).unwrap();
+    }
+
+    #[test]
+    fn second_launch_forwards_and_a_dropped_instance_can_be_reopened() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.json");
+        let Launch::Primary(instance) = Instance::acquire(&path, Request::Show).unwrap() else {
+            panic!("primary");
+        };
+        assert!(matches!(
+            Instance::acquire(&path, Request::Show).unwrap(),
             Launch::Forwarded
         ));
         assert!(matches!(
-            Instance::acquire(&path).unwrap(),
+            Instance::acquire(&path, Request::Show).unwrap(),
             Launch::Forwarded
         ));
-        assert!(instance.requested_show());
-        assert!(!instance.requested_show());
+        assert!(instance.requests().contains(&Request::Show));
+        assert!(instance.requests().is_empty());
         drop(instance);
         assert!(matches!(
-            Instance::acquire(&path).unwrap(),
+            Instance::acquire(&path, Request::Show).unwrap(),
             Launch::Primary(_)
         ));
     }
@@ -175,7 +397,7 @@ mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    Instance::acquire(&path).unwrap()
+                    Instance::acquire(&path, Request::Show).unwrap()
                 })
             })
             .collect();
@@ -192,7 +414,7 @@ mod tests {
             })
             .collect();
         assert_eq!(primaries.len(), 1);
-        assert!(primaries[0].requested_show());
+        assert_eq!(primaries[0].requests(), vec![Request::Show; 8]);
     }
 
     #[test]
@@ -206,14 +428,14 @@ mod tests {
         std::fs::write(&path, b"{}").unwrap();
         let alias = dir.path().join("alias.json");
         std::os::unix::fs::symlink(&path, &alias).unwrap();
-        let Launch::Primary(instance) = Instance::acquire(&path).unwrap() else {
+        let Launch::Primary(instance) = Instance::acquire(&path, Request::Show).unwrap() else {
             panic!("primary");
         };
         assert!(matches!(
-            Instance::acquire(&alias).unwrap(),
+            Instance::acquire(&alias, Request::Show).unwrap(),
             Launch::Forwarded
         ));
-        assert!(instance.requested_show());
+        assert!(instance.requests().contains(&Request::Show));
     }
 
     #[test]
@@ -224,7 +446,7 @@ mod tests {
         lock_path.push(".instance-lock");
         std::fs::write(PathBuf::from(lock_path), b"/tmp/no-such-markraft.sock").unwrap();
         assert!(matches!(
-            Instance::acquire(&path).unwrap(),
+            Instance::acquire(&path, Request::Show).unwrap(),
             Launch::Primary(_)
         ));
     }
