@@ -36,7 +36,6 @@ actions!(
         Actions,
         Settings,
         Link,
-        Trash,
         Export,
         OpenMarkdown
     ]

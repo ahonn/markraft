@@ -33,7 +33,7 @@ pub use extension::{
 };
 pub use markraft_core::commands::ColumnAlignment;
 pub use style::EditorStyle;
-pub use syntax::code_languages;
+pub use syntax::{canonical_language, code_languages};
 pub use typeahead::{Typeahead, TypeaheadItem, TypeaheadProvider};
 pub use types::DocTypes;
 

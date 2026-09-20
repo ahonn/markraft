@@ -98,7 +98,7 @@ pub fn language_label(language: &str) -> &str {
 }
 
 /// The [`code_languages`] entry a fence alias names, or the alias unchanged.
-fn canonical_language(language: &str) -> &str {
+pub fn canonical_language(language: &str) -> &str {
     let lower = language.to_ascii_lowercase();
     match lower.as_str() {
         "text" | "txt" | "plaintext" | "plain" => "",

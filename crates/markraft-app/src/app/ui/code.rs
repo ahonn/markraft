@@ -1,4 +1,5 @@
 use super::*;
+use markraft_gpui::canonical_language;
 
 impl NotesApp {
     pub(in crate::app) fn open_code_language(&mut self, pos: usize, cx: &mut Context<Self>) {
@@ -221,25 +222,5 @@ impl NotesApp {
                 )
                 .child(list),
         )
-    }
-}
-
-// Fence aliases match the canonical menu entry without rewriting the stored language.
-fn canonical_language(language: &str) -> &str {
-    match language {
-        "text" | "txt" | "plaintext" | "plain" => "",
-        "rs" => "rust",
-        "js" | "mjs" | "cjs" | "node" | "nodejs" => "javascript",
-        "ts" => "typescript",
-        "py" => "python",
-        "rb" => "ruby",
-        "golang" => "go",
-        "kt" | "kts" => "kotlin",
-        "c++" | "cxx" | "hpp" => "cpp",
-        "c#" | "csharp" => "cs",
-        "sh" | "shell" | "zsh" => "bash",
-        "yml" => "yaml",
-        "md" => "markdown",
-        other => other,
     }
 }

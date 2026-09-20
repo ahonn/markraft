@@ -2174,11 +2174,7 @@ fn starts_item(types: &DocTypes, line: &Line) -> bool {
             .all(|ancestor| ancestor.index == 0)
 }
 
-fn marker_of(
-    types: &DocTypes,
-    line: &Line,
-    number: Option<Rc<ShapedLine>>,
-) -> Option<Marker> {
+fn marker_of(types: &DocTypes, line: &Line, number: Option<Rc<ShapedLine>>) -> Option<Marker> {
     let (item, list) = types.item_of(line)?;
     if !starts_item(types, line) {
         return None;
@@ -3635,8 +3631,8 @@ mod tests {
         let projection = projection_of(&state);
         let schema = commonmark_schema();
         let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
-        let style = EditorStyle::notes();
         let images = crate::images::Images::default();
+        let style = EditorStyle::notes();
         let input = ShapeInput {
             images: &images,
             wiki: None,
@@ -4168,7 +4164,6 @@ mod tests {
         let projection = projection_of(&state);
         let schema = commonmark_schema();
         let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
-        let style = EditorStyle::notes();
         projection
             .lines()
             .iter()

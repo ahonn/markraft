@@ -675,8 +675,8 @@ impl Store {
                     });
                 if self.reviewed.contains_key(&note.id) || locally_changed {
                     self.recover(note)?;
-                    // `app::unexplained_error` recognises a conflicted note's line by
-                    // its quoted title; keep the quotes when rewording this.
+                    // The quotes around the title are what the status card's own
+                    // sentence is built to sit beside; keep them when rewording.
                     errors.push(format!(
                         "Unsaved changes for “{}” are held in recovery.",
                         note.title()
@@ -763,8 +763,8 @@ impl Store {
         {
             let current = read_optional(&saved.path).map_err(|e| describe(&saved.path, &e))?;
             if current.as_ref() != Some(&saved.bytes) {
-                // `app::unexplained_error` recognises a conflicted note's line by its
-                // quoted title; keep the quotes when rewording this.
+                // The quotes around the title are what the status card's own
+                // sentence is built to sit beside; keep them when rewording.
                 return Err(format!(
                     "“{}” changed on disk. Your changes are preserved in recovery; resolve the conflict before saving.",
                     note.title()
