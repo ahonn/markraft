@@ -1076,6 +1076,10 @@ impl NotesApp {
         self.editor()
             .update(cx, |editor, cx| editor.cancel_composition(cx));
         if !self.flush(cx) {
+            // The window staying put is the only sign the key landed at all, and a
+            // 24px capsule is a thin place to keep the reason.
+            self.file_status_popover = true;
+            cx.notify();
             return;
         }
         if let Some(p) = &mut self.platform {
@@ -1105,7 +1109,10 @@ impl NotesApp {
     fn quit(&mut self, cx: &mut Context<Self>) {
         if self.prepare_to_quit(cx) {
             cx.quit();
+            return;
         }
+        self.file_status_popover = true;
+        cx.notify();
     }
     pub fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(error) = self.updater.check() {
@@ -2465,7 +2472,7 @@ fn conflict_subject(note: &crate::storage::Note) -> String {
 
 /// Heights of the toolbar and footer, which float over the top and bottom of the note.
 const TOOLBAR_HEIGHT: Pixels = px(52.);
-const FOOTER_HEIGHT: Pixels = px(44.);
+const FOOTER_HEIGHT: Pixels = px(48.);
 /// How long a keystroke counts as someone being at the window.
 const KEY_PRESENCE: Duration = Duration::from_millis(2500);
 /// A queued notice is a sentence, not an acknowledgment, so it is given time to read.

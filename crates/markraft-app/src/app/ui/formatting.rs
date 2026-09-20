@@ -304,7 +304,8 @@ impl NotesApp {
                 .rounded(ROW_RADIUS)
                 .cursor_pointer()
                 .when(active || expanded, |s| s.bg(self.selected_color()))
-                .tooltip(self.hint(label))
+                // A tooltip beside an open menu only covers the menu.
+                .when(!expanded, |s| s.tooltip(self.hint(label)))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
@@ -370,7 +371,7 @@ impl NotesApp {
         let compact_vim = self.format_toolbar
             && (viewport < px(450.) || (!states.is_empty() && viewport < px(500.)));
         div()
-            .h(px(48.))
+            .h(FOOTER_HEIGHT)
             .flex_shrink_0()
             .relative()
             .flex()
@@ -765,7 +766,7 @@ impl NotesApp {
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     // The capsules close the card themselves; preserve their click.
-                    if event.position.y < window.bounds().size.height - px(44.) {
+                    if event.position.y < window.bounds().size.height - FOOTER_HEIGHT {
                         this.file_status_popover = false;
                         this.focus_editor(window, cx);
                         cx.notify();
@@ -915,7 +916,7 @@ impl NotesApp {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 // Footer controls switch or close menus themselves; preserve their click.
-                if event.position.y < window.bounds().size.height - px(44.) {
+                if event.position.y < window.bounds().size.height - FOOTER_HEIGHT {
                     this.format_menu = None;
                     this.focus_editor(window, cx);
                     cx.notify();

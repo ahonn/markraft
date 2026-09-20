@@ -80,6 +80,12 @@ enum Intent {
     FileStatus,
     ReviewConflict,
     OpenExternally,
+    /// Commands the editor owns and the panel only forwards, because each one
+    /// acts on the thing the caret is already in.
+    ToggleTask,
+    ChooseCodeLanguage,
+    CopyCodeBlock,
+    EditRawHtml,
     Mark(doc::Inline),
     Block(doc::Block),
     InsertTable,
@@ -108,9 +114,15 @@ impl Intent {
             Self::Mark(_) | Self::Block(_) | Self::Link | Self::InsertTable => {
                 ActionGroup::Formatting
             }
-            Self::Table(_) | Self::EditLink | Self::CopyLink | Self::OpenLink | Self::Unlink => {
-                ActionGroup::Context
-            }
+            Self::Table(_)
+            | Self::EditLink
+            | Self::CopyLink
+            | Self::OpenLink
+            | Self::Unlink
+            | Self::ToggleTask
+            | Self::ChooseCodeLanguage
+            | Self::CopyCodeBlock
+            | Self::EditRawHtml => ActionGroup::Context,
             Self::Save
             | Self::Export
             | Self::OpenMarkdown
@@ -135,6 +147,9 @@ struct Caret {
     table: Option<TableInfo>,
     /// A code block keeps its text literal, so nothing is inserted into one.
     in_code: bool,
+    /// Raw HTML is shown as its own source, and edited through the source dialog.
+    in_raw_html: bool,
+    in_task: bool,
 }
 /// The settings rows drawn as a switch rather than as a labelled button.
 fn is_switch(id: &str) -> bool {
@@ -193,6 +208,10 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::Settings => Icon::Settings,
         Intent::Save => Icon::Check,
         Intent::Undo | Intent::Redo | Intent::UndoDelete => Icon::Restore,
+        Intent::ToggleTask => Icon::Task,
+        Intent::ChooseCodeLanguage => Icon::CodeBlock,
+        Intent::CopyCodeBlock => Icon::Copy,
+        Intent::EditRawHtml => Icon::Code,
         Intent::ToggleFormatToolbar | Intent::ToggleCount => Icon::Text,
         Intent::OpenLink
         | Intent::Reveal
@@ -296,6 +315,21 @@ impl NotesApp {
                     Box::new(markraft_gpui::Undo)
                 } else {
                     Box::new(markraft_gpui::Redo)
+                };
+                window.dispatch_action(action, cx);
+            }
+            // The caret is already where these act, so the panel closes and the
+            // editor's own action does the work.
+            Intent::ToggleTask
+            | Intent::ChooseCodeLanguage
+            | Intent::CopyCodeBlock
+            | Intent::EditRawHtml => {
+                self.intent(Intent::Back, window, cx);
+                let action: Box<dyn Action> = match intent {
+                    Intent::ToggleTask => Box::new(markraft_gpui::ToggleTask),
+                    Intent::ChooseCodeLanguage => Box::new(markraft_gpui::ChooseCodeLanguage),
+                    Intent::CopyCodeBlock => Box::new(markraft_gpui::CopyCodeBlock),
+                    _ => Box::new(markraft_gpui::EditRawHtml),
                 };
                 window.dispatch_action(action, cx);
             }
@@ -911,6 +945,10 @@ impl NotesApp {
                 };
                 format!("{} {date}", if deleted { "Deleted" } else { "Edited" })
             };
+            // In this scope the status above already says whether the note has a
+            // file, so a location beside it can only repeat itself or crowd the
+            // line until neither half is legible.
+            let drafts = scope == Scope::Drafts;
             let location = (scope != Scope::Drafts)
                 .then_some(note.path.as_ref())
                 .flatten()
@@ -927,7 +965,11 @@ impl NotesApp {
                 None => notes_style(self.dark).marker,
             };
             let location = location.unwrap_or_else(|| "Unsaved draft".to_owned());
-            let meta = format!("{status} · {location}");
+            let meta = if drafts {
+                status.clone()
+            } else {
+                format!("{status} · {location}")
+            };
             // A deleted note's buttons are spelled out, so they sit on the row's second
             // line and leave its title the full width.
             let mut controls = div()
@@ -1102,17 +1144,23 @@ impl NotesApp {
                                                 .text_size(px(12.))
                                                 .line_height(px(18.))
                                                 .text_color(self.muted())
-                                                .child(format!("{status} ·")),
+                                                .child(if drafts {
+                                                    status.clone()
+                                                } else {
+                                                    format!("{status} ·")
+                                                }),
                                         )
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .text_size(px(12.))
-                                                .line_height(px(18.))
-                                                .text_color(location_color)
-                                                .truncate()
-                                                .child(location),
-                                        ),
+                                        .when(!drafts, |s| {
+                                            s.child(
+                                                div()
+                                                    .min_w_0()
+                                                    .text_size(px(12.))
+                                                    .line_height(px(18.))
+                                                    .text_color(location_color)
+                                                    .truncate()
+                                                    .child(location),
+                                            )
+                                        }),
                                 ),
                         )
                         .child(controls),
@@ -1828,6 +1876,38 @@ impl NotesApp {
                 Intent::EmptyTrash,
             ));
         }
+        if caret.in_task {
+            items.push(Command::new(
+                "toggle-task",
+                "Toggle Task",
+                "⌘↩",
+                Intent::ToggleTask,
+            ));
+        }
+        if caret.in_code {
+            items.extend([
+                Command::new(
+                    "code-language",
+                    "Choose Code Language",
+                    "⌥⌘L",
+                    Intent::ChooseCodeLanguage,
+                ),
+                Command::new(
+                    "copy-code-block",
+                    "Copy Code Block",
+                    "⌥⇧⌘C",
+                    Intent::CopyCodeBlock,
+                ),
+            ]);
+        }
+        if caret.in_raw_html {
+            items.push(Command::new(
+                "edit-raw-html",
+                "Edit HTML Source",
+                "⌥⌘R",
+                Intent::EditRawHtml,
+            ));
+        }
         if caret.in_link {
             items.extend([
                 Command::new("copy-link", "Copy Link", "", Intent::CopyLink),
@@ -1952,13 +2032,15 @@ impl NotesApp {
         let query = self.query.read(cx).text().to_owned().trim().to_lowercase();
         let editor = self.editor();
         let editor = editor.read(cx);
+        let block = doc::Block::active(editor.state(), &editor.projection());
         let caret = Caret {
             in_link: editor.active_link().is_some(),
             // The note goes on painting behind the panel, so this is the table the
             // caret is in even while the panel has the keyboard.
             table: editor.table_at_caret(),
-            in_code: doc::Block::active(editor.state(), &editor.projection())
-                == Some(doc::Block::Code),
+            in_code: block == Some(doc::Block::Code),
+            in_raw_html: editor.raw_html_at_caret().is_some(),
+            in_task: block == Some(doc::Block::Task),
         };
         let mut items: Vec<_> = self
             .action_items(caret)
@@ -2189,7 +2271,10 @@ impl Render for NotesApp {
                 .unwrap_or_else(|| note.title()),
             _ => note.title(),
         };
-        window.set_window_title(&title);
+        // With no folder open there is no note to name, and a stray "Untitled"
+        // over the gate reads as a bug rather than as a state.
+        let unopened = self.persistence.is_none();
+        window.set_window_title(if unopened { "Markraft" } else { &title });
         let style = notes_style(self.dark);
         let reduce_motion = cx.reduce_motion();
         let chrome = Self::chrome_spring(self.chrome_visible(), reduce_motion);
@@ -2344,7 +2429,7 @@ impl Render for NotesApp {
                     .text_size(px(12.))
                     .text_color(self.muted())
                     .truncate()
-                    .child(title)
+                    .child(if unopened { String::new() } else { title })
                     .with_spring("title-fade", chrome.clone(), |s, phase| {
                         s.opacity(phase.interpolate_clamped(0.6, 1.))
                     }),
