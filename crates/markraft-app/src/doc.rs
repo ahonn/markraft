@@ -169,6 +169,10 @@ pub enum Block {
     Paragraph,
     Heading(u8),
     Quote,
+    /// An Obsidian callout, which is a quote carrying a type. The interface
+    /// offers the default `note`; changing an existing one's type, fold or
+    /// title is not something v1 does.
+    Callout,
     Code,
     Ordered,
     Bullet,
@@ -193,6 +197,10 @@ impl Block {
                 markraft_gpui::commands::toggle_block(types, node(md::CODE_BLOCK), Attrs::empty())
             }
             Block::Quote => markraft_gpui::commands::toggle_quote(types),
+            Block::Callout => markraft_gpui::commands::toggle_wrap(
+                node(md::BLOCKQUOTE),
+                Attrs::from_pairs([("callout", "note"), ("fold", ""), ("title", "")]),
+            ),
             Block::Ordered => markraft_gpui::commands::toggle_list(
                 types,
                 node(md::ORDERED_LIST),
@@ -246,7 +254,19 @@ impl Block {
         for (index, ancestor) in line.ancestors.iter().enumerate().rev() {
             let ty = ancestor.node_type;
             if ty == node(md::BLOCKQUOTE) {
-                return Some(Block::Quote);
+                // A callout is a quote with a type on it, and it is the kind
+                // the toolbar shows so that asking for a plain quote takes the
+                // marker off rather than doing nothing.
+                let callout = ancestor
+                    .attrs
+                    .get("callout")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|kind| !kind.is_empty());
+                return Some(if callout {
+                    Block::Callout
+                } else {
+                    Block::Quote
+                });
             }
             if ty == node(md::TASK_ITEM) {
                 return Some(Block::Task);
@@ -361,6 +381,7 @@ mod tests {
             ("- [ ] task", Block::Task),
             ("***", Block::Divider),
             // The innermost wrapper wins.
+            ("> [!note]\n> callout", Block::Callout),
             ("- > quoted", Block::Quote),
             ("- - nested", Block::Bullet),
         ] {
@@ -445,5 +466,28 @@ mod tests {
                     .clone();
             assert_eq!(to_markdown(back.doc()), "text");
         }
+    }
+
+    #[test]
+    fn the_callout_command_converts_a_quote_and_takes_the_marker_off_again() {
+        let run = |state: &EditorState, block: Block| {
+            markraft_core::commands::run_command(state, &block.command())
+                .expect("the command applies")
+                .expect("a transaction")
+                .state()
+                .clone()
+        };
+        // From plain text: one quote, carrying the default type.
+        let callout = run(&state_of("text"), Block::Callout);
+        assert_eq!(to_markdown(callout.doc()), "> [!note]\n> text");
+        assert_eq!(active(&callout), Some(Block::Callout));
+        // Asking again lifts it, the way every other block command toggles.
+        assert_eq!(to_markdown(run(&callout, Block::Callout).doc()), "text");
+        // An existing quote is retyped rather than wrapped a second time, and
+        // the quote command takes the marker off it.
+        let quote = run(&state_of("text"), Block::Quote);
+        let converted = run(&quote, Block::Callout);
+        assert_eq!(to_markdown(converted.doc()), "> [!note]\n> text");
+        assert_eq!(to_markdown(run(&converted, Block::Quote).doc()), "> text");
     }
 }

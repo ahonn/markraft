@@ -84,7 +84,10 @@ fn ordered_markers_keep_their_start_and_delimiter() {
 
 #[test]
 fn a_quote_marker_wraps_the_block() {
-    assert_eq!(typed("> "), "doc(blockquote(paragraph()))");
+    assert_eq!(
+        typed("> "),
+        r#"doc(blockquote[callout=Str(""),fold=Str(""),title=Str("")](paragraph()))"#
+    );
 }
 
 #[test]
@@ -266,5 +269,60 @@ fn a_pasted_wiki_link_arrives_as_the_atom_without_an_input_rule() {
             r#"doc(paragraph("see ", "#,
             r#"wiki_link[alias=Str("Alias"),embed=Bool(false),target=Str("Note")], " now"))"#
         )
+    );
+}
+
+#[test]
+fn a_marker_typed_in_a_quote_turns_it_into_a_callout() {
+    let (schema, state) = empty();
+    let quote = type_all(&state, "> ");
+    for (typing, kind, fold) in [
+        ("[!note] ", "note", ""),
+        ("[!tip]- ", "tip", "-"),
+        ("[!warning]+ ", "warning", "+"),
+        ("[!custom-type] ", "custom-type", ""),
+    ] {
+        assert_eq!(
+            schema.describe(type_all(&quote, typing).doc()),
+            format!(
+                "doc(blockquote[callout=Str(\"{kind}\"),fold=Str(\"{fold}\"),title=Str(\"\")](paragraph()))"
+            ),
+            "{typing:?}"
+        );
+    }
+    // Outside a quote, past its first block, or with a title already typed,
+    // the marker stays the text it is.
+    assert_eq!(typed("[!note] "), r#"doc(paragraph("[!note] "))"#);
+    assert_eq!(
+        schema.describe(type_all(&quote, "[!note] Title ").doc()),
+        r#"doc(blockquote[callout=Str("note"),fold=Str(""),title=Str("")](paragraph("Title ")))"#,
+        "the marker fires on its own space and the title is typed as body"
+    );
+    // A second marker inside a callout is ordinary text.
+    let callout = type_all(&quote, "[!note] ");
+    assert_eq!(
+        schema.describe(type_all(&callout, "[!tip] ").doc()),
+        r#"doc(blockquote[callout=Str("note"),fold=Str(""),title=Str("")](paragraph("[!tip] ")))"#
+    );
+    // Rules are suppressed in code.
+    assert_eq!(
+        schema.describe(type_all(&type_all(&state, "``` "), "> [!note] ").doc()),
+        r#"doc(code_block[fence_char=Str("`"),fence_length=Int(3),language=Str("")]("> [!note] "))"#
+    );
+}
+
+#[test]
+fn undoing_the_callout_rule_gives_the_typed_marker_back() {
+    let (schema, state) = empty();
+    let built = type_all(&type_all(&state, "> "), "[!note] ");
+    let undo = markraft_core::commands::undo_input_rule();
+    let back = markraft_core::commands::run_command(&built, &undo)
+        .expect("the rule can be taken back")
+        .expect("the transaction resolves")
+        .state()
+        .clone();
+    assert_eq!(
+        schema.describe(back.doc()),
+        r#"doc(blockquote[callout=Str(""),fold=Str(""),title=Str("")](paragraph("[!note] ")))"#
     );
 }

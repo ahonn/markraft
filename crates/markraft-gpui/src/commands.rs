@@ -54,6 +54,15 @@ pub fn toggle_quote(types: &DocTypes) -> Command {
     keymap::toggle_quote(types)
 }
 
+/// Wrap in a node of `ty` with `attrs`; inside one already, retype it when its
+/// attributes differ and lift out of it when they do not.
+///
+/// This is what gives a wrapper variants without a second node type: a block
+/// quote that carries a callout marker is still a block quote.
+pub fn toggle_wrap(ty: NodeTypeId, attrs: Attrs) -> Command {
+    keymap::toggle_wrap_in(ty, attrs)
+}
+
 /// Wrap in a list of `ty` holding items of `item`, or leave it.
 pub fn toggle_list(types: &DocTypes, ty: NodeTypeId, item: NodeTypeId) -> Command {
     keymap::toggle_list(types, ty, item)

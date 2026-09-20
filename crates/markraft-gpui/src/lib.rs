@@ -6,6 +6,7 @@
 //! touches the tree. Everything drawn comes from the state's
 //! [`markraft_core::projection::Projection`].
 mod accessibility;
+mod callout;
 mod caret;
 mod clipboard;
 pub mod commands;
@@ -1142,6 +1143,9 @@ impl EditorView {
             Some(table) => surface::cell_under(&self.layout, table, point).unwrap_or(row),
             None => row,
         };
+        if row.in_callout_header(point.y) {
+            return row.offset_to_pos(0);
+        }
         let local = gpui::point(point.x - row.origin.x, point.y - row.origin.y);
         row.hit_position(row.char_at(local), &self.projection)
     }

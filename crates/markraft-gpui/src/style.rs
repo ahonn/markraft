@@ -37,6 +37,12 @@ pub struct EditorStyle {
     pub table_header_background: Hsla,
     /// Quote bars, horizontal rules and table grid lines.
     pub rule: Hsla,
+    /// One accent per callout tone, in the order
+    /// [`Tone`](crate::callout::Tone) declares them: note, summary, success,
+    /// caution, danger, example, quote. Each draws both the quote's own bar and
+    /// its header label, so each answers to the text floor rather than the
+    /// graphic one.
+    pub callout_tones: [Hsla; 7],
     pub quote_indent: Pixels,
     pub draw_markers: bool,
     /// Heights of host chrome drawn over the editor's top and bottom edges. Content
@@ -76,6 +82,15 @@ impl Default for EditorStyle {
             code_radius: px(0.),
             table_header_background: rgb(0xf4f2ec).into(),
             rule: rgb(0xd9d7d0).into(),
+            callout_tones: [
+                rgb(0x1f63d6).into(),
+                rgb(0x00696f).into(),
+                rgb(0x1c7a3e).into(),
+                rgb(0x8a5200).into(),
+                rgb(0xb3261e).into(),
+                rgb(0x6a3ab2).into(),
+                rgb(0x55575c).into(),
+            ],
             quote_indent: px(18.),
             draw_markers: false,
             top_overlay: px(0.),
@@ -116,6 +131,15 @@ impl EditorStyle {
             code_radius: px(6.),
             table_header_background: rgb(0xe6e6e7).into(),
             rule: rgb(0x86888d).into(),
+            callout_tones: [
+                rgb(0x1f63d6).into(),
+                rgb(0x00696f).into(),
+                rgb(0x1c7a3e).into(),
+                rgb(0x8a5200).into(),
+                rgb(0xb3261e).into(),
+                rgb(0x6a3ab2).into(),
+                rgb(0x55575c).into(),
+            ],
             quote_indent: px(12.),
             draw_markers: true,
             top_overlay: px(0.),
@@ -142,6 +166,15 @@ impl EditorStyle {
             inline_code_text: rgb(0xb9bcc2).into(),
             table_header_background: rgb(0x1d1e21).into(),
             rule: rgb(0x6e717a).into(),
+            callout_tones: [
+                rgb(0x4c9bff).into(),
+                rgb(0x4fd1d9).into(),
+                rgb(0x5ed17a).into(),
+                rgb(0xe8b04b).into(),
+                rgb(0xff7b72).into(),
+                rgb(0xc6a0f6).into(),
+                rgb(0x93979e).into(),
+            ],
             scrollbar: rgba(0xffffff4d).into(),
             popup_background: rgb(0x2e2f33).into(),
             popup_border: rgb(0x383a40).into(),
@@ -163,6 +196,11 @@ impl EditorStyle {
     /// The space above a heading of `level`, except at the top of the document.
     pub(crate) fn heading_top_gap(&self, level: u8) -> Pixels {
         self.heading_top_gaps[usize::from(level).clamp(1, 6) - 1]
+    }
+
+    /// The accent a callout of `tone` is drawn in.
+    pub(crate) fn callout_tone(&self, tone: crate::callout::Tone) -> Hsla {
+        self.callout_tones[tone.index()]
     }
 }
 
@@ -232,6 +270,48 @@ mod tests {
             ),
             // A rule is a graphic, not text, so it answers to the 3:1 floor.
             ("rule", style.rule, style.background, 3.0),
+            (
+                "callout note",
+                style.callout_tones[0],
+                style.background,
+                4.5,
+            ),
+            (
+                "callout summary",
+                style.callout_tones[1],
+                style.background,
+                4.5,
+            ),
+            (
+                "callout success",
+                style.callout_tones[2],
+                style.background,
+                4.5,
+            ),
+            (
+                "callout caution",
+                style.callout_tones[3],
+                style.background,
+                4.5,
+            ),
+            (
+                "callout danger",
+                style.callout_tones[4],
+                style.background,
+                4.5,
+            ),
+            (
+                "callout example",
+                style.callout_tones[5],
+                style.background,
+                4.5,
+            ),
+            (
+                "callout quote",
+                style.callout_tones[6],
+                style.background,
+                4.5,
+            ),
             (
                 "text on the selection",
                 body,

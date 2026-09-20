@@ -44,9 +44,12 @@ fn semantic_styles_nested_lists_and_code_come_across() {
 
 #[test]
 fn a_quote_in_a_quote_keeps_both_levels() {
+    let plain = r#"[callout=Str(""),fold=Str(""),title=Str("")]"#;
     assert_eq!(
         shape("<blockquote><p>Outer</p><blockquote>Inner</blockquote></blockquote>"),
-        r#"doc(blockquote(paragraph("Outer"), blockquote(paragraph("Inner"))))"#
+        format!(
+            r#"doc(blockquote{plain}(paragraph("Outer"), blockquote{plain}(paragraph("Inner"))))"#
+        )
     );
 }
 
@@ -583,4 +586,25 @@ fn a_wiki_link_travels_as_an_anchor_carrying_its_own_parts() {
     );
     // An anchor from anywhere else is an ordinary link.
     assert_eq!(markdown("<a href=\"Note\">Note</a>"), "[Note](Note)");
+}
+
+#[test]
+fn a_callout_travels_as_a_blockquote_carrying_its_marker() {
+    assert_eq!(
+        html_of("> [!tip]- Custom title\n> Body"),
+        "<blockquote data-callout=\"tip\" data-callout-fold=\"-\" \
+         data-callout-title=\"Custom title\">\n<p>Body</p>\n</blockquote>"
+    );
+    assert_eq!(
+        html_of("> plain"),
+        "<blockquote>\n<p>plain</p>\n</blockquote>"
+    );
+    // A paste back reads the marker rather than a line of text, so the callout
+    // survives the clipboard.
+    assert_eq!(
+        markdown(&html_of("> [!warning]+ Title\n> Body")),
+        "> [!warning]+ Title\n> Body"
+    );
+    // A blockquote from anywhere else is an ordinary quote.
+    assert_eq!(markdown("<blockquote><p>a</p></blockquote>"), "> a");
 }

@@ -118,15 +118,21 @@ impl InlineCode {
     }
 }
 
-/// How an inline atom is drawn over the fillers reserving its slot.
+/// What an inline atom is drawn as.
+///
+/// A [`AtomShape::Pill`] is chrome the row cannot shape, so it is painted over
+/// a run of fillers reserving its slot. The other two *are* text, so the row
+/// shapes their label itself: a placeholder rounded up to a whole number of
+/// fillers would leave a gap after the label, and punctuation after a wiki link
+/// has to sit where it would after any other word.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum AtomShape {
     /// An image's stand-in: a picture glyph and a label on a rounded fill.
     Pill,
-    /// The source of an inline HTML primitive, drawn as the quiet code-font
+    /// The source of an inline HTML primitive, shaped as the quiet code-font
     /// text it is — the view keeps HTML verbatim and never renders it.
     Source,
-    /// A wiki link's label, drawn as the prose it stands in, in the link
+    /// A wiki link's label, shaped as the prose it stands in, in the link
     /// colour. Its brackets and its target are source the view does not show.
     Link,
 }
@@ -141,14 +147,14 @@ impl AtomShape {
         }
     }
 
-    /// Whether the shape draws its label and nothing else, where the run
-    /// before it left off.
-    fn is_bare_text(self) -> bool {
+    /// Whether the row shapes the atom's own label in place of a placeholder,
+    /// so it takes exactly the width its glyphs advance.
+    fn is_own_text(self) -> bool {
         matches!(self, AtomShape::Source | AtomShape::Link)
     }
 }
 
-/// One inline atom, once shaping says which slot it landed in.
+/// One painted inline atom, once shaping says which slot it landed in.
 #[derive(Clone)]
 struct InlineAtom {
     /// Relative to the line's origin.
@@ -156,7 +162,6 @@ struct InlineAtom {
     slot: Pixels,
     /// Visual row within the whole block.
     visual_row: usize,
-    shape: AtomShape,
     label: Rc<ShapedLine>,
     /// A decoded image drawn in place of the pill, at the size it was measured
     /// for.
@@ -176,7 +181,14 @@ struct Widening {
     display: usize,
     /// How many `char`s the placeholder takes. Always at least one.
     len: usize,
+    /// What the placeholder holds, which is what says whether its own
+    /// characters reach the screen.
+    shape: AtomShape,
 }
+
+/// How many quote levels can carry a tone of their own; deeper ones fall back to
+/// the ordinary bar.
+const QUOTE_TONES: usize = 8;
 
 #[derive(Clone, Copy)]
 enum Decoration {
@@ -185,11 +197,26 @@ enum Decoration {
     Quote {
         levels: usize,
         joined: usize,
+        /// The accent of each drawn level's callout, outermost first. `None` for
+        /// an ordinary quote, and for levels past what the array holds.
+        tones: [Option<Hsla>; QUOTE_TONES],
     },
     Divider,
     /// A code block's rounded background, behind the whole line.
     Code,
 }
+
+/// A callout's header: the line drawn above its first block, saying what kind
+/// of note it is. It is chrome, not content — no caret ever lands in it.
+#[derive(Clone)]
+struct CalloutHeader {
+    label: Rc<ShapedLine>,
+    /// What the label says, for a reader that cannot see it.
+    text: String,
+}
+
+/// The room a callout's header takes above the block it opens.
+const CALLOUT_HEADER_HEIGHT: Pixels = px(22.);
 
 #[derive(Clone)]
 enum Marker {
@@ -292,6 +319,8 @@ pub(crate) struct LayoutLine {
     decoration: Option<Decoration>,
     /// The shaped language label of a code block's header.
     code_header: Option<Rc<ShapedLine>>,
+    /// The shaped header of a callout, on the line that opens it.
+    callout_header: Option<CalloutHeader>,
     code_hitboxes: Option<(Hitbox, Hitbox)>,
     /// Sorted by `source`; see [`Widening`].
     widenings: Vec<Widening>,
@@ -411,6 +440,28 @@ impl LayoutLine {
         let row = &self.rows[index];
         let local = offset.saturating_sub(row.char_start).min(row.char_len());
         (index, char_to_byte(row.text(), local))
+    }
+
+    /// What a callout's header says and the box it is drawn in, relative to the
+    /// line's own origin — available only on the line that opens one.
+    /// Whether `y` falls in the band a callout's header is drawn in. The band is
+    /// chrome above the line, so a click there means the start of the body rather
+    /// than whichever character happens to sit under it.
+    pub(crate) fn in_callout_header(&self, y: Pixels) -> bool {
+        self.callout_header.is_some()
+            && y >= self.origin.y - CALLOUT_HEADER_HEIGHT
+            && y < self.origin.y
+    }
+
+    pub(crate) fn callout_header(&self) -> Option<(&str, Bounds<Pixels>)> {
+        let header = self.callout_header.as_ref()?;
+        Some((
+            header.text.as_str(),
+            Bounds::new(
+                point(self.origin.x, self.origin.y - CALLOUT_HEADER_HEIGHT),
+                size(header.label.width, CALLOUT_HEADER_HEIGHT),
+            ),
+        ))
     }
 
     /// Window-space bounds of the language button, available only on a code
@@ -805,6 +856,25 @@ fn shape_line(
             text_system,
         )
     });
+    // A callout says what kind of note it is on a line of its own above the
+    // block it opens. The line is chrome: it holds no caret stop, so it lives
+    // in the room the block reserves above itself rather than in the text.
+    let above = index.checked_sub(1).map(|above| &projection.lines()[above]);
+    let callout_header = crate::callout::header_of(types, line, above).map(|head| CalloutHeader {
+        label: callout_label(
+            &head.label,
+            style.callout_tone(head.tone),
+            style,
+            text_system,
+        ),
+        text: head.label,
+    });
+    let top_gap = top_gap
+        + if callout_header.is_some() {
+            CALLOUT_HEADER_HEIGHT
+        } else {
+            px(0.)
+        };
 
     let mut layout = LayoutLine {
         source: line.clone(),
@@ -828,6 +898,7 @@ fn shape_line(
         marker,
         decoration,
         code_header,
+        callout_header,
         code_hitboxes: None,
         widenings: text.widenings,
         atoms: Vec::new(),
@@ -881,9 +952,20 @@ fn decoration_of(
     } else if types.horizontal_rule.is_some() && line.node_type() == types.horizontal_rule {
         Some(Decoration::Divider)
     } else if quote_levels > 0 {
+        let levels = quote_levels.min(visible_levels(style, max_indent));
+        // The bars drawn are the innermost `levels`, so the tones are too.
+        let beside = crate::callout::tones_beside(types, line);
+        let mut tones = [None; QUOTE_TONES];
+        for (slot, tone) in tones
+            .iter_mut()
+            .zip(beside.iter().skip(beside.len().saturating_sub(levels)))
+        {
+            *slot = tone.map(|tone| style.callout_tone(tone));
+        }
         Some(Decoration::Quote {
-            levels: quote_levels.min(visible_levels(style, max_indent)),
+            levels,
             joined: joined_quote_levels(projection, index, types).min(quote_levels),
+            tones,
         })
     } else {
         None
@@ -1387,7 +1469,6 @@ fn place_atoms(layout: &mut LayoutLine, pending: Vec<PendingAtom>) {
             left: slot.origin.x - layout.origin.x,
             slot: slot.size.width,
             visual_row: ((slot.origin.y - layout.origin.y) / layout.line_height).round() as usize,
-            shape: atom.shape,
             label: atom.label,
             image: atom.image,
         });
@@ -1424,12 +1505,11 @@ impl DisplayText {
     }
 }
 
-/// An atom the display text has reserved room for, before shaping says where on
-/// the block it landed.
+/// A painted atom the display text has reserved room for, before shaping says
+/// where on the block it landed.
 struct PendingAtom {
     /// `char` range of the placeholder within the display text.
     chars: Range<usize>,
-    shape: AtomShape,
     label: Rc<ShapedLine>,
     image: Option<(Arc<RenderImage>, Size<Pixels>)>,
 }
@@ -1468,26 +1548,38 @@ fn display_text(
         byte += len;
         match atom_of(input, run, font_size, column, alone, text_system) {
             Some(atom) => {
-                // One atom is one character, and it advances nowhere near far
-                // enough for what is drawn over it, so the row reserves the
-                // width in fillers.
-                let unit = *filler.get_or_insert_with(|| filler_width(font_size, text_system));
-                let count = (atom.width / unit).ceil().max(1.) as usize;
-                text.extend(std::iter::repeat_n(PILL_FILLER, count));
-                run_bytes.push(count * PILL_FILLER.len_utf8());
+                // An atom the row can shape *is* its text: writing the label
+                // into the display text gives it exactly the width its glyphs
+                // advance, so what follows sits against it. A placeholder
+                // rounded up to whole fillers would leave a gap behind.
+                let count = if atom.shape.is_own_text() && !atom.text.is_empty() {
+                    text.push_str(&atom.text);
+                    run_bytes.push(atom.text.len());
+                    atom.text.chars().count()
+                } else {
+                    // One atom is one character, and a pill advances nowhere
+                    // near far enough for what is drawn over it, so the row
+                    // reserves the width in fillers. An atom with nothing to
+                    // shape keeps one, which is its caret stop.
+                    let unit = *filler.get_or_insert_with(|| filler_width(font_size, text_system));
+                    let count = (atom.width / unit).ceil().max(1.) as usize;
+                    text.extend(std::iter::repeat_n(PILL_FILLER, count));
+                    run_bytes.push(count * PILL_FILLER.len_utf8());
+                    if let Some((_, size)) = &atom.image {
+                        line_height = Some(size.height);
+                    }
+                    atoms.push(PendingAtom {
+                        chars: display..display + count,
+                        label: atom.label,
+                        image: atom.image,
+                    });
+                    count
+                };
                 widenings.push(Widening {
                     source: run.char_from,
                     display,
                     len: count,
-                });
-                if let Some((_, size)) = &atom.image {
-                    line_height = Some(size.height);
-                }
-                atoms.push(PendingAtom {
-                    chars: display..display + count,
                     shape: atom.shape,
-                    label: atom.label,
-                    image: atom.image,
                 });
                 display += count;
             }
@@ -1529,9 +1621,12 @@ fn filler_width(font_size: Pixels, text_system: &WindowTextSystem) -> Pixels {
     (shaped.width / SAMPLE as f32).max(px(1.))
 }
 
-/// A drawn atom's content and the width it needs.
+/// An inline atom's content and the width it needs.
 struct Atom {
     shape: AtomShape,
+    /// The label as it reaches the screen, shortened where it would not fit the
+    /// column. The row shapes this itself where the shape is its own text.
+    text: String,
     label: Rc<ShapedLine>,
     width: Pixels,
     image: Option<(Arc<RenderImage>, Size<Pixels>)>,
@@ -1636,12 +1731,16 @@ fn atom_of(
         ))
     };
     let mut graphemes = text.graphemes(true).collect::<Vec<_>>();
-    let mut label = shaped(graphemes.concat());
-    // Even source text has to stay within the column: its placeholder is one
-    // unbreakable run, so nothing downstream can shorten it.
+    let mut shown = graphemes.concat();
+    let mut label = shaped(shown.clone());
+    // A label has to stay within the column. A pill's placeholder is one
+    // unbreakable run, so nothing downstream could shorten it; a label the row
+    // shapes itself could wrap, but a target or a tag long enough to need it is
+    // better read short than spread over three lines.
     while label.width > room && graphemes.len() > 1 {
         graphemes.pop();
-        label = shaped(format!("{}…", graphemes.concat()));
+        shown = format!("{}…", graphemes.concat());
+        label = shaped(shown.clone());
     }
     Some(Atom {
         width: match &drawn {
@@ -1649,6 +1748,7 @@ fn atom_of(
             None => label.width + shape.chrome(),
         },
         shape,
+        text: shown,
         label,
         image: drawn,
     })
@@ -1763,12 +1863,25 @@ fn text_runs(
             face.style = FontStyle::Italic;
         }
         let atom = matches!(run.content, RunContent::Atom(_));
-        // A widened atom is drawn over the fillers standing in for it.
-        let widened = text
+        // What an atom's placeholder holds: a pill is painted over its fillers,
+        // and the other shapes are the row's own text. A wiki link's label is
+        // prose, so it keeps the face this run already decided on — the
+        // heading's weight, the emphasis around it — in the link colour an atom
+        // draws in anyway; an HTML primitive is source, and reads as the quiet
+        // monospaced markup it is wherever it sits.
+        let placeholder = text
             .widenings
             .iter()
-            .any(|widening| widening.source == run.char_from);
-        let ink = if is_link || (atom && !code_block) {
+            .find(|widening| widening.source == run.char_from)
+            .map(|widening| widening.shape);
+        let source_atom = placeholder == Some(AtomShape::Source);
+        if source_atom {
+            face = font(CODE_FONT);
+        }
+        let widened = placeholder == Some(AtomShape::Pill);
+        let ink = if source_atom {
+            style.muted_text
+        } else if is_link || (atom && !code_block) {
             style.link
         } else if has(types.code, marks) {
             style.inline_code_text
@@ -2079,6 +2192,33 @@ fn gap_below(
 
 /// The shaped language label of a code block's header, trimmed to the room the
 /// picker and the copy button leave it.
+/// A callout's header label, shaped in the accent of its tone: the sentence
+/// face at the body size, in the weight that says it names the note rather
+/// than being part of it.
+fn callout_label(
+    label: &str,
+    tone: Hsla,
+    style: &EditorStyle,
+    text_system: &WindowTextSystem,
+) -> Rc<ShapedLine> {
+    let mut face = font(".SystemUIFont");
+    face.weight = FontWeight::BOLD;
+    let text: SharedString = label.to_owned().into();
+    Rc::new(text_system.shape_line(
+        text.clone(),
+        style.body_size,
+        &[TextRun {
+            len: text.len(),
+            font: face,
+            color: tone,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    ))
+}
+
 fn code_header(
     label: &str,
     width: Pixels,
@@ -2441,22 +2581,34 @@ impl Element for EditorSurface {
                     paint_atom(row, atom, &style, window, cx);
                 }
                 match row.decoration {
-                    Some(Decoration::Quote { levels, joined }) => {
+                    Some(Decoration::Quote {
+                        levels,
+                        joined,
+                        tones,
+                    }) => {
+                        // A callout's header sits above the block, so the bars
+                        // beside it reach up over it: its own, and those of the
+                        // quotes around it, which would otherwise break there.
+                        let lift = row
+                            .callout_header
+                            .as_ref()
+                            .map_or(px(0.), |_| CALLOUT_HEADER_HEIGHT);
                         for level in 0..levels {
                             let height = if level < joined {
                                 row.height
                             } else {
                                 row.text_height()
                             };
+                            let (top, height) = (row.origin.y - lift, height + lift);
                             window.paint_quad(fill(
                                 Bounds::new(
                                     point(
                                         row.origin.x - style.quote_indent * (levels - level) as f32,
-                                        row.origin.y,
+                                        top,
                                     ),
                                     size(QUOTE_BAR, height),
                                 ),
-                                style.marker,
+                                tones.get(level).copied().flatten().unwrap_or(style.marker),
                             ));
                         }
                     }
@@ -2489,6 +2641,16 @@ impl Element for EditorSurface {
                 }
                 if let Some(label) = &row.code_header {
                     paint_code_header(self, row, label, &style, window, cx);
+                }
+                if let Some(header) = &row.callout_header {
+                    let _ = header.label.paint(
+                        point(row.origin.x, row.origin.y - CALLOUT_HEADER_HEIGHT),
+                        CALLOUT_HEADER_HEIGHT,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
                 }
                 if a != b {
                     let from = row.pos_to_offset(a);
@@ -2839,19 +3001,6 @@ fn paint_atom(
         );
         return;
     }
-    // Source text and a wiki link's label are text: each starts where the run
-    // before it left off, with nothing drawn around it.
-    if atom.shape.is_bare_text() {
-        let _ = atom.label.paint(
-            point(row.origin.x + atom.left, top),
-            row.line_height,
-            TextAlign::Left,
-            None,
-            window,
-            cx,
-        );
-        return;
-    }
     let inset = (row.line_height * 0.1).round();
     let bounds = Bounds::new(
         point(row.origin.x + atom.left, top + inset),
@@ -3105,6 +3254,7 @@ mod tests {
             marker: None,
             decoration: None,
             code_header: None,
+            callout_header: None,
             code_hitboxes: None,
             widenings: Vec::new(),
             atoms: Vec::new(),
@@ -3470,6 +3620,7 @@ mod tests {
             source: 2,
             display: 2,
             len: 5,
+            shape: AtomShape::Pill,
         }];
         for offset in 0..=row.char_len {
             assert_eq!(row.to_source(row.to_display(offset)), offset, "at {offset}");
@@ -3508,6 +3659,11 @@ mod tests {
             px(0.),
             "source text reserves its own width and no padding"
         );
+        // And the row shapes that source itself, so the text after a tag sits
+        // against it exactly as it does after a wiki link.
+        let row = &shaped("press <kbd>K</kbd> twice")[0];
+        assert_eq!(row.rows[0].text(), "press <kbd>K</kbd> twice");
+        assert!(!row.rows[0].text().contains(super::PILL_FILLER));
     }
 
     /// A wiki link is drawn as the prose it stands in: its alias, or its
@@ -3535,7 +3691,84 @@ mod tests {
             ]
         );
         assert_eq!(AtomShape::Link.chrome(), px(0.));
-        assert!(AtomShape::Link.is_bare_text());
+        assert!(AtomShape::Link.is_own_text());
+    }
+
+    /// A wiki link is shaped as the text it reads as, so the punctuation after
+    /// it sits against it rather than after a placeholder rounded up to whole
+    /// fillers.
+    #[test]
+    fn text_after_a_wiki_link_starts_at_the_labels_right_edge() {
+        let lines = shaped("see [[Missing Page]]. end");
+        let row = &lines[0];
+        // The display text holds the label itself; nothing stands in for it.
+        assert_eq!(row.rows[0].text(), "see Missing Page. end");
+        assert!(!row.rows[0].text().contains(super::PILL_FILLER));
+        // Four projection characters — `see ` — then the atom, then `. end`.
+        assert_eq!(row.char_len, 4 + 1 + 5);
+        let atom = row.rectangles(4..5, false);
+        let after = row.rectangles(5..6, false);
+        assert_eq!(atom.len(), 1);
+        assert_eq!(after.len(), 1);
+        assert_eq!(atom[0].right(), after[0].left());
+    }
+
+    /// A callout says what it is on a line of its own above its first block,
+    /// which is chrome: it takes room, not caret stops.
+    #[test]
+    fn a_callout_reserves_a_header_row_above_its_first_block_only() {
+        let lines = shaped("> [!tip] Custom title\n> First\n>\n> Second\n\nafter");
+        let (first, second, after) = (&lines[0], &lines[1], &lines[2]);
+        assert_eq!(
+            first.callout_header().map(|(label, _)| label),
+            Some("Custom title")
+        );
+        assert_eq!(second.callout_header().map(|(label, _)| label), None);
+        assert_eq!(after.callout_header().map(|(label, _)| label), None);
+        // The room is above the block, so no caret stop moved.
+        assert!(first.top_gap >= super::CALLOUT_HEADER_HEIGHT);
+        let (_, box_) = first.callout_header().expect("a header");
+        assert_eq!(box_.bottom(), first.origin.y);
+        // The marker line is not in the text, so the first line is the body's.
+        assert_eq!(first.rows[0].text(), "First");
+        // A callout with no title reads as its type, capitalised.
+        let lines = shaped("> [!warning]\n> Body");
+        assert_eq!(
+            lines[0].callout_header().map(|(label, _)| label),
+            Some("Warning")
+        );
+        // Where the callout sits in the note does not matter, and a first block
+        // holding a hard break is still one line with one header.
+        let lines = shaped("before\n\n> [!note]\n> One  \n> two\n>\n> > [!tip]\n> > Inner");
+        let labels: Vec<_> = lines
+            .iter()
+            .map(|line| line.callout_header().map(|(label, _)| label.to_owned()))
+            .collect();
+        assert_eq!(
+            labels,
+            [None, Some("Note".to_owned()), Some("Tip".to_owned())]
+        );
+        // Each bar keeps its own callout's tone: beside the nested tip the outer
+        // bar is still the note's.
+        let Some(Decoration::Quote { levels, tones, .. }) = lines[2].decoration else {
+            panic!("a nested callout line is decorated as a quote");
+        };
+        assert_eq!(levels, 2);
+        assert!(tones[0].is_some() && tones[1].is_some());
+        assert_ne!(tones[0], tones[1]);
+        let Some(Decoration::Quote { tones: outer, .. }) = lines[1].decoration else {
+            panic!("a callout line is decorated as a quote");
+        };
+        assert_eq!(outer[0], tones[0]);
+        // The band is the header's, and nothing below or above it is.
+        let band = lines[1].origin.y - super::CALLOUT_HEADER_HEIGHT / 2.;
+        assert!(lines[1].in_callout_header(band));
+        assert!(!lines[1].in_callout_header(lines[1].origin.y));
+        assert!(!lines[0].in_callout_header(band));
+        // An ordinary quote has no header and no extra room.
+        let lines = shaped("> plain");
+        assert!(lines[0].callout_header().is_none());
+        assert_eq!(lines[0].top_gap, Pixels::ZERO);
     }
 
     /// A table of two rows of two cells, as the measuring pass leaves them:

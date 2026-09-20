@@ -1,0 +1,249 @@
+//! What the view has to know about a callout, which is as little as possible.
+//!
+//! A callout is a block quote carrying a `callout` type, a `fold` marker and a
+//! `title`. The view reads three things off that: whether the quote has a
+//! header at all, what the header says, and which accent it and the quote's bar
+//! are drawn in. Every type name the mapping knows lives here, so the rest of
+//! the surface reads "this quote has a header and a tone" and nothing more.
+//!
+//! The fold marker is deliberately *not* acted on: the content is always drawn.
+//! A note whose body an editor hid would be a note whose body could not be
+//! edited, and the marker's byte is preserved either way.
+
+use crate::types::DocTypes;
+use markraft_core::projection::{Ancestor, Line};
+
+/// The colour family a callout is drawn in, following Obsidian's own grouping.
+///
+/// [`EditorStyle::callout_tones`](crate::EditorStyle::callout_tones) holds one
+/// accent per variant, in the order they are declared here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Tone {
+    /// note, info, todo — and anything the table does not know.
+    Note,
+    /// abstract, summary, tldr, tip, hint, important.
+    Summary,
+    /// success, check, done.
+    Success,
+    /// question, help, faq, warning, caution, attention.
+    Caution,
+    /// failure, fail, missing, danger, error, bug.
+    Danger,
+    /// example.
+    Example,
+    /// quote, cite.
+    Quote,
+}
+
+impl Tone {
+    /// Its place in [`EditorStyle::callout_tones`](crate::EditorStyle::callout_tones).
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Tone::Note => 0,
+            Tone::Summary => 1,
+            Tone::Success => 2,
+            Tone::Caution => 3,
+            Tone::Danger => 4,
+            Tone::Example => 5,
+            Tone::Quote => 6,
+        }
+    }
+}
+
+/// The tone a callout type belongs to. Obsidian matches a type without regard
+/// to case and shows anything it does not know in the default style, so an
+/// unknown type is a [`Tone::Note`] here too.
+pub(crate) fn tone_of(kind: &str) -> Tone {
+    match kind.to_lowercase().as_str() {
+        "abstract" | "summary" | "tldr" | "tip" | "hint" | "important" => Tone::Summary,
+        "success" | "check" | "done" => Tone::Success,
+        "question" | "help" | "faq" | "warning" | "caution" | "attention" => Tone::Caution,
+        "failure" | "fail" | "missing" | "danger" | "error" | "bug" => Tone::Danger,
+        "example" => Tone::Example,
+        "quote" | "cite" => Tone::Quote,
+        _ => Tone::Note,
+    }
+}
+
+/// A callout's header: what it reads as, and the tone it is drawn in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Head {
+    pub(crate) label: String,
+    pub(crate) tone: Tone,
+}
+
+/// The header a callout's type and title spell: the title where it has one, and
+/// the type capitalised where it has not.
+pub(crate) fn head_of(kind: &str, title: &str) -> Option<Head> {
+    if kind.is_empty() {
+        return None;
+    }
+    let label = match title.trim() {
+        "" => capitalize(kind),
+        title => title.to_owned(),
+    };
+    Some(Head {
+        label,
+        tone: tone_of(kind),
+    })
+}
+
+/// A type as a header reads it: `note` becomes `Note`, and a type an author
+/// capitalised keeps the capitals it was given.
+fn capitalize(kind: &str) -> String {
+    let mut chars = kind.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// The innermost block quote a line sits in, when it is a callout that has this
+/// line as its first — which is the line the header is drawn above.
+pub(crate) fn header_of(types: &DocTypes, line: &Line, previous: Option<&Line>) -> Option<Head> {
+    let quote = innermost_quote(types, line)?;
+    // The header belongs to the quote's own first line. Every line of the
+    // quote's first block passes `opens_quote`, so the line above settles it:
+    // the first one has no line of the same quote before it.
+    let continues = previous
+        .and_then(|previous| innermost_quote(types, previous))
+        .is_some_and(|above| above.before == quote.before);
+    if continues || !opens_quote(types, line) {
+        return None;
+    }
+    head_of(attr(quote, "callout"), attr(quote, "title"))
+}
+
+/// The tone of every block quote a line sits in, outermost first, for the bars
+/// drawn beside it — `None` for an ordinary quote. Each bar keeps its own
+/// callout's tone, so an outer callout still reads as itself beside a nested one.
+pub(crate) fn tones_beside(types: &DocTypes, line: &Line) -> Vec<Option<Tone>> {
+    line.ancestors
+        .iter()
+        .filter(|ancestor| Some(ancestor.node_type) == types.blockquote)
+        .map(|quote| {
+            let kind = attr(quote, "callout");
+            (!kind.is_empty()).then(|| tone_of(kind))
+        })
+        .collect()
+}
+
+fn innermost_quote<'a>(types: &DocTypes, line: &'a Line) -> Option<&'a Ancestor> {
+    line.ancestors
+        .iter()
+        .rev()
+        .find(|ancestor| Some(ancestor.node_type) == types.blockquote)
+}
+
+/// Whether the line is the first one inside the quote it sits in: every
+/// ancestor below the quote is that ancestor's first child.
+fn opens_quote(types: &DocTypes, line: &Line) -> bool {
+    let at = line
+        .ancestors
+        .iter()
+        .rposition(|ancestor| Some(ancestor.node_type) == types.blockquote);
+    at.is_some_and(|at| {
+        line.ancestors[at + 1..]
+            .iter()
+            .all(|below| below.index == 0)
+    })
+}
+
+fn attr<'a>(ancestor: &'a Ancestor, name: &str) -> &'a str {
+    ancestor
+        .attrs
+        .get(name)
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_obsidian_type_family_maps_to_its_own_tone() {
+        for (kind, tone) in [
+            ("note", Tone::Note),
+            ("info", Tone::Note),
+            ("todo", Tone::Note),
+            ("abstract", Tone::Summary),
+            ("summary", Tone::Summary),
+            ("tldr", Tone::Summary),
+            ("tip", Tone::Summary),
+            ("hint", Tone::Summary),
+            ("important", Tone::Summary),
+            ("success", Tone::Success),
+            ("check", Tone::Success),
+            ("done", Tone::Success),
+            ("question", Tone::Caution),
+            ("help", Tone::Caution),
+            ("faq", Tone::Caution),
+            ("warning", Tone::Caution),
+            ("caution", Tone::Caution),
+            ("attention", Tone::Caution),
+            ("failure", Tone::Danger),
+            ("fail", Tone::Danger),
+            ("missing", Tone::Danger),
+            ("danger", Tone::Danger),
+            ("error", Tone::Danger),
+            ("bug", Tone::Danger),
+            ("example", Tone::Example),
+            ("quote", Tone::Quote),
+            ("cite", Tone::Quote),
+            // Case does not matter, and Obsidian draws what it does not know
+            // in the default style.
+            ("WARNING", Tone::Caution),
+            ("Tip", Tone::Summary),
+            ("custom-type", Tone::Note),
+            ("", Tone::Note),
+        ] {
+            assert_eq!(tone_of(kind), tone, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn every_tone_has_a_place_of_its_own() {
+        let tones = [
+            Tone::Note,
+            Tone::Summary,
+            Tone::Success,
+            Tone::Caution,
+            Tone::Danger,
+            Tone::Example,
+            Tone::Quote,
+        ];
+        let indexes: Vec<_> = tones.iter().map(|tone| tone.index()).collect();
+        assert_eq!(indexes, (0..tones.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_header_reads_as_its_title_or_as_its_type_capitalised() {
+        assert_eq!(
+            head_of("note", ""),
+            Some(Head {
+                label: "Note".into(),
+                tone: Tone::Note
+            })
+        );
+        assert_eq!(
+            head_of("tip", "Custom title").map(|h| h.label).as_deref(),
+            Some("Custom title")
+        );
+        assert_eq!(
+            head_of("NOTE", "").map(|h| h.label).as_deref(),
+            Some("NOTE")
+        );
+        assert_eq!(
+            head_of("custom-type", "").map(|h| h.label).as_deref(),
+            Some("Custom-type")
+        );
+        // A title of nothing but spaces is no title.
+        assert_eq!(
+            head_of("note", "   ").map(|h| h.label).as_deref(),
+            Some("Note")
+        );
+        // An ordinary quote has no header at all.
+        assert_eq!(head_of("", "Title"), None);
+    }
+}

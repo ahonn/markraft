@@ -116,12 +116,7 @@ pub fn commonmark_node_rules() -> NodeRules {
             state.close_block(node);
         }),
     );
-    rules.insert(
-        md::BLOCKQUOTE.to_string(),
-        rule(|state, node, _, _| {
-            state.wrap_block("> ", None, node, |state| state.render_content(node));
-        }),
-    );
+    rules.insert(md::BLOCKQUOTE.to_string(), rule(blockquote));
     rules.insert(md::CODE_BLOCK.to_string(), rule(code_block));
     rules.insert(md::BULLET_LIST.to_string(), rule(bullet_list));
     rules.insert(md::ORDERED_LIST.to_string(), rule(ordered_list));
@@ -253,12 +248,80 @@ fn thematic_break(state: &SerializerState<'_>) -> &'static str {
     }
     // Nothing above, so what shares the line is a list marker, if any.
     let out = state.out();
-    let marker = out[out.rfind('\n').map_or(0, |index| index + 1)..].trim();
-    if !marker.is_empty() && marker.chars().all(|c| c == '-') {
+    let line = &out[out.rfind('\n').map_or(0, |index| index + 1)..];
+    let marker = line.trim();
+    if !marker.is_empty() {
+        return if marker.chars().all(|c| c == '-') {
+            "***"
+        } else {
+            "---"
+        };
+    }
+    // This line is bare, so the one above is what three dashes would underline.
+    // A callout writes its marker one line above its first block rather than a
+    // blank line above it, which is the one place a block starts here with text
+    // directly over it.
+    let above = out[..out.len() - line.len()].trim_end_matches('\n');
+    let previous = &above[above.rfind('\n').map_or(0, |index| index + 1)..];
+    if out.ends_with('\n') && !previous.trim_matches([' ', '\t', '>']).is_empty() {
         "***"
     } else {
         "---"
     }
+}
+
+/// A block quote, with its callout marker on the first quoted line when it has
+/// one.
+///
+/// The marker and the body's first line are one source line apart, not a blank
+/// line apart, so the separation is written here rather than left to the block
+/// flush a paragraph would ask for. A quote whose whole content is the empty
+/// paragraph standing for an empty container writes nothing after the marker,
+/// so `> [!note]` stays one line and reads back as itself.
+///
+/// The marker is written unescaped because the codec spells it; text that only
+/// *looks* like one goes out of an ordinary quote through
+/// [`escape_text`](crate::escape::escape_text), which escapes the `[` it opens
+/// with, so no edit can turn a quote into a callout behind the user's back.
+fn blockquote(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: usize) {
+    let callout = crate::callout::Callout {
+        kind: attr_str(node, "callout", "").to_string(),
+        fold: attr_str(node, "fold", "").to_string(),
+        title: attr_str(node, "title", "").to_string(),
+    };
+    state.wrap_block("> ", None, node, |state| {
+        if callout.kind.is_empty() {
+            state.render_content(node);
+            return;
+        }
+        state.text(&callout.marker(), false);
+        if is_empty_container(state, node) {
+            return;
+        }
+        // The marker line is a line of text, so the body may follow it directly
+        // only where its first block can interrupt a paragraph; anything else
+        // would be read as more of the marker's own line and the callout would
+        // come back as something else.
+        // A paragraph needs no rule of its own: it *is* the rest of the marker's
+        // line, which is how the compact form is written and read back.
+        let compact = node.maybe_child(0).is_some_and(|first| {
+            state.schema().node_id(md::PARAGRAPH) == Some(first.type_id())
+                || interrupts_paragraph(state, first)
+        });
+        state.close_block(node);
+        state.flush_close(if compact { 1 } else { 2 });
+        state.render_content(node);
+    });
+}
+
+/// Whether a container holds nothing but the empty paragraph that stands for
+/// having no content, which writes as nothing at all.
+fn is_empty_container(state: &SerializerState<'_>, node: &Node) -> bool {
+    node.child_count() == 1
+        && node.children().all(|child| {
+            child.content_size() == 0
+                && state.schema().node_id(md::PARAGRAPH) == Some(child.type_id())
+        })
 }
 
 fn code_block(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: usize) {

@@ -208,7 +208,7 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::Mark(doc::Inline::Underline) => Icon::Underline,
         Intent::Link => Icon::Link,
         Intent::Block(doc::Block::Heading(_)) => Icon::Heading,
-        Intent::Block(doc::Block::Quote) => Icon::Quote,
+        Intent::Block(doc::Block::Quote) | Intent::Block(doc::Block::Callout) => Icon::Quote,
         Intent::Block(doc::Block::Code) => Icon::CodeBlock,
         Intent::Block(doc::Block::Ordered) => Icon::Ordered,
         Intent::Block(doc::Block::Bullet) => Icon::Bullet,
@@ -1579,6 +1579,13 @@ impl NotesApp {
                 Intent::Block(doc::Block::Quote),
             )
             .slash(10, SlashEffect::Block(doc::Block::Quote)),
+            Command::new(
+                "format-callout",
+                "Callout",
+                "",
+                Intent::Block(doc::Block::Callout),
+            )
+            .slash(10, SlashEffect::Block(doc::Block::Callout)),
             Command::new(
                 "format-code-block",
                 "Code Block",

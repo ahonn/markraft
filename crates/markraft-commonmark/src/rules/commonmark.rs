@@ -22,7 +22,10 @@ use crate::table::{Alignment, format_alignments};
 pub fn commonmark_rules() -> ParseRules {
     ParseRules::new(md::RAW_BLOCK)
         .with(&NodeValue::FrontMatter(String::new()), ParseRule::Ignore)
-        .with(&NodeValue::BlockQuote, ParseRule::block(md::BLOCKQUOTE))
+        .with(
+            &NodeValue::BlockQuote,
+            ParseRule::block_with(md::BLOCKQUOTE, attrs_fn(blockquote_attrs)),
+        )
         .with(&NodeValue::Paragraph, ParseRule::block(md::PARAGRAPH))
         .with(
             &NodeValue::ThematicBreak,
@@ -171,6 +174,45 @@ fn table_attrs(target: ParseTarget<'_>) -> Attrs {
         })
         .collect();
     attrs! {"alignments" => format_alignments(&alignments)}
+}
+
+/// A block quote's callout marker, read from the source of its first line.
+///
+/// The marker has to come from the source and not from the paragraph comrak
+/// built: a reader resolves `\[!note]` to the text `[!note]`, and strips the
+/// indentation that tells `>  [!x]` apart from `> [!x]`. Everything the
+/// recogniser refuses leaves the attributes empty, which is an ordinary quote.
+fn blockquote_attrs(target: ParseTarget<'_>) -> Attrs {
+    let empty = attrs! {"callout" => "", "fold" => "", "title" => ""};
+    let Some(callout) = callout_marker(target) else {
+        return empty;
+    };
+    attrs! {
+        "callout" => callout.kind,
+        "fold" => callout.fold,
+        "title" => callout.title,
+    }
+}
+
+/// The callout marker a block quote's first line spells, or `None` for an
+/// ordinary quote.
+pub(crate) fn callout_marker(target: ParseTarget<'_>) -> Option<crate::callout::Callout> {
+    let quote = target.sourcepos();
+    let line = target.cx.line(quote.start.line);
+    // Where the quote's content begins: past the `>` and the one space after it
+    // a reader strips. A first line indented further does not open a callout,
+    // which is what Obsidian says too.
+    let marker = line.as_bytes().get(quote.start.column)?;
+    let content = quote.start.column + 1 + usize::from(*marker == b' ');
+    let first = target.node.first_child()?;
+    let paragraph = first.data.borrow();
+    if !matches!(paragraph.value, NodeValue::Paragraph)
+        || paragraph.sourcepos.start.line != quote.start.line
+        || paragraph.sourcepos.start.column != content
+    {
+        return None;
+    }
+    crate::callout::read_callout(line.get(content - 1..)?)
 }
 
 fn heading_attrs(target: ParseTarget<'_>) -> Attrs {

@@ -137,7 +137,11 @@ fn an_empty_paragraph_that_is_all_its_parent_holds_writes_as_nothing() {
     assert_eq!(round(">"), "> ");
     assert_eq!(round(""), "");
     assert_eq!(shape(""), "doc(paragraph())");
-    assert_eq!(shape(">"), "doc(blockquote(paragraph()))");
+    // A quote carries its callout attributes whether or not it is one.
+    assert_eq!(
+        shape(">"),
+        r#"doc(blockquote[callout=Str(""),fold=Str(""),title=Str("")](paragraph()))"#
+    );
 }
 
 // -- tables ---------------------------------------------------------------
@@ -615,6 +619,76 @@ fn an_anchor_with_nothing_but_a_destination_is_the_link_mark() {
     }
 }
 
+/// A callout is a block quote carrying its marker in attributes, so every
+/// form of it comes back as the line it was written on.
+#[test]
+fn a_callout_marker_travels_in_the_quotes_attributes() {
+    let codec = Codec::new();
+    for source in [
+        "> [!note]",
+        "> [!note]\n> Body",
+        "> [!tip] Custom title\n> Body with **marks**",
+        "> [!faq]- Folded by default\n> Body",
+        "> [!warning]+ Expanded by default\n> Body",
+        "> [!custom-type] Any type is legal in Obsidian",
+        "> [!NOTE] Upper",
+        "> [!note] Title  \n> Body",
+        "> [!note] a|b `c` **d**\n> Body",
+        "> [!note]\n> - one\n> - two",
+        "> [!note]\n> ```\n> code\n> ```",
+        "> [!note]\n> > [!tip] Inner\n> > inner body",
+        "- > [!note] In a list\n  > body",
+    ] {
+        assert_eq!(round(source), source, "{source:?}");
+        assert!(shape(source).contains("callout=Str(\""), "{source:?}");
+        // Parsing what was written gives the same document back.
+        assert_eq!(shape(&round(source)), shape(source), "{source:?}");
+    }
+    assert_eq!(
+        shape("> [!tip]- Title\n> Body"),
+        concat!(
+            r#"doc(blockquote[callout=Str("tip"),fold=Str("-"),title=Str("Title")]"#,
+            r#"(paragraph("Body")))"#
+        )
+    );
+    // The marker line is the paragraph's first line and nothing more.
+    assert_eq!(
+        shape("> [!note]"),
+        r#"doc(blockquote[callout=Str("note"),fold=Str(""),title=Str("")](paragraph()))"#
+    );
+    // Body text that spells a marker is escaped on the way out, so nothing a
+    // quote holds can turn it into a callout — or into a second one.
+    assert_eq!(
+        round("> [!note]\n> [!tip] is only text here"),
+        "> [!note]\n> \\[!tip\\] is only text here"
+    );
+    assert_eq!(
+        round("> \\[!note] plain"),
+        "> \\[!note\\] plain",
+        "an ordinary quote keeps its first line ordinary"
+    );
+    // What is not a marker is an ordinary quote, and the codec escapes text
+    // that would otherwise open one when it writes the quote back.
+    for source in [
+        "> \\[!note]\n> Body",
+        "> text [!note]\n> more",
+        "> `[!note]`\n> body",
+        ">  [!note]\n> Body",
+        "> [!]\n> body",
+        "> [!note]x\n> body",
+    ] {
+        assert!(
+            shape(source).contains(r#"callout=Str("")"#),
+            "{source:?}: {}",
+            shape(source)
+        );
+        judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
+        // Whatever it writes reads back as the same document, so text that
+        // looks like a marker cannot become one behind the author's back.
+        assert_eq!(shape(&round(source)), shape(source), "{source:?}");
+    }
+}
+
 #[test]
 fn a_wiki_link_is_an_atom_that_writes_back_the_bytes_it_took() {
     let codec = Codec::new();
@@ -916,7 +990,7 @@ fn task_items_carry_their_check_box_in_the_list_marker() {
 fn a_list_in_a_quote_in_a_list_keeps_every_level() {
     let source = "- outer\n\n  > quoted\n  >\n  > - inner\n  >   - deeper";
     assert_eq!(round(source), source);
-    assert!(shape(source).contains("blockquote(paragraph(\"quoted\"), bullet_list"));
+    assert!(shape(source).contains("](paragraph(\"quoted\"), bullet_list"));
 }
 
 #[test]

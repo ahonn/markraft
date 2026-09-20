@@ -100,6 +100,10 @@ const HREFS: &[&str] = &[
     "",
 ];
 const RAW_SOURCES: &[&str] = &["<div>\nraw\n</div>", "<!-- a comment -->"];
+/// What a callout's marker may spell. A type holds no bracket and is never
+/// empty; a title is one line and may hold anything a line may.
+const CALLOUT_TYPES: &[&str] = &["note", "tip", "NOTE", "custom-type", "警告"];
+const CALLOUT_TITLES: &[&str] = &["", "Title", "a|b **c**", "two  spaces", "trailing "];
 /// What a wiki link's target and alias may spell: anything but `[`, `]`, an
 /// unescaped `|` and a line ending, which is what the recogniser reads. An
 /// empty alias is the link having none.
@@ -293,8 +297,23 @@ impl Gen<'_> {
             6 if !in_item => self.table(),
             7 => {
                 let blocks = self.blocks(depth - 1, false, 1, 2);
+                // Every third quote is a callout, which is the same node
+                // carrying the marker its first line writes.
+                let (callout, fold, title) = if self.rng.one_in(3) {
+                    (
+                        *self.rng.pick(CALLOUT_TYPES),
+                        *self.rng.pick(&["", "-", "+"]),
+                        *self.rng.pick(CALLOUT_TITLES),
+                    )
+                } else {
+                    ("", "", "")
+                };
                 self.schema
-                    .node(md::BLOCKQUOTE, blocks)
+                    .node_with(
+                        md::BLOCKQUOTE,
+                        attrs! {"callout" => callout, "fold" => fold, "title" => title},
+                        blocks,
+                    )
                     .expect("a block quote")
             }
             _ => self.list(depth),

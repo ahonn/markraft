@@ -58,7 +58,7 @@ use std::cell::Ref;
 
 use comrak::nodes::{AstNode, NodeValue};
 use comrak::{Arena, Options, parse_document};
-use markraft_core::{Attrs, MarkTypeId, Node, NodeError, NodeTypeId, Schema, Slice};
+use markraft_core::{Attrs, Fragment, MarkTypeId, Node, NodeError, NodeTypeId, Schema, Slice};
 
 use crate::rules::{ParseCx, ParseRule, ParseRules, ParseTarget, commonmark_rules};
 
@@ -286,7 +286,8 @@ impl<'a> Walk<'a> {
                 } else {
                     self.blocks(node)?
                 };
-                out.push(self.fit(ty, attrs(target), children)?);
+                let (attrs, children) = self.callout(node, attrs(target), children);
+                out.push(self.fit(ty, attrs, children)?);
             }
             ParseRule::TextBlock {
                 node_type,
@@ -314,6 +315,73 @@ impl<'a> Walk<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Take a callout's marker line out of the body it opened.
+    ///
+    /// The marker is in the attributes now, and it is not text, so the
+    /// paragraph it shares with the first body line has to lose its first
+    /// line. A marker that is the whole paragraph takes the paragraph with it;
+    /// [`crate::fit::fit`] puts the empty one back that the content rule asks
+    /// for.
+    ///
+    /// The cut is the paragraph's first *top-level* line break. A paragraph
+    /// that runs past its first line without one — `> [!note] **bold` with the
+    /// emphasis closing on the line below — has no marker line to take away, so
+    /// the quote stays an ordinary one rather than losing the text that spans
+    /// the cut.
+    fn callout(
+        &self,
+        node: &'a AstNode<'a>,
+        attrs: Attrs,
+        mut children: Vec<Node>,
+    ) -> (Attrs, Vec<Node>) {
+        let named = attrs
+            .get("callout")
+            .and_then(|value| value.as_str())
+            .is_some_and(|kind| !kind.is_empty());
+        if !named {
+            return (attrs, children);
+        }
+        if self.take_marker_line(node, &mut children) {
+            (attrs, children)
+        } else {
+            let plain = attrs.with("callout", "").with("fold", "").with("title", "");
+            (plain, children)
+        }
+    }
+
+    /// Take the marker line out of the body, answering whether it could be
+    /// taken out at all.
+    fn take_marker_line(&self, node: &'a AstNode<'a>, children: &mut Vec<Node>) -> bool {
+        let Some(first) = node.first_child() else {
+            return false;
+        };
+        let pos = first.data.borrow().sourcepos;
+        let Some(paragraph) = children.first().cloned() else {
+            return false;
+        };
+        let breaks: Vec<NodeTypeId> = [crate::schema::SOFT_BREAK, crate::schema::HARD_BREAK]
+            .iter()
+            .filter_map(|name| self.schema.node_id(name))
+            .collect();
+        let cut = paragraph
+            .children()
+            .position(|child| breaks.contains(&child.type_id()));
+        match cut {
+            Some(cut) => {
+                let body: Vec<Node> = paragraph.children().skip(cut + 1).cloned().collect();
+                children[0] = paragraph.copy(Fragment::from_nodes(body));
+                true
+            }
+            // No break, so the marker is the whole paragraph — unless the
+            // paragraph runs past the line the marker sits on.
+            None if pos.start.line == pos.end.line => {
+                children.remove(0);
+                true
+            }
+            None => false,
+        }
     }
 
     /// The node type the rule set uses for paragraphs, which is also what an

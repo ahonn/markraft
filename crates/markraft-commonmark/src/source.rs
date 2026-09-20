@@ -28,9 +28,9 @@ pub struct SourceDocument {
 /// user what to do about it rather than only that something failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceError {
-    /// The change lands inside source kept verbatim: a callout, math, a block
-    /// anchor, a link reference definition or a `[[…]]` spelling this codec
-    /// does not read as a wiki link.
+    /// The change lands inside source kept verbatim: math, a block anchor, a
+    /// link reference definition, a callout's marker line or a `[[…]]`
+    /// spelling this codec does not read as a wiki link.
     ProtectedSpan,
     /// Writing the change needs its whole block replaced, and that block carries
     /// source the semantic document does not, such as a reference definition.
@@ -44,7 +44,7 @@ impl std::fmt::Display for SourceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::ProtectedSpan => {
-                "This edit falls inside Markdown that is kept exactly as written, such as a callout or math."
+                "This edit falls inside Markdown that is kept exactly as written, such as math, a block anchor or a callout's marker line."
             }
             Self::ProtectedBlock => {
                 "This edit would have to replace a block that also carries source the document does not, such as a link reference definition."
@@ -264,7 +264,7 @@ impl SourceDocument {
         for spelling in emphasis_spellings(&removed) {
             for offset in candidate_offsets(raw, &spelling, &prefix, &suffix) {
                 let changed = offset..offset + spelling.len();
-                if protected.iter().any(|span| overlaps(&changed, span)) {
+                if protected.overlaps(&changed) {
                     blocked = true;
                     continue;
                 }
@@ -298,8 +298,7 @@ impl SourceDocument {
                             .into_iter()
                             .find_map(|offset| {
                                 let changed = offset..offset + spelling.len();
-                                (!protected.iter().any(|span| overlaps(&changed, span)))
-                                    .then_some(changed)
+                                (!protected.overlaps(&changed)).then_some(changed)
                             })
                     });
                 let Some(changed) = found else {
@@ -328,8 +327,11 @@ impl SourceDocument {
         }
         // A structural operation may require replacing its containing block.
         // Only canonical original source is eligible: any unknown spelling,
-        // definition or trivia makes this fallback unsafe rather than expendable.
-        if raw == self.with_newlines(before) && protected.is_empty() {
+        // definition or trivia makes this fallback unsafe rather than
+        // expendable. A callout's marker line is the exception — the document
+        // holds its bytes in the quote's attributes, so writing the block again
+        // writes the marker again.
+        if raw == self.with_newlines(before) && protected.all_rebuildable() {
             let mut candidate = source;
             candidate.replace_range(range, &self.with_newlines(after));
             return self.validate(schema, target, candidate);
@@ -610,10 +612,41 @@ fn line_ranges(source: &str) -> Vec<Range<usize>> {
     lines
 }
 
-fn protected_ranges(source: &str) -> Vec<Range<usize>> {
+/// Where an edit may not land, and which of those spans the document itself can
+/// put back.
+#[derive(Debug, Default)]
+struct Protected {
+    /// Every span an edit must not overlap.
+    spans: Vec<Range<usize>>,
+    /// The spans whose bytes the *document* carries — a callout's marker line,
+    /// which lives in its quote's attributes — so replacing the whole block
+    /// writes them again exactly as they were. Everything else here is source
+    /// the tree has no record of, and a rewrite would lose or respell it.
+    rebuildable: Vec<Range<usize>>,
+}
+
+impl Protected {
+    fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+
+    fn overlaps(&self, change: &Range<usize>) -> bool {
+        self.spans.iter().any(|span| overlaps(change, span))
+    }
+
+    /// Whether a rewrite of the whole block puts every protected span back.
+    fn all_rebuildable(&self) -> bool {
+        self.spans
+            .iter()
+            .all(|span| self.rebuildable.contains(span))
+    }
+}
+
+fn protected_ranges(source: &str) -> Protected {
+    let mut rebuildable = Vec::new();
     let mut protected = Vec::new();
     let code = code_ranges(source);
-    for (open, close) in [("%%", "%%"), ("[!", "]")] {
+    for (open, close) in [("%%", "%%")] {
         let mut offset = 0;
         while let Some(start) = source[offset..].find(open).map(|at| offset + at) {
             if let Some(span) = code.iter().find(|span| span.contains(&start)) {
@@ -635,6 +668,20 @@ fn protected_ranges(source: &str) -> Vec<Range<usize>> {
     for range in line_ranges(source) {
         let line = &source[range.clone()];
         let trimmed = line.trim_start();
+        // A callout's marker line is in the tree as attributes rather than as
+        // text, so nothing an edit says can rebuild it; the body it opened is
+        // ordinary content. `[!…]` anywhere else is the plain text it has
+        // always been and is not guarded at all.
+        if crate::callout::quote_content(line)
+            .and_then(crate::callout::read_callout)
+            .is_some()
+            && !code
+                .iter()
+                .any(|span| span.start <= range.start && range.end <= span.end)
+        {
+            protected.push(range.clone());
+            rebuildable.push(range.clone());
+        }
         // Reference definitions can disappear from the semantic tree, so never
         // treat them as replaceable whitespace inside a structural range.
         if trimmed.starts_with('[')
@@ -653,7 +700,10 @@ fn protected_ranges(source: &str) -> Vec<Range<usize>> {
             protected.push(range.start + at + 1..range.end);
         }
     }
-    protected
+    Protected {
+        spans: protected,
+        rebuildable,
+    }
 }
 
 /// The `[[…]]` spans this codec does *not* read as a

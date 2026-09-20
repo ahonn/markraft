@@ -19,6 +19,7 @@ pub(crate) enum ControlAction {
     CopyCode(usize),
     EditHtml(usize),
     OpenWikiLink(usize),
+    EnterCallout(usize),
 }
 
 struct AccessibleControl {
@@ -88,7 +89,7 @@ impl AccessibleControl {
             ControlAction::CodeLanguage(_) => Some("Command+Option+L"),
             ControlAction::CopyCode(_) => Some("Command+Option+Shift+C"),
             ControlAction::EditHtml(_) => Some("Command+Option+R"),
-            ControlAction::OpenWikiLink(_) => None,
+            ControlAction::OpenWikiLink(_) | ControlAction::EnterCallout(_) => None,
         };
         if let Some(shortcut) = shortcut {
             node.set_keyboard_shortcut(shortcut);
@@ -192,6 +193,18 @@ impl AccessibleText {
                         bounds: accessible_bounds(*bounds, scale),
                     });
                 }
+            }
+            // A callout's header is not text anyone can reach with the caret,
+            // so what it says reaches a screen reader as a control that puts
+            // the caret where the callout's own content starts.
+            if let Some((label, bounds)) = row.callout_header() {
+                self.controls.push(AccessibleControl {
+                    node_id: None,
+                    action: ControlAction::EnterCallout(row.from),
+                    label: format!("Callout: {label}"),
+                    checked: None,
+                    bounds: accessible_bounds(bounds, scale),
+                });
             }
             if let Some((checked, bounds)) = row.task_marker() {
                 self.controls.push(AccessibleControl {
@@ -417,6 +430,12 @@ impl crate::EditorView {
                 };
                 (index, position)
             }
+            ControlAction::EnterCallout(position) => {
+                let Some((index, _)) = self.projection.pos_to_line_offset(position) else {
+                    return;
+                };
+                (index, position)
+            }
             ControlAction::OpenWikiLink(position) => {
                 if self.wiki_link_at(position).is_none() {
                     return;
@@ -458,7 +477,12 @@ impl crate::EditorView {
                 (index, line.from)
             }
         };
-        if !activate || matches!(action, ControlAction::ToggleTask(_)) {
+        if !activate
+            || matches!(
+                action,
+                ControlAction::ToggleTask(_) | ControlAction::EnterCallout(_)
+            )
+        {
             window.focus(&self.focus, cx);
             self.select(position, false, cx);
         }
@@ -480,6 +504,9 @@ impl crate::EditorView {
             ControlAction::CodeLanguage(pos) => {
                 cx.emit(crate::EditorEvent::CodeLanguageRequested { pos })
             }
+            // Selecting the position is the whole action: the header names the
+            // callout, and reaching it means reaching its content.
+            ControlAction::EnterCallout(_) => {}
             ControlAction::CopyCode(_) => {
                 if let Some(text) = self.projection.line_text(index) {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_owned()));

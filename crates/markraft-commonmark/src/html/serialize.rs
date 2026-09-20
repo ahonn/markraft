@@ -351,7 +351,14 @@ pub fn commonmark_html_node_rules() -> HtmlNodeRules {
     rules.insert(
         md::BLOCKQUOTE.to_string(),
         rule(|state, node, _| {
-            state.write("<blockquote>\n");
+            // A callout's marker is not content, so it travels in data
+            // attributes rather than as a line of text another reader would
+            // then show twice.
+            state.write("<blockquote");
+            state.attr("data-callout", attr_str(node, "callout", ""));
+            state.attr("data-callout-fold", attr_str(node, "fold", ""));
+            state.attr("data-callout-title", attr_str(node, "title", ""));
+            state.write(">\n");
             state.render_content(node);
             state.write("\n</blockquote>");
         }),

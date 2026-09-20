@@ -84,6 +84,18 @@ pub const PARAGRAPH: &str = "paragraph";
 /// default 1). Always written back as ATX.
 pub const HEADING: &str = "heading";
 /// A block quote: `block+`.
+///
+/// Attributes, all empty on an ordinary quote:
+/// * `callout` (`Str`, default `""`) — an Obsidian callout's type, exactly as
+///   written. A non-empty value is what makes the quote a callout.
+/// * `fold` (`Str`, default `""`) — `"-"` or `"+"`, the fold marker after the
+///   type. Kept as a byte; this codec always shows the content.
+/// * `title` (`Str`, default `""`) — the raw title after the marker, not read
+///   as inline content.
+///
+/// A callout is this node rather than one of its own so that every structural
+/// command, key binding and correction that works on a block quote keeps
+/// working on it. [`crate::callout`] says which first lines are markers.
 pub const BLOCKQUOTE: &str = "blockquote";
 /// A code block: `text*`, no marks, `code: true`.
 ///
@@ -232,7 +244,10 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
         .node(
             NodeTypeSpec::new(BLOCKQUOTE, "block+")
                 .group(BLOCK_GROUP)
-                .defining(true),
+                .defining(true)
+                .attr(str_attr("callout", ""))
+                .attr(str_attr("fold", ""))
+                .attr(str_attr("title", "")),
         )
         .node(
             NodeTypeSpec::new(CODE_BLOCK, "text*")

@@ -7,18 +7,20 @@
 //! paragraph.
 
 use crate::types::DocTypes;
+use markraft_core::commands::structure::markup_of;
 use markraft_core::commands::{
-    Command, Direction, add_row_after, chain, command, create_paragraph_near, delete_by_grapheme,
-    delete_by_word, delete_empty_table, delete_selection, exit_code, goto_cell_below,
-    goto_next_cell, goto_prev_cell, guard_cell_boundary, guard_cell_range, guard_cell_split,
-    join_backward, join_forward, lift, lift_empty_block, lift_list_item, move_by_grapheme,
-    move_by_word, new_line_in_code, select_node_backward, select_node_forward, set_block_type,
-    sink_list_item, split_block_keep_marks, split_list_item, toggle_mark, undo_input_rule, wrap_in,
-    wrap_in_list,
+    Command, Direction, add_row_after, chain, changes_spec, command, create_paragraph_near,
+    delete_by_grapheme, delete_by_word, delete_empty_table, delete_selection, exit_code,
+    goto_cell_below, goto_next_cell, goto_prev_cell, guard_cell_boundary, guard_cell_range,
+    guard_cell_split, join_backward, join_forward, lift, lift_empty_block, lift_list_item,
+    move_by_grapheme, move_by_word, new_line_in_code, select_node_backward, select_node_forward,
+    set_block_type, sink_list_item, split_block_keep_marks, split_list_item, toggle_mark,
+    undo_input_rule, wrap_in, wrap_in_list,
 };
 use markraft_core::projection::projection_of;
 use markraft_core::{
-    AttrValue, Attrs, Change, EditorState, NodeTypeId, Selection, TransactionSpec,
+    AttrValue, Attrs, Change, EditorState, Markup, NodeTypeId, Selection, Slice, Token,
+    TransactionSpec,
 };
 
 /// Run `command` only where `pred` holds.
@@ -358,17 +360,54 @@ pub(crate) fn toggle_quote(types: &DocTypes) -> Command {
     let types = types.clone();
     command(move |state| {
         let blockquote = types.blockquote?;
+        toggle_wrap_in(blockquote, Attrs::empty())(state)
+    })
+}
+
+/// Wrap the selection in `ty` with `attrs`, or, where it already sits in one:
+/// retype that node when its attributes differ, and lift out of it when they
+/// do not.
+///
+/// The retyping case is what lets one wrapper have variants — a quote that is
+/// a callout, say — without a second node type: asking for a variant the
+/// cursor is not in changes the one it is in, and asking for the variant it is
+/// already in takes the wrapper away, which is what a toggle means.
+pub(crate) fn toggle_wrap_in(ty: NodeTypeId, attrs: Attrs) -> Command {
+    command(move |state| {
         let doc = state.doc();
-        let inside = doc
-            .resolve(state.selection().head(doc))
-            .is_ok_and(|resolved| {
-                (0..=resolved.depth()).any(|d| resolved.node(d).type_id() == blockquote)
-            });
-        if inside {
-            lift()(state)
-        } else {
-            wrap_in(blockquote, Attrs::empty())(state)
+        let schema = state.schema();
+        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        let depth = (0..=resolved.depth())
+            .rev()
+            .find(|d| resolved.node(*d).type_id() == ty);
+        let Some(depth) = depth else {
+            return wrap_in(ty, attrs.clone())(state);
+        };
+        let node = resolved.node(depth);
+        let wanted = markup_of(schema, ty, &attrs);
+        if node.attrs() == &wanted.attrs {
+            return lift()(state);
         }
+        let before = resolved.before(depth);
+        let after = before + node.node_size() - 1;
+        let markup = Markup {
+            ty,
+            attrs: wanted.attrs,
+            marks: node.marks().clone(),
+        };
+        let changes = vec![
+            Change::replace(
+                before,
+                before + 1,
+                Slice::from_tokens(&[Token::Open(markup.clone())]),
+            ),
+            Change::replace(
+                after,
+                after + 1,
+                Slice::from_tokens(&[Token::Close(markup)]),
+            ),
+        ];
+        changes_spec(state, changes, "settype")
     })
 }
 

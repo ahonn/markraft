@@ -10,6 +10,8 @@
 //!   two cannot be told apart before it. A typed `[[Note]]` becomes the wiki
 //!   link atom on its closing `]]`, because text spelling one is not one and a
 //!   source-preserving save would read the two back as different documents.
+//!   `[!note] ` at the start of a block quote turns it into a callout, for the
+//!   same reason and on the same space a check box waits for.
 //! * **Corrections** — a list merge, and the repair that puts a required child
 //!   back into an emptied container. Two lists of the same type and attributes
 //!   sitting next to each other are one list as far as CommonMark is concerned,
@@ -100,6 +102,7 @@ pub fn commonmark_input_rules() -> Vec<InputRule> {
         divider_rule(),
         task_rule(),
         wiki_link_rule(),
+        callout_rule(),
     ]
 }
 
@@ -270,6 +273,79 @@ fn task_rule() -> InputRule {
             let markup = markup_of(m.schema, task_type, &attrs! {"checked" => checked});
             let before = resolved.before(depth - 1);
             let after = before + item.node_size() - 1;
+            Some(spec(vec![
+                Change::replace(
+                    before,
+                    before + 1,
+                    Slice::from_tokens(&[Token::Open(markup.clone())]),
+                ),
+                Change::delete(m.from, m.to),
+                Change::replace(
+                    after,
+                    after + 1,
+                    Slice::from_tokens(&[Token::Close(markup)]),
+                ),
+            ]))
+        },
+    )
+}
+
+/// `[!note] ` at the start of a block quote turns it into a callout.
+///
+/// The space is what completes the marker, the way it completes a check box:
+/// before it, `[!note]-` may still be growing a fold marker. Only an ordinary
+/// quote converts, and only from its own first block, which is where a reader
+/// looks for the marker too. A title is not typed here — it is not text once
+/// the quote is a callout, and v1 has no way to edit one.
+fn callout_rule() -> InputRule {
+    InputRule::new(
+        |before| {
+            let marker = before.strip_suffix(' ')?;
+            crate::callout::read_callout(marker)
+                .filter(|callout| callout.title.is_empty())
+                .map(|_| before.chars().count())
+        },
+        |m| {
+            let quote_type = m.schema.node_id(md::BLOCKQUOTE)?;
+            let callout = crate::callout::read_callout(m.text.trim_end_matches(' '))?;
+            let resolved = m.doc.resolve(m.block_start).ok()?;
+            let depth = resolved.depth();
+            // The marker opens the quote, so it sits in its first block.
+            if depth < 1 || resolved.index(depth - 1) != 0 {
+                return None;
+            }
+            let quote = resolved.node(depth - 1);
+            if quote.type_id() != quote_type {
+                return None;
+            }
+            // A quote that is already a callout has its marker in hand.
+            let named = quote
+                .attrs()
+                .get("callout")
+                .and_then(|value| value.as_str())
+                .is_some_and(|kind| !kind.is_empty());
+            if named {
+                return None;
+            }
+            let in_code = m.schema.mark_id(md::CODE).is_some_and(|code| {
+                m.doc
+                    .resolve(m.from)
+                    .is_ok_and(|resolved| resolved.marks(m.schema).contains_type(code))
+            });
+            if in_code {
+                return None;
+            }
+            let markup = markup_of(
+                m.schema,
+                quote_type,
+                &attrs! {
+                    "callout" => callout.kind,
+                    "fold" => callout.fold,
+                    "title" => "",
+                },
+            );
+            let before = resolved.before(depth - 1);
+            let after = before + quote.node_size() - 1;
             Some(spec(vec![
                 Change::replace(
                     before,

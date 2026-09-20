@@ -381,7 +381,19 @@ pub fn commonmark_html_rules() -> HtmlRules {
         .with("label", HtmlRule::Inline)
         .matching("span", html_match_fn(fully_modelled_span), HtmlRule::Inline)
         .with("p", HtmlRule::block(md::PARAGRAPH))
-        .with("blockquote", HtmlRule::block(md::BLOCKQUOTE))
+        .with(
+            "blockquote",
+            HtmlRule::block_with(
+                md::BLOCKQUOTE,
+                html_attrs_fn(|target| {
+                    attrs! {
+                        "callout" => target.attr("data-callout").unwrap_or("").to_string(),
+                        "fold" => target.attr("data-callout-fold").unwrap_or("").to_string(),
+                        "title" => target.attr("data-callout-title").unwrap_or("").to_string(),
+                    }
+                }),
+            ),
+        )
         .with("hr", HtmlRule::block(md::HORIZONTAL_RULE))
         // Before the general `<pre>`: a block whose source the model does not
         // interpret is written as one, and has to come back as one.

@@ -114,6 +114,7 @@
 #![forbid(unsafe_code)]
 
 mod autolink;
+pub mod callout;
 pub mod escape;
 mod extensions;
 mod fit;
@@ -135,6 +136,7 @@ pub mod wiki;
 /// registering rules for its own node kinds uses the same types.
 pub use comrak;
 
+pub use callout::{Callout, read_callout};
 pub use extensions::{commonmark_corrections, commonmark_extensions, commonmark_input_rules};
 pub use fragment::open_fragment;
 pub use html::{

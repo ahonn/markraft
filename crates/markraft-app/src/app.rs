@@ -2095,8 +2095,8 @@ fn rejection_message(error: &markraft_commonmark::SourceError) -> String {
     use markraft_commonmark::SourceError;
     match error {
         SourceError::ProtectedSpan => {
-            "Markraft leaves this Markdown exactly as written — a callout, math or a block \
-             anchor. Edit that part in another editor."
+            "Markraft leaves this Markdown exactly as written — math, a block anchor or a \
+             callout's own first line. Edit that part in another editor."
         }
         SourceError::ProtectedBlock => {
             "This change would drop source Markraft cannot represent, such as a link reference \

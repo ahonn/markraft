@@ -93,7 +93,9 @@ fn modifications_inside_unsupported_extension_syntax_are_refused() {
         // A `[[…]]` this codec does not read as a wiki link is still source it
         // cannot rebuild; the ones it does read are nodes, tested below.
         "Read [[old|]] here\n",
-        "> [!old]\n> contents\n",
+        // A callout whose source is not what the codec would write cannot be
+        // rebuilt either, so its marker line stays untouchable.
+        ">[!old]\n>contents\n",
         "text ^old\n",
         "math $old$\n",
     ] {
@@ -129,6 +131,103 @@ fn modifications_inside_dollar_math_are_still_refused() {
             "{original:?}"
         );
     }
+}
+
+#[test]
+fn unchanged_callouts_of_every_form_are_byte_identical() {
+    for source in [
+        "> [!note]\n> Body\n",
+        "> [!tip] Custom title\n> Body with **marks**\n",
+        "> [!faq]- Folded by default\n> Body\n",
+        "> [!warning]+ Expanded by default\n> Body\n",
+        "> [!custom-type] Any type is legal in Obsidian\n> Body\n",
+        "> [!note]\n",
+        ">[!note]\n>Body\n",
+        "> [!note]\r\n> Body\r\n",
+        "> [!note] Title\nlazy continuation\n",
+        "> [!note]\n> > [!tip] Inner\n> > body\n",
+        "- > [!note] In a list\n  > body\n",
+        "> [!note]\n>\n> Second block\n",
+        "> [!note] Title  \n> Body\n",
+        "> \\[!note]\n> Not a callout\n",
+        "> text [!note] more\n",
+    ] {
+        let schema = commonmark_schema();
+        let document = SourceDocument::parse(&schema, source).unwrap();
+        assert_eq!(
+            document.render(&schema, document.document()).unwrap(),
+            source,
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
+fn editing_a_callouts_body_leaves_its_marker_line_and_prefixes_alone() {
+    for original in [
+        "> [!note]\n> old text\n",
+        "> [!tip] Title\n> old text\n",
+        ">[!note]\n>old text\n",
+        "> [!note]\n>\n> old text\n",
+        "> [!note]\n> - old item\n> - two\n",
+        "> [!note]\n> > [!tip] Inner\n> > old body\n",
+        // Callout-looking text that is not a marker is ordinary content now.
+        "> text [!note] and old\n",
+        "paragraph with [!note] and old\n",
+    ] {
+        let expected = original.replace("old", "new");
+        assert_eq!(edit(original, &expected).unwrap(), expected, "{original:?}");
+    }
+}
+
+#[test]
+fn a_callout_can_be_rewritten_whole_but_not_patched_through_its_marker() {
+    // The marker's bytes are in the quote's attributes, so writing the block
+    // again writes the marker again: retyping it, dropping it and deleting the
+    // whole callout all go through.
+    for (original, expected) in [
+        ("> [!note]\n> Body\n", "> [!tip] Now titled\n> Body\n"),
+        ("> [!note]\n> Body\n", "> Body\n"),
+        ("> Body\n", "> [!note]\n> Body\n"),
+    ] {
+        assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
+    }
+    // Deleting the whole callout leaves the separators around it, as deleting
+    // any other block does; what matters is that it goes at all.
+    let schema = commonmark_schema();
+    let expected = "First\n\nLast\n";
+    let result = edit("First\n\n> [!note]\n> Body\n\nLast\n", expected).unwrap();
+    assert_eq!(
+        SourceDocument::parse(&schema, &result).unwrap().document(),
+        SourceDocument::parse(&schema, expected).unwrap().document()
+    );
+    assert!(!result.contains("[!note]"));
+    // A callout the codec would not spell the same way cannot be rebuilt, so
+    // an edit reaching its marker is refused rather than respelling the block.
+    assert_eq!(
+        edit(">[!note]\n>Body\n", ">[!tip]\n>Body\n"),
+        Err(SourceError::ProtectedSpan)
+    );
+}
+
+#[test]
+fn real_enter_inside_a_callout_keeps_its_marker_and_quote_prefixes() {
+    let schema = commonmark_schema();
+    let original = "> [!note] Title\n> First line\n";
+    let source = SourceDocument::parse(&schema, original).unwrap();
+    let state = editor_at_end(&source);
+    let state = applied(&state, enter_command(&state));
+    let state = applied(&state, markraft_core::commands::insert_text("Second"));
+    let rendered = source
+        .render(&schema, state.doc())
+        .unwrap_or_else(|error| panic!("Return in a callout: {error}"));
+    assert_eq!(rendered, "> [!note] Title\n> First line\n>\n> Second\n");
+    assert_eq!(
+        SourceDocument::parse(&schema, &rendered)
+            .unwrap()
+            .document(),
+        state.doc()
+    );
 }
 
 #[test]
