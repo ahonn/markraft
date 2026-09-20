@@ -2,6 +2,46 @@ use super::*;
 
 type FormatItem = (&'static str, &'static str, Intent, bool);
 
+/// How many capsules stand beside the mode badge before the rest fold into a count.
+const CAPSULES_SHOWN: usize = 2;
+/// A capsule's height. Its corner is half of this, so it reads as one of the
+/// rounded controls the chrome is made of.
+const CAPSULE_HEIGHT: Pixels = px(24.);
+/// The box a capsule's symbol is drawn into. A symbol carries its own margin, so a
+/// box the size of the label's type draws a glyph shorter than the label's capitals;
+/// this is measured against the 11px text beside it rather than set to match it.
+const CAPSULE_ICON: f32 = 14.;
+
+/// One thing about the open note the user has to deal with, said in the corner and
+/// explained in the card the corner opens.
+///
+/// These are *states*, not events: each one outlives any sentence about it, which is
+/// why none of them is a notice. Ordered most pressing first, which is the order
+/// [`NotesApp::file_states`] builds them in.
+pub(super) struct FileState {
+    /// Element id, and the spring's key; stable per kind so the entry animation
+    /// does not replay as the label's number changes.
+    pub id: &'static str,
+    pub icon: Icon,
+    /// Two words at most: it sits in 11px beside the mode badge.
+    pub label: String,
+    /// What the card says, ending in what to do about it.
+    pub detail: String,
+    /// Drawn in the colour destructive controls use. Reserved for a state that is
+    /// losing work for as long as it holds.
+    pub urgent: bool,
+    /// What the card offers, left to right.
+    pub actions: Vec<(&'static str, Intent)>,
+}
+
+impl FileState {
+    /// The whole state as assistive technology hears it: the label alone is two
+    /// words and says too little on its own.
+    pub(super) fn announced(&self) -> String {
+        format!("{}. {}", self.label, self.detail)
+    }
+}
+
 // Three 38px menus, four 24px actions, two 9px separators, eight 4px gaps,
 // and 4px padding on each side. Keep menu anchors tied to this geometry.
 const TOOLBAR_CAPSULE: Pixels = px(268.);
@@ -323,27 +363,12 @@ impl NotesApp {
         let kind = doc::Block::active(editor.state(), &editor.projection());
         let reduce_motion = cx.reduce_motion();
         let linked = editor.active_link().is_some();
-        let note = self.library.active_note();
-        let file_status = if let Some(reason) = &note.read_only {
-            let mut label = format!("Read-only: {reason}");
-            if note.conflicted {
-                label.push_str(" Autosave paused.");
-            }
-            Some((Icon::Lock, label, "Read-only. Click for ways to edit it."))
-        } else if note.conflicted {
-            Some((
-                Icon::Pause,
-                "Autosave paused".to_owned(),
-                "Autosave paused. Click to review.",
-            ))
-        } else {
-            None
-        };
+        let states = self.file_states();
         // The toolbar is 268px wide and centered, so its left edge sits 91px from a
         // 450px window's. The full mode label takes about that much; adding the
         // indicator and its gap needs some 22px more, which a 500px window has.
         let compact_vim = self.format_toolbar
-            && (viewport < px(450.) || (file_status.is_some() && viewport < px(500.)));
+            && (viewport < px(450.) || (!states.is_empty() && viewport < px(500.)));
         div()
             .h(px(48.))
             .flex_shrink_0()
@@ -359,9 +384,7 @@ impl NotesApp {
                     .items_center()
                     .gap(px(4.))
                     .children(self.vim_badge(compact_vim))
-                    .when_some(file_status, |s, (symbol, label, hint)| {
-                        s.child(self.file_status_button(symbol, label, hint, cx))
-                    }),
+                    .children(self.status_capsules(&states, cx)),
             )
             .when(!self.format_toolbar, |s| {
                 s.child(
@@ -506,79 +529,206 @@ impl NotesApp {
             })
     }
 
-    /// The lower-left lock or pause. It says what state the file is in and opens the
-    /// way out of it, and it lights up when a keystroke was refused, because a
-    /// read-only file has no notice of its own to show for each one.
-    fn file_status_button(
-        &self,
-        symbol: Icon,
-        label: String,
-        hint: &'static str,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    /// Everything about the open note and its folder the user has to deal with,
+    /// most pressing first.
+    ///
+    /// A save failure comes first because it is the only one losing work for as long
+    /// as it holds; a conflict next, because autosave is stopped until it is settled.
+    /// The rest are true but not urgent.
+    pub(super) fn file_states(&self) -> Vec<FileState> {
+        let mut states = Vec::new();
+        if self.persistence.is_none() {
+            return states;
+        }
+        let note = self.library.active_note();
+        if let Some(error) = &self.error {
+            states.push(FileState {
+                id: "state-unsaved",
+                icon: Icon::Alert,
+                label: "Not saved".into(),
+                detail: error.clone(),
+                urgent: true,
+                actions: vec![
+                    ("Retry", Intent::Retry),
+                    ("Save a Copy…", Intent::SaveCopy),
+                    ("Reload from Disk…", Intent::Reload),
+                ],
+            });
+        }
+        if note.conflicted {
+            states.push(FileState {
+                id: "state-conflict",
+                icon: Icon::Pause,
+                label: "Conflict".into(),
+                detail: "Another app changed this file. Autosave is paused until you \
+                         choose which version to keep."
+                    .into(),
+                urgent: true,
+                actions: vec![("Resolve…", Intent::ReviewConflict)],
+            });
+        }
+        if let Some(reason) = &note.read_only {
+            states.push(FileState {
+                id: "state-read-only",
+                icon: Icon::Lock,
+                label: "Read-only".into(),
+                detail: reason.clone(),
+                urgent: false,
+                actions: if note.path.is_some() {
+                    vec![
+                        ("Open in Default Editor", Intent::OpenExternally),
+                        ("Reveal", Intent::RevealNote),
+                    ]
+                } else {
+                    Vec::new()
+                },
+            });
+        }
+        if self.folder_was_created {
+            states.push(FileState {
+                id: "state-new-folder",
+                icon: Icon::Open,
+                label: "New folder".into(),
+                detail: "The notes folder in your settings was not there, so an empty \
+                         one was made. Choose another folder if the old one moved."
+                    .into(),
+                urgent: false,
+                actions: vec![
+                    ("Choose Folder…", Intent::ChooseFolder),
+                    ("Show Folder", Intent::Reveal),
+                ],
+            });
+        }
+        states
+    }
+
+    /// The capsules in the lower left: one per state the file is in that the user
+    /// has to deal with, most pressing first.
+    ///
+    /// Two fit beside the mode badge; the rest fold into a count, because the card
+    /// they all open lists every one of them anyway. A capsule says its state in
+    /// words rather than in an icon alone, which is what lets a refused keystroke
+    /// go unexplained elsewhere: the reason is already legible here.
+    fn status_capsules(&self, states: &[FileState], cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if states.is_empty() {
+            return Vec::new();
+        }
         let lit = self
             .file_status_flash
             .is_some_and(|until| Instant::now() < until);
-        // A refusal is not a hover, so it is not drawn as one: the indicator takes the
-        // colour destructive controls use, which is the only thing on screen saying
-        // that the key the user just pressed went nowhere.
-        let (resting, attention) = (self.hover_color(), self.danger().opacity(0.22));
-        let ink = if lit { self.danger() } else { self.muted() };
-        // Only the lock discloses a card; the pause opens a dialog, which is not a
-        // state this control is in.
-        let discloses = self.library.active_note().read_only.is_some();
+        let shown = states.len().min(CAPSULES_SHOWN);
+        let mut row: Vec<AnyElement> = states[..shown]
+            .iter()
+            .enumerate()
+            .map(|(index, state)| {
+                self.status_capsule(state, lit && index == 0, cx)
+                    .into_any_element()
+            })
+            .collect();
+        if states.len() > shown {
+            row.push(
+                div()
+                    .h(CAPSULE_HEIGHT)
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .rounded(CAPSULE_HEIGHT / 2.)
+                    .bg(self.chrome_fill(0.05))
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(self.muted())
+                    .child(format!("+{}", states.len() - shown))
+                    .into_any_element(),
+            );
+        }
+        row
+    }
+
+    /// One capsule. `lit` is a keystroke the file just refused, which lights the
+    /// most pressing state rather than every one of them.
+    fn status_capsule(
+        &self,
+        state: &FileState,
+        lit: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let urgent = state.urgent || lit;
+        let ink = if urgent { self.danger() } else { self.muted() };
+        // A refusal is not a hover, so it is not drawn as one: an urgent capsule
+        // takes the colour destructive controls use.
+        let (resting, attention) = if urgent {
+            (self.danger().opacity(0.16), self.danger().opacity(0.28))
+        } else {
+            (self.chrome_fill(0.05), self.chrome_fill(0.12))
+        };
+        let clear = self.chrome_fill(0.);
         div()
-            .id("file-status-indicator")
+            .id(state.id)
             .role(Role::Button)
-            .aria_label(label)
-            .when(discloses, |s| s.aria_expanded(self.file_status_popover))
-            // The card it discloses opens right beside it, so the tooltip would be
-            // drawn over the card's own words.
-            .when(!self.file_status_popover, |s| s.tooltip(self.hint(hint)))
+            .aria_label(state.announced())
+            .aria_expanded(self.file_status_popover)
+            // The card opens right beside it, so a tooltip would be drawn over the
+            // card's own words.
+            .when(!self.file_status_popover, |s| {
+                s.tooltip(self.hint("Click for what to do about it"))
+            })
             .flex_shrink_0()
-            .size(px(18.))
+            .h(CAPSULE_HEIGHT)
+            .pl(px(7.))
+            .pr(px(9.))
             .flex()
             .items_center()
-            .justify_center()
-            .rounded(px(4.))
+            .gap(px(5.))
+            .rounded(CAPSULE_HEIGHT / 2.)
             .cursor_pointer()
-            .hover(|s| s.bg(self.selected_color()))
-            .active(|s| s.bg(attention))
+            .hover(|s| s.bg(attention))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, _, window, cx| {
                 cx.stop_propagation();
                 this.intent(Intent::FileStatus, window, cx);
             }))
-            .child(sized_icon(symbol, ink, 11.))
-            // Reduced motion keeps both fills and drops the travel between them, so
-            // the indicator simply stands out until the flash expires.
+            .child(sized_icon(state.icon, ink, CAPSULE_ICON))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(ink)
+                    .child(state.label.clone()),
+            )
+            // A state the user has to deal with arrives rather than appears, so the
+            // eye is sent to it once. Reduced motion keeps the fill and drops the
+            // travel.
             .with_spring(
-                "file-status-flash",
-                Self::chrome_spring(lit, cx.reduce_motion()),
-                move |s, phase| s.bg(phase.interpolate_clamped(resting, attention)),
+                state.id,
+                Self::chrome_spring(true, cx.reduce_motion()),
+                move |s, phase| s.bg(phase.interpolate_clamped(clear, resting)),
             )
     }
 
-    /// What a read-only file is, and the two apps that can still change it. A note
-    /// that is also conflicted says so here and offers the dialog, since its own
-    /// indicator is taken by the lock.
+    /// Every state the file and its folder are in, each with what to do about it.
+    ///
+    /// One card for all of them rather than one control per state: they are the same
+    /// kind of thing, they stack, and a person dealing with a conflict wants to know
+    /// the save also failed.
     pub(super) fn file_status_card(
         &mut self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        // Only a read-only note has a card; anything else closes it where it stands.
-        if self.panel != Panel::Editor || self.library.active_note().read_only.is_none() {
+        let states = self.file_states();
+        // Nothing left to disclose closes the card where it stands.
+        if self.panel != Panel::Editor || states.is_empty() {
             self.file_status_popover = false;
         }
         if !self.file_status_popover {
             return None;
         }
-        let note = self.library.active_note();
-        let reason = note.read_only.clone()?;
-        let conflicted = note.conflicted;
-        let openable = note.path.is_some();
         let width = px(300.).min(window.bounds().size.width - px(16.));
+        // It grows upward from the footer, and several states at once can ask for
+        // more than the window has. What does not fit scrolls rather than being cut
+        // off above the title bar.
+        let room = (window.bounds().size.height - px(64.)).max(px(120.));
+        let last = states.len() - 1;
         Some(
             div()
                 .id("file-status-card")
@@ -586,10 +736,11 @@ impl NotesApp {
                 .bottom(px(48.))
                 .left(px(8.))
                 .w(width)
-                .p(px(12.))
+                .max_h(room)
+                .overflow_y_scroll()
+                .p(px(4.))
                 .flex()
                 .flex_col()
-                .gap_2()
                 .rounded(POPOVER_RADIUS)
                 .bg(self.surface_color())
                 .border_1()
@@ -598,7 +749,7 @@ impl NotesApp {
                 .occlude()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    // The indicator closes the card itself; preserve its click.
+                    // The capsules close the card themselves; preserve their click.
                     if event.position.y < window.bounds().size.height - px(44.) {
                         this.file_status_popover = false;
                         this.focus_editor(window, cx);
@@ -606,45 +757,55 @@ impl NotesApp {
                         cx.stop_propagation();
                     }
                 }))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .line_height(px(17.))
-                        .text_color(self.control_text())
-                        .child(if conflicted {
-                            format!("{reason} Autosave is paused until the conflict is resolved.")
-                        } else {
-                            reason
-                        }),
-                )
-                .child(
+                .children(states.iter().enumerate().map(|(index, state)| {
+                    let ink = if state.urgent {
+                        self.danger()
+                    } else {
+                        self.muted()
+                    };
                     div()
                         .flex()
-                        .flex_wrap()
+                        .flex_col()
                         .gap_2()
-                        .when(openable, |s| {
-                            s.child(self.button(
-                                "file-status-open",
-                                "Open in Default Editor",
-                                Intent::OpenExternally,
-                                cx,
+                        .px(px(12.))
+                        .py(px(12.))
+                        .when(index < last, |s| {
+                            s.border_b_1().border_color(self.border_color())
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(7.))
+                                .child(sized_icon(state.icon, ink, 15.))
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(ink)
+                                        .child(state.label.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .line_height(px(17.))
+                                .text_color(self.control_text())
+                                .child(state.detail.clone()),
+                        )
+                        .when(!state.actions.is_empty(), |s| {
+                            s.child(div().flex().flex_wrap().gap_2().children(
+                                state.actions.iter().map(|(label, intent)| {
+                                    self.button(
+                                        SharedString::from(format!("{}-{label}", state.id)),
+                                        *label,
+                                        intent.clone(),
+                                        cx,
+                                    )
+                                }),
                             ))
                         })
-                        .child(self.button(
-                            "file-status-reveal",
-                            "Reveal in Finder",
-                            Intent::RevealNote,
-                            cx,
-                        ))
-                        .when(conflicted, |s| {
-                            s.child(self.button(
-                                "file-status-conflict",
-                                "Review Conflict…",
-                                Intent::ReviewConflict,
-                                cx,
-                            ))
-                        }),
-                ),
+                })),
         )
     }
 

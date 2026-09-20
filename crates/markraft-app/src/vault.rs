@@ -80,6 +80,9 @@ pub struct Store {
     notices: Notices,
     loose: HashSet<PathBuf>,
     standalone: bool,
+    /// Whether the notes folder had to be made because the one the settings named
+    /// was no longer there.
+    created: bool,
 }
 impl Store {
     pub fn open(directory: PathBuf, settings_path: PathBuf) -> Result<(Self, Library), String> {
@@ -97,6 +100,10 @@ impl Store {
         settings_path: PathBuf,
         file: Option<PathBuf>,
     ) -> Result<(Self, Library), String> {
+        // A folder the settings still name but the disk no longer has is made
+        // again rather than refused, so the app keeps working; that it was made is
+        // worth saying, because the notes that were in it are not coming back.
+        let created = !directory.exists();
         fs::create_dir_all(&directory).map_err(|e| describe(&directory, &e))?;
         let directory = fs::canonicalize(&directory).map_err(|e| describe(&directory, &e))?;
         let mut hash = 0xcbf29ce484222325u64;
@@ -155,11 +162,17 @@ impl Store {
             settings,
             notices: Notices::default(),
             loose,
+            created,
             standalone,
         };
         let mut library = store.scan_library()?;
         store.restore_recovery(&mut library)?;
         Ok((store, library))
+    }
+    /// Whether the notes folder was made on open because the one the settings named
+    /// was gone. What was in the old one is not coming back, so the app says so.
+    pub fn created_folder(&self) -> bool {
+        self.created
     }
     pub fn notices(&self) -> Notices {
         self.notices.clone()

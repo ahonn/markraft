@@ -389,11 +389,9 @@ impl NotesApp {
             }
             // The indicator answers for whichever state it is showing: a conflict has
             // its dialog, and a read-only file has the card of ways around it.
+            // Every capsule opens the one card, which lists all of them: the lock no
+            // longer owns it and the pause no longer skips it for its dialog.
             Intent::FileStatus => {
-                if self.library.active_note().read_only.is_none() {
-                    self.reopen_conflict(window, cx);
-                    return;
-                }
                 self.format_menu = None;
                 self.link_popover = None;
                 self.code_language_block = None;
@@ -2387,44 +2385,6 @@ impl Render for NotesApp {
                         .text_size(px(11.))
                         .text_color(self.muted())
                         .child(message),
-                )
-            })
-            .when_some(self.error.clone(), |s, error| {
-                let message = format!("{error}  ⌘S retry · ⇧⌘C copy");
-                s.child(
-                    div()
-                        .id("save-error")
-                        .role(Role::Alert)
-                        .aria_label(message.clone())
-                        .px_6()
-                        .py_2()
-                        .text_size(px(11.))
-                        .text_color(if self.dark {
-                            rgb(0xffa4a4)
-                        } else {
-                            rgb(0xa53232)
-                        })
-                        .child(message),
-                )
-            })
-            .when(self.error.is_some(), |s| {
-                s.child(
-                    div()
-                        .flex()
-                        .px_4()
-                        .gap_2()
-                        .child(self.button(
-                            "save-library-copy",
-                            "Save Library Copy…",
-                            Intent::SaveCopy,
-                            cx,
-                        ))
-                        .child(self.button(
-                            "reload-library",
-                            "Reload from Disk…",
-                            Intent::Reload,
-                            cx,
-                        )),
                 )
             })
             .when_some(self.notice.clone(), |s, notice| {

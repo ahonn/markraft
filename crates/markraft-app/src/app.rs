@@ -131,9 +131,6 @@ pub struct NotesApp {
     /// Until when that indicator stays lit, after a keystroke the file refused. It
     /// is attention rather than a message, so it expires on its own.
     file_status_flash: Option<Instant>,
-    /// Until when a refused keystroke has already been explained in words, so that a
-    /// file refusing a whole sentence of typing says why once rather than per key.
-    refusal_explained: Option<Instant>,
     show_words: bool,
     format_toolbar: bool,
     format_menu: Option<FormatMenu>,
@@ -146,6 +143,9 @@ pub struct NotesApp {
     dark: bool,
     // Corner action buttons and traffic lights follow window hover alone.
     pointer_inside: bool,
+    /// Whether the notes folder had to be made on open because the one the settings
+    /// named was gone.
+    folder_was_created: bool,
     /// Whether the platform's close button is currently shown. It follows window hover
     /// like the rest of the chrome, but also stands down for a popup it would cover.
     close_button_shown: bool,
@@ -185,6 +185,7 @@ impl NotesApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let path = path.map(|path| path.canonicalize().unwrap_or(path));
+        let folder_was_created = store.as_ref().is_some_and(Store::created_folder);
         let dark = library.preferences.dark_mode.unwrap_or(matches!(
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
@@ -326,7 +327,7 @@ impl NotesApp {
             conflict_dialog: false,
             file_status_popover: false,
             file_status_flash: None,
-            refusal_explained: None,
+            folder_was_created,
             close_button_shown: false,
             link_targets: Default::default(),
             link_index: Default::default(),
@@ -790,18 +791,11 @@ impl NotesApp {
             .update(cx, |editor, _| editor.take_edit_error())
         {
             match rejection {
-                // A read-only file refuses every keystroke, and one notice per key
-                // would bury the single thing that explains why — but saying nothing
-                // at all leaves the typing to vanish unexplained. So it is said once
-                // and then held back while the same file keeps refusing; the lock
-                // lights up for every key in between.
-                EditRejection::ReadOnly(message) => {
-                    let now = Instant::now();
-                    if self.refusal_explained.is_none_or(|until| now >= until) {
-                        self.refusal_explained = Some(now + REFUSAL_COOLDOWN);
-                        self.queue_notice(message);
-                    }
-                    self.file_status_flash = Some(now + FILE_STATUS_FLASH);
+                // The corner already says "Read-only" in words, beside a capsule that
+                // opens the ways out of it. A sentence per keystroke would only say
+                // it again, so the capsule lights instead.
+                EditRejection::ReadOnly(_) => {
+                    self.file_status_flash = Some(Instant::now() + FILE_STATUS_FLASH);
                     cx.notify();
                 }
                 EditRejection::Protected(message) | EditRejection::Invalid(message) => {
@@ -899,7 +893,10 @@ impl NotesApp {
                             self.dirty = false;
                             self.error = None;
                         }
-                        Err(e) => self.error = unexplained_error(&e, &self.conflict_names()),
+                        // A save failure is a state of the file now, so the whole
+                        // report stands: the Not saved capsule carries it, and the
+                        // conflict it may mention has a capsule of its own beside it.
+                        Err(e) => self.error = Some(e),
                     }
                     cx.notify();
                 }
@@ -1890,27 +1887,11 @@ impl NotesApp {
         }
     }
 
-    /// How a save failure names the notes that are conflicted, so the lines about
-    /// them can be told from the rest of the same failure.
-    fn conflict_names(&self) -> Vec<String> {
-        self.library
-            .notes
-            .iter()
-            .filter(|note| note.conflicted)
-            .map(|note| format!("“{}”", note.title()))
-            .collect()
-    }
-
     fn update_conflicts(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
         for id in ids {
             if let Some(note) = self.library.notes.iter_mut().find(|note| note.id == id) {
                 note.conflicted = true;
             }
-        }
-        // A note that has just become conflicted now explains its own failed write,
-        // so the banner drops that line — and keeps every other one.
-        if let Some(error) = self.error.take() {
-            self.error = unexplained_error(&error, &self.conflict_names());
         }
         cx.notify();
     }
@@ -2413,19 +2394,6 @@ fn conflict_subject(note: &crate::storage::Note) -> String {
         .unwrap_or_else(|| note.title())
 }
 
-/// The part of a save failure that nothing else on screen accounts for. The store
-/// reports one line per note it could not write and names each in quotes; a
-/// conflicted note already says so in the footer and in the dialog its indicator
-/// reopens, so repeating its line in the red banner adds nothing. Every other line
-/// has nowhere else to appear and is kept.
-fn unexplained_error(error: &str, conflicted: &[String]) -> Option<String> {
-    let rest: Vec<_> = error
-        .lines()
-        .filter(|line| !conflicted.iter().any(|name| line.contains(name.as_str())))
-        .collect();
-    (!rest.is_empty()).then(|| rest.join("\n"))
-}
-
 /// Heights of the toolbar and footer, which float over the top and bottom of the note.
 const TOOLBAR_HEIGHT: Pixels = px(52.);
 const FOOTER_HEIGHT: Pixels = px(44.);
@@ -2444,10 +2412,6 @@ const DELETED_SELECTED_META_CHARS: usize = 12;
 /// How long the file status indicator stays lit after a keystroke the file refused.
 /// Long enough to be seen without following the typing that provoked it.
 const FILE_STATUS_FLASH: Duration = Duration::from_millis(900);
-/// How long the sentence explaining a refused keystroke stands for. It outlasts the
-/// notice itself, so that typing a paragraph into a read-only file explains itself
-/// once rather than over and over.
-const REFUSAL_COOLDOWN: Duration = Duration::from_secs(20);
 /// The shortest the window is allowed to become while it follows its content. Below
 /// this the chrome has nowhere to sit, so a window with less room than this keeps the
 /// height and lets the editor scroll instead.
@@ -2531,7 +2495,7 @@ mod tests {
     // are ordinary unit tests.
     use super::{
         classify_drop, conflict_subject, folder_label, linked_file, location_budget, note_location,
-        rejection_message, resolve_wiki_link, shorten_location, unexplained_error, wiki_link_page,
+        rejection_message, resolve_wiki_link, shorten_location, wiki_link_page,
     };
     use crate::{doc, storage::Library};
     use std::{
@@ -2865,32 +2829,6 @@ mod tests {
         assert_eq!(
             folder_label(root, Path::new("Inbox/Daily")),
             "Notes/Inbox/Daily"
-        );
-    }
-
-    #[test]
-    fn a_conflicted_note_hides_only_its_own_line_of_a_save_failure() {
-        let conflicted = ["“Meeting”".to_owned()];
-        assert_eq!(
-            unexplained_error("“Meeting” changed on disk. Resolve it.", &conflicted),
-            None
-        );
-        assert_eq!(
-            unexplained_error(
-                "“Meeting” changed on disk. Resolve it.\nNotes is read-only",
-                &conflicted
-            )
-            .as_deref(),
-            Some("Notes is read-only")
-        );
-        // Nothing on screen explains a failure that names no conflicted note.
-        assert_eq!(
-            unexplained_error("The notes folder could not be opened.", &conflicted).as_deref(),
-            Some("The notes folder could not be opened.")
-        );
-        assert_eq!(
-            unexplained_error("“Meeting” changed on disk.", &[]).as_deref(),
-            Some("“Meeting” changed on disk.")
         );
     }
 }

@@ -44,6 +44,7 @@ define_icons! {
     Open => "folder",
     Image => "photo",
     Lock => "lock",
+    Alert => "exclamationmark.triangle",
     Pause => "pause",
     Heading => "textformat.size",
     Quote => "text.quote",
