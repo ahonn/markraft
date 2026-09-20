@@ -374,6 +374,9 @@ pub struct EditorView {
     pub(crate) extensions: Vec<extension::Registration>,
     /// The selection the extensions were last told about.
     pub(crate) extension_selection: Selection,
+    /// Whether the last frame drew an extension's popup, for a host whose window
+    /// chrome is drawn by the platform above everything this view renders.
+    overlay_open: bool,
     /// What the host says a wiki link target can open, so that a link leading nowhere
     /// is not drawn as one that leads somewhere. Absent until the host says.
     wiki_resolver: Option<WikiResolver>,
@@ -465,6 +468,7 @@ impl EditorView {
             types,
             codecs,
             extension_selection: state.selection().clone(),
+            overlay_open: false,
             wiki_resolver: None,
             state,
             projection,
@@ -659,6 +663,13 @@ impl EditorView {
     }
     pub fn is_composing(&self) -> bool {
         markraft_core::is_composing(&self.state)
+    }
+
+    /// Whether an extension's popup — the `/` menu, the emoji list — is on screen.
+    /// A host whose window chrome the platform draws above the whole view reads this
+    /// to keep that chrome off the popup.
+    pub fn overlay_open(&self) -> bool {
+        self.overlay_open
     }
 
     /// Height at the most recently laid-out width, including editor padding.
@@ -1479,6 +1490,7 @@ impl Render for EditorView {
         self.prune_extensions();
         let key_context = self.extension_key_context();
         let overlay = self.extension_overlay(window, cx);
+        self.overlay_open = overlay.is_some();
         let accessible_text = self.accessible_text.clone();
         let mut root = div()
             .id("markraft-editor")

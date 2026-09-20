@@ -647,6 +647,12 @@ impl NotesApp {
         } else {
             16.
         };
+        // Whatever this button opens sits directly under it, so a tooltip describing
+        // the button is both noise and drawn over the thing the user just asked for.
+        // Dropping it also keeps the label honest: a pointer that has not moved keeps
+        // the tooltip it opened with, which by then names the opposite action.
+        let showing = expanded == Some(true)
+            || (matches!(intent, Intent::ToggleFormatToolbar) && self.format_toolbar);
         self.ring(
             &id.clone(),
             px(if chrome { 16. } else { 6. }),
@@ -672,7 +678,7 @@ impl NotesApp {
                     .opacity(1.)
                 })
                 .active(|s| s.bg(pressed).opacity(1.))
-                .tooltip(self.hint(label))
+                .when(!showing, |s| s.tooltip(self.hint(label)))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();

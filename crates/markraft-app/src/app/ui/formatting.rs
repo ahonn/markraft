@@ -519,7 +519,11 @@ impl NotesApp {
         let lit = self
             .file_status_flash
             .is_some_and(|until| Instant::now() < until);
-        let (resting, attention) = (self.hover_color(), self.pressed_color());
+        // A refusal is not a hover, so it is not drawn as one: the indicator takes the
+        // colour destructive controls use, which is the only thing on screen saying
+        // that the key the user just pressed went nowhere.
+        let (resting, attention) = (self.hover_color(), self.danger().opacity(0.22));
+        let ink = if lit { self.danger() } else { self.muted() };
         // Only the lock discloses a card; the pause opens a dialog, which is not a
         // state this control is in.
         let discloses = self.library.active_note().read_only.is_some();
@@ -528,7 +532,9 @@ impl NotesApp {
             .role(Role::Button)
             .aria_label(label)
             .when(discloses, |s| s.aria_expanded(self.file_status_popover))
-            .tooltip(self.hint(hint))
+            // The card it discloses opens right beside it, so the tooltip would be
+            // drawn over the card's own words.
+            .when(!self.file_status_popover, |s| s.tooltip(self.hint(hint)))
             .flex_shrink_0()
             .size(px(18.))
             .flex()
@@ -543,7 +549,7 @@ impl NotesApp {
                 cx.stop_propagation();
                 this.intent(Intent::FileStatus, window, cx);
             }))
-            .child(sized_icon(symbol, self.muted(), 11.))
+            .child(sized_icon(symbol, ink, 11.))
             // Reduced motion keeps both fills and drops the travel between them, so
             // the indicator simply stands out until the flash expires.
             .with_spring(

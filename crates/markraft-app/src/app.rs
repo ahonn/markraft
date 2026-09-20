@@ -131,6 +131,9 @@ pub struct NotesApp {
     /// Until when that indicator stays lit, after a keystroke the file refused. It
     /// is attention rather than a message, so it expires on its own.
     file_status_flash: Option<Instant>,
+    /// Until when a refused keystroke has already been explained in words, so that a
+    /// file refusing a whole sentence of typing says why once rather than per key.
+    refusal_explained: Option<Instant>,
     show_words: bool,
     format_toolbar: bool,
     format_menu: Option<FormatMenu>,
@@ -143,6 +146,9 @@ pub struct NotesApp {
     dark: bool,
     // Corner action buttons and traffic lights follow window hover alone.
     pointer_inside: bool,
+    /// Whether the platform's close button is currently shown. It follows window hover
+    /// like the rest of the chrome, but also stands down for a popup it would cover.
+    close_button_shown: bool,
     /// The notes the `[[` menu offers, shared with the editor's provider so that a note
     /// written after this editor opened can still be linked to.
     link_targets: ui::wiki::LinkTargets,
@@ -320,6 +326,8 @@ impl NotesApp {
             conflict_dialog: false,
             file_status_popover: false,
             file_status_flash: None,
+            refusal_explained: None,
+            close_button_shown: false,
             link_targets: Default::default(),
             link_index: Default::default(),
             link_targets_revision: None,
@@ -770,10 +778,17 @@ impl NotesApp {
         {
             match rejection {
                 // A read-only file refuses every keystroke, and one notice per key
-                // would bury the single thing that explains why. The footer's lock
-                // already says it, so the eye is sent there instead.
-                EditRejection::ReadOnly(_) => {
-                    self.file_status_flash = Some(Instant::now() + FILE_STATUS_FLASH);
+                // would bury the single thing that explains why — but saying nothing
+                // at all leaves the typing to vanish unexplained. So it is said once
+                // and then held back while the same file keeps refusing; the lock
+                // lights up for every key in between.
+                EditRejection::ReadOnly(message) => {
+                    let now = Instant::now();
+                    if self.refusal_explained.is_none_or(|until| now >= until) {
+                        self.refusal_explained = Some(now + REFUSAL_COOLDOWN);
+                        self.queue_notice(message);
+                    }
+                    self.file_status_flash = Some(now + FILE_STATUS_FLASH);
                     cx.notify();
                 }
                 EditRejection::Protected(message) | EditRejection::Invalid(message) => {
@@ -793,16 +808,24 @@ impl NotesApp {
             self.link_targets_revision = Some(self.revision);
             self.refresh_link_targets();
         }
+        // The platform draws the close button above everything the view renders, so a
+        // popup that reaches the top-left corner would be covered by it. It stands down
+        // while one is open, the same way it does when the pointer leaves the window.
+        let covered = self.panel == Panel::Editor && self.editor().read(cx).overlay_open();
         if let Some(platform) = &self.platform {
             let inside = platform.pointer_inside(window);
             if inside != self.pointer_inside {
                 self.pointer_inside = inside;
+                cx.notify();
+            }
+            let shown = inside && !covered;
+            if shown != self.close_button_shown {
+                self.close_button_shown = shown;
                 platform.set_traffic_lights_alpha(
                     window,
-                    if inside { 1. } else { 0. },
+                    if shown { 1. } else { 0. },
                     !cx.reduce_motion(),
                 );
-                cx.notify();
             }
         }
         // The keystroke timer expires on its own, so the chrome is compared here rather
@@ -2406,6 +2429,10 @@ const DELETED_SELECTED_META_CHARS: usize = 12;
 /// How long the file status indicator stays lit after a keystroke the file refused.
 /// Long enough to be seen without following the typing that provoked it.
 const FILE_STATUS_FLASH: Duration = Duration::from_millis(900);
+/// How long the sentence explaining a refused keystroke stands for. It outlasts the
+/// notice itself, so that typing a paragraph into a read-only file explains itself
+/// once rather than over and over.
+const REFUSAL_COOLDOWN: Duration = Duration::from_secs(20);
 /// The shortest the window is allowed to become while it follows its content. Below
 /// this the chrome has nowhere to sit, so a window with less room than this keeps the
 /// height and lets the editor scroll instead.
