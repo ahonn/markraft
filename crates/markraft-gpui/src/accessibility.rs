@@ -495,6 +495,7 @@ impl crate::EditorView {
                 if let Some(node) = self.wiki_link_at(pos) {
                     cx.emit(crate::EditorEvent::WikiLinkClicked {
                         target: crate::wiki::wiki_link_target(&node),
+                        embed: crate::wiki::wiki_link_embed(&node),
                     });
                 }
             }

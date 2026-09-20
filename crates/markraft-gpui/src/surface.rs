@@ -746,14 +746,9 @@ pub(crate) fn shape(
             .lines()
             .iter()
             .flat_map(|line| &line.runs)
-            .filter_map(|run| {
-                if let RunContent::Atom(node) = &run.content
-                    && Some(node.type_id()) == input.types.image
-                {
-                    Some(attr(node, "src"))
-                } else {
-                    None
-                }
+            .filter_map(|run| match &run.content {
+                RunContent::Atom(node) => picture_source(input.types, node),
+                _ => None,
             }),
     );
     let mut lines: Vec<LayoutLine> = (0..input.projection.line_count())
@@ -1659,10 +1654,34 @@ fn atom_label<'a>(types: &DocTypes, node: &'a Node) -> Option<(AtomShape, &'a st
         // it was written — a closing tag included.
         Some((AtomShape::Source, attr(node, "source")))
     } else if Some(ty) == types.wiki_link {
+        if crate::wiki::wiki_link_embed(node) {
+            // `![[…]]` puts a file in the note rather than pointing at a page, so
+            // it reads as the picture it is: its alias, or the file it names.
+            let label = match (attr(node, "alias"), file_name(attr(node, "target"))) {
+                ("", Some(name)) => name,
+                ("", None) => "Embed",
+                (alias, _) => alias,
+            };
+            return Some((AtomShape::Pill, label));
+        }
         // The alias is what the author wrote it to read as; without one the
         // target stands in, with whatever `#heading` or `^block` it names,
         // because that is what the link says.
         Some((AtomShape::Link, crate::wiki::wiki_link_label(node)))
+    } else {
+        None
+    }
+}
+
+/// The file an atom draws a picture of, where it draws one. `![](path)` and
+/// `![[path]]` are the same picture written two ways, so the view loads, measures and
+/// draws them alike; only the syntax they were written in differs.
+fn picture_source<'a>(types: &DocTypes, node: &'a Node) -> Option<&'a str> {
+    let ty = node.type_id();
+    if Some(ty) == types.image {
+        Some(attr(node, "src"))
+    } else if Some(ty) == types.wiki_link && crate::wiki::wiki_link_embed(node) {
+        Some(attr(node, "target"))
     } else {
         None
     }
@@ -1687,20 +1706,21 @@ fn atom_of(
         ..
     } = *input;
     let (shape, original) = atom_label(types, node)?;
-    let text = if Some(node.type_id()) == types.image {
-        match images.load(attr(node, "src")) {
+    let picture = picture_source(types, node);
+    let text = match picture {
+        Some(source) => match images.load(source) {
             Err(error) => format!("{}: {original}", error.label()),
             Ok(_) if !alone => format!("Inline image: {original}"),
             Ok(_) => original.to_owned(),
-        }
-    } else {
-        original.to_owned()
+        },
+        None => original.to_owned(),
     };
     // A local file the note can read is drawn for real where it has the line to
     // itself; the placeholder is still built, and stands in wherever it is not.
-    let drawn = (alone && Some(node.type_id()) == types.image)
-        .then(|| drawn_image(images, attr(node, "src"), column))
-        .flatten();
+    let drawn = alone
+        .then_some(picture)
+        .flatten()
+        .and_then(|source| drawn_image(images, source, column));
     // A pill's label is smaller than the text around it, as inline code is;
     // source text and a wiki link's label sit in the sentence at the
     // sentence's own size, the one in the code font it is and the other in the
@@ -3222,8 +3242,8 @@ mod tests {
         AtomShape, CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_PADDING, Decoration,
         LayoutLine, LayoutRow, Marker, QUOTE_BAR, ShapeInput, TableScroll, Widening, atom_label,
         cell_under, column_demands, column_widths, decoration_of, drawn_image, file_name,
-        gap_below, marker_of, max_indent, merge_row_centers, place_table, quote_bars,
-        reveal_offset, shape, table_overflows, unbreakable_units, visible_strips,
+        gap_below, marker_of, max_indent, merge_row_centers, picture_source, place_table,
+        quote_bars, reveal_offset, shape, table_overflows, unbreakable_units, visible_strips,
     };
     use crate::style::EditorStyle;
     use crate::typeahead::tests::state_of;
@@ -3667,10 +3687,12 @@ mod tests {
     }
 
     /// A wiki link is drawn as the prose it stands in: its alias, or its
-    /// target with whatever it names, and none of its brackets.
+    /// target with whatever it names, and none of its brackets. An embed is not a
+    /// link at all — it names a file the note shows — so it reads as an image does.
     #[test]
     fn a_wiki_link_atom_is_drawn_as_its_label_and_nothing_around_it() {
-        let state = state_of("see [[Note#Top]] and [[a/b|Alias]] and ![[x.png]]");
+        let state =
+            state_of("see [[Note#Top]] and [[a/b|Alias]] and ![[pics/x.png]] and ![[y.png|Cover]]");
         let projection = projection_of(&state);
         let schema = commonmark_schema();
         let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
@@ -3687,11 +3709,23 @@ mod tests {
             vec![
                 (AtomShape::Link, "Note#Top"),
                 (AtomShape::Link, "Alias"),
-                (AtomShape::Link, "x.png"),
+                (AtomShape::Pill, "x.png"),
+                (AtomShape::Pill, "Cover"),
             ]
         );
         assert_eq!(AtomShape::Link.chrome(), px(0.));
         assert!(AtomShape::Link.is_own_text());
+        // An embed is the same picture as `![](…)` written another way, so both name
+        // the same file to load; a plain link names no picture at all.
+        let sources: Vec<Option<&str>> = projection.lines()[0]
+            .runs
+            .iter()
+            .filter_map(|run| match &run.content {
+                RunContent::Atom(node) => Some(picture_source(&types, node)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sources, vec![None, None, Some("pics/x.png"), Some("y.png")]);
     }
 
     /// A wiki link is shaped as the text it reads as, so the punctuation after

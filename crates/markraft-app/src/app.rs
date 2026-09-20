@@ -471,9 +471,9 @@ impl NotesApp {
                     }
                     return;
                 }
-                if let EditorEvent::WikiLinkClicked { target } = event {
+                if let EditorEvent::WikiLinkClicked { target, embed } = event {
                     if this.library.active_id == note_id && this.panel == Panel::Editor {
-                        this.follow_wiki_link(target, window, cx);
+                        this.follow_wiki_link(target, *embed, window, cx);
                     }
                     return;
                 }
@@ -910,8 +910,7 @@ impl NotesApp {
                 .display(cx)
                 .map(|d| {
                     let visible = d.visible_bounds();
-                    (visible.bottom() - window.bounds().origin.y)
-                        .min(visible.size.height * 0.8)
+                    (visible.bottom() - window.bounds().origin.y).min(visible.size.height * 0.8)
                 })
                 .unwrap_or(px(720.))
                 .max(MINIMUM_HEIGHT);
@@ -1094,7 +1093,13 @@ impl NotesApp {
     /// A target that names nothing is said out loud rather than created: a file
     /// this window makes is a file the folder did not have, and a mistyped link
     /// is the likelier reason for a miss.
-    fn follow_wiki_link(&mut self, target: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn follow_wiki_link(
+        &mut self,
+        target: &str,
+        embed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let page = wiki_link_page(target);
         if page.is_empty() {
             // `[[#Heading]]` names a place in this very note, and going to one
@@ -1114,7 +1119,16 @@ impl NotesApp {
         );
         match found {
             Some(id) => self.select_note(&id, window, cx),
-            None => self.queue_notice(format!("No note named “{page}” in this folder.")),
+            // Not a page the folder holds, so it may still be a file it holds — an
+            // embedded image is the usual one, and reporting that as a missing note
+            // would be telling the user something they can see is untrue.
+            None => match linked_file(page, from.as_deref(), self.path.as_deref()) {
+                Some(path) => cx.open_with_system(&path),
+                None => {
+                    let what = if embed { "file" } else { "note" };
+                    self.queue_notice(format!("No {what} named “{page}” in this folder."))
+                }
+            },
         }
     }
     fn open_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
@@ -2156,6 +2170,25 @@ fn without_markdown(name: &str) -> &str {
 /// With no folder — the standalone window, where the open files have no root in
 /// common — every target is matched by stem, because a path relative to nothing
 /// names nothing.
+/// The file a wiki link names, where the folder really holds one. A target is written
+/// relative to the note or to the folder, the two places an image source is looked up,
+/// and it may not climb out of either.
+fn linked_file(
+    page: &str,
+    from: Option<&std::path::Path>,
+    root: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    let relative = std::path::Path::new(page.trim_start_matches("./"));
+    if !crate::vault::safe_relative(relative) {
+        return None;
+    }
+    from.and_then(std::path::Path::parent)
+        .into_iter()
+        .chain(root)
+        .map(|base| base.join(relative))
+        .find(|path| path.is_file())
+}
+
 fn resolve_wiki_link<'a>(
     target: &str,
     from: Option<&std::path::Path>,
@@ -2427,12 +2460,13 @@ mod tests {
     // Not a glob: `gpui::prelude` carries a `test` attribute of its own, and these
     // are ordinary unit tests.
     use super::{
-        classify_drop, conflict_subject, folder_label, location_budget, note_location,
+        classify_drop, conflict_subject, folder_label, linked_file, location_budget, note_location,
         rejection_message, resolve_wiki_link, shorten_location, unexplained_error, wiki_link_page,
     };
     use crate::{doc, storage::Library};
     use std::{
         collections::HashSet,
+        fs,
         path::{Path, PathBuf},
     };
 
@@ -2476,6 +2510,33 @@ mod tests {
         assert_eq!(wiki_link_page("Note#^block-id"), "Note");
         assert_eq!(wiki_link_page(" Note "), "Note");
         assert_eq!(wiki_link_page("#Heading"), "");
+    }
+
+    #[test]
+    fn an_embed_finds_the_file_beside_the_note_or_in_the_folder_and_climbs_out_of_neither() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path();
+        fs::create_dir_all(folder.join("sub/assets")).unwrap();
+        fs::write(folder.join("sub/assets/near.png"), b"near").unwrap();
+        fs::write(folder.join("top.png"), b"top").unwrap();
+        fs::write(root.path().join("outside.png"), b"outside").unwrap();
+        let note = folder.join("sub/Note.md");
+        let find = |page: &str| linked_file(page, Some(&note), Some(folder));
+        // Beside the note, and the same file written the other way.
+        assert_eq!(
+            find("assets/near.png"),
+            Some(folder.join("sub/assets/near.png"))
+        );
+        assert_eq!(
+            find("./assets/near.png"),
+            Some(folder.join("sub/assets/near.png"))
+        );
+        // Not beside the note, so the folder root answers for it.
+        assert_eq!(find("top.png"), Some(folder.join("top.png")));
+        // A name the folder does not hold stays unresolved, and `..` never escapes.
+        assert_eq!(find("missing.png"), None);
+        assert_eq!(find("../outside.png"), None);
+        assert_eq!(find("/etc/hosts"), None);
     }
 
     #[test]

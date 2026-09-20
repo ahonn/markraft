@@ -218,9 +218,11 @@ pub enum EditorEvent {
         pos: usize,
     },
     /// A wiki link was clicked. `target` is what the source spelled before any
-    /// `|`, which only the host can turn into a document to open.
+    /// `|`, which only the host can turn into a document to open. `embed` says the
+    /// link was written `![[…]]`, so it names a file to open rather than a page.
     WikiLinkClicked {
         target: String,
+        embed: bool,
     },
     /// An extension asked the host to do something only the host can do. Hosts that
     /// register no extension never see it.
@@ -1378,6 +1380,7 @@ impl EditorView {
         {
             cx.emit(EditorEvent::WikiLinkClicked {
                 target: wiki::wiki_link_target(&node),
+                embed: wiki::wiki_link_embed(&node),
             });
         }
         let head = self.head();

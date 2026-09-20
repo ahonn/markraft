@@ -32,6 +32,15 @@ pub(crate) fn wiki_link_target(node: &Node) -> String {
     attr(node, "target").to_owned()
 }
 
+/// Whether the link was written as an embed, `![[…]]`. An embed puts the file it names
+/// in the note; a plain link points at a page.
+pub(crate) fn wiki_link_embed(node: &Node) -> bool {
+    node.attrs()
+        .get("embed")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
 impl EditorView {
     /// The wiki link atom beginning at `pos`.
     pub fn wiki_link_at(&self, pos: usize) -> Option<Node> {
