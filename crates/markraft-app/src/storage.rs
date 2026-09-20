@@ -54,6 +54,11 @@ pub struct Note {
 }
 
 impl Note {
+    /// Whether the note holds nothing at all. A file Markraft could not read comes
+    /// back like this: it has a name and a reason, but never became a document.
+    pub fn document_is_empty(&self) -> bool {
+        crate::doc::is_blank(&self.document)
+    }
     pub fn title(&self) -> String {
         doc::title_line(&self.document)
             .as_deref()

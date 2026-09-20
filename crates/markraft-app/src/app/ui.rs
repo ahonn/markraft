@@ -784,6 +784,75 @@ impl NotesApp {
                 .child(self.query.clone()),
         )
     }
+    /// What stands in the document area for a file Markraft could not read.
+    ///
+    /// Its text never became a document, so the editor below would offer "Start
+    /// writing…" for a file that takes no writing. The explanation and the two ways
+    /// out take the gate's own shape, scaled to a note.
+    fn unreadable_file(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let note = self.library.active_note();
+        let reason = note.read_only.clone()?;
+        if !note.document_is_empty() || self.panel != Panel::Editor {
+            return None;
+        }
+        let openable = note.path.is_some();
+        // The reason is one sentence naming the trouble and one saying what to do;
+        // the heading takes the first, the body the rest.
+        let (heading, rest) = match reason.split_once(". ") {
+            Some((first, rest)) => (first.to_owned(), rest.to_owned()),
+            None => (reason.clone(), String::new()),
+        };
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                // Opaque: the editor keeps the keyboard behind this, and its own
+                // "Start writing…" would otherwise read through the explanation.
+                .bg(notes_style(self.dark).background)
+                .pt(TOOLBAR_HEIGHT + px(24.))
+                .px_6()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .text_size(px(19.))
+                        .line_height(px(25.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(heading),
+                )
+                .when(!rest.is_empty(), |s| {
+                    s.child(
+                        div()
+                            .text_size(px(13.))
+                            .line_height(px(19.))
+                            .text_color(self.muted())
+                            .child(rest),
+                    )
+                })
+                .when(openable, |s| {
+                    s.child(
+                        div()
+                            .mt_2()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(self.button(
+                                "unreadable-open",
+                                "Open in Default Editor",
+                                Intent::OpenExternally,
+                                cx,
+                            ))
+                            .child(self.button(
+                                "unreadable-reveal",
+                                "Reveal in Finder",
+                                Intent::RevealNote,
+                                cx,
+                            )),
+                    )
+                }),
+        )
+    }
     fn picker(&self, heading: bool, cx: &mut Context<Self>) -> Div {
         let scope = self.scope();
         let deleted = scope == Scope::Deleted;
@@ -2109,7 +2178,17 @@ impl Render for NotesApp {
                 });
             });
         }
-        let title = self.library.active_note().title();
+        // A file Markraft cannot read has no title of its own to show — its text
+        // never became a document — but it does have a name, and that is what the
+        // user is looking at.
+        let note = self.library.active_note();
+        let title = match (&note.read_only, &note.path) {
+            (Some(_), Some(path)) if note.document_is_empty() => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| note.title()),
+            _ => note.title(),
+        };
         window.set_window_title(&title);
         let style = notes_style(self.dark);
         let reduce_motion = cx.reduce_motion();
@@ -2389,6 +2468,9 @@ impl Render for NotesApp {
             .min_h_0()
             .relative()
             .child(self.editor())
+            // Over the editor, which still owns the keyboard: its own placeholder
+            // would otherwise invite writing into a file that takes none.
+            .children(self.unreadable_file(cx))
             .child(fade(px(80.), true))
             .child(fade(px(56.), true))
             .child(fade(px(128.), false))
