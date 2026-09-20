@@ -806,7 +806,7 @@ fn shape_line(
     let max_indent = max_indent(style, width);
     let number = ordered_marker(doc, types, line, style, font_size, text_system);
     let indent = indent_of(types, line, style, number.as_ref().map(|(_, w)| *w)).min(max_indent);
-    let marker = marker_of(types, line, style, number.map(|(shaped, _)| shaped));
+    let marker = marker_of(types, line, number.map(|(shaped, _)| shaped));
     let decoration = decoration_of(input, index, line, cell.is_some(), max_indent);
 
     let wrap_width = match cell {
@@ -2177,14 +2177,12 @@ fn starts_item(types: &DocTypes, line: &Line) -> bool {
 fn marker_of(
     types: &DocTypes,
     line: &Line,
-    style: &EditorStyle,
     number: Option<Rc<ShapedLine>>,
 ) -> Option<Marker> {
     let (item, list) = types.item_of(line)?;
     if !starts_item(types, line) {
         return None;
     }
-    let _ = style;
     if Some(item.node_type) == types.task_item {
         return Some(Marker::Task {
             checked: DocTypes::task_checked(&item.attrs),
@@ -3003,8 +3001,7 @@ fn paint_table_fades(
 ///
 /// The separators are hairlines drawn along each cell's own bottom and right
 /// edge rather than a border per cell, so a shared edge is one pixel wide and
-/// not two, and the outer rectangle is drawn last so its rounded corners sit
-/// over the band.
+/// not two, and the outer rectangle is drawn last so it sits over the band.
 ///
 /// `offset` is how far the grid is drawn left of where it sits, which the quote
 /// bars are taken back out of: the bars belong to the quote's indent and stay
@@ -3522,7 +3519,7 @@ mod tests {
                 line,
                 input.types.heading_level(line),
                 input.types.is_code_block(line),
-                &marker_of(input.types, line, input.style, None),
+                &marker_of(input.types, line, None),
             )
         })
     }
@@ -4176,7 +4173,7 @@ mod tests {
             .lines()
             .iter()
             .map(|line| {
-                marker_of(&types, line, &style, None).map(|marker| match marker {
+                marker_of(&types, line, None).map(|marker| match marker {
                     Marker::Number(_) => "number",
                     Marker::Bullet { .. } => "bullet",
                     Marker::Task { .. } => "task",

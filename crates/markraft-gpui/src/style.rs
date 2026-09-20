@@ -51,7 +51,6 @@ pub struct EditorStyle {
     /// graphic one.
     pub callout_tones: [Hsla; 7],
     pub quote_indent: Pixels,
-    pub draw_markers: bool,
     /// Heights of host chrome drawn over the editor's top and bottom edges. Content
     /// gains this much extra padding, the caret is revealed clear of it, and the
     /// scrollbar track stays between the two.
@@ -61,7 +60,11 @@ pub struct EditorStyle {
     /// Popups an extension anchors in the text, such as a typeahead menu.
     pub popup_background: Hsla,
     pub popup_border: Hsla,
+    /// The row the keyboard is on. Stronger than `popup_hover`, so a pointer
+    /// crossing the list never looks like it moved the selection.
     pub popup_selected: Hsla,
+    /// The row the pointer is over.
+    pub popup_hover: Hsla,
 }
 
 impl Default for EditorStyle {
@@ -101,13 +104,13 @@ impl Default for EditorStyle {
                 rgb(0x55575c).into(),
             ],
             quote_indent: px(18.),
-            draw_markers: false,
             top_overlay: px(0.),
             bottom_overlay: px(0.),
             scrollbar: rgba(0x00000047).into(),
             popup_background: rgb(0xfcfbf8).into(),
             popup_border: rgb(0xd9d7d0).into(),
             popup_selected: rgb(0xedece7).into(),
+            popup_hover: rgb(0xf4f3ef).into(),
         }
     }
 }
@@ -152,7 +155,6 @@ impl EditorStyle {
                 rgb(0x55575c).into(),
             ],
             quote_indent: px(12.),
-            draw_markers: true,
             top_overlay: px(0.),
             bottom_overlay: px(0.),
             scrollbar: rgba(0x00000047).into(),
@@ -160,6 +162,7 @@ impl EditorStyle {
             popup_background: rgb(0xf8f8f8).into(),
             popup_border: rgb(0xdcdcdc).into(),
             popup_selected: rgb(0xe2e2e2).into(),
+            popup_hover: rgb(0xededed).into(),
         }
     }
 
@@ -192,6 +195,7 @@ impl EditorStyle {
             popup_background: rgb(0x2e2f33).into(),
             popup_border: rgb(0x383a40).into(),
             popup_selected: rgb(0x414246).into(),
+            popup_hover: rgb(0x38393d).into(),
             ..Self::notes()
         }
     }

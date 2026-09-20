@@ -65,8 +65,12 @@ pub struct TypeaheadItem {
     /// Identifies the item to the provider that produced it.
     pub id: SharedString,
     pub label: SharedString,
-    /// Right-aligned muted text, such as a keyboard shortcut.
+    /// Right-aligned keyboard shortcut, drawn one key per cap.
     pub hint: SharedString,
+    /// Right-aligned muted prose, such as the folder a note sits in. Unlike
+    /// [`Self::hint`] it is drawn as text, so a path does not come out as a row
+    /// of key caps.
+    pub detail: SharedString,
     /// A short leading glyph, such as an emoji.
     pub glyph: SharedString,
 }
@@ -77,11 +81,16 @@ impl TypeaheadItem {
             id: id.into(),
             label: label.into(),
             hint: SharedString::default(),
+            detail: SharedString::default(),
             glyph: SharedString::default(),
         }
     }
     pub fn hint(mut self, hint: impl Into<SharedString>) -> Self {
         self.hint = hint.into();
+        self
+    }
+    pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
+        self.detail = detail.into();
         self
     }
     pub fn glyph(mut self, glyph: impl Into<SharedString>) -> Self {

@@ -76,7 +76,7 @@ impl TypeaheadProvider for WikiProvider {
                         (
                             !title.starts_with(&wanted),
                             TypeaheadItem::new(note.target.clone(), note.title.clone())
-                                .hint(note.location.clone()),
+                                .detail(note.location.clone()),
                         )
                     },
                 )
@@ -245,10 +245,12 @@ mod tests {
         // Matching from the first letter comes before matching inside.
         let dive: Vec<_> = menu.items("[div").iter().map(|i| i.label.clone()).collect();
         assert_eq!(dive, vec!["Diving Board", "Deep Dive"]);
-        // The id is what the link spells; the hint says which folder it is in.
+        // The id is what the link spells; the detail says which folder it is in.
         let board = menu.items("[diving")[0].clone();
         assert_eq!(board.id, "Diving Board");
-        assert_eq!(board.hint, "sport");
+        assert_eq!(board.detail, "sport");
+        // A folder is prose, not a shortcut: it must not come out as key caps.
+        assert!(board.hint.is_empty());
     }
 
     #[test]

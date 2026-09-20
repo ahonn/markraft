@@ -51,7 +51,9 @@ impl CompletionList<'_> {
                     .text_size(px(13.))
                     .cursor_pointer()
                     .when(index == self.selected, |row| row.bg(style.popup_selected))
-                    .hover(|row| row.bg(style.popup_selected))
+                    .when(index != self.selected, |row| {
+                        row.hover(|row| row.bg(style.popup_hover))
+                    })
                     .on_mouse_move(move |_, window, cx| hover(index, window, cx))
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
@@ -71,6 +73,17 @@ impl CompletionList<'_> {
                             .truncate()
                             .child(item.label.clone()),
                     )
+                    .when(!item.detail.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .flex_shrink_0()
+                                .max_w(px(96.))
+                                .truncate()
+                                .text_size(px(12.))
+                                .text_color(style.muted_text)
+                                .child(item.detail.clone()),
+                        )
+                    })
                     .when(!item.hint.is_empty(), |row| {
                         row.child(keycaps(&item.hint, style))
                     }),
