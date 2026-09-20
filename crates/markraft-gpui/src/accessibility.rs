@@ -561,6 +561,7 @@ mod tests {
                 single_line: false,
                 images: &images,
                 wiki: None,
+                protected: None,
             },
             gpui::px(400.),
             &text_system,

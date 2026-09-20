@@ -616,3 +616,32 @@ fn typing_consecutive_and_trailing_spaces_survives_each_guard_check() {
         );
     }
 }
+
+/// What a view shades. The same scan the guard runs, reported per line so the
+/// boundary of a refused edit can be drawn before one is attempted.
+#[test]
+fn protected_spans_mark_the_source_a_line_keeps_exactly() {
+    let spans = |line: &str| {
+        markraft_commonmark::protected_spans(line)
+            .into_iter()
+            .map(|span| line[span].to_owned())
+            .collect::<Vec<_>>()
+    };
+    let none: Vec<String> = Vec::new();
+    // Inline and display math, a comment, and a trailing block anchor.
+    assert_eq!(spans("costs $x^2$ here"), ["$x^2$"]);
+    assert_eq!(spans("a $$E = mc^2$$ b"), ["$$E = mc^2$$"]);
+    assert_eq!(spans("a %%hidden%% b"), ["%%hidden%%"]);
+    assert_eq!(spans("A paragraph. ^my-anchor"), ["^my-anchor"]);
+    // Prose with money in it is not math, which is why the blanket scan went.
+    assert_eq!(spans("costs $5 and $10 today"), none);
+    // A `[[…]]` this codec cannot rebuild stays protected. A plain one is an atom
+    // by the time a view asks, so its source never reaches the line text.
+    assert_eq!(spans("see [[a|]] here"), ["[[a|]]"]);
+    // Several on one line come back in order.
+    assert_eq!(spans("$a$ then %%b%% then $c$"), ["$a$", "%%b%%", "$c$"]);
+    // An unterminated comment runs to the end, which is what the guard covers.
+    assert_eq!(spans("tail %%open"), ["%%open"]);
+    // Ordinary prose is not shaded at all.
+    assert_eq!(spans("A plain sentence."), none);
+}

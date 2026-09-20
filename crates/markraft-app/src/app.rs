@@ -424,7 +424,18 @@ impl NotesApp {
                     Some(Ok(source)) => source
                         .render(doc::schema(), candidate)
                         .map(|_| ())
-                        .map_err(|error| EditRejection::Protected(rejection_message(&error))),
+                        .map_err(|error| {
+                            let message = rejection_message(&error);
+                            // The editor shades a protected span, so the boundary the
+                            // keystroke landed in is already on screen; the other two
+                            // have nowhere else to appear.
+                            match error {
+                                markraft_commonmark::SourceError::ProtectedSpan => {
+                                    EditRejection::Marked(message)
+                                }
+                                _ => EditRejection::Protected(message),
+                            }
+                        }),
                     // The file was read but its Markdown could not be lined up with
                     // its source, so no keystroke could ever be written back.
                     Some(Err(error)) => Err(EditRejection::Invalid(format!(
@@ -447,6 +458,8 @@ impl NotesApp {
         let resolver = self.wiki_resolver();
         let extensions = editor.update(cx, |editor, cx| {
             editor.set_wiki_resolver(resolver, cx);
+            // What the source codec will refuse, drawn before it is attempted.
+            editor.set_protected_spans(markraft_commonmark::protected_spans, cx);
             [
                 editor.add_extension(menu, cx),
                 editor.add_extension(links, cx),
@@ -794,6 +807,8 @@ impl NotesApp {
                 EditRejection::Protected(message) | EditRejection::Invalid(message) => {
                     self.queue_notice(message);
                 }
+                // The shading said it where the edit landed.
+                EditRejection::Marked(_) => {}
             }
         }
         if self.panel == Panel::Editor {

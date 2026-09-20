@@ -642,27 +642,59 @@ impl Protected {
     }
 }
 
-fn protected_ranges(source: &str) -> Protected {
-    let mut rebuildable = Vec::new();
-    let mut protected = Vec::new();
-    let code = code_ranges(source);
-    for (open, close) in [("%%", "%%")] {
-        let mut offset = 0;
-        while let Some(start) = source[offset..].find(open).map(|at| offset + at) {
-            if let Some(span) = code.iter().find(|span| span.contains(&start)) {
-                offset = span.end;
-                continue;
-            }
-            if let Some(end) = source[start + open.len()..].find(close) {
-                let end = start + open.len() + end + close.len();
-                protected.push(start..end);
-                offset = end;
-            } else {
-                protected.push(start..source.len());
-                break;
-            }
+/// The parts of one line of text this codec keeps exactly as written.
+///
+/// A view draws these so the boundary is visible *before* an edit is attempted:
+/// everything inside one is source the codec cannot rebuild, so a keystroke
+/// landing there is refused. Byte ranges within `line`, sorted, and the line is
+/// the document's own text rather than the file's, so a quote's `> ` and a code
+/// fence's backticks are already gone.
+///
+/// This is the inline half of [`protected_ranges`]. A callout's marker line and
+/// a link reference definition are whole lines a view draws differently anyway,
+/// and display math opened on one line and closed on another is not found here.
+pub fn protected_spans(line: &str) -> Vec<Range<usize>> {
+    let code = code_ranges(line);
+    let mut spans = comment_ranges(line, &code);
+    spans.extend(math_ranges(line, &code));
+    spans.extend(unread_wiki_links(line, &code));
+    if let Some(at) = line.rfind(" ^")
+        && !code.iter().any(|span| span.contains(&(at + 1)))
+    {
+        spans.push(at + 1..line.len());
+    }
+    spans.sort_by_key(|span| span.start);
+    spans.dedup();
+    spans
+}
+
+/// The `%%…%%` comments in `source`. An unterminated one runs to the end, which
+/// is what the codec guards and so what a view shades.
+fn comment_ranges(source: &str, code: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let (open, close) = ("%%", "%%");
+    let mut offset = 0;
+    while let Some(start) = source[offset..].find(open).map(|at| offset + at) {
+        if let Some(span) = code.iter().find(|span| span.contains(&start)) {
+            offset = span.end;
+            continue;
+        }
+        if let Some(end) = source[start + open.len()..].find(close) {
+            let end = start + open.len() + end + close.len();
+            ranges.push(start..end);
+            offset = end;
+        } else {
+            ranges.push(start..source.len());
+            break;
         }
     }
+    ranges
+}
+
+fn protected_ranges(source: &str) -> Protected {
+    let mut rebuildable = Vec::new();
+    let code = code_ranges(source);
+    let mut protected = comment_ranges(source, &code);
     protected.extend(math_ranges(source, &code));
     protected.extend(unread_wiki_links(source, &code));
     for range in line_ranges(source) {
