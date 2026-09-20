@@ -900,10 +900,21 @@ impl NotesApp {
             let Some(height) = self.editor().read(cx).content_height() else {
                 return;
             };
+            // Growing is all this does: `resize` keeps the origin, so the window
+            // only ever extends downwards. Its room is therefore what is left
+            // below its own top edge, not a share of the whole display — a window
+            // sitting low would otherwise grow straight past the bottom of the
+            // screen, and since it is sized to its content there is no overflow
+            // left to scroll the hidden part back into view.
             let maximum = window
                 .display(cx)
-                .map(|d| d.visible_bounds().size.height * 0.8)
-                .unwrap_or(px(720.));
+                .map(|d| {
+                    let visible = d.visible_bounds();
+                    (visible.bottom() - window.bounds().origin.y)
+                        .min(visible.size.height * 0.8)
+                })
+                .unwrap_or(px(720.))
+                .max(MINIMUM_HEIGHT);
             // The toolbar and footer float over the editor and are already part of its
             // content height; only an error banner adds to it.
             let chrome = if self.error.is_some() {
@@ -911,7 +922,7 @@ impl NotesApp {
             } else {
                 px(0.)
             };
-            let desired = px(f32::from((height + chrome).max(px(220.)).min(maximum)).round());
+            let desired = px(f32::from((height + chrome).max(MINIMUM_HEIGHT).min(maximum)).round());
             let size = size(window.bounds().size.width, desired);
             if (size.height - window.bounds().size.height).abs() > px(2.)
                 && self.expected_size.is_none()
@@ -2334,6 +2345,10 @@ const DELETED_SELECTED_META_CHARS: usize = 12;
 /// How long the file status indicator stays lit after a keystroke the file refused.
 /// Long enough to be seen without following the typing that provoked it.
 const FILE_STATUS_FLASH: Duration = Duration::from_millis(900);
+/// The shortest the window is allowed to become while it follows its content. Below
+/// this the chrome has nowhere to sit, so a window with less room than this keeps the
+/// height and lets the editor scroll instead.
+const MINIMUM_HEIGHT: Pixels = px(220.);
 fn notes_style(dark: bool) -> EditorStyle {
     let mut style = if dark {
         EditorStyle::notes_dark()
