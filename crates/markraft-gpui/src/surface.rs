@@ -126,6 +126,9 @@ enum AtomShape {
     /// The source of an inline HTML primitive, drawn as the quiet code-font
     /// text it is — the view keeps HTML verbatim and never renders it.
     Source,
+    /// A wiki link's label, drawn as the prose it stands in, in the link
+    /// colour. Its brackets and its target are source the view does not show.
+    Link,
 }
 
 impl AtomShape {
@@ -134,8 +137,14 @@ impl AtomShape {
     fn chrome(self) -> Pixels {
         match self {
             AtomShape::Pill => PILL_PADDING * 2. + PILL_ICON + PILL_ICON_GAP,
-            AtomShape::Source => px(0.),
+            AtomShape::Source | AtomShape::Link => px(0.),
         }
+    }
+
+    /// Whether the shape draws its label and nothing else, where the run
+    /// before it left off.
+    fn is_bare_text(self) -> bool {
+        matches!(self, AtomShape::Source | AtomShape::Link)
     }
 }
 
@@ -1538,9 +1547,9 @@ fn attr<'a>(node: &'a Node, name: &str) -> &'a str {
 }
 
 /// What an inline atom is drawn as, for the atoms the view draws itself: an
-/// image's label, or the verbatim source of an inline HTML primitive. Every
-/// other atom keeps the object-replacement character the projection gave it,
-/// which is blank.
+/// image's label, the verbatim source of an inline HTML primitive, or a wiki
+/// link's label. Every other atom keeps the object-replacement character the
+/// projection gave it, which is blank.
 fn atom_label<'a>(types: &DocTypes, node: &'a Node) -> Option<(AtomShape, &'a str)> {
     let ty = node.type_id();
     if Some(ty) == types.image {
@@ -1554,6 +1563,11 @@ fn atom_label<'a>(types: &DocTypes, node: &'a Node) -> Option<(AtomShape, &'a st
         // HTML is kept verbatim and shown as source, so the tag reads exactly as
         // it was written — a closing tag included.
         Some((AtomShape::Source, attr(node, "source")))
+    } else if Some(ty) == types.wiki_link {
+        // The alias is what the author wrote it to read as; without one the
+        // target stands in, with whatever `#heading` or `^block` it names,
+        // because that is what the link says.
+        Some((AtomShape::Link, crate::wiki::wiki_link_label(node)))
     } else {
         None
     }
@@ -1593,10 +1607,17 @@ fn atom_of(
         .then(|| drawn_image(images, attr(node, "src"), column))
         .flatten();
     // A pill's label is smaller than the text around it, as inline code is;
-    // source text sits in the sentence at the sentence's own size.
+    // source text and a wiki link's label sit in the sentence at the
+    // sentence's own size, the one in the code font it is and the other in the
+    // link colour, which is what says it can be followed.
     let (face, size) = match shape {
         AtomShape::Pill => (font(".SystemUIFont"), font_size * PILL_SCALE),
         AtomShape::Source => (font(CODE_FONT), font_size),
+        AtomShape::Link => (font(".SystemUIFont"), font_size),
+    };
+    let ink = match shape {
+        AtomShape::Link => style.link,
+        AtomShape::Pill | AtomShape::Source => style.muted_text,
     };
     let room = (column * PILL_MAX_RATIO - shape.chrome()).max(px(16.));
     let shaped = |label: String| {
@@ -1606,7 +1627,7 @@ fn atom_of(
             &[TextRun {
                 len: label.len(),
                 font: face.clone(),
-                color: style.muted_text,
+                color: ink,
                 background_color: None,
                 underline: None,
                 strikethrough: None,
@@ -2818,9 +2839,9 @@ fn paint_atom(
         );
         return;
     }
-    // Source text is text: it starts where the run before it left off, with
-    // nothing drawn around it.
-    if atom.shape == AtomShape::Source {
+    // Source text and a wiki link's label are text: each starts where the run
+    // before it left off, with nothing drawn around it.
+    if atom.shape.is_bare_text() {
         let _ = atom.label.paint(
             point(row.origin.x + atom.left, top),
             row.line_height,
@@ -3487,6 +3508,34 @@ mod tests {
             px(0.),
             "source text reserves its own width and no padding"
         );
+    }
+
+    /// A wiki link is drawn as the prose it stands in: its alias, or its
+    /// target with whatever it names, and none of its brackets.
+    #[test]
+    fn a_wiki_link_atom_is_drawn_as_its_label_and_nothing_around_it() {
+        let state = state_of("see [[Note#Top]] and [[a/b|Alias]] and ![[x.png]]");
+        let projection = projection_of(&state);
+        let schema = commonmark_schema();
+        let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
+        let drawn: Vec<(AtomShape, &str)> = projection.lines()[0]
+            .runs
+            .iter()
+            .filter_map(|run| match &run.content {
+                RunContent::Atom(node) => atom_label(&types, node),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            vec![
+                (AtomShape::Link, "Note#Top"),
+                (AtomShape::Link, "Alias"),
+                (AtomShape::Link, "x.png"),
+            ]
+        );
+        assert_eq!(AtomShape::Link.chrome(), px(0.));
+        assert!(AtomShape::Link.is_bare_text());
     }
 
     /// A table of two rows of two cells, as the measuring pass leaves them:

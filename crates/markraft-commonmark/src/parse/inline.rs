@@ -41,6 +41,14 @@ impl<'a> Walk<'a> {
     ) -> Result<(), ParseError> {
         for child in parent.children() {
             let target = self.target(child);
+            if self.wiki_link_stays_text(child) {
+                let source = self.cx.wrapped_source(target.sourcepos());
+                self.push_source_text(&source, marks, builder)?;
+                continue;
+            }
+            if self.embeds(child, marks, builder)? {
+                continue;
+            }
             let inline_html = match &*self.value(child) {
                 NodeValue::HtmlInline(html) => Some(html.clone()),
                 _ => None,
@@ -113,6 +121,102 @@ impl<'a> Walk<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Whether comrak read a `[[…]]` that this codec does not: one with an
+    /// empty alias, or one spanning a line ending. See [`crate::wiki`] for why
+    /// neither can be an atom. Such a source stays the text a reader sees,
+    /// exactly as it was before the extension was enabled.
+    fn wiki_link_stays_text(&self, node: &'a AstNode<'a>) -> bool {
+        matches!(&*self.value(node), NodeValue::WikiLink(_))
+            && crate::wiki::whole_wiki_link(&self.cx.wrapped_source(self.target(node).sourcepos()))
+                .is_none()
+    }
+
+    /// Push source no node stands for: one text leaf per line, with the soft
+    /// breaks between them the parser would have produced for it anyway.
+    fn push_source_text(
+        &self,
+        source: &str,
+        marks: &[Mark],
+        builder: &mut Inlines<'_>,
+    ) -> Result<(), ParseError> {
+        let soft_break = self.node_id(md::SOFT_BREAK)?;
+        for (index, line) in source.split('\n').enumerate() {
+            if index > 0 {
+                let node = self.schema.create(
+                    soft_break,
+                    Attrs::empty(),
+                    MarkSet::empty(),
+                    Fragment::empty(),
+                )?;
+                builder.push_node(node, marks);
+            }
+            builder.push_text(line, marks);
+        }
+        Ok(())
+    }
+
+    /// Split a text run around the `![[…]]` embeds in it, answering whether it
+    /// held any.
+    ///
+    /// comrak has no embed syntax: the `!` opens an image label, which stops
+    /// the wiki link inside from being seen at all, so the whole run arrives
+    /// here as the text a reader sees.
+    ///
+    /// The atom keeps the bytes its source spelled, so the embeds are found in
+    /// that source; the text around them is the literal comrak read, which is
+    /// the text everywhere else in this parser too. [`literal_offsets`] is what
+    /// carries a position from one to the other.
+    fn embeds(
+        &self,
+        node: &'a AstNode<'a>,
+        marks: &[Mark],
+        builder: &mut Inlines<'_>,
+    ) -> Result<bool, ParseError> {
+        let literal = match &*self.value(node) {
+            NodeValue::Text(text) if text.contains("[[") => text.to_string(),
+            _ => return Ok(false),
+        };
+        let source = self.target(node).source();
+        let Some(offsets) = literal_offsets(&source, &literal) else {
+            return Ok(false);
+        };
+        let mut found = Vec::new();
+        let mut at = 0;
+        while let Some(offset) = source[at..].find("![[").map(|index| at + index) {
+            // An escaped `\!` is not an embed's, and its `!` is not a position
+            // the literal has one of either.
+            match crate::wiki::read_wiki_link(&source[offset..])
+                .filter(|_| offsets[offset] != NOT_IN_LITERAL)
+            {
+                Some((link, len)) => {
+                    found.push((offsets[offset]..offsets[offset + len], link));
+                    at = offset + len;
+                }
+                None => at = offset + 1,
+            }
+        }
+        if found.is_empty() {
+            return Ok(false);
+        }
+        let ty = self.node_id(md::WIKI_LINK)?;
+        let mut at = 0;
+        for (span, link) in &found {
+            builder.push_text(&literal[at..span.start], marks);
+            let attrs = attrs! {
+                "target" => link.target.clone(),
+                "alias" => link.alias.clone(),
+                "embed" => true,
+            };
+            let atom = self
+                .schema
+                .create(ty, attrs, MarkSet::empty(), Fragment::empty())?;
+            builder.push_node(atom, marks);
+            at = span.end;
+        }
+        builder.push_text(&literal[at..], marks);
+        Ok(true)
     }
 
     /// What each inline HTML tag of this block does, in the order
@@ -197,6 +301,67 @@ impl<'a> Walk<'a> {
             .ancestors()
             .any(|node| matches!(&*self.value(node), NodeValue::Link(_)))
     }
+}
+
+/// The mark [`literal_offsets`] puts on a source offset the literal has no
+/// position of its own for: the byte after a backslash that escapes it.
+const NOT_IN_LITERAL: usize = usize::MAX;
+
+/// Where each byte offset of `source` lands in the `literal` comrak read out of
+/// it, or `None` where the two cannot be walked together.
+///
+/// comrak resolves a backslash escape and a character reference while it reads
+/// text. A backslash escape is a local two-bytes-for-one substitution this
+/// follows, and so is a *numeric* reference, which is the only kind this
+/// codec's own serialiser writes. A named one — `&amp;` in someone else's file
+/// — is not, so a run holding one cannot be lined up at all and is left as the
+/// single text leaf it arrived as.
+fn literal_offsets(source: &str, literal: &str) -> Option<Vec<usize>> {
+    let (source, literal) = (source.as_bytes(), literal.as_bytes());
+    let mut offsets = vec![NOT_IN_LITERAL; source.len() + 1];
+    let (mut read, mut written) = (0, 0);
+    while read < source.len() {
+        offsets[read] = written;
+        if let Some((character, len)) = numeric_reference(&source[read..]) {
+            let mut buffer = [0_u8; 4];
+            let encoded = character.encode_utf8(&mut buffer).as_bytes();
+            if literal.get(written..written + encoded.len()) != Some(encoded) {
+                return None;
+            }
+            read += len;
+            written += encoded.len();
+            continue;
+        }
+        let escape = source[read] == b'\\'
+            && source
+                .get(read + 1)
+                .is_some_and(|byte| byte.is_ascii_punctuation());
+        read += usize::from(escape);
+        if literal.get(written) != source.get(read) {
+            return None;
+        }
+        read += 1;
+        written += 1;
+    }
+    offsets[read] = written;
+    (written == literal.len()).then_some(offsets)
+}
+
+/// The character a numeric reference at the start of `source` stands for, with
+/// the number of bytes it spells it in.
+fn numeric_reference(source: &[u8]) -> Option<(char, usize)> {
+    let rest = source.strip_prefix(b"&#")?;
+    let (digits, radix) = match rest.first() {
+        Some(b'x' | b'X') => (&rest[1..], 16),
+        _ => (rest, 10),
+    };
+    let end = digits.iter().take(9).position(|byte| *byte == b';')?;
+    let code = u32::from_str_radix(std::str::from_utf8(&digits[..end]).ok()?, radix).ok()?;
+    // CommonMark gives a reference to nothing the replacement character.
+    let character = char::from_u32(code)
+        .filter(|c| *c != '\0')
+        .unwrap_or('\u{fffd}');
+    Some((character, source.len() - digits.len() + end + 1))
 }
 
 /// One inline HTML tag's role in a block.

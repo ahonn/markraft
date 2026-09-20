@@ -16,6 +16,8 @@ fn unchanged_source_is_byte_identical() {
         "[unused]: /target \"title\"\n\n[link][unused]\n\n",
         "\tcode\n\n+ one\n+ two\n",
         "![[image.png|100]]\n\n> [!note]\n> contents\n\nparagraph ^block-id\n",
+        "[[Note]] [[Note|Alias]] ![[a.png]] [[a#Heading]] [[a^id]] [[ spaced ]]\n",
+        "[[a|]] and [[a|b|c]] are not wiki links\n",
         "---\ninvalid: yaml\nwithout closing delimiter",
         "paragraph\r\n\r\nnext\n\nlast\r",
         "",
@@ -76,7 +78,6 @@ fn multiple_changed_blocks_keep_untouched_blocks_and_blank_lines() {
 #[test]
 fn untouched_extension_tokens_survive_adjacent_text_edits() {
     for original in [
-        "Read [[page|label]] and old\n",
         "> [!note]\n> old text\n",
         "old text ^stable-id\n",
         "old text with $x + y$\n",
@@ -89,15 +90,99 @@ fn untouched_extension_tokens_survive_adjacent_text_edits() {
 #[test]
 fn modifications_inside_unsupported_extension_syntax_are_refused() {
     for original in [
-        "Read [[old]] here\n",
+        // A `[[…]]` this codec does not read as a wiki link is still source it
+        // cannot rebuild; the ones it does read are nodes, tested below.
+        "Read [[old|]] here\n",
         "> [!old]\n> contents\n",
         "text ^old\n",
         "math $old$\n",
     ] {
         assert_eq!(
             edit(original, &original.replace("old", "new")),
-            Err(SourceError::ProtectedSpan)
+            Err(SourceError::ProtectedSpan),
+            "{original:?}"
         );
+    }
+}
+
+#[test]
+fn prices_in_prose_are_not_read_as_math() {
+    for (original, expected) in [
+        ("It costs $5 and $10\n", "It costs $5 or $10\n"),
+        (r"Pay \$5 and \$10 now", r"Pay \$5 or \$10 now"),
+        ("$5, $10 and $20 each\n", "$5, $10 or $20 each\n"),
+    ] {
+        assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
+    }
+}
+
+#[test]
+fn modifications_inside_dollar_math_are_still_refused() {
+    for original in [
+        "energy $old^2$ here\n",
+        "$$\nx = old\n$$\n",
+        "inline $a + old$ and more\n",
+    ] {
+        assert_eq!(
+            edit(original, &original.replace("old", "new")),
+            Err(SourceError::ProtectedSpan),
+            "{original:?}"
+        );
+    }
+}
+
+#[test]
+fn text_beside_a_wiki_link_is_edited_without_rewriting_the_link() {
+    for original in [
+        "Read [[page|label]] and old\n",
+        "Look at ![[image.png|100]] for old detail\n",
+        "See [[ folder/note.md#Heading ]] for old notes\n",
+        "Jump to [[note^block-id]] for old context\n",
+    ] {
+        let expected = original.replace("old", "new");
+        assert_eq!(edit(original, &expected).unwrap(), expected, "{original:?}");
+    }
+}
+
+#[test]
+fn deleting_a_wiki_link_removes_exactly_its_source_bytes() {
+    for (original, expected) in [
+        ("Read [[page|label]] now\n", "Read  now\n"),
+        ("Read ![[image.png]] now\n", "Read  now\n"),
+        ("[[only]]\n\nnext\n", "<br>\n\nnext\n"),
+    ] {
+        assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
+    }
+}
+
+#[test]
+fn inserting_a_wiki_link_writes_exactly_its_serialized_form() {
+    for (original, expected) in [
+        ("Read now\n", "Read [[page|label]] now\n"),
+        ("Read now\n", "Read ![[image.png|100]] now\n"),
+        ("Read now\n", "Read [[folder/note#Heading]] now\n"),
+    ] {
+        assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
+    }
+}
+
+#[test]
+fn undo_after_a_wiki_link_edit_restores_the_original_bytes() {
+    let schema = commonmark_schema();
+    let original = "Read [[page|label]] and ![[image.png]] now\n";
+    let source = SourceDocument::parse(&schema, original).unwrap();
+    for edited in [
+        "Read  and ![[image.png]] now\n",
+        "Read [[page|label]] and ![[image.png]] later\n",
+        "Read [[page|label]] and ![[image.png]] and [[extra]] now\n",
+    ] {
+        let target = SourceDocument::parse(&schema, edited).unwrap();
+        assert_eq!(
+            source.render(&schema, target.document()).unwrap(),
+            edited,
+            "{edited:?}"
+        );
+        assert_eq!(source.render(&schema, source.document()).unwrap(), original);
     }
 }
 

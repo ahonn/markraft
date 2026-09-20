@@ -201,3 +201,70 @@ fn everything_the_rules_build_survives_a_round_trip() {
         );
     }
 }
+
+#[test]
+fn a_closing_bracket_pair_makes_the_wiki_link_atom() {
+    for (typing, described) in [
+        (
+            "[[Note]]",
+            r#"doc(paragraph(wiki_link[alias=Str(""),embed=Bool(false),target=Str("Note")]))"#,
+        ),
+        (
+            "[[Note|Alias]]",
+            r#"doc(paragraph(wiki_link[alias=Str("Alias"),embed=Bool(false),target=Str("Note")]))"#,
+        ),
+        (
+            "![[x.png]]",
+            r#"doc(paragraph(wiki_link[alias=Str(""),embed=Bool(true),target=Str("x.png")]))"#,
+        ),
+        (
+            "see [[a#H]] now",
+            concat!(
+                r#"doc(paragraph("see ", "#,
+                r#"wiki_link[alias=Str(""),embed=Bool(false),target=Str("a#H")], " now"))"#
+            ),
+        ),
+        // Half of one is still the text it is.
+        ("[[Note]", r#"doc(paragraph("[[Note]"))"#),
+        // And so is a spelling the codec does not read.
+        ("[[a|]]", r#"doc(paragraph("[[a|]]"))"#),
+    ] {
+        assert_eq!(typed(typing), described, "{typing:?}");
+    }
+    // A code span keeps what is typed in it literal, and so does a code block.
+    let (schema, state) = empty();
+    assert_eq!(
+        schema.describe(type_all(&type_all(&state, "``` "), "[[Note]]").doc()),
+        r#"doc(code_block[fence_char=Str("`"),fence_length=Int(3),language=Str("")]("[[Note]]"))"#
+    );
+}
+
+#[test]
+fn undoing_the_wiki_link_rule_gives_the_typed_text_back() {
+    let (schema, state) = empty();
+    let built = type_all(&state, "[[Note]]");
+    let undo = markraft_core::commands::undo_input_rule();
+    let back = markraft_core::commands::run_command(&built, &undo)
+        .expect("the rule can be taken back")
+        .expect("the transaction resolves")
+        .state()
+        .clone();
+    assert_eq!(schema.describe(back.doc()), r#"doc(paragraph("[[Note]]"))"#);
+}
+
+#[test]
+fn a_pasted_wiki_link_arrives_as_the_atom_without_an_input_rule() {
+    let schema = commonmark_schema();
+    let slice = markraft_commonmark::from_markdown_fragment(&schema, "see [[Note|Alias]] now")
+        .expect("a fragment");
+    let pasted = schema
+        .doc(slice.content().iter().cloned())
+        .expect("a document");
+    assert_eq!(
+        schema.describe(&pasted),
+        concat!(
+            r#"doc(paragraph("see ", "#,
+            r#"wiki_link[alias=Str("Alias"),embed=Bool(false),target=Str("Note")], " now"))"#
+        )
+    );
+}

@@ -114,6 +114,32 @@ impl<'a> ParseCx<'a> {
         self.slice_lines(pos, true)
     }
 
+    /// The source a node covers when its ending position counts a line ending
+    /// as an ordinary column, so the position names a column its own line never
+    /// reaches.
+    ///
+    /// comrak's wiki link does exactly that: `[[a\nb]]` ends at `1:7` although
+    /// line 1 is three characters long. The byte length the position implies is
+    /// still right, so the lines are read from the start until that many bytes
+    /// are in hand, each one after the first losing the container prefix
+    /// [`ParseCx::source`] would remove too.
+    pub fn wrapped_source(&self, pos: Sourcepos) -> String {
+        let len = (pos.end.column + 1).saturating_sub(pos.start.column);
+        let indent = pos.start.column.saturating_sub(1);
+        let mut out = slice(self.line(pos.start.line), pos.start.column, usize::MAX).to_string();
+        let mut number = pos.start.line + 1;
+        while out.len() < len && number <= self.lines.len() {
+            let line = self.line(number);
+            out.push('\n');
+            out.push_str(&line[container_prefix(line, indent).min(line.len())..]);
+            number += 1;
+        }
+        if out.is_char_boundary(len.min(out.len())) {
+            out.truncate(len.min(out.len()));
+        }
+        out
+    }
+
     fn slice_lines(&self, pos: Sourcepos, stop_at_end_column: bool) -> String {
         let indent = pos.start.column.saturating_sub(1);
         let mut out = String::new();

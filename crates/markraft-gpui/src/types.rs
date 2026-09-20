@@ -13,6 +13,7 @@ use markraft_core::{Attrs, DocTypeNames, EditorState, MarkTypeId, NodeTypeId, Sc
 /// entry for.
 const RAW_INLINE: &str = "raw_inline";
 const INLINE_SPAN: &str = "inline_span";
+const WIKI_LINK: &str = "wiki_link";
 
 /// The roles the view, its key bindings and its extensions know about, as the
 /// ids one schema gives them.
@@ -79,6 +80,12 @@ pub struct DocTypes {
     /// carries the marks that say what it is, and those are what is drawn — so
     /// this names the type for hosts and extensions that build one.
     pub inline_span: Option<NodeTypeId>,
+    /// A wiki link, carrying `target`, `alias` and `embed` attributes. The view
+    /// draws its alias, or its target, in the link colour, and a click on one
+    /// asks the host to follow it — only the host knows what a target names.
+    /// Without it such an atom is drawn as a bare object-replacement character,
+    /// which is blank.
+    pub wiki_link: Option<NodeTypeId>,
     /// Strong emphasis. Without it ⌘B does nothing.
     pub strong: Option<MarkTypeId>,
     /// Emphasis. Without it ⌘I does nothing.
@@ -105,11 +112,12 @@ impl DocTypes {
     /// Resolve every name in `names` against `schema`. A name the schema does
     /// not declare leaves its role unset.
     ///
-    /// [`DocTypes::raw_inline`] and [`DocTypes::inline_span`] have no entry in
-    /// [`DocTypeNames`], so they are looked up under the names the CommonMark
-    /// preset gives them. A schema that spells them differently sets the two
-    /// fields itself; leaving [`DocTypes::raw_inline`] unset costs the source
-    /// text an inline primitive is drawn as.
+    /// [`DocTypes::raw_inline`], [`DocTypes::inline_span`] and
+    /// [`DocTypes::wiki_link`] have no entry in [`DocTypeNames`], so they are
+    /// looked up under the names the CommonMark preset gives them. A schema
+    /// that spells them differently sets those fields itself; leaving
+    /// [`DocTypes::raw_inline`] unset costs the source text an inline primitive
+    /// is drawn as.
     pub fn from_schema_names(schema: &Schema, names: &DocTypeNames) -> DocTypes {
         let node = |name: Option<&str>| name.and_then(|name| schema.node_id(name));
         let mark = |name: Option<&str>| name.and_then(|name| schema.mark_id(name));
@@ -131,6 +139,7 @@ impl DocTypes {
             image: node(names.image),
             raw_inline: node(Some(RAW_INLINE)),
             inline_span: node(Some(INLINE_SPAN)),
+            wiki_link: node(Some(WIKI_LINK)),
             strong: mark(names.strong),
             em: mark(names.em),
             code: mark(names.code),

@@ -100,6 +100,20 @@ const HREFS: &[&str] = &[
     "",
 ];
 const RAW_SOURCES: &[&str] = &["<div>\nraw\n</div>", "<!-- a comment -->"];
+/// What a wiki link's target and alias may spell: anything but `[`, `]`, an
+/// unescaped `|` and a line ending, which is what the recogniser reads. An
+/// empty alias is the link having none.
+const WIKI_PARTS: &[&str] = &[
+    "",
+    "Note",
+    "folder/note.md",
+    "Note#Heading",
+    "Note^block-id",
+    " spaced ",
+    "中文 😀",
+    "a\\]b",
+    "100",
+];
 const ALIGNMENTS: &[&str] = &["none", "left", "center", "right"];
 
 struct Gen<'a> {
@@ -166,6 +180,27 @@ impl Gen<'_> {
                 let mark = self.mark(md::LINK, attrs! {"href" => href, "title" => ""});
                 let marks = MarkSet::from_marks(self.schema, [mark]);
                 out.push(self.schema.text_marked(text, marks));
+                continue;
+            }
+            // A table row is one source line, where GFM escapes the `|` that
+            // separates a wiki link's alias from its target, so an aliased link
+            // has no spelling there at all.
+            if breaks && self.rng.one_in(8) {
+                let target = *self.rng.pick(WIKI_PARTS);
+                let alias = *self.rng.pick(WIKI_PARTS);
+                out.push(
+                    self.schema
+                        .node_with(
+                            md::WIKI_LINK,
+                            attrs! {
+                                "target" => target,
+                                "alias" => alias,
+                                "embed" => self.rng.one_in(3),
+                            },
+                            [],
+                        )
+                        .expect("a wiki link"),
+                );
                 continue;
             }
             if breaks && self.rng.one_in(8) {

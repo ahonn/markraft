@@ -566,3 +566,21 @@ fn unmodelled_css_and_void_inline_elements_survive_html_paste() {
     assert_eq!(written, "a<span style=\"color:red\">b</span><wbr>c");
     assert!(!written.contains("</wbr>"));
 }
+
+#[test]
+fn a_wiki_link_travels_as_an_anchor_carrying_its_own_parts() {
+    assert_eq!(
+        html_of("read [[Note|Alias]] and ![[x.png]]"),
+        "<p>read <a href=\"Note\" data-type=\"wikiLink\" data-target=\"Note\" \
+         data-alias=\"Alias\">Alias</a> and <a href=\"x.png\" data-type=\"wikiLink\" \
+         data-target=\"x.png\" data-embed=\"true\">x.png</a></p>"
+    );
+    // A paste back reads the parts rather than the rendered label, so the
+    // source spelling survives the clipboard.
+    assert_eq!(
+        markdown(&html_of("read [[ Note#H |Alias]] and ![[x.png|100]]")),
+        "read [[ Note#H |Alias]] and ![[x.png|100]]"
+    );
+    // An anchor from anywhere else is an ordinary link.
+    assert_eq!(markdown("<a href=\"Note\">Note</a>"), "[Note](Note)");
+}

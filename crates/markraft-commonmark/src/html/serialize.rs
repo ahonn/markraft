@@ -423,6 +423,28 @@ pub fn commonmark_html_node_rules() -> HtmlNodeRules {
         }),
     );
     rules.insert(
+        md::WIKI_LINK.to_string(),
+        rule(|state, node, _| {
+            // A reader outside this editor sees an ordinary link to the target;
+            // a paste back into it takes the atom's parts from the data
+            // attributes rather than reading a source spelling out of the
+            // rendered label, which is only the alias when there is one.
+            let target = attr_str(node, "target", "");
+            let alias = attr_str(node, "alias", "");
+            state.write("<a");
+            state.attr("href", target.trim());
+            state.attr("data-type", "wikiLink");
+            state.attr("data-target", target);
+            state.attr("data-alias", alias);
+            if attr_bool(node, "embed", false) {
+                state.attr("data-embed", "true");
+            }
+            state.write(">");
+            state.text(if alias.is_empty() { target } else { alias });
+            state.write("</a>");
+        }),
+    );
+    rules.insert(
         md::SOFT_BREAK.to_string(),
         rule(|state, _, _| state.write("<span data-type=\"softBreak\"> </span>")),
     );

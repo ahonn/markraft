@@ -18,6 +18,7 @@ pub(crate) enum ControlAction {
     CodeLanguage(usize),
     CopyCode(usize),
     EditHtml(usize),
+    OpenWikiLink(usize),
 }
 
 struct AccessibleControl {
@@ -34,6 +35,17 @@ fn accessible_bounds(bounds: Bounds<Pixels>, scale: f32) -> accesskit::Rect {
         y0: f64::from(f32::from(bounds.top()) * scale),
         x1: f64::from(f32::from(bounds.right()) * scale),
         y1: f64::from(f32::from(bounds.bottom()) * scale),
+    }
+}
+
+/// What a screen reader is told a wiki link is, so it reads as a link to
+/// somewhere rather than as the bare character the projection gives an atom.
+fn wiki_link_label(label: &str) -> String {
+    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    if label.is_empty() {
+        "Empty wiki link".into()
+    } else {
+        format!("Wiki link: {label}")
     }
 }
 
@@ -69,12 +81,18 @@ impl AccessibleControl {
                 accesskit::Toggled::False
             });
         }
-        node.set_keyboard_shortcut(match self.action {
-            ControlAction::ToggleTask(_) => "Command+Enter",
-            ControlAction::CodeLanguage(_) => "Command+Option+L",
-            ControlAction::CopyCode(_) => "Command+Option+Shift+C",
-            ControlAction::EditHtml(_) => "Command+Option+R",
-        });
+        // A wiki link has no binding of its own: it is followed by clicking or
+        // by activating it here, so there is no shortcut to announce.
+        let shortcut = match self.action {
+            ControlAction::ToggleTask(_) => Some("Command+Enter"),
+            ControlAction::CodeLanguage(_) => Some("Command+Option+L"),
+            ControlAction::CopyCode(_) => Some("Command+Option+Shift+C"),
+            ControlAction::EditHtml(_) => Some("Command+Option+R"),
+            ControlAction::OpenWikiLink(_) => None,
+        };
+        if let Some(shortcut) = shortcut {
+            node.set_keyboard_shortcut(shortcut);
+        }
         node
     }
 }
@@ -139,8 +157,26 @@ impl AccessibleText {
             };
             let text = projection.line_text(row.index).unwrap_or_default();
             for run in &line.runs {
-                if let markraft_core::projection::RunContent::Atom(node) = &run.content
-                    && Some(node.type_id()) == types.raw_inline
+                let markraft_core::projection::RunContent::Atom(node) = &run.content else {
+                    continue;
+                };
+                let control = if Some(node.type_id()) == types.raw_inline {
+                    let source = node
+                        .attrs()
+                        .get("source")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    Some((ControlAction::EditHtml(run.from), html_label(source)))
+                } else if Some(node.type_id()) == types.wiki_link {
+                    let label = crate::wiki::wiki_link_label(node);
+                    Some((
+                        ControlAction::OpenWikiLink(run.from),
+                        wiki_link_label(label),
+                    ))
+                } else {
+                    None
+                };
+                if let Some((action, label)) = control
                     && let Some(bounds) = row
                         .rectangles(
                             row.pos_to_offset(run.from)..row.pos_to_offset(run.to),
@@ -150,13 +186,8 @@ impl AccessibleText {
                 {
                     self.controls.push(AccessibleControl {
                         node_id: None,
-                        action: ControlAction::EditHtml(run.from),
-                        label: html_label(
-                            node.attrs()
-                                .get("source")
-                                .and_then(|value| value.as_str())
-                                .unwrap_or_default(),
-                        ),
+                        action,
+                        label,
                         checked: None,
                         bounds: accessible_bounds(*bounds, scale),
                     });
@@ -386,6 +417,15 @@ impl crate::EditorView {
                 };
                 (index, position)
             }
+            ControlAction::OpenWikiLink(position) => {
+                if self.wiki_link_at(position).is_none() {
+                    return;
+                }
+                let Some((index, _)) = self.projection.pos_to_line_offset(position) else {
+                    return;
+                };
+                (index, position)
+            }
             ControlAction::ToggleTask(position) => {
                 let Some((index, _)) = self.projection.pos_to_line_offset(position) else {
                     return;
@@ -427,6 +467,13 @@ impl crate::EditorView {
         }
         match action {
             ControlAction::EditHtml(pos) => cx.emit(crate::EditorEvent::RawHtmlRequested { pos }),
+            ControlAction::OpenWikiLink(pos) => {
+                if let Some(node) = self.wiki_link_at(pos) {
+                    cx.emit(crate::EditorEvent::WikiLinkClicked {
+                        target: crate::wiki::wiki_link_target(&node),
+                    });
+                }
+            }
             ControlAction::ToggleTask(_) => {
                 self.run_command(&crate::keymap::toggle_task(&self.types), cx);
             }

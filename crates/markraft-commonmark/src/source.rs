@@ -28,8 +28,9 @@ pub struct SourceDocument {
 /// user what to do about it rather than only that something failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceError {
-    /// The change lands inside source kept verbatim: a wiki link, a callout, math,
-    /// a block anchor or a link reference definition.
+    /// The change lands inside source kept verbatim: a callout, math, a block
+    /// anchor, a link reference definition or a `[[…]]` spelling this codec
+    /// does not read as a wiki link.
     ProtectedSpan,
     /// Writing the change needs its whole block replaced, and that block carries
     /// source the semantic document does not, such as a reference definition.
@@ -43,7 +44,7 @@ impl std::fmt::Display for SourceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::ProtectedSpan => {
-                "This edit falls inside Markdown that is kept exactly as written, such as a wiki link, a callout or math."
+                "This edit falls inside Markdown that is kept exactly as written, such as a callout or math."
             }
             Self::ProtectedBlock => {
                 "This edit would have to replace a block that also carries source the document does not, such as a link reference definition."
@@ -612,7 +613,7 @@ fn line_ranges(source: &str) -> Vec<Range<usize>> {
 fn protected_ranges(source: &str) -> Vec<Range<usize>> {
     let mut protected = Vec::new();
     let code = code_ranges(source);
-    for (open, close) in [("[[", "]]"), ("%%", "%%"), ("$", "$"), ("[!", "]")] {
+    for (open, close) in [("%%", "%%"), ("[!", "]")] {
         let mut offset = 0;
         while let Some(start) = source[offset..].find(open).map(|at| offset + at) {
             if let Some(span) = code.iter().find(|span| span.contains(&start)) {
@@ -629,6 +630,8 @@ fn protected_ranges(source: &str) -> Vec<Range<usize>> {
             }
         }
     }
+    protected.extend(math_ranges(source, &code));
+    protected.extend(unread_wiki_links(source, &code));
     for range in line_ranges(source) {
         let line = &source[range.clone()];
         let trimmed = line.trim_start();
@@ -651,6 +654,126 @@ fn protected_ranges(source: &str) -> Vec<Range<usize>> {
         }
     }
     protected
+}
+
+/// The `[[…]]` spans this codec does *not* read as a
+/// [`WIKI_LINK`](crate::schema::WIKI_LINK) atom.
+///
+/// A recognised one is a node of its own now: its source is ordinary content
+/// that an edit may replace, insert or delete, and the guard would otherwise
+/// refuse the very operations the atom exists for. Everything else — an empty
+/// alias, a `[` inside the brackets, an unterminated `[[` — is still source
+/// this codec cannot rebuild, so it stays untouchable.
+fn unread_wiki_links(source: &str, code: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut protected = Vec::new();
+    let mut offset = 0;
+    while let Some(start) = source[offset..].find("[[").map(|at| offset + at) {
+        if let Some(span) = code.iter().find(|span| span.contains(&start)) {
+            offset = span.end;
+            continue;
+        }
+        // An embed's `!` is part of its source, and an escaped one is not an
+        // embed at all.
+        let from = if source[..start].ends_with('!') && !source[..start].ends_with("\\!") {
+            start - 1
+        } else {
+            start
+        };
+        if let Some((_, len)) = crate::wiki::read_wiki_link(&source[from..]) {
+            offset = from + len;
+            continue;
+        }
+        match source[start + 2..].find("]]") {
+            Some(end) => {
+                let end = start + 2 + end + 2;
+                protected.push(start..end);
+                offset = end;
+            }
+            None => {
+                protected.push(start..source.len());
+                break;
+            }
+        }
+    }
+    protected
+}
+
+/// The `$`-delimited math spans in `source`.
+///
+/// Math is unsupported and has to stay byte-preserved, but a `$` is also an
+/// ordinary character: `costs $5 and $10` is prose, not a formula between two
+/// prices. The usual dollar-math delimiter rules separate the two — an opening
+/// `$` is not followed by whitespace, a closing one is not preceded by
+/// whitespace and not followed by a digit, `$$…$$` is display math, neither
+/// kind spans a blank line, and `\$` is not a delimiter at all.
+fn math_ranges(source: &str, code: &[Range<usize>]) -> Vec<Range<usize>> {
+    let bytes = source.as_bytes();
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes[offset] == b'\\' {
+            offset += 2;
+            continue;
+        }
+        if bytes[offset] != b'$' || code.iter().any(|span| span.contains(&offset)) {
+            offset += 1;
+            continue;
+        }
+        let display = bytes.get(offset + 1) == Some(&b'$');
+        let open = if display { 2 } else { 1 };
+        // Inline math opens only on a `$` with something other than whitespace
+        // after it, which is what keeps `costs $5 and $10` prose.
+        if !display && bytes.get(offset + 1).is_none_or(u8::is_ascii_whitespace) {
+            offset += 1;
+            continue;
+        }
+        match math_end(bytes, offset + open, display) {
+            Some(end) => {
+                ranges.push(offset..end);
+                offset = end;
+            }
+            None => offset += open,
+        }
+    }
+    ranges
+}
+
+/// Where the math opened before `from` closes, or `None` where nothing closes
+/// it before a blank line or the end of the source.
+fn math_end(bytes: &[u8], from: usize, display: bool) -> Option<usize> {
+    let mut offset = from;
+    while offset < bytes.len() {
+        match bytes[offset] {
+            b'\\' => offset += 2,
+            b'\n' => {
+                let mut ahead = offset + 1;
+                while bytes.get(ahead).is_some_and(|b| matches!(b, b' ' | b'\t')) {
+                    ahead += 1;
+                }
+                if bytes.get(ahead).is_none_or(|b| *b == b'\n') {
+                    return None;
+                }
+                offset = ahead;
+            }
+            b'$' if display => {
+                if bytes.get(offset + 1) == Some(&b'$') {
+                    return Some(offset + 2);
+                }
+                offset += 1;
+            }
+            b'$' => {
+                let closes = offset > from
+                    && !bytes[offset - 1].is_ascii_whitespace()
+                    && !bytes.get(offset + 1).is_some_and(u8::is_ascii_digit);
+                if closes {
+                    return Some(offset + 1);
+                }
+                offset += 1;
+            }
+            _ => offset += 1,
+        }
+    }
+    None
 }
 
 /// Unknown-syntax guards do not apply inside ordinary Markdown code literals.

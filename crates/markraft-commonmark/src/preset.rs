@@ -56,6 +56,13 @@ fn attr_str<'a>(node: &'a Node, name: &str, default: &'a str) -> &'a str {
         .unwrap_or(default)
 }
 
+fn attr_bool(node: &Node, name: &str, default: bool) -> bool {
+    node.attrs()
+        .get(name)
+        .and_then(|value| value.as_bool())
+        .unwrap_or(default)
+}
+
 fn attr_int(node: &Node, name: &str, default: i64) -> i64 {
     node.attrs()
         .get(name)
@@ -167,6 +174,21 @@ pub fn commonmark_node_rules() -> NodeRules {
         md::RAW_INLINE.to_string(),
         rule(|state, node, _, _| {
             state.text(attr_str(node, "source", ""), false);
+        }),
+    );
+    rules.insert(
+        md::WIKI_LINK.to_string(),
+        rule(|state, node, _, _| {
+            // The attributes hold the source's own bytes, so nothing here
+            // escapes or normalises them. A `!` in the text before a link that
+            // is not an embed is given up by `SerializerState::text` itself,
+            // which would otherwise read the two together as one.
+            let link = crate::wiki::WikiLink {
+                target: attr_str(node, "target", "").to_string(),
+                alias: attr_str(node, "alias", "").to_string(),
+                embed: attr_bool(node, "embed", false),
+            };
+            state.text(&link.source(), false);
         }),
     );
     rules.insert(

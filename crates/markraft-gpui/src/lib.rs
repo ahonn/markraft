@@ -24,6 +24,7 @@ mod surface;
 mod syntax;
 mod typeahead;
 mod types;
+mod wiki;
 pub use emoji::{EmojiShortcodes, emoji_menu};
 pub use extension::{
     ActionHandler, CaretShape, EXTENSION_ORIGIN_PREFIX, EditorCx, Extension, ExtensionHandle,
@@ -214,6 +215,11 @@ pub enum EditorEvent {
     /// An opaque inline HTML primitive was clicked; the host can edit its source.
     RawHtmlRequested {
         pos: usize,
+    },
+    /// A wiki link was clicked. `target` is what the source spelled before any
+    /// `|`, which only the host can turn into a document to open.
+    WikiLinkClicked {
+        target: String,
     },
     /// An extension asked the host to do something only the host can do. Hosts that
     /// register no extension never see it.
@@ -1357,6 +1363,18 @@ impl EditorView {
             && self.link_under(event.position).is_some()
         {
             cx.emit(EditorEvent::LinkClicked);
+        }
+        // A wiki link is an atom rather than a mark, so it carries no link mark
+        // for `link_under` to find; the same click follows it.
+        if event.click_count == 1
+            && !event.modifiers.shift
+            && !self.single_line
+            && let Some(pos) = self.wiki_link_under(event.position)
+            && let Some(node) = self.wiki_link_at(pos)
+        {
+            cx.emit(EditorEvent::WikiLinkClicked {
+                target: wiki::wiki_link_target(&node),
+            });
         }
         let head = self.head();
         if event.click_count >= 3 {

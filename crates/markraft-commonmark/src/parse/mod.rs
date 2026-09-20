@@ -22,6 +22,11 @@
 //!   and every other tag do, and is written without escaping. A `<br>` in a
 //!   heading or a table cell stays raw too, because a break has no spelling on
 //!   a line that cannot end.
+//! * An **Obsidian wiki link** — `[[target]]`, `[[target|alias]]` or the embed
+//!   `![[target]]` — becomes a `wiki_link` atom holding the bytes the source
+//!   spelled. comrak finds the first two and normalises what it reads, so the
+//!   parts come from the source; the embed is recognised here. A spelling
+//!   [`crate::wiki`] refuses stays the text a reader sees.
 //! * An **indented code block** becomes an ordinary `code_block` and is written
 //!   back fenced. The two render identically.
 //! * **Link reference definitions** are resolved by comrak, so a reference link
@@ -110,17 +115,28 @@ impl From<NodeError> for ParseError {
 /// [`MarkdownParser::with_options`] — the rule set already sends both footnote
 /// kinds to [`ParseRule::Raw`].
 ///
+/// `wikilinks_title_after_pipe` is on for Obsidian's `[[target|alias]]` order,
+/// which is what the files this editor shares are written in. comrak only
+/// *finds* the construct: what it reads is normalised — the destination is
+/// trimmed, unescaped and entity-resolved — so the [`WIKI_LINK`] atom takes its
+/// parts from the source instead, and [`crate::wiki`] decides which spellings
+/// count. The embed form `![[…]]` is not comrak's at all and is recognised in
+/// the conversion layer.
+///
 /// Front matter is off: the host strips it before the codec sees the text.
 /// Setext headings are *not* ignored, so `Title\n=====` imports as a heading.
 ///
 /// comrak records source positions in the AST unconditionally; its `sourcepos`
 /// option only adds attributes to rendered HTML, so it stays off.
+///
+/// [`WIKI_LINK`]: crate::schema::WIKI_LINK
 pub fn commonmark_options() -> Options<'static> {
     let mut options = Options::default();
     options.extension.strikethrough = true;
     options.extension.tasklist = true;
     options.extension.table = true;
     options.extension.autolink = true;
+    options.extension.wikilinks_title_after_pipe = true;
     options
 }
 

@@ -12,7 +12,8 @@
 //! the source stays editable in place. Ordinary inline styling uses
 //! [`markraft_core::MarkSet`]; nested or empty structures that need more than a
 //! set use transparent [`INLINE_SPAN`] containers. [`RAW_INLINE`] preserves
-//! CommonMark inline HTML primitives.
+//! CommonMark inline HTML primitives, and [`WIKI_LINK`] an Obsidian `[[…]]`
+//! link, both as atoms whose source is never interpreted as text.
 //!
 //! # Mark ranks
 //!
@@ -163,6 +164,21 @@ pub const INLINE_SPAN: &str = "inline_span";
 /// One CommonMark inline HTML primitive, retained in the `source` attribute.
 /// It is an editable/selectable atom; its source is never interpreted as text.
 pub const RAW_INLINE: &str = "raw_inline";
+/// An Obsidian-style wiki link: an inline atom with `target` (`Str`,
+/// required), `alias` (`Str`, default `""`) and `embed` (`Bool`, default
+/// `false`).
+///
+/// The attributes hold the bytes the source spelled, `#heading`/`^block`
+/// suffixes and surrounding spaces included, and the codec writes them back as
+/// `[[target]]`, `[[target|alias]]` or with a leading `!` for an embed, with no
+/// normalisation of either part.
+///
+/// It is an *atom* rather than a mark for three reasons: the source has to
+/// round-trip verbatim, `[[Note]]` has no display text apart from its target to
+/// edit, and what stands inside the brackets — a heading, a block id, an image
+/// size — is Obsidian's sub-syntax, which this codec never interprets.
+/// [`crate::wiki`] says which spellings are read as one.
+pub const WIKI_LINK: &str = "wiki_link";
 
 /// A link, `inclusive: false`, with `href` (`Str`, required) and `title`
 /// (`Str`, default `""`).
@@ -301,6 +317,20 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                 .selectable(true)
                 .atom(true)
                 .attr(AttrSpec::required("source", AttrKind::Str)),
+        )
+        .node(
+            NodeTypeSpec::leaf(WIKI_LINK)
+                .inline(true)
+                .group(INLINE_GROUP)
+                .selectable(true)
+                .atom(true)
+                .attr(AttrSpec::required("target", AttrKind::Str))
+                .attr(str_attr("alias", ""))
+                .attr(AttrSpec::new(
+                    "embed",
+                    AttrKind::Bool,
+                    AttrValue::Bool(false),
+                )),
         )
         .node(
             NodeTypeSpec::leaf(IMAGE)

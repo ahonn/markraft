@@ -324,6 +324,20 @@ pub fn commonmark_html_rules() -> HtmlRules {
             },
         )
         .matching(
+            "a",
+            html_match_fn(|t| t.attr("data-type") == Some("wikiLink")),
+            HtmlRule::Atom {
+                node_type: md::WIKI_LINK.to_string(),
+                attrs: html_attrs_fn(|t| {
+                    attrs! {
+                        "target" => t.attr("data-target").unwrap_or("").to_string(),
+                        "alias" => t.attr("data-alias").unwrap_or("").to_string(),
+                        "embed" => t.attr("data-embed") == Some("true"),
+                    }
+                }),
+            },
+        )
+        .matching(
             "span",
             html_match_fn(|t| t.attr("data-type") == Some("softBreak")),
             HtmlRule::Atom {

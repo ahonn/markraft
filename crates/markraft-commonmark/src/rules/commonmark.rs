@@ -3,7 +3,7 @@
 use comrak::nodes::{
     LineColumn, ListDelimType, ListType, NodeCode, NodeCodeBlock, NodeFootnoteDefinition,
     NodeFootnoteReference, NodeHeading, NodeHtmlBlock, NodeLink, NodeList, NodeTable, NodeTaskItem,
-    NodeValue, Sourcepos, TableAlignment,
+    NodeValue, NodeWikiLink, Sourcepos, TableAlignment,
 };
 use markraft_core::{Attrs, attrs};
 
@@ -107,6 +107,10 @@ pub fn commonmark_rules() -> ParseRules {
         .with(
             &NodeValue::Image(Box::<NodeLink>::default()),
             ParseRule::atom_with(md::IMAGE, attrs_fn(image_attrs)),
+        )
+        .with(
+            &NodeValue::WikiLink(NodeWikiLink::default()),
+            ParseRule::atom_with(md::WIKI_LINK, attrs_fn(wiki_link_attrs)),
         )
         .with(
             &NodeValue::Table(Box::<NodeTable>::default()),
@@ -253,6 +257,23 @@ fn link_attrs(target: ParseTarget<'_>) -> Attrs {
             "title" => link.title.clone(),
         },
         _ => Attrs::empty(),
+    }
+}
+
+/// A wiki link's parts, read from the source the node covers rather than from
+/// what comrak made of it: comrak trims, unescapes and entity-resolves the
+/// destination, and the atom has to write back the bytes it took.
+///
+/// A source this codec does not read as a wiki link never reaches here — the
+/// conversion layer keeps it as the text a reader sees — so the empty parts
+/// this falls back to stand for a node that cannot occur.
+fn wiki_link_attrs(target: ParseTarget<'_>) -> Attrs {
+    let source = target.cx.wrapped_source(target.sourcepos());
+    let link = crate::wiki::whole_wiki_link(&source).unwrap_or_default();
+    attrs! {
+        "target" => link.target,
+        "alias" => link.alias,
+        "embed" => link.embed,
     }
 }
 

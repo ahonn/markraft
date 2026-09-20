@@ -36,6 +36,7 @@ fn the_preset_compiles_and_names_everything_it_documents() {
         md::RAW_BLOCK,
         md::TEXT,
         md::IMAGE,
+        md::WIKI_LINK,
         md::HARD_BREAK,
     ] {
         assert!(schema.node_id(name).is_some(), "missing node type {name}");
@@ -612,6 +613,61 @@ fn an_anchor_with_nothing_but_a_destination_is_the_link_mark() {
     ] {
         judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
     }
+}
+
+#[test]
+fn a_wiki_link_is_an_atom_that_writes_back_the_bytes_it_took() {
+    let codec = Codec::new();
+    for source in [
+        "[[Note]]",
+        "read [[Note|Alias]] here",
+        "see ![[image.png]] here",
+        "![[image.png|100]]",
+        "[[Note#Heading]]",
+        "[[Note^block-id]]",
+        "[[Note#^block-id|Alias]]",
+        "[[  spaced  ]]",
+        "[[ a | b ]]",
+        "[[folder/note.md]]",
+        "[[]]",
+        "[[|a]]",
+        "**[[Note]]**",
+        "> [[Note]]",
+        "- [[a]]\n- ![[b]]",
+        "[[a]]\n[[b]]",
+        "a![[x]]b[[y]]c",
+    ] {
+        assert_eq!(round(source), source, "{source:?}");
+        assert!(shape(source).contains("wiki_link"), "{source:?}");
+    }
+    assert_eq!(
+        shape("read [[Note|Alias]] and ![[x.png]]"),
+        concat!(
+            r#"doc(paragraph("read ", "#,
+            r#"wiki_link[alias=Str("Alias"),embed=Bool(false),target=Str("Note")], "#,
+            r#"" and ", "#,
+            r#"wiki_link[alias=Str(""),embed=Bool(true),target=Str("x.png")]))"#
+        )
+    );
+    // Whatever the recogniser refuses stays the text a reader sees. An empty
+    // alias is refused because `[[a]]` and `[[a|]]` would otherwise be the
+    // same atom, and comrak's own reading of that one is the only spelling
+    // this codec renders differently from it.
+    for source in ["[[a|]]", "[[a|b|c]]", "[[Note]", "[[a[b]]", "[[a\nb]]"] {
+        assert!(!shape(source).contains("wiki_link"), "{source:?}");
+    }
+    for source in ["[[a|b|c]]", "[[Note]", "[[a[b]]", "`[[Note]]`"] {
+        judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
+    }
+    // An embed is found in the source rather than in the text comrak resolved
+    // the escapes out of, so both sides of one keep the bytes they had.
+    for source in [r"a\[b ![[x.png]]", r"![[a\]b|Alias]]", r"![[x]] and a\*b"] {
+        assert_eq!(round(source), source, "{source:?}");
+        assert!(shape(source).contains("wiki_link"), "{source:?}");
+    }
+    // A code literal is code, whatever it spells.
+    assert_eq!(shape("`[[Note]]`"), r#"doc(paragraph("[[Note]]"{code}))"#);
+    assert!(shape("```\n[[Note]]\n```").ends_with(r#"("[[Note]]"))"#));
 }
 
 #[test]

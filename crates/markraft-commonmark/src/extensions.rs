@@ -7,7 +7,9 @@
 //!   `[ ] `/`[x] ` at the start of a bullet item, and a fence. The fence waits
 //!   for the space that ends its info string — ```` ``` ```` opens a code block
 //!   with no language and ```` ```rust ```` opens one with `rust` — because the
-//!   two cannot be told apart before it.
+//!   two cannot be told apart before it. A typed `[[Note]]` becomes the wiki
+//!   link atom on its closing `]]`, because text spelling one is not one and a
+//!   source-preserving save would read the two back as different documents.
 //! * **Corrections** — a list merge, and the repair that puts a required child
 //!   back into an emptied container. Two lists of the same type and attributes
 //!   sitting next to each other are one list as far as CommonMark is concerned,
@@ -97,6 +99,7 @@ pub fn commonmark_input_rules() -> Vec<InputRule> {
         code_rule(),
         divider_rule(),
         task_rule(),
+        wiki_link_rule(),
     ]
 }
 
@@ -280,6 +283,66 @@ fn task_rule() -> InputRule {
                     Slice::from_tokens(&[Token::Close(markup)]),
                 ),
             ]))
+        },
+    )
+}
+
+/// `[[Note]]` becomes the atom as soon as the closing `]]` is typed.
+///
+/// It has to: text spelling a wiki link is not a wiki link, and a save would
+/// read the two back as different documents and refuse the edit. A code span
+/// keeps what is typed in it literal, and so does a code block, which the rule
+/// runner excludes already.
+fn wiki_link_rule() -> InputRule {
+    InputRule::new(
+        |before| {
+            if !before.ends_with("]]") {
+                return None;
+            }
+            let mut start = before.rfind("[[")?;
+            // An embed's `!` belongs to the link it opens.
+            if before[..start].ends_with('!') {
+                start -= 1;
+            }
+            let (_, len) = crate::wiki::read_wiki_link(&before[start..])?;
+            (start + len == before.len()).then(|| before[start..].chars().count())
+        },
+        |m| {
+            let ty = m.schema.node_id(md::WIKI_LINK)?;
+            let (link, _) = crate::wiki::read_wiki_link(m.text)?;
+            // An atom stands for one token, so what the rule replaces has to be
+            // text and nothing else.
+            if m.text
+                .contains(markraft_core::projection::OBJECT_REPLACEMENT)
+            {
+                return None;
+            }
+            let in_code = m.schema.mark_id(md::CODE).is_some_and(|code| {
+                m.doc
+                    .resolve(m.from)
+                    .is_ok_and(|resolved| resolved.marks(m.schema).contains_type(code))
+            });
+            if in_code {
+                return None;
+            }
+            let node = m
+                .schema
+                .create(
+                    ty,
+                    attrs! {
+                        "target" => link.target,
+                        "alias" => link.alias,
+                        "embed" => link.embed,
+                    },
+                    MarkSet::empty(),
+                    Fragment::empty(),
+                )
+                .ok()?;
+            Some(spec(vec![Change::replace(
+                m.from,
+                m.to,
+                Slice::from_fragment(Fragment::from_node(node)),
+            )]))
         },
     )
 }

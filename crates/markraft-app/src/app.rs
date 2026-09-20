@@ -471,6 +471,12 @@ impl NotesApp {
                     }
                     return;
                 }
+                if let EditorEvent::WikiLinkClicked { target } = event {
+                    if this.library.active_id == note_id && this.panel == Panel::Editor {
+                        this.follow_wiki_link(target, window, cx);
+                    }
+                    return;
+                }
                 if matches!(event, EditorEvent::LinkClicked) {
                     if this.library.active_id == note_id && this.panel == Panel::Editor {
                         this.code_language_block = None;
@@ -1068,6 +1074,36 @@ impl NotesApp {
             self.panel = Panel::Editor;
             self.focus_editor(window, cx);
             self.changed(cx);
+        }
+    }
+    /// Open what a clicked wiki link names, exactly as selecting it in Browse
+    /// would — [`NotesApp::select_note`] is what `Intent::Select` runs, so the
+    /// session, the focus and the panel all end up where Browse leaves them.
+    ///
+    /// A target that names nothing is said out loud rather than created: a file
+    /// this window makes is a file the folder did not have, and a mistyped link
+    /// is the likelier reason for a miss.
+    fn follow_wiki_link(&mut self, target: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let page = wiki_link_page(target);
+        if page.is_empty() {
+            // `[[#Heading]]` names a place in this very note, and going to one
+            // is not something this does.
+            return;
+        }
+        let from = self.library.active_note().path.clone();
+        let found = resolve_wiki_link(
+            target,
+            from.as_deref(),
+            self.path.as_deref(),
+            self.library
+                .notes
+                .iter()
+                .filter(|note| note.deleted_at.is_none())
+                .filter_map(|note| Some((note.id.as_str(), note.path.as_deref()?))),
+        );
+        match found {
+            Some(id) => self.select_note(&id, window, cx),
+            None => self.queue_notice(format!("No note named “{page}” in this folder.")),
         }
     }
     fn open_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
@@ -2059,8 +2095,8 @@ fn rejection_message(error: &markraft_commonmark::SourceError) -> String {
     use markraft_commonmark::SourceError;
     match error {
         SourceError::ProtectedSpan => {
-            "Markraft leaves this Markdown exactly as written — a wiki link, a callout, math or \
-             a block anchor. Edit that part in another editor."
+            "Markraft leaves this Markdown exactly as written — a callout, math or a block \
+             anchor. Edit that part in another editor."
         }
         SourceError::ProtectedBlock => {
             "This change would drop source Markraft cannot represent, such as a link reference \
@@ -2072,6 +2108,82 @@ fn rejection_message(error: &markraft_commonmark::SourceError) -> String {
         }
     }
     .to_owned()
+}
+
+/// A wiki link target without the `#heading`, `^block` or `#^block` it may end
+/// with, and without the spaces around it.
+///
+/// Going to a place *inside* a note is not something this does, so the suffix
+/// only ever names one; what is left is the note. An empty result is a link
+/// into the note it was written in, which is nowhere to go.
+fn wiki_link_page(target: &str) -> &str {
+    let end = target.find(['#', '^']).unwrap_or(target.len());
+    target[..end].trim()
+}
+
+/// `name` without a trailing `.md`, whatever case it is written in.
+fn without_markdown(name: &str) -> &str {
+    let start = name.len().saturating_sub(3);
+    if name.is_char_boundary(start) && name[start..].eq_ignore_ascii_case(".md") {
+        &name[..start]
+    } else {
+        name
+    }
+}
+
+/// Which note a wiki link target names, resolved the way Obsidian does.
+///
+/// A target holding a `/` is a path relative to the notes folder, with or
+/// without its `.md` extension; one without is a file stem, matched against
+/// every note the folder holds. Both are matched without regard to case,
+/// because the file systems these files live on do not keep it either.
+///
+/// Where more than one note answers, the one nearest `from` wins: a note in the
+/// same directory first, then the shortest path relative to `root`, then that
+/// path itself — so the answer never depends on the order the notes arrived in.
+///
+/// With no folder — the standalone window, where the open files have no root in
+/// common — every target is matched by stem, because a path relative to nothing
+/// names nothing.
+fn resolve_wiki_link<'a>(
+    target: &str,
+    from: Option<&std::path::Path>,
+    root: Option<&std::path::Path>,
+    notes: impl Iterator<Item = (&'a str, &'a std::path::Path)>,
+) -> Option<String> {
+    let page = wiki_link_page(target);
+    if page.is_empty() {
+        return None;
+    }
+    let wanted = without_markdown(page.trim_start_matches("./")).to_lowercase();
+    let by_path = root.is_some() && wanted.contains('/');
+    let here = from.and_then(std::path::Path::parent);
+    let mut best: Option<(bool, usize, String, String)> = None;
+    for (id, path) in notes {
+        let relative = root
+            .and_then(|root| path.strip_prefix(root).ok())
+            .unwrap_or(path);
+        let text = relative.to_string_lossy();
+        let found = if by_path {
+            without_markdown(&text).to_lowercase() == wanted
+        } else {
+            path.file_stem()
+                .is_some_and(|stem| stem.to_string_lossy().to_lowercase() == wanted)
+        };
+        if !found {
+            continue;
+        }
+        let key = (
+            here != path.parent(),
+            relative.components().count(),
+            text.into_owned(),
+            id.to_owned(),
+        );
+        if best.as_ref().is_none_or(|best| key < *best) {
+            best = Some(key);
+        }
+    }
+    best.map(|(_, _, _, id)| id)
 }
 
 /// What a drop is made of. Each kind has somewhere different to go, so a mixed drop
@@ -2301,7 +2413,7 @@ mod tests {
     // are ordinary unit tests.
     use super::{
         classify_drop, conflict_subject, folder_label, location_budget, note_location,
-        rejection_message, shorten_location, unexplained_error,
+        rejection_message, resolve_wiki_link, shorten_location, unexplained_error, wiki_link_page,
     };
     use crate::{doc, storage::Library};
     use std::{
@@ -2313,6 +2425,156 @@ mod tests {
         let mut library = Library::default();
         let id = library.new_note(doc::from_markdown(markdown));
         library.note(&id).unwrap().clone()
+    }
+
+    /// The folder a wiki link is followed in: ids paired with the paths of the
+    /// notes it holds.
+    fn folder() -> Vec<(&'static str, PathBuf)> {
+        [
+            ("root", "/notes/Note.md"),
+            ("inbox", "/notes/inbox/Note.md"),
+            ("deep", "/notes/a/b/c/Note.md"),
+            ("other", "/notes/Other.md"),
+            ("nested", "/notes/projects/Plan.md"),
+            ("spaced", "/notes/inbox/Weekly Review.md"),
+        ]
+        .into_iter()
+        .map(|(id, path)| (id, PathBuf::from(path)))
+        .collect()
+    }
+
+    fn resolve(target: &str, from: &str) -> Option<String> {
+        let notes = folder();
+        resolve_wiki_link(
+            target,
+            Some(Path::new(from)),
+            Some(Path::new("/notes")),
+            notes.iter().map(|(id, path)| (*id, path.as_path())),
+        )
+    }
+
+    #[test]
+    fn a_wiki_link_target_loses_the_place_it_names_inside_a_note() {
+        assert_eq!(wiki_link_page("Note"), "Note");
+        assert_eq!(wiki_link_page("Note#Heading"), "Note");
+        assert_eq!(wiki_link_page("Note^block-id"), "Note");
+        assert_eq!(wiki_link_page("Note#^block-id"), "Note");
+        assert_eq!(wiki_link_page(" Note "), "Note");
+        assert_eq!(wiki_link_page("#Heading"), "");
+    }
+
+    #[test]
+    fn a_wiki_link_resolves_by_stem_by_path_and_without_regard_to_case() {
+        // A bare stem, from the note beside it.
+        assert_eq!(resolve("Other", "/notes/Note.md").as_deref(), Some("other"));
+        assert_eq!(resolve("other", "/notes/Note.md").as_deref(), Some("other"));
+        assert_eq!(
+            resolve("Other.md", "/notes/Note.md").as_deref(),
+            Some("other")
+        );
+        assert_eq!(
+            resolve("Weekly Review", "/notes/Note.md").as_deref(),
+            Some("spaced")
+        );
+        // A place inside the note does not change which note it is.
+        assert_eq!(
+            resolve("Other#Heading", "/notes/Note.md").as_deref(),
+            Some("other")
+        );
+        assert_eq!(
+            resolve("Other#^b-1", "/notes/Note.md").as_deref(),
+            Some("other")
+        );
+        // A `/` makes it a path relative to the folder, with or without `.md`.
+        for target in [
+            "projects/Plan",
+            "projects/Plan.md",
+            "PROJECTS/plan",
+            "./projects/Plan",
+        ] {
+            assert_eq!(
+                resolve(target, "/notes/Note.md").as_deref(),
+                Some("nested"),
+                "{target:?}"
+            );
+        }
+        assert_eq!(resolve("projects/Missing", "/notes/Note.md"), None);
+        assert_eq!(resolve("Missing", "/notes/Note.md"), None);
+        assert_eq!(resolve("#Heading", "/notes/Note.md"), None);
+    }
+
+    #[test]
+    fn an_ambiguous_stem_picks_the_nearest_note_the_same_way_every_time() {
+        // Three notes are called `Note`; the one in the linking note's own
+        // directory wins wherever the link is followed from.
+        assert_eq!(
+            resolve("Note", "/notes/inbox/x.md").as_deref(),
+            Some("inbox")
+        );
+        assert_eq!(
+            resolve("Note", "/notes/a/b/c/x.md").as_deref(),
+            Some("deep")
+        );
+        // From anywhere else the shortest path relative to the folder wins.
+        assert_eq!(
+            resolve("Note", "/notes/projects/x.md").as_deref(),
+            Some("root")
+        );
+        // And the order the notes arrive in does not change the answer.
+        let mut notes = folder();
+        notes.reverse();
+        assert_eq!(
+            resolve_wiki_link(
+                "Note",
+                Some(Path::new("/notes/projects/x.md")),
+                Some(Path::new("/notes")),
+                notes.iter().map(|(id, path)| (*id, path.as_path())),
+            )
+            .as_deref(),
+            Some("root")
+        );
+    }
+
+    #[test]
+    fn a_wiki_link_never_resolves_to_a_note_that_is_not_offered() {
+        // Deleted notes are kept out by the caller, so a folder without them
+        // finds nothing rather than something unopenable.
+        let notes = folder();
+        let kept: Vec<_> = notes
+            .iter()
+            .filter(|(id, _)| *id != "other")
+            .map(|(id, path)| (*id, path.as_path()))
+            .collect();
+        assert_eq!(
+            resolve_wiki_link(
+                "Other",
+                Some(Path::new("/notes/Note.md")),
+                Some(Path::new("/notes")),
+                kept.into_iter(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn standalone_files_resolve_by_stem_alone() {
+        let notes = [
+            ("a", PathBuf::from("/tmp/one/Note.md")),
+            ("b", PathBuf::from("/var/two/Plan.md")),
+        ];
+        let resolve = |target: &str| {
+            resolve_wiki_link(
+                target,
+                Some(Path::new("/tmp/one/Note.md")),
+                None,
+                notes.iter().map(|(id, path)| (*id, path.as_path())),
+            )
+        };
+        assert_eq!(resolve("Plan").as_deref(), Some("b"));
+        // With no folder there is nothing for a path to be relative to, so the
+        // last component is all that is matched.
+        assert_eq!(resolve("two/Plan").as_deref(), None);
+        assert_eq!(resolve("Plan.md").as_deref(), Some("b"));
     }
 
     #[test]
@@ -2339,7 +2601,9 @@ mod tests {
             messages.len(),
             "each case needs its own sentence: {messages:?}"
         );
-        assert!(messages[0].contains("wiki link"), "{}", messages[0]);
+        // A wiki link is a node of its own now, so it is not on the list.
+        assert!(messages[0].contains("callout"), "{}", messages[0]);
+        assert!(!messages[0].contains("wiki link"), "{}", messages[0]);
         assert!(
             messages[1].contains("link reference definition"),
             "{}",
