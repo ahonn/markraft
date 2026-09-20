@@ -812,15 +812,30 @@ impl Store {
         if path.starts_with(&self.directory) {
             reject_symlink_components(&self.directory, path.parent().unwrap())?;
         }
-        write_document(
-            &path,
-            &bytes,
-            if restoring {
-                None
-            } else {
-                saved.map(|s| s.bytes.as_slice())
-            },
-        )?;
+        match restoring.then(|| self.trashed_file(&note.id)).flatten() {
+            // Putting the file back is what restoring means. Writing a fresh one
+            // instead would leave the original sitting in the Trash for the user to
+            // find later, and would lose the permissions and extended attributes it
+            // went in with. An emptied Trash falls through to writing the bytes.
+            Some(from) => {
+                move_back(&from, &path)?;
+                // It comes back as it went in, so only a file someone edited while it
+                // sat in the Trash still needs the note's own bytes written over it.
+                let current = read_optional(&path).map_err(|e| describe(&path, &e))?;
+                if current.as_deref() != Some(bytes.as_slice()) {
+                    write_document(&path, &bytes, current.as_deref())?;
+                }
+            }
+            None => write_document(
+                &path,
+                &bytes,
+                if restoring {
+                    None
+                } else {
+                    saved.map(|s| s.bytes.as_slice())
+                },
+            )?,
+        }
         let mut stored = note.clone();
         stored.path = Some(path.clone());
         stored.conflicted = false;
@@ -893,6 +908,14 @@ impl Store {
             );
         }
         Ok(())
+    }
+    /// Where a deleted note's file went, while it is still there. A Trash the user has
+    /// emptied, a record from before the file was moved, and an unreadable tombstone
+    /// all read the same way: there is nothing to put back.
+    fn trashed_file(&self, id: &str) -> Option<PathBuf> {
+        let location = self.state.join("deleted").join(format!("{id}.json"));
+        let record: Tombstone = serde_json::from_slice(&fs::read(location).ok()?).ok()?;
+        record.trash_path.filter(|path| path.exists())
     }
     fn trash_note(
         &mut self,
@@ -1109,6 +1132,12 @@ fn write_document(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> Result<
         temp.as_file()
             .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::now()))
             .map_err(|e| describe(path, &e))?;
+    } else {
+        // A file that does not exist yet has no permissions of its own to keep, and
+        // the temporary file it is written through is private. A note in a folder
+        // shared with other tools should sit there like its neighbours, so it takes
+        // the folder's own permissions: a 755 folder gives a 644 note.
+        inherit_folder_mode(parent, temp.path())?;
     }
     temp.as_file().sync_all().map_err(|e| describe(path, &e))?;
     if read_optional(path)
@@ -1127,6 +1156,32 @@ fn write_document(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> Result<
     File::open(parent)
         .and_then(|f| f.sync_all())
         .map_err(|e| describe(parent, &e))?;
+    Ok(())
+}
+/// Moves a trashed file back to the place it was deleted from, which the caller has
+/// already found unoccupied. macOS trashes to the file's own volume, so a rename is
+/// normally enough; a Trash that turns out to be elsewhere is copied across instead.
+fn move_back(from: &Path, to: &Path) -> Result<(), String> {
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    fs::copy(from, to).map_err(|e| describe(from, &e))?;
+    fs::remove_file(from).map_err(|e| describe(from, &e))
+}
+/// The permissions a new file in `folder` should have: the folder's own, without the
+/// execute bits a Markdown file has no use for.
+#[cfg(unix)]
+fn inherit_folder_mode(folder: &Path, file: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(folder)
+        .map_err(|e| describe(folder, &e))?
+        .permissions()
+        .mode()
+        & 0o666;
+    fs::set_permissions(file, fs::Permissions::from_mode(mode)).map_err(|e| describe(file, &e))
+}
+#[cfg(not(unix))]
+fn inherit_folder_mode(_folder: &Path, _file: &Path) -> Result<(), String> {
     Ok(())
 }
 #[cfg(target_os = "macos")]
@@ -1583,6 +1638,86 @@ mod tests {
         let restored = store.files.get(&id).unwrap();
         assert_eq!(restored.bytes, original);
         assert!(restored.path.ends_with("note.md"));
+    }
+    #[test]
+    fn restoring_a_note_puts_the_trashed_file_back_rather_than_copying_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let original = b"# Note\n\nBody.\n";
+        let path = fixture(root.path(), "note.md", original);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let (mut store, mut library) = open(root.path());
+        let id = library.active_id.clone();
+        library.delete(&id);
+        let note = library.note(&id).unwrap().clone();
+        let saved = store.files.get(&id).unwrap().clone();
+        let trash = root.path().join("trash/note.md");
+        fs::create_dir_all(trash.parent().unwrap()).unwrap();
+        store
+            .trash_note(&note, &saved, |source| {
+                fs::rename(source, &trash).map_err(|e| e.to_string())?;
+                Ok(trash.clone())
+            })
+            .unwrap();
+        assert!(!path.exists() && trash.exists());
+        assert!(library.restore(&id));
+        store.save(&library).unwrap();
+        assert!(!trash.exists(), "the trashed file was left behind");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "the file came back as it went in"
+        );
+    }
+    #[test]
+    fn a_restore_falls_back_to_writing_the_bytes_once_the_trash_is_emptied() {
+        let root = tempfile::tempdir().unwrap();
+        let original = b"# Note\n\nBody.\n";
+        let path = fixture(root.path(), "note.md", original);
+        let (mut store, mut library) = open(root.path());
+        let id = library.active_id.clone();
+        library.delete(&id);
+        let note = library.note(&id).unwrap().clone();
+        let saved = store.files.get(&id).unwrap().clone();
+        let trash = root.path().join("trash/note.md");
+        fs::create_dir_all(trash.parent().unwrap()).unwrap();
+        store
+            .trash_note(&note, &saved, |source| {
+                fs::rename(source, &trash).map_err(|e| e.to_string())?;
+                Ok(trash.clone())
+            })
+            .unwrap();
+        fs::remove_file(&trash).unwrap();
+        assert!(library.restore(&id));
+        store.save(&library).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+    #[test]
+    fn a_new_note_takes_the_permissions_of_the_folder_it_lands_in() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), "existing.md", b"Existing\n");
+        let folder = root.path().join("notes");
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+        let (mut store, mut library) = open(root.path());
+        let id = library.new_note(doc::from_markdown("Fresh note"));
+        store.save(&library).unwrap();
+        let path = store.files.get(&id).unwrap().path.clone();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "a new note sits in the folder like its neighbours"
+        );
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+        let private = library.new_note(doc::from_markdown("Private note"));
+        store.save(&library).unwrap();
+        let path = store.files.get(&private).unwrap().path.clone();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "a private folder keeps its notes private"
+        );
     }
     #[test]
     fn pending_dirty_flush_cannot_claim_the_original_is_saved() {
