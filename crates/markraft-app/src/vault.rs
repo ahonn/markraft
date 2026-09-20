@@ -564,10 +564,12 @@ impl Store {
             }
         }
         if !self.pending.is_empty() {
-            self.notices.raise(format!(
-                "Recovered unsaved changes. Resolve them before saving. Recovery files: {}",
-                dir.display()
-            ));
+            // The notice is one line in the corner, and the path to Markraft's own
+            // recovery folder is neither short nor anything the user acts on. It goes
+            // to the log, where a diagnosis can find it.
+            eprintln!("Markraft: recovery files are in {}", dir.display());
+            self.notices
+                .raise("Recovered unsaved changes. Resolve them before saving.".to_owned());
         }
         Ok(())
     }

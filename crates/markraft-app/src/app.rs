@@ -1427,11 +1427,11 @@ impl NotesApp {
         let answer = window.prompt(
             PromptLevel::Warning,
             &format!(
-                "Permanently delete {} {}?",
+                "Delete {} {} for good?",
                 ids.len(),
                 if ids.len() == 1 { "note" } else { "notes" }
             ),
-            Some("Recently Deleted will be emptied. This cannot be undone."),
+            Some("This cannot be undone."),
             &["Cancel", "Delete"],
             cx,
         );
@@ -1712,11 +1712,8 @@ impl NotesApp {
     fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let answer = window.prompt(
             PromptLevel::Warning,
-            "Reload notes from disk?",
-            Some(
-                "This discards unsaved changes in this app. \
-                 Save a library copy first if you need to keep them.",
-            ),
+            "Reload from disk?",
+            Some("Unsaved changes in Markraft will be lost."),
             &["Cancel", "Reload"],
             cx,
         );
@@ -1883,9 +1880,9 @@ impl NotesApp {
             .unwrap_or_else(|| folder.display().to_string());
         let answer = window.prompt(
             PromptLevel::Info,
-            &format!("Switch to the folder “{name}”?"),
-            Some("Markraft shows one folder at a time. Nothing in either folder is moved or changed."),
-            &["Cancel", "Switch"],
+            &format!("Open “{name}” instead?"),
+            Some("Markraft shows one folder at a time. Nothing is moved or renamed."),
+            &["Cancel", "Open"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -1966,7 +1963,7 @@ impl NotesApp {
     }
 
     /// Bring the conflict dialog back for the active note. ⌘S, the footer indicator
-    /// and the command all arrive here, so a note that was answered "Not Now" can be
+    /// and the command all arrive here, so a note that was answered "Keep Mine" can be
     /// asked again from wherever the user looks for it.
     fn reopen_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.library.active_id.clone();
@@ -1985,12 +1982,9 @@ impl NotesApp {
         self.conflict_dialog = true;
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("“{subject}” was changed by another app"),
-            Some(
-                "Load Changes replaces what you see with the version on disk. \
-                 Your edits are kept as a recovery copy either way.",
-            ),
-            &["Not Now", "Load Changes"],
+            &format!("“{subject}” changed on disk"),
+            Some("Your edits are kept either way."),
+            &["Keep Mine", "Use Disk Version"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {

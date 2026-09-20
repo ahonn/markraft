@@ -7,6 +7,9 @@ const CAPSULES_SHOWN: usize = 2;
 /// A capsule's height. Its corner is half of this, so it reads as one of the
 /// rounded controls the chrome is made of.
 const CAPSULE_HEIGHT: Pixels = px(24.);
+/// How far the mode badge and the capsules beside it stand from the window's edge.
+/// The card they open is anchored to the same line.
+const CAPSULES_LEFT: Pixels = px(12.);
 /// The box a capsule's symbol is drawn into. A symbol carries its own margin, so a
 /// box the size of the label's type draws a glyph shorter than the label's capitals;
 /// this is measured against the 11px text beside it rather than set to match it.
@@ -380,7 +383,7 @@ impl NotesApp {
             .child(
                 div()
                     .absolute()
-                    .left(px(12.))
+                    .left(CAPSULES_LEFT)
                     .flex()
                     .items_center()
                     .gap(px(4.))
@@ -749,8 +752,10 @@ impl NotesApp {
             div()
                 .id("file-status-card")
                 .absolute()
-                .bottom(px(48.))
-                .left(px(8.))
+                .bottom(FOOTER_HEIGHT)
+                // Flush with the capsules it belongs to, which start at the footer's
+                // own left inset.
+                .left(CAPSULES_LEFT)
                 .w(width)
                 .max_h(room)
                 .overflow_y_scroll()
