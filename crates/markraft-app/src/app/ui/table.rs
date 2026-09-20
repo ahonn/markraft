@@ -96,8 +96,10 @@ impl TableEdit {
 
     pub(super) fn icon(self) -> Icon {
         match self {
-            TableEdit::RowBefore | TableEdit::RowAfter => Icon::RowAdd,
-            TableEdit::ColumnBefore | TableEdit::ColumnAfter => Icon::ColumnAdd,
+            TableEdit::RowBefore => Icon::RowAbove,
+            TableEdit::RowAfter => Icon::RowBelow,
+            TableEdit::ColumnBefore => Icon::ColumnLeft,
+            TableEdit::ColumnAfter => Icon::ColumnRight,
             TableEdit::DeleteRow => Icon::RowDelete,
             TableEdit::DeleteColumn => Icon::ColumnDelete,
             TableEdit::DeleteTable => Icon::Trash,

@@ -113,7 +113,7 @@ impl NotesApp {
                 .child(self.format_button(
                     "link-open",
                     "Open link",
-                    Icon::Open,
+                    Icon::External,
                     Intent::OpenLink,
                     None,
                     cx,

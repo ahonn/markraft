@@ -201,28 +201,32 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::Browse => Icon::Notes,
         Intent::Pin => Icon::Pin,
         Intent::Trash | Intent::Delete | Intent::PurgeNote(_) | Intent::EmptyTrash => Icon::Trash,
-        Intent::Drafts => Icon::Restore,
+        Intent::Drafts => Icon::Drafts,
         Intent::Copy | Intent::SaveCopy | Intent::CopyLink => Icon::Copy,
         Intent::Export => Icon::Export,
         Intent::OpenMarkdown => Icon::Document,
         Intent::Settings => Icon::Settings,
-        Intent::Save => Icon::Check,
-        Intent::Undo | Intent::Redo | Intent::UndoDelete => Icon::Restore,
+        Intent::Save => Icon::Save,
+        Intent::Undo | Intent::Redo | Intent::UndoDelete | Intent::Restore(_) => Icon::Restore,
         Intent::ToggleTask => Icon::Task,
         Intent::ChooseCodeLanguage => Icon::CodeBlock,
         Intent::CopyCodeBlock => Icon::Copy,
         Intent::EditRawHtml => Icon::Code,
-        Intent::ToggleFormatToolbar | Intent::ToggleCount => Icon::Text,
-        Intent::OpenLink
-        | Intent::Reveal
+        Intent::ToggleFormatToolbar => Icon::Text,
+        Intent::ToggleCount => Icon::Count,
+        // Anything that hands the note to something outside Markraft.
+        Intent::OpenLink | Intent::OpenExternally => Icon::External,
+        Intent::Reveal
         | Intent::RevealNote
         | Intent::NewNoteLocation
         | Intent::ChooseFolder
-        | Intent::OpenExternally => Icon::Open,
-        Intent::ReviewConflict | Intent::FileStatus => Icon::Pause,
-        Intent::ImageLocation | Intent::ResetImageLocation => Icon::Image,
-        Intent::ResetNewNoteLocation => Icon::Plus,
-        Intent::Unlink => Icon::Link,
+        | Intent::DefaultFolder => Icon::Open,
+        Intent::ReviewConflict | Intent::FileStatus => Icon::Conflict,
+        Intent::ImageLocation => Icon::Image,
+        Intent::ResetImageLocation | Intent::ResetNewNoteLocation => Icon::Reset,
+        Intent::Retry | Intent::Reload => Icon::Reset,
+        // Removing a link is a removal, as the pill's own button says.
+        Intent::Unlink => Icon::Trash,
         Intent::Mark(doc::Inline::Bold) => Icon::Bold,
         Intent::Mark(doc::Inline::Italic) => Icon::Italic,
         Intent::Mark(doc::Inline::Code) => Icon::Code,
@@ -759,7 +763,11 @@ impl NotesApp {
         let kind = intent_icon(&intent);
         let destructive = matches!(
             intent,
-            Intent::Delete | Intent::EmptyTrash | Intent::Table(TableEdit::DeleteTable)
+            Intent::Delete
+                | Intent::EmptyTrash
+                | Intent::Table(
+                    TableEdit::DeleteTable | TableEdit::DeleteRow | TableEdit::DeleteColumn
+                )
         );
         let ink = if destructive {
             self.danger()

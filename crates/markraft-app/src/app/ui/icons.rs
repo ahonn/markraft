@@ -19,13 +19,17 @@ macro_rules! define_icons {
 }
 
 // Semantic names stay independent of AppKit. Prefer symbols present on macOS 13,
-// the minimum supported version; the native-render test checks the host catalog.
+// the minimum supported version; the native-render test only proves this Mac has
+// them. The version a symbol arrived in is in the system's own catalogue:
+// `plutil -p /System/Library/CoreServices/CoreGlyphs.bundle/Contents/Resources/\
+//  name_availability.plist` maps each name to a release year, and `year_to_release`
+// in the same file maps that year to a macOS version.
 define_icons! {
     Plus => "plus",
-    Notes => "doc.on.doc",
+    Notes => "list.bullet.rectangle",
     Command => "command",
     Text => "textformat",
-    Close => "xmark.circle.fill",
+    Close => "xmark",
     ChevronDown => "chevron.down",
     Check => "checkmark",
     Pin => "pin",
@@ -42,10 +46,18 @@ define_icons! {
     Link => "link",
     Edit => "pencil",
     Open => "folder",
+    // Leaving Markraft: a link in the browser, a file in another editor.
+    External => "arrow.up.right.square",
     Image => "photo",
     Lock => "lock",
     Alert => "exclamationmark.triangle",
-    Pause => "pause",
+    // Two versions of one file that have to be told apart.
+    Conflict => "arrow.triangle.branch",
+    // Notes waiting in the tray because no file holds them the way they are.
+    Drafts => "tray.full",
+    Save => "arrow.down.doc",
+    Reset => "arrow.counterclockwise",
+    Count => "number",
     Heading => "textformat.size",
     Quote => "text.quote",
     CodeBlock => "curlybraces.square",
@@ -56,10 +68,13 @@ define_icons! {
     Divider => "minus",
     Restore => "arrow.uturn.backward",
     Table => "tablecells",
-    RowAdd => "rectangle.stack.badge.plus",
-    RowDelete => "rectangle.stack.badge.minus",
-    ColumnAdd => "rectangle.badge.plus",
-    ColumnDelete => "rectangle.badge.minus",
+    RowAbove => "arrow.up.to.line",
+    RowBelow => "arrow.down.to.line",
+    ColumnLeft => "arrow.left.to.line",
+    ColumnRight => "arrow.right.to.line",
+    // Taking one away is said by the destructive ink; the split says which one.
+    RowDelete => "square.split.1x2",
+    ColumnDelete => "square.split.2x1",
     AlignLeft => "text.alignleft",
     AlignCenter => "text.aligncenter",
     AlignRight => "text.alignright",

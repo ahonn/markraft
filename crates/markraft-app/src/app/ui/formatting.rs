@@ -275,7 +275,10 @@ impl NotesApp {
         let active = toggled == Some(true);
         // A control that takes the whole table away is written in the destructive ink,
         // as its ⌘K row is.
-        let ink = if matches!(intent, Intent::Table(TableEdit::DeleteTable)) {
+        let ink = if matches!(
+            intent,
+            Intent::Table(TableEdit::DeleteTable | TableEdit::DeleteRow | TableEdit::DeleteColumn)
+        ) {
             self.danger()
         } else if active {
             self.control_text()
@@ -562,7 +565,7 @@ impl NotesApp {
         if note.conflicted {
             states.push(FileState {
                 id: "state-conflict",
-                icon: Icon::Pause,
+                icon: Icon::Conflict,
                 label: "Conflict".into(),
                 detail: "Another app changed this file. Autosave is paused until you \
                          choose which version to keep."
@@ -592,7 +595,7 @@ impl NotesApp {
         if drafts > 0 {
             states.push(FileState {
                 id: "state-drafts",
-                icon: Icon::Restore,
+                icon: Icon::Drafts,
                 label: format!("{drafts} draft{}", if drafts == 1 { "" } else { "s" }),
                 detail: format!(
                     "{drafts} note{} not in a file the way you left {}.",
