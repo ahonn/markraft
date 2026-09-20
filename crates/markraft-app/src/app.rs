@@ -42,10 +42,22 @@ actions!(
     ]
 );
 
+/// Which of the library's notes a panel lists.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    Notes,
+    /// Work that is not in a file the way it was left; see [`is_draft`].
+    Drafts,
+    Deleted,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Panel {
     Editor,
     Browse,
+    /// Work that is not in a file the way the user left it: a note with no file yet,
+    /// and one whose file says something else. The same list Browse draws, filtered.
+    Drafts,
     Trash,
     Actions,
     Settings,
@@ -644,6 +656,12 @@ impl NotesApp {
         self.prompt_conflict(window, cx);
         cx.notify();
     }
+    /// How many notes are not in a file the way the user left them: one with no file
+    /// yet, and one whose file says something else. Both come back from recovery as
+    /// ordinary notes, so this is a filter rather than a second list.
+    pub(crate) fn draft_count(&self) -> usize {
+        self.library.notes.iter().filter(|n| is_draft(n)).count()
+    }
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.revision += 1;
         self.dirty = true;
@@ -1234,8 +1252,21 @@ impl NotesApp {
         }
         cx.notify();
     }
-    fn matching_notes(&self, query: &str, deleted: bool) -> Vec<&crate::storage::Note> {
+    /// Which of the library's notes the open panel is looking at. Drafts and the
+    /// trash are the same list the Browse panel draws, filtered two ways.
+    pub(crate) fn scope(&self) -> Scope {
+        match self.panel {
+            Panel::Drafts => Scope::Drafts,
+            Panel::Trash => Scope::Deleted,
+            _ => Scope::Notes,
+        }
+    }
+    fn matching_notes(&self, query: &str, scope: Scope) -> Vec<&crate::storage::Note> {
+        let deleted = scope == Scope::Deleted;
         let mut notes = self.library.search(query, deleted, self.path.as_deref());
+        if scope == Scope::Drafts {
+            notes.retain(|note| is_draft(note));
+        }
         if !deleted {
             notes.sort_by_key(|note| note.id != self.library.active_id);
         }
@@ -1253,7 +1284,7 @@ impl NotesApp {
         }
         // Pinning reorders results; keep the same note selected.
         self.selected = self
-            .matching_notes(self.query.read(cx).text().trim(), false)
+            .matching_notes(self.query.read(cx).text().trim(), self.scope())
             .iter()
             .position(|note| note.id == id)
             .unwrap_or(0);
@@ -2386,6 +2417,12 @@ fn folder_label(root: &std::path::Path, relative: &std::path::Path) -> String {
 
 /// What the conflict dialog calls the note: the file another app changed, or the
 /// note's own title while it has no file yet.
+/// Whether a note is work that is not in a file the way it was left: it has no file
+/// yet, or the file says something else.
+pub(crate) fn is_draft(note: &crate::storage::Note) -> bool {
+    note.deleted_at.is_none() && (note.path.is_none() || note.conflicted)
+}
+
 fn conflict_subject(note: &crate::storage::Note) -> String {
     note.path
         .as_ref()
@@ -2830,5 +2867,32 @@ mod tests {
             folder_label(root, Path::new("Inbox/Daily")),
             "Notes/Inbox/Daily"
         );
+    }
+
+    #[test]
+    fn a_draft_is_a_note_with_no_file_or_one_its_file_disagrees_with() {
+        let mut library = Library::default();
+        let id = library.new_note(doc::from_markdown("Unfiled"));
+        let note = |library: &Library, id: &str| {
+            library.notes.iter().find(|n| n.id == id).unwrap().clone()
+        };
+        // Nothing has been written for it yet, so it lives only in the app.
+        assert!(super::is_draft(&note(&library, &id)));
+        // Given a file it agrees with, it is an ordinary note.
+        let filed = library.notes.iter_mut().find(|n| n.id == id).unwrap();
+        filed.path = Some(PathBuf::from("/notes/Unfiled.md"));
+        assert!(!super::is_draft(&note(&library, &id)));
+        // Until the file says something else.
+        library
+            .notes
+            .iter_mut()
+            .find(|n| n.id == id)
+            .unwrap()
+            .conflicted = true;
+        assert!(super::is_draft(&note(&library, &id)));
+        // Something thrown away is not waiting to be filed.
+        let gone = library.notes.iter_mut().find(|n| n.id == id).unwrap();
+        gone.deleted_at = Some(1);
+        assert!(!super::is_draft(&note(&library, &id)));
     }
 }

@@ -26,6 +26,7 @@ enum Intent {
     EditHtml(usize),
     New,
     Browse,
+    Drafts,
     Trash,
     Actions,
     ToggleFormatToolbar,
@@ -185,6 +186,7 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::Browse => Icon::Notes,
         Intent::Pin => Icon::Pin,
         Intent::Trash | Intent::Delete | Intent::PurgeNote(_) | Intent::EmptyTrash => Icon::Trash,
+        Intent::Drafts => Icon::Restore,
         Intent::Copy | Intent::SaveCopy | Intent::CopyLink => Icon::Copy,
         Intent::Export => Icon::Export,
         Intent::OpenMarkdown => Icon::Document,
@@ -234,6 +236,7 @@ impl NotesApp {
             Intent::EditHtml(pos) => self.open_html_source(pos, window, cx),
             Intent::New => self.new_note(window, cx),
             Intent::Browse => self.open_panel(Panel::Browse, window, cx),
+            Intent::Drafts => self.open_panel(Panel::Drafts, window, cx),
             Intent::Trash => self.open_panel(Panel::Trash, window, cx),
             Intent::Actions => self.open_panel(Panel::Actions, window, cx),
             Intent::ToggleFormatToolbar => {
@@ -617,7 +620,10 @@ impl NotesApp {
     ) -> Stateful<Div> {
         let id: SharedString = id.into();
         let expanded = match intent {
-            Intent::Browse => Some(self.panel == Panel::Browse || self.panel == Panel::Trash),
+            Intent::Browse => Some(matches!(
+                self.panel,
+                Panel::Browse | Panel::Drafts | Panel::Trash
+            )),
             Intent::Actions => Some(self.panel == Panel::Actions),
             _ => None,
         };
@@ -779,9 +785,10 @@ impl NotesApp {
         )
     }
     fn picker(&self, heading: bool, cx: &mut Context<Self>) -> Div {
-        let deleted = self.panel == Panel::Trash;
+        let scope = self.scope();
+        let deleted = scope == Scope::Deleted;
         let query = self.query.read(cx).text().to_owned();
-        let notes = self.matching_notes(query.trim(), deleted);
+        let notes = self.matching_notes(query.trim(), scope);
         let total = notes.len();
         let now = crate::storage::timestamp();
         let home = std::env::var("HOME").ok();
@@ -813,7 +820,19 @@ impl NotesApp {
             let id = note.id.clone();
             let current = note.id == self.library.active_id;
             let selected = index == self.selected;
-            let status = if current && !deleted {
+            let status = if scope == Scope::Drafts {
+                // In this scope every row is a draft, so the useful thing to say is
+                // which kind: one with no file yet, or one its file disagrees with.
+                match &note.path {
+                    None => "No file yet".to_owned(),
+                    Some(path) => format!(
+                        "Differs from {}",
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ),
+                }
+            } else if current && !deleted {
                 "Current".to_owned()
             } else {
                 let date = relative_day(note.deleted_at.unwrap_or(note.updated_at), now);
@@ -823,12 +842,15 @@ impl NotesApp {
                 };
                 format!("{} {date}", if deleted { "Deleted" } else { "Edited" })
             };
-            let location = note.path.as_ref().map(|path| {
-                shorten_location(
-                    &note_location(path, self.path.as_deref(), home.as_deref()),
-                    location_budget(&status, current && !deleted, deleted, selected),
-                )
-            });
+            let location = (scope != Scope::Drafts)
+                .then_some(note.path.as_ref())
+                .flatten()
+                .map(|path| {
+                    shorten_location(
+                        &note_location(path, self.path.as_deref(), home.as_deref()),
+                        location_budget(&status, current && !deleted, deleted, selected),
+                    )
+                });
             // A draft has nowhere on disk yet, which the accent says without adding
             // a badge of its own: the row already speaks in dots and muted text.
             let location_color = match &location {
@@ -1045,9 +1067,19 @@ impl NotesApp {
                         .justify_between()
                         .text_size(px(11.))
                         .text_color(self.muted())
-                        .child(if deleted { "Recently Deleted" } else { "Notes" })
-                        .when(deleted, |s| {
+                        .child(match scope {
+                            Scope::Deleted => "Recently Deleted",
+                            Scope::Drafts => "Drafts",
+                            Scope::Notes => "Notes",
+                        })
+                        // The three scopes are one list read three ways, so the way
+                        // back to the others sits in the heading rather than behind a
+                        // command each.
+                        .when(scope != Scope::Notes, |s| {
                             s.child(self.button("trash-back", "All Notes", Intent::Browse, cx))
+                        })
+                        .when(scope != Scope::Drafts && self.draft_count() > 0, |s| {
+                            s.child(self.button("drafts-scope", "Drafts", Intent::Drafts, cx))
                         }),
                 )
             })
@@ -1425,7 +1457,7 @@ impl NotesApp {
             self.actions_scroll.scroll_to_item(self.selected);
         } else {
             let query = self.query.read(cx).text().to_owned();
-            let notes = self.matching_notes(query.trim(), self.panel == Panel::Trash);
+            let notes = self.matching_notes(query.trim(), self.scope());
             match key {
                 "up" => self.select_row(self.selected.saturating_sub(1)),
                 "down" => self.select_row((self.selected + 1).min(notes.len().saturating_sub(1))),
@@ -1970,16 +2002,15 @@ impl NotesApp {
         .min(viewport.width - px(32.));
         let available = (viewport.height - top - px(16.)).max(px(0.));
         let desired = match self.panel {
-            Panel::Browse | Panel::Trash => {
+            Panel::Browse | Panel::Drafts | Panel::Trash => {
                 let n = self
-                    .library
-                    .search(
-                        self.query.read(cx).text().trim(),
-                        self.panel == Panel::Trash,
-                        self.path.as_deref(),
-                    )
+                    .matching_notes(self.query.read(cx).text().trim(), self.scope())
                     .len();
-                let heading = if self.panel == Panel::Trash { 32. } else { 26. };
+                let heading = if self.panel == Panel::Editor {
+                    26.
+                } else {
+                    32.
+                };
                 let rows = if n == 0 { 72. } else { 58. * n as f32 };
                 px(44. + heading + rows + 8.)
             }
@@ -2012,7 +2043,7 @@ impl NotesApp {
             .min(available);
         let contents = match self.panel {
             // A short card gives what room it has to the rows rather than to a heading.
-            Panel::Browse | Panel::Trash => self.picker(height >= px(136.), cx),
+            Panel::Browse | Panel::Drafts | Panel::Trash => self.picker(height >= px(136.), cx),
             Panel::Actions => self.actions_panel(cx),
             _ => div()
                 .flex()

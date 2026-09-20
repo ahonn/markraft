@@ -584,6 +584,21 @@ impl NotesApp {
                 },
             });
         }
+        let drafts = self.draft_count();
+        if drafts > 0 {
+            states.push(FileState {
+                id: "state-drafts",
+                icon: Icon::Restore,
+                label: format!("{drafts} draft{}", if drafts == 1 { "" } else { "s" }),
+                detail: format!(
+                    "{drafts} note{} not in a file the way you left {}.",
+                    if drafts == 1 { " is" } else { "s are" },
+                    if drafts == 1 { "it" } else { "them" }
+                ),
+                urgent: false,
+                actions: vec![("Show Drafts…", Intent::Drafts)],
+            });
+        }
         if self.folder_was_created {
             states.push(FileState {
                 id: "state-new-folder",

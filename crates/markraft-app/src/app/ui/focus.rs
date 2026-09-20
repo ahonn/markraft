@@ -104,7 +104,7 @@ impl NotesApp {
         }
         match self.panel {
             Panel::Editor => Surface::Editor,
-            Panel::Browse | Panel::Trash => Surface::Picker,
+            Panel::Browse | Panel::Drafts | Panel::Trash => Surface::Picker,
             Panel::Actions => Surface::Actions,
             Panel::Settings => Surface::Settings,
         }
@@ -195,7 +195,7 @@ impl NotesApp {
                 }
                 let query = self.query.read(cx).text().to_owned();
                 for (index, note) in self
-                    .matching_notes(query.trim(), deleted)
+                    .matching_notes(query.trim(), self.scope())
                     .iter()
                     .enumerate()
                 {
