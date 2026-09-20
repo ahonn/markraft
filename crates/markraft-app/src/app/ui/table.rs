@@ -3,9 +3,9 @@ use super::*;
 /// The pill's height; its radius is the one that height gives it, as the link pill's is.
 const HEIGHT: Pixels = px(32.);
 /// The pill's width, which it has to be anchored by before it has been laid out: its
-/// eight 28 px controls, the 1 px gap between each pair of neighbours, two dividers with
+/// ten 28 px controls, the 1 px gap between each pair of neighbours, two dividers with
 /// their margins, and 5 px of padding and border at each end.
-const WIDTH: Pixels = px(8. * 28. + 9. * 1. + 2. * 7. + 2. * 5.);
+const WIDTH: Pixels = px(10. * 28. + 11. * 1. + 2. * 7. + 2. * 5.);
 /// How far the pill floats clear of the grid it belongs to, and of the window's chrome.
 const GAP: Pixels = px(6.);
 /// Every toolbar control's id begins with this, so the ring can tell a stop of its own
@@ -14,11 +14,21 @@ const STOP: &str = "table-bar-";
 
 /// The toolbar's controls, in the order it draws them and the ring walks them: adding
 /// to the grid, aligning its column, then taking from it.
-const CONTROLS: [(&str, &str, TableEdit); 8] = [
+const CONTROLS: [(&str, &str, TableEdit); 10] = [
+    (
+        "table-bar-row-add-before",
+        "Add Row Above",
+        TableEdit::RowBefore,
+    ),
     (
         "table-bar-row-add",
         "Add Row Below · ⌘↩",
         TableEdit::RowAfter,
+    ),
+    (
+        "table-bar-column-add-before",
+        "Add Column Left",
+        TableEdit::ColumnBefore,
     ),
     (
         "table-bar-column-add",
@@ -54,7 +64,7 @@ const CONTROLS: [(&str, &str, TableEdit); 8] = [
 ];
 /// Where the pill's two dividers fall: before the alignment trio, and before the
 /// controls that take something away.
-const DIVIDERS: [usize; 2] = [2, 5];
+const DIVIDERS: [usize; 2] = [4, 7];
 
 /// One edit of the table the caret is in. The ⌘K panel names them and the toolbar draws
 /// them; each resolves to a command of the editor's table catalogue.
