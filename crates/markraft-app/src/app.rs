@@ -76,7 +76,7 @@ struct Session {
     _changes: Subscription,
     _format_changes: Subscription,
     /// Unregisters the note's editor extensions when the session is evicted.
-    _extensions: [ExtensionHandle; 3],
+    _extensions: [ExtensionHandle; 4],
     /// Modal editing, while the preference is on. Dropping the handle turns it off.
     vim: Option<ExtensionHandle>,
     /// The mode this note's editor last reported.
@@ -143,6 +143,12 @@ pub struct NotesApp {
     dark: bool,
     // Corner action buttons and traffic lights follow window hover alone.
     pointer_inside: bool,
+    /// The notes the `[[` menu offers, shared with the editor's provider so that a note
+    /// written after this editor opened can still be linked to.
+    link_targets: ui::wiki::LinkTargets,
+    /// The revision the shared list was built from, so it is rebuilt when the library
+    /// moves on rather than on every tick.
+    link_targets_revision: Option<u64>,
     /// When the keyboard was last used here. Someone typing is present even with the
     /// pointer parked outside the window, so the chrome stays up for a moment after.
     last_key_at: Option<Instant>,
@@ -311,6 +317,8 @@ impl NotesApp {
             conflict_dialog: false,
             file_status_popover: false,
             file_status_flash: None,
+            link_targets: Default::default(),
+            link_targets_revision: None,
             chrome_focus: None,
             show_words: false,
             format_toolbar: false,
@@ -416,15 +424,18 @@ impl NotesApp {
             .with_placeholder("Start writing…")
         });
         // Only note editors get the menus; the host's query field gets no extension.
-        // The `/` menu is registered first: the two typeaheads derive from the same
+        // The `/` menu is registered first: the three typeaheads derive from the same
         // caret and their triggers are disjoint, so only one is ever open, but were they
         // ever to overlap the first registered one would own the popup and the commands
-        // matter more than the emoji. Auto-replace goes last so that it sees the menu's
-        // view of a keystroke settled before it edits.
+        // matter more than a link, and a link more than an emoji. Auto-replace goes last
+        // so that it sees the menu's view of a keystroke settled before it edits.
+        self.refresh_link_targets();
         let menu = self.slash_menu();
+        let links = self.wiki_menu();
         let extensions = editor.update(cx, |editor, cx| {
             [
                 editor.add_extension(menu, cx),
+                editor.add_extension(links, cx),
                 editor.add_extension(markraft_gpui::emoji_menu(), cx),
                 editor.add_extension(markraft_gpui::EmojiShortcodes, cx),
             ]
@@ -588,6 +599,9 @@ impl NotesApp {
             ids.push(id);
         }
         self.ensure_session(window, cx);
+        // A file appearing or leaving changes what `[[` can link to, and arrives
+        // without touching the revision counter the poll watches.
+        self.refresh_link_targets();
         // Replacing an editor session drops its focus handle. Restore editing
         // focus without taking it away from a picker or settings input.
         if editor_was_focused {
@@ -764,6 +778,14 @@ impl NotesApp {
         if self.panel == Panel::Editor {
             self.editor()
                 .update(cx, |editor, cx| editor.refresh_images(cx));
+        }
+        // The `[[` menu reads a shared list rather than a snapshot, so it follows notes
+        // being written, renamed and deleted. Rebuilding costs a string a note, so it
+        // is tied to the counter every change already bumps; a change arriving from
+        // outside refills the list where it lands.
+        if self.link_targets_revision != Some(self.revision) {
+            self.link_targets_revision = Some(self.revision);
+            self.refresh_link_targets();
         }
         if let Some(platform) = &self.platform {
             let inside = platform.pointer_inside(window);

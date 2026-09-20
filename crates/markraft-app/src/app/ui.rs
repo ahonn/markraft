@@ -8,6 +8,7 @@ pub(in crate::app) mod slash;
 mod table;
 mod tokens;
 mod vim;
+pub(in crate::app) mod wiki;
 
 use super::*;
 use focus::Surface;
