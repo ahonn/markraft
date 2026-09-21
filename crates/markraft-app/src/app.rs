@@ -1,4 +1,5 @@
 mod assets;
+mod rename;
 mod ui;
 
 use crate::doc;
@@ -157,6 +158,8 @@ pub struct NotesApp {
     format_toolbar: bool,
     format_menu: Option<FormatMenu>,
     link_popover: Option<LinkPopover>,
+    /// The popover under the title that gives the note's file another name.
+    rename: Option<rename::Rename>,
     /// The table the toolbar was last drawn for. It is paint geometry, so it is only
     /// ever as fresh as the last frame, which is also the frame the keyboard walks.
     table: Option<TableInfo>,
@@ -329,6 +332,7 @@ impl NotesApp {
             _query_changes: query_changes,
             panel: Panel::Editor,
             link_popover: None,
+            rename: None,
             table: None,
             panel_focus: cx.focus_handle(),
             selected: 0,
@@ -1251,6 +1255,7 @@ impl NotesApp {
         self.chrome_focus = None;
         let had_popover = self.format_menu.take().is_some()
             | self.link_popover.take().is_some()
+            | self.rename.take().is_some()
             | self.code_language_block.take().is_some()
             | std::mem::take(&mut self.file_status_popover);
         if had_popover {
@@ -1271,6 +1276,7 @@ impl NotesApp {
         self.format_menu = None;
         self.code_language_block = None;
         self.link_popover = None;
+        self.rename = None;
         self.file_status_popover = false;
         self.query.update(cx, |e, cx| e.cancel_composition(cx));
         if self.persistence.is_none() {
@@ -1289,6 +1295,7 @@ impl NotesApp {
         self.format_menu = None;
         self.code_language_block = None;
         self.link_popover = None;
+        self.rename = None;
         self.file_status_popover = false;
         self.query.update(cx, |e, cx| e.cancel_composition(cx));
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));

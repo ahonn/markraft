@@ -4,6 +4,7 @@ mod formatting;
 pub(super) mod html;
 mod icons;
 mod link;
+mod rename;
 pub(in crate::app) mod slash;
 mod table;
 mod tokens;
@@ -52,6 +53,10 @@ enum Intent {
     PastePlain,
     PasteMarkdown,
     Export,
+    /// The popover under the title, and the two things done inside it.
+    Rename,
+    ApplyRename,
+    RenameLinks,
     OpenMarkdown,
     NewNoteLocation,
     ImageLocation,
@@ -125,6 +130,7 @@ impl Intent {
             | Self::EditRawHtml => ActionGroup::Context,
             Self::Save
             | Self::Export
+            | Self::Rename
             | Self::OpenMarkdown
             | Self::Reveal
             | Self::RevealNote
@@ -204,6 +210,7 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::Drafts => Icon::Drafts,
         Intent::Copy | Intent::SaveCopy | Intent::CopyLink => Icon::Copy,
         Intent::Export => Icon::Export,
+        Intent::Rename => Icon::Edit,
         Intent::OpenMarkdown => Icon::Document,
         Intent::Settings => Icon::Settings,
         Intent::Save => Icon::Save,
@@ -378,6 +385,9 @@ impl NotesApp {
                 self.intent(Intent::Back, window, cx);
                 self.export(cx);
             }
+            Intent::Rename => self.open_rename(window, cx),
+            Intent::ApplyRename => self.apply_rename(window, cx),
+            Intent::RenameLinks => self.toggle_rename_links(cx),
             Intent::OpenMarkdown => self.open_markdown(window, cx),
             Intent::NewNoteLocation => self.configure_new_notes(window, cx),
             Intent::ImageLocation => self.configure_images(window, cx),
@@ -1557,6 +1567,12 @@ impl NotesApp {
             // Up and down have nowhere to go in a one-line field.
             return true;
         }
+        if self.rename.is_some() {
+            if key == "enter" {
+                self.apply_rename(window, cx);
+            }
+            return true;
+        }
         if self.panel == Panel::Editor {
             return false;
         }
@@ -1649,6 +1665,7 @@ impl NotesApp {
                 Intent::PasteMarkdown,
             ),
             Command::new("export-note", "Export Markdown…", "⇧⌘E", Intent::Export),
+            Command::new("rename-note", "Rename…", "", Intent::Rename),
             Command::new(
                 "open-markdown-action",
                 "Open Markdown…",
@@ -2433,11 +2450,33 @@ impl Render for NotesApp {
                     .left(px(112.))
                     .right(px(112.))
                     .top(px(17.))
-                    .text_center()
+                    .flex()
+                    .justify_center()
                     .text_size(px(12.))
                     .text_color(self.muted())
-                    .truncate()
-                    .child(if unopened { String::new() } else { title })
+                    // Only the words are the control, as in a macOS title bar: the band
+                    // either side of them stays part of the window.
+                    .child(
+                        div()
+                            .id("note-title")
+                            .role(Role::Button)
+                            .aria_label("Rename")
+                            .min_w_0()
+                            .truncate()
+                            .when(!unopened, |s| {
+                                s.cursor_pointer()
+                                    .hover(|s| s.text_color(self.control_text()))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        if this.rename.is_some() {
+                                            this.close_rename(window, cx);
+                                        } else {
+                                            this.intent(Intent::Rename, window, cx);
+                                        }
+                                    }))
+                            })
+                            .child(if unopened { String::new() } else { title }),
+                    )
                     .with_spring("title-fade", chrome.clone(), |s, phase| {
                         s.opacity(phase.interpolate_clamped(0.6, 1.))
                     }),
@@ -2665,6 +2704,7 @@ impl Render for NotesApp {
                     ))
                 },
             )
+            .when_some(self.rename_card(window, cx), |s, card| s.child(card))
             .when_some(self.link_pill(window, cx), |s, pill| {
                 s.child(popover_enter("link-enter", pill, true, reduce_motion))
             })

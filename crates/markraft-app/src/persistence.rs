@@ -37,6 +37,7 @@ enum Request {
     Review(Note, Sender<Result<Option<String>, String>>),
     Resolve(Note, Sender<Result<Option<Note>, String>>),
     OpenFile(std::path::PathBuf, Sender<Result<Note, String>>),
+    Rename(String, String, Sender<Result<std::path::PathBuf, String>>),
     Paths(Sender<Vec<(String, std::path::PathBuf)>>),
     Conflicts(Sender<Vec<String>>),
     Flush(Library, Sender<Result<(), String>>),
@@ -89,6 +90,9 @@ impl Persistence {
                     }
                     Request::OpenFile(path, response) => {
                         let _ = response.send(store.add_file(path));
+                    }
+                    Request::Rename(id, name, response) => {
+                        let _ = response.send(store.rename(&id, &name));
                     }
                     Request::Paths(response) => {
                         let _ = response.send(store.paths());
@@ -186,6 +190,14 @@ impl Persistence {
         let (tx, rx) = mpsc::channel();
         self.requests
             .send(Request::OpenFile(path, tx))
+            .map_err(|_| "The save worker stopped")?;
+        rx.recv().map_err(|_| "The save worker stopped")?
+    }
+    /// Rename a note's file where it is, answering with the path it has now.
+    pub fn rename(&self, id: String, name: String) -> Result<std::path::PathBuf, String> {
+        let (tx, rx) = mpsc::channel();
+        self.requests
+            .send(Request::Rename(id, name, tx))
             .map_err(|_| "The save worker stopped")?;
         rx.recv().map_err(|_| "The save worker stopped")?
     }

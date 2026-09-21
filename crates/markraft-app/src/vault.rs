@@ -390,6 +390,63 @@ impl Store {
             )),
         }
     }
+    /// Give a note's file another name, in the folder it is already in.
+    ///
+    /// The file is moved rather than rewritten, so it keeps its bytes, permissions and
+    /// extended attributes, and the note keeps its identity: the manifest follows the
+    /// file to its new path, which is what stops the watcher from reading the move as
+    /// one note leaving and a stranger arriving.
+    pub fn rename(&mut self, id: &str, name: &str) -> Result<PathBuf, String> {
+        let saved = self
+            .files
+            .get(id)
+            .ok_or("Save this note to a file before renaming it.")?
+            .clone();
+        if self.pending.contains(id) || self.reviewed.contains_key(id) {
+            return Err("Resolve the conflict before renaming this note.".into());
+        }
+        if let Some(reason) = unsafe_file(&saved.path)? {
+            return Err(reason);
+        }
+        let extension = saved
+            .path
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "md".into());
+        let stem = typed_stem(name, &extension)?;
+        let target = saved.path.with_file_name(format!("{stem}.{extension}"));
+        if target == saved.path {
+            return Ok(target);
+        }
+        let disk = read_optional(&saved.path).map_err(|e| describe(&saved.path, &e))?;
+        if disk.as_ref() != Some(&saved.bytes) {
+            return Err(format!(
+                "“{}” changed on disk. Resolve the conflict before renaming it.",
+                saved.note.title()
+            ));
+        }
+        move_without_replacing(&saved.path, &target)?;
+        let parent = target.parent().ok_or("The file has no parent")?;
+        File::open(parent)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| describe(parent, &e))?;
+        self.manifest.paths.remove(&saved.path);
+        if self.loose.remove(&saved.path) {
+            self.loose.insert(target.clone());
+            self.settings.open_files = self.loose.iter().cloned().collect();
+            self.settings.open_files.sort();
+            self.settings.write(&self.settings_path)?;
+        }
+        if let Some(current) = self.files.get_mut(id) {
+            current.path.clone_from(&target);
+            current.note.path = Some(target.clone());
+            self.manifest
+                .paths
+                .insert(target.clone(), identity(&current.note));
+        }
+        self.persist_manifest()?;
+        Ok(target)
+    }
     pub fn add_file(&mut self, path: PathBuf) -> Result<Note, String> {
         let path = absolute_file(&path)?;
         if let Some(saved) = self
@@ -1266,6 +1323,69 @@ fn write_document(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> Result<
         .map_err(|e| describe(parent, &e))?;
     Ok(())
 }
+/// The stem a user typed for a file, or why it cannot be one. A generated name is
+/// quietly made safe; a typed one is refused instead, because silently filing the note
+/// under something other than what was typed is its own surprise. The file's own
+/// extension may be typed along with the name and is not part of it.
+pub(crate) fn typed_stem(name: &str, extension: &str) -> Result<String, String> {
+    let name = name.trim();
+    let suffix = format!(".{extension}");
+    let cut = name.len().saturating_sub(suffix.len());
+    let stem = if cut > 0 && name.is_char_boundary(cut) && name[cut..].eq_ignore_ascii_case(&suffix)
+    {
+        name[..cut].trim_end()
+    } else {
+        name
+    };
+    if stem.is_empty() {
+        return Err("Enter a name.".into());
+    }
+    if safe_stem(stem) != stem {
+        return Err("A name cannot contain / : \\ [ ] # ^ | or begin or end with a period.".into());
+    }
+    // The limit is the file system's, counted in bytes with the extension on.
+    if stem.len() + suffix.len() > 255 {
+        return Err("That name is too long.".into());
+    }
+    Ok(stem.to_owned())
+}
+/// Rename `from` to `to` without ever replacing a file already there. Checking first
+/// and renaming after would leave a moment for another program to put a file at `to`,
+/// and that file would be lost, so the refusal is the file system's own.
+fn move_without_replacing(from: &Path, to: &Path) -> Result<(), String> {
+    let occupied = || {
+        format!(
+            "“{}” already exists. Choose another name.",
+            to.file_name().unwrap_or_default().to_string_lossy()
+        )
+    };
+    // A name that differs only in case is the same file on a file system that does
+    // not keep case, and renaming a file over itself replaces nothing.
+    if same_regular_file(from, to) {
+        return fs::rename(from, to).map_err(|e| describe(from, &e));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let path = |p: &Path| CString::new(p.as_os_str().as_bytes()).map_err(|e| e.to_string());
+        let (source, target) = (path(from)?, path(to)?);
+        // SAFETY: both arguments are NUL-terminated strings that outlive the call.
+        if unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EEXIST) => return Err(occupied()),
+            // A volume that cannot promise exclusivity falls through to the check below.
+            Some(libc::ENOTSUP) => {}
+            _ => return Err(describe(from, &error)),
+        }
+    }
+    if fs::symlink_metadata(to).is_ok() {
+        return Err(occupied());
+    }
+    fs::rename(from, to).map_err(|e| describe(from, &e))
+}
 /// Moves a trashed file back to the place it was deleted from, which the caller has
 /// already found unoccupied. macOS trashes to the file's own volume, so a rename is
 /// normally enough; a Trash that turns out to be elsewhere is copied across instead.
@@ -1700,6 +1820,108 @@ mod tests {
         fixture(root.path(), "other.md", b"Other");
         let (_, library) = Store::open_file(path, root.path().join("settings.json")).unwrap();
         assert_eq!(library.notes.len(), 1);
+    }
+    #[test]
+    fn a_renamed_file_is_the_same_note_under_another_name() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(
+            root.path(),
+            "inbox/Meet.md",
+            b"---\nid: x\n---\n\nMeeting notes\n",
+        );
+        let bytes = fs::read(&path).unwrap();
+        let path = fs::canonicalize(&path).unwrap();
+        let (mut store, mut library) = open(root.path());
+        let id = library.active_id.clone();
+        library.notes[0].pinned = true;
+        store.save(&library, &[]).unwrap();
+        let renamed = store.rename(&id, "Meeting notes").unwrap();
+        assert_eq!(renamed, path.with_file_name("Meeting notes.md"));
+        assert!(!path.exists());
+        assert_eq!(fs::read(&renamed).unwrap(), bytes);
+        assert_eq!(store.paths(), [(id.clone(), renamed.clone())]);
+        // The watcher sees the move too, and has nothing to report about it.
+        assert!(store.refresh().unwrap().is_empty());
+        assert!(
+            store
+                .refresh_paths(&[path, renamed.clone()])
+                .unwrap()
+                .is_empty()
+        );
+        // An edit afterwards lands in the renamed file rather than making a new one.
+        library.notes[0].path = Some(renamed.clone());
+        library.set_document(&id, doc::from_markdown("Meeting notes, revised"));
+        store.save(&library, &[]).unwrap();
+        let files: Vec<_> = markdown_files(root.path())
+            .iter()
+            .map(|file| fs::canonicalize(file).unwrap())
+            .collect();
+        assert_eq!(files, [renamed]);
+        drop(store);
+        let (_, library) = open(root.path());
+        assert_eq!(library.active_id, id);
+        assert!(library.active_note().pinned);
+    }
+    #[test]
+    fn a_rename_never_replaces_a_file_or_takes_a_name_no_link_can_reach() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "One.md", b"one\n");
+        let other = fixture(root.path(), "Two.md", b"two\n");
+        let (mut store, library) = open(root.path());
+        let id = library
+            .notes
+            .iter()
+            .find(|note| note.path.as_deref() == Some(fs::canonicalize(&path).unwrap().as_path()))
+            .unwrap()
+            .id
+            .clone();
+        assert!(
+            store
+                .rename(&id, "Two")
+                .unwrap_err()
+                .contains("already exists")
+        );
+        assert!(
+            store
+                .rename(&id, "Two.md")
+                .unwrap_err()
+                .contains("already exists")
+        );
+        for name in [
+            "", "  ", ".md", "a/b", "a:b", "Q3 #plan", "[x]", "a|b", ".hidden", "v1.",
+        ] {
+            assert!(store.rename(&id, name).is_err(), "{name:?}");
+        }
+        assert_eq!(fs::read(&path).unwrap(), b"one\n");
+        assert_eq!(fs::read(&other).unwrap(), b"two\n");
+        // The same name is no rename at all, and a dot inside one is only a dot.
+        assert_eq!(
+            store.rename(&id, "One").unwrap(),
+            fs::canonicalize(&path).unwrap()
+        );
+        let dotted = store.rename(&id, "One v1.2").unwrap();
+        assert_eq!(dotted.file_name().unwrap(), "One v1.2.md");
+        // Only the letters' case changes: on a file system that does not keep case
+        // the target is the file itself, which is not a file in the way.
+        let cased = store.rename(&id, "one V1.2").unwrap();
+        assert_eq!(cased.file_name().unwrap(), "one V1.2.md");
+        assert_eq!(fs::read(&cased).unwrap(), b"one\n");
+    }
+    #[test]
+    fn a_file_another_app_changed_is_not_renamed_under_it() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "One.md", b"one\n");
+        let (mut store, library) = open(root.path());
+        let id = library.active_id.clone();
+        fs::write(&path, b"changed elsewhere\n").unwrap();
+        assert!(
+            store
+                .rename(&id, "Uno")
+                .unwrap_err()
+                .contains("changed on disk")
+        );
+        assert!(path.exists());
+        assert!(store.rename("no-such-note", "Uno").is_err());
     }
     #[test]
     fn undo_after_save_restores_original_source() {

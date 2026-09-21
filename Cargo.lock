@@ -3841,6 +3841,7 @@ dependencies = [
  "global-hotkey",
  "gpui-pre",
  "gpui-pre-platform",
+ "libc",
  "markraft-commonmark",
  "markraft-core",
  "markraft-gpui",

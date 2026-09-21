@@ -854,6 +854,13 @@ impl EditorView {
         }
     }
 
+    /// Select everything, as ⌘A does. A host that fills a field with a value meant to
+    /// be typed over calls this, so the first keystroke replaces it.
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        let command = commands::select_all(&self.types);
+        self.run_command(&command, cx);
+    }
+
     pub fn toggle_mark(&mut self, ty: MarkTypeId, attrs: Attrs, cx: &mut Context<Self>) {
         let command = markraft_core::commands::toggle_mark(ty, attrs);
         self.run_command(&command, cx);

@@ -20,6 +20,8 @@ pub(super) enum Surface {
     CodeLanguage,
     LinkView,
     LinkEdit,
+    /// The card under the title that renames the note's file.
+    Rename,
     /// The card over the lower-left file status indicator.
     FileStatus,
     /// The pill over the table the caret is in. Unlike the others it is not modal: the
@@ -95,6 +97,9 @@ impl NotesApp {
             Some(LinkPopover::Edit) => return Surface::LinkEdit,
             Some(LinkPopover::View) => return Surface::LinkView,
             None => {}
+        }
+        if self.rename.is_some() {
+            return Surface::Rename;
         }
         if self.file_status_popover {
             return Surface::FileStatus;
@@ -172,6 +177,13 @@ impl NotesApp {
                 stops.push(Stop::query());
                 stops.push(Stop::run("link-apply", Intent::ApplyLink));
                 stops.push(Stop::run("link-remove", Intent::Unlink));
+            }
+            Surface::Rename => {
+                stops.push(Stop::query());
+                if self.rename.as_ref().is_some_and(|rename| rename.links > 0) {
+                    stops.push(Stop::run("rename-links", Intent::RenameLinks));
+                }
+                stops.push(Stop::run("rename-apply", Intent::ApplyRename));
             }
             Surface::FileStatus => {
                 if self.library.active_note().path.is_some() {
