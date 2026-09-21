@@ -139,6 +139,9 @@ pub struct NotesApp {
     /// again, so a caret wandering back into the first line — or a filing that failed
     /// and must be reported — cannot put one back into recovery.
     released_drafts: HashSet<String>,
+    /// When the held draft's name stops being worked on. Typing pushes it back; the
+    /// poll files the note once it passes.
+    name_at: Option<Instant>,
     error: Option<String>,
     platform_error: Option<String>,
     notice: Option<Notice>,
@@ -351,6 +354,7 @@ impl NotesApp {
             save_at: None,
             held_draft: None,
             released_drafts: HashSet::new(),
+            name_at: None,
             error,
             platform_error,
             notice: None,
@@ -731,6 +735,11 @@ impl NotesApp {
         self.revision += 1;
         self.dirty = true;
         self.save_at = Some(Instant::now() + Duration::from_millis(350));
+        // A held draft is waiting for its first line to stop changing, so every edit
+        // puts that moment off again.
+        if self.held_draft.is_some() {
+            self.name_at = Some(Instant::now() + NAME_SETTLES);
+        }
         cx.notify();
     }
     /// Keep autosave from naming a new note's file after a half-typed first line.
@@ -738,8 +747,9 @@ impl NotesApp {
     /// A note is filed 350ms after the first keystroke and never renamed, so a note
     /// whose first line will read "Meeting notes for Q3" would be called `M.md` for
     /// good. While the caret is still in the line the name would come from, the store
-    /// holds the note in recovery instead; the moment the caret leaves it the name has
-    /// settled, and the next save files the note under what the line says then.
+    /// holds the note in recovery instead. The name has settled once the caret leaves
+    /// that line or the typing stops, and the next save files the note under what the
+    /// line says then — a note that is only a first line is filed like any other.
     ///
     /// Called wherever the editor's state moved, a selection with no edit included.
     fn follow_title(&mut self, cx: &mut Context<Self>) {
@@ -754,6 +764,7 @@ impl NotesApp {
         }
         if naming && self.held_draft.is_none() {
             self.held_draft = Some(id);
+            self.name_at = Some(Instant::now() + NAME_SETTLES);
         }
     }
     /// Whether the active note is one the store would file under its first line, with
@@ -785,6 +796,7 @@ impl NotesApp {
     /// never held again. A caret leaving the first line and a window losing focus are
     /// not edits, so the save this needs is scheduled here.
     fn release_title(&mut self, cx: &mut Context<Self>) {
+        self.name_at = None;
         if let Some(id) = self.held_draft.take() {
             self.released_drafts.insert(id);
             self.changed(cx);
@@ -1065,6 +1077,11 @@ impl NotesApp {
                 self.show(window, cx);
                 self.inform("Update paused. Resolve the save error, then choose Check for Updates to retry.", cx);
             }
+        }
+        // Nobody has touched the name for a while, so it is as settled as it is going
+        // to get; the note is filed rather than left waiting for the caret to move.
+        if self.name_at.is_some_and(|at| Instant::now() >= at) {
+            self.release_title(cx);
         }
         if self.save_at.is_some_and(|at| Instant::now() >= at) {
             self.save_at = None;
@@ -2580,6 +2597,10 @@ fn conflict_subject(note: &crate::storage::Note) -> String {
 const TOOLBAR_HEIGHT: Pixels = px(52.);
 const FOOTER_HEIGHT: Pixels = px(48.);
 /// How long a keystroke counts as someone being at the window.
+/// How long a new note's first line has to stand still before it names the file. Long
+/// enough that a pause for thought mid-title does not name the file after half of it,
+/// and short enough that a note which is only that line still reaches the folder.
+const NAME_SETTLES: Duration = Duration::from_millis(2000);
 const KEY_PRESENCE: Duration = Duration::from_millis(2500);
 /// A queued notice is a sentence, not an acknowledgment, so it is given time to read.
 const READING_NOTICE: Duration = Duration::from_secs(8);
