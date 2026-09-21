@@ -150,6 +150,9 @@ pub struct NotesApp {
     pending_notices: VecDeque<String>,
     conflict_prompted: HashSet<String>,
     conflict_dialog: bool,
+    /// Whether the quit question is already on screen, so a second ⌘Q cannot stack
+    /// another one behind it.
+    quit_dialog: bool,
     /// The card over the lower-left indicator: why this file cannot be written, and
     /// the ways out of that. Only a read-only note has one; a conflict opens its
     /// dialog instead of a card.
@@ -361,6 +364,7 @@ impl NotesApp {
             pending_notices: VecDeque::new(),
             conflict_prompted: HashSet::new(),
             conflict_dialog: false,
+            quit_dialog: false,
             file_status_popover: false,
             file_status_flash: None,
             folder_was_created,
@@ -1046,7 +1050,7 @@ impl NotesApp {
                     self.open_panel(Panel::Settings, window, cx);
                 }
                 PlatformEvent::CheckForUpdates => self.check_for_updates(window, cx),
-                PlatformEvent::Quit => self.quit(cx),
+                PlatformEvent::Quit => self.quit(window, cx),
             }
         }
         for notice in self
@@ -1244,7 +1248,44 @@ impl NotesApp {
             .update(cx, |editor, cx| editor.cancel_composition(cx));
         self.flush(cx)
     }
-    fn quit(&mut self, cx: &mut Context<Self>) {
+    /// ⌘Q. A note with no file of its own is never written to one by autosave, so
+    /// this is the last moment to offer it a file. Hiding the window asks nothing:
+    /// the note is still open behind it, and that happens many times an hour.
+    fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.quit_dialog && self.unfiled_draft() && is_draft(self.library.active_note()) {
+            self.quit_dialog = true;
+            let answer = window.prompt(
+                PromptLevel::Warning,
+                "This note has not been saved to a file",
+                // The words are not at stake — recovery has them and the next launch
+                // opens them again — so the question is only about the file.
+                Some("It is kept inside Markraft and will be here when you come back."),
+                &["Save As…", "Cancel", "Quit"],
+                cx,
+            );
+            cx.spawn_in(window, async move |this, cx| {
+                let choice = answer.await;
+                let _ = cx.update(|window, cx| {
+                    this.update(cx, |this, cx| {
+                        this.quit_dialog = false;
+                        match choice {
+                            // Giving it a file is what the question was about, so
+                            // leaving is what follows once it has one.
+                            Ok(0) => this
+                                .prompt_for_note_path(window, cx, |this, _, cx| this.quit_now(cx)),
+                            Ok(2) => this.quit_now(cx),
+                            _ => cx.notify(),
+                        }
+                    })
+                });
+            })
+            .detach();
+            return;
+        }
+        self.quit_now(cx);
+    }
+    /// Write everything that has a file and go; stay and say why if that fails.
+    fn quit_now(&mut self, cx: &mut Context<Self>) {
         if self.prepare_to_quit(cx) {
             cx.quit();
             return;

@@ -599,8 +599,13 @@ impl NotesApp {
             states.push(FileState {
                 id: "state-unfiled",
                 icon: Icon::Drafts,
-                label: "No file".into(),
-                detail: "This note is kept inside Markraft until you give it a file.".into(),
+                // Not urgent: nothing is being lost while it holds. The note comes
+                // back from recovery on the next launch, so this is about the file
+                // the writer may be expecting to find, not about the words.
+                label: "Unsaved".into(),
+                detail: "This note has never been saved to a file. It is kept inside \
+                         Markraft until you choose where it goes."
+                    .into(),
                 urgent: false,
                 actions: vec![("Save As…", Intent::Save)],
             });

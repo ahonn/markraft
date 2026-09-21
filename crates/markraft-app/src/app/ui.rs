@@ -2392,7 +2392,7 @@ impl Render for NotesApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &CopyMarkdown, _, cx| this.copy_markdown(cx)))
-            .on_action(cx.listener(|this, _: &Quit, _, cx| this.quit(cx)))
+            .on_action(cx.listener(|this, _: &Quit, window, cx| this.quit(window, cx)))
             .on_action(cx.listener(|this, _: &Hide, w, cx| this.dismiss(w, cx)))
             .on_action(cx.listener(|this, _: &NewNote, w, cx| this.intent(Intent::New, w, cx)))
             .on_action(cx.listener(|this, _: &Browse, w, cx| this.intent(Intent::Browse, w, cx)))
