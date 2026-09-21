@@ -591,8 +591,12 @@ impl NotesApp {
                 },
             });
         }
+        // The capsule is a pointer to work that is not on screen. When the only note
+        // that is not in a file is the one being written, it points at itself, and the
+        // note already says what it is.
         let drafts = self.draft_count();
-        if drafts > 0 {
+        let elsewhere = drafts - usize::from(crate::app::is_draft(note));
+        if elsewhere > 0 {
             states.push(FileState {
                 id: "state-drafts",
                 icon: Icon::Drafts,
