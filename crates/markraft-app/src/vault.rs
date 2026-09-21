@@ -1176,20 +1176,7 @@ fn unsafe_file(path: &Path) -> Result<Option<String>, String> {
     })
 }
 fn file_name(note: &Note) -> String {
-    let title: String = note
-        .title()
-        .chars()
-        .map(|c| {
-            if c.is_control() || matches!(c, '/' | ':' | '\\') {
-                '-'
-            } else {
-                c
-            }
-        })
-        .collect();
-    let mut name = title
-        .trim_matches(|c: char| c == '.' || c.is_whitespace())
-        .to_owned();
+    let mut name = safe_stem(&note.title());
     while name.len() > 180 {
         name.pop();
     }
@@ -1198,6 +1185,46 @@ fn file_name(note: &Note) -> String {
     } else {
         name
     }
+}
+/// What a file may be called, with everything a name cannot carry taken out of it.
+/// The rule lives here rather than in the one caller so that a name the user types
+/// can be held to the same one.
+///
+/// A separator — `/`, `:`, `\` — and anything a control character interrupted become
+/// `-`, which keeps `2026/09/21` readable as a date. Wiki-link syntax is dropped
+/// instead: links resolve by file stem, and a stem holding `[`, `]`, `#`, `^` or `|`
+/// is one no `[[link]]` can reach, because a target is cut at `#` and `^`, `|` begins
+/// the alias, and the brackets end the link. Dropping a character closes the gap it
+/// leaves, so `a | b` is not filed as `a  b`.
+pub(crate) fn safe_stem(title: &str) -> String {
+    let mut name = String::with_capacity(title.len());
+    let mut dropped = false;
+    for character in title.chars() {
+        match character {
+            '[' | ']' | '#' | '^' | '|' => dropped = true,
+            '/' | ':' | '\\' => {
+                name.push('-');
+                dropped = false;
+            }
+            _ if character.is_control() => {
+                name.push('-');
+                dropped = false;
+            }
+            // Only the run a dropped character sat in closes up; spacing the user
+            // wrote elsewhere in the title is theirs.
+            _ if character.is_whitespace() => {
+                if !dropped || !name.ends_with(char::is_whitespace) {
+                    name.push(character);
+                }
+            }
+            _ => {
+                name.push(character);
+                dropped = false;
+            }
+        }
+    }
+    name.trim_matches(|c: char| c == '.' || c.is_whitespace())
+        .to_owned()
 }
 fn write_document(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> Result<(), String> {
     if expected.is_some()
@@ -2026,6 +2053,45 @@ mod tests {
                 .join("recovery")
                 .join(format!("{id}.json"))
                 .exists()
+        );
+    }
+    #[test]
+    fn a_generated_name_keeps_nothing_a_wiki_link_cannot_reach() {
+        let name = |source: &str| {
+            let mut library = Library::default();
+            let id = library.new_note(doc::from_markdown(source));
+            file_name(library.note(&id).unwrap())
+        };
+        for (source, expected) in [
+            // A wiki link is an atom, and the title reads nothing at all in it, so the
+            // rest of the line is what the file is named after.
+            ("[[Link]] notes", "notes"),
+            // Brackets the source only spells out do reach the title, and a stem
+            // holding them is one no `[[link]]` can name.
+            ("[TODO] Fix the bug", "TODO Fix the bug"),
+            ("Q3 #planning", "Q3 planning"),
+            ("a | b", "a b"),
+            ("note^2 squared", "note2 squared"),
+            // Spacing the title carries elsewhere is the user's own.
+            ("a    b", "a    b"),
+            // A separator is not dropped but replaced, so a date still reads as one.
+            ("2026/09/21 log", "2026-09-21 log"),
+            // Nothing readable is left of a line that was all syntax.
+            ("[#^|]", "Untitled"),
+        ] {
+            assert_eq!(name(source), expected, "{source}");
+        }
+    }
+    #[test]
+    fn a_new_note_is_filed_under_a_name_a_link_can_reach() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut store, mut library) = open(root.path());
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown("Q3 #planning\n\nbody"));
+        store.save(&library, &[]).unwrap();
+        assert_eq!(
+            markdown_files(root.path()),
+            [root.path().join("notes/Q3 planning.md")]
         );
     }
     #[test]
