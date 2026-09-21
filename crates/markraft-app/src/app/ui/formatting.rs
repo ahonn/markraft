@@ -97,29 +97,28 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.code_language_block = None;
-        self.link_popover = None;
-        self.chrome_focus = None;
-        self.query
-            .update(cx, |editor, cx| editor.cancel_composition(cx));
+        if self.interaction.html().is_some() {
+            return;
+        }
+        let closing = self.interaction.format_menu() == Some(menu);
         self.editor()
             .update(cx, |editor, cx| editor.cancel_composition(cx));
-        self.format_menu = if self.format_menu == Some(menu) {
-            None
+        if closing {
+            self.close_popover(cx);
         } else {
-            Some(menu)
-        };
+            self.show_popover(Popover::Format(menu), cx);
+        }
         self.format_selected = self
             .format_items(cx)
             .iter()
             .position(|item| item.3)
             .unwrap_or(0);
-        if self.format_menu.is_some() {
+        if self.interaction.format_menu().is_some() {
             window.focus(&self.panel_focus, cx);
             let weak = cx.entity().downgrade();
             window.on_next_frame(move |_, cx| {
                 let _ = weak.update(cx, |this, cx| {
-                    if this.format_menu == Some(menu) {
+                    if this.interaction.format_menu() == Some(menu) {
                         this.format_scroll.scroll_to_item(this.format_selected);
                         cx.notify();
                     }
@@ -135,7 +134,7 @@ impl NotesApp {
         let editor = self.editor().read(cx);
         let marks = editor.active_marks();
         let kind = doc::Block::active(editor.state(), &editor.projection());
-        match self.format_menu {
+        match self.interaction.format_menu() {
             Some(FormatMenu::Block) => {
                 let mut items = vec![(
                     "Paragraph",
@@ -271,7 +270,7 @@ impl NotesApp {
             Intent::FormatMenu(menu) => Some(menu),
             _ => None,
         };
-        let expanded = menu.is_some() && self.format_menu == menu;
+        let expanded = menu.is_some() && self.interaction.format_menu() == menu;
         let active = toggled == Some(true);
         // A control that takes the whole table away is written in the destructive ink,
         // as its ⌘K row is.
@@ -338,7 +337,7 @@ impl NotesApp {
             Intent::FormatMenu(menu) => Some(menu),
             _ => None,
         };
-        let expanded = menu.is_some() && self.format_menu == menu;
+        let expanded = menu.is_some() && self.interaction.format_menu() == menu;
         let selected = toggled == Some(true) && menu.is_none();
         self.format_button_base(id, label, kind, intent, toggled, cx)
             .h(px(24.))
@@ -542,6 +541,10 @@ impl NotesApp {
     /// A save failure comes first because it is the only one losing work for as long
     /// as it holds; a conflict next, because autosave is stopped until it is settled.
     /// The rest are true but not urgent.
+    pub(in crate::app) fn has_file_status(&self) -> bool {
+        !self.file_states().is_empty()
+    }
+
     pub(super) fn file_states(&self) -> Vec<FileState> {
         let mut states = Vec::new();
         if self.persistence.is_none() {
@@ -711,10 +714,10 @@ impl NotesApp {
             .id(state.id)
             .role(Role::Button)
             .aria_label(state.announced())
-            .aria_expanded(self.file_status_popover)
+            .aria_expanded(self.interaction.file_status())
             // The card opens right beside it, so a tooltip would be drawn over the
             // card's own words.
-            .when(!self.file_status_popover, |s| {
+            .when(!self.interaction.file_status(), |s| {
                 s.tooltip(self.hint("Click for what to do about it"))
             })
             .flex_shrink_0()
@@ -756,16 +759,12 @@ impl NotesApp {
     /// kind of thing, they stack, and a person dealing with a conflict wants to know
     /// the save also failed.
     pub(super) fn file_status_card(
-        &mut self,
+        &self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
         let states = self.file_states();
-        // Nothing left to disclose closes the card where it stands.
-        if self.panel != Panel::Editor || states.is_empty() {
-            self.file_status_popover = false;
-        }
-        if !self.file_status_popover {
+        if !self.interaction.file_status() || states.is_empty() {
             return None;
         }
         let width = px(300.).min(window.bounds().size.width - px(16.));
@@ -798,7 +797,7 @@ impl NotesApp {
                 .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     // The capsules close the card themselves; preserve their click.
                     if event.position.y < window.bounds().size.height - FOOTER_HEIGHT {
-                        this.file_status_popover = false;
+                        this.close_popover(cx);
                         this.focus_editor(window, cx);
                         cx.notify();
                         cx.stop_propagation();
@@ -861,7 +860,7 @@ impl NotesApp {
         let width = px(216.);
         let viewport = window.bounds().size.width;
         let toolbar_left = (viewport - TOOLBAR_CAPSULE) / 2.;
-        let left = match self.format_menu {
+        let left = match self.interaction.format_menu() {
             Some(FormatMenu::Inline) => toolbar_left + px(42.),
             Some(FormatMenu::List) => toolbar_left + TOOLBAR_CAPSULE - width,
             _ => toolbar_left,
@@ -948,7 +947,7 @@ impl NotesApp {
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 // Footer controls switch or close menus themselves; preserve their click.
                 if event.position.y < window.bounds().size.height - FOOTER_HEIGHT {
-                    this.format_menu = None;
+                    this.close_popover(cx);
                     this.focus_editor(window, cx);
                     cx.notify();
                     cx.stop_propagation();

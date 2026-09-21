@@ -4,8 +4,8 @@
 
 use super::*;
 
-/// The stop id of the shared query editor. It is the same wherever the field appears,
-/// because only one surface borrows it at a time.
+/// The stop id of the current surface's input editor. Each surface owns a fresh
+/// input session, while keyboard navigation keeps the same logical stop.
 pub(super) const QUERY: &str = "query-field";
 
 /// The surface Tab walks. At most one is open, and the order mirrors the precedence
@@ -87,27 +87,30 @@ impl NotesApp {
         if self.persistence.is_none() {
             return Surface::Chooser;
         }
-        if self.format_menu.is_some() && self.panel == Panel::Editor {
+        if self.interaction.format_menu().is_some() && self.interaction.panel() == Panel::Editor {
             return Surface::Format;
         }
-        if self.code_language_block.is_some() {
+        if self.interaction.code_language().is_some() {
             return Surface::CodeLanguage;
         }
-        match self.link_popover {
+        match self.interaction.link() {
             Some(LinkPopover::Edit) => return Surface::LinkEdit,
             Some(LinkPopover::View) => return Surface::LinkView,
             None => {}
         }
-        if self.rename.is_some() {
+        if self.interaction.rename().is_some() {
             return Surface::Rename;
         }
-        if self.file_status_popover {
+        if self.interaction.file_status() {
             return Surface::FileStatus;
         }
-        if self.table.is_some() {
+        if self.interaction.panel() == Panel::Editor
+            && self.interaction.html().is_none()
+            && self.table.is_some()
+        {
             return Surface::Table;
         }
-        match self.panel {
+        match self.interaction.panel() {
             Panel::Editor => Surface::Editor,
             Panel::Browse | Panel::Drafts | Panel::Trash => Surface::Picker,
             Panel::Actions => Surface::Actions,
@@ -180,7 +183,11 @@ impl NotesApp {
             }
             Surface::Rename => {
                 stops.push(Stop::query());
-                if self.rename.as_ref().is_some_and(|rename| rename.links > 0) {
+                if self
+                    .interaction
+                    .rename()
+                    .is_some_and(|rename| rename.links > 0)
+                {
                     stops.push(Stop::run("rename-links", Intent::RenameLinks));
                 }
                 stops.push(Stop::run("rename-apply", Intent::ApplyRename));
@@ -200,12 +207,12 @@ impl NotesApp {
                 }
             }
             Surface::Picker => {
-                let deleted = self.panel == Panel::Trash;
+                let deleted = self.interaction.panel() == Panel::Trash;
                 stops.push(Stop::query());
                 if deleted {
                     stops.push(Stop::run("trash-back", Intent::Browse));
                 }
-                let query = self.query.read(cx).text().to_owned();
+                let query = self.query().read(cx).text().to_owned();
                 for (index, note) in self
                     .matching_notes(query.trim(), self.scope())
                     .iter()
@@ -313,9 +320,7 @@ impl NotesApp {
             Some(id) => stops.iter().position(|stop| &stop.id == id),
             // A caret in the query field is already standing on that stop.
             None => self
-                .query
-                .focus_handle(cx)
-                .is_focused(window)
+                .query_focused(window, cx)
                 .then(|| stops.iter().position(Stop::is_query))
                 .flatten(),
         };
@@ -336,7 +341,7 @@ impl NotesApp {
         }
         self.chrome_focus = Some(id);
         if query {
-            window.focus(&self.query.focus_handle(cx), cx);
+            window.focus(&self.query().focus_handle(cx), cx);
         } else {
             window.focus(&self.panel_focus, cx);
         }

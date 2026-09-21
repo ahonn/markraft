@@ -1,11 +1,18 @@
 mod assets;
+mod interaction;
+mod sessions;
+use sessions::Sessions;
+mod workspace;
+
+use interaction::{InputSession, Interaction, Popover};
+use workspace::{DraftNaming, QuitState, SaveCompletion, SaveState};
 mod rename;
 mod ui;
 
 use crate::doc;
 use crate::{
     instance::Instance,
-    persistence::{Event, Persistence},
+    persistence::{Event, Persistence, Saved},
     platform::{Platform, PlatformEvent},
     storage::Library,
     updater::Updater,
@@ -18,7 +25,7 @@ use markraft_gpui::{
     TableInfo,
 };
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashSet, VecDeque},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -43,7 +50,7 @@ actions!(
 );
 
 /// Which of the library's notes a panel lists.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Scope {
     Notes,
     /// Work that is not in a file the way it was left; see [`is_draft`].
@@ -51,7 +58,7 @@ pub(crate) enum Scope {
     Deleted,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Panel {
     Editor,
     Browse,
@@ -63,12 +70,12 @@ enum Panel {
     Settings,
 }
 /// The pill above a link: its actions, or the field that edits its address.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LinkPopover {
     View,
     Edit,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FormatMenu {
     Block,
     Inline,
@@ -83,20 +90,6 @@ struct Notice {
     /// The note an "Undo" button puts back; a plain notice carries none.
     undo: Option<String>,
 }
-struct Session {
-    editor: Entity<EditorView>,
-    _changes: Subscription,
-    /// Everything else the editor's state does, a selection that moved without an edit
-    /// included: the format toolbar reads it, and so does the line a new note's file
-    /// would be named after.
-    _state_changes: Subscription,
-    /// Unregisters the note's editor extensions when the session is evicted.
-    _extensions: [ExtensionHandle; 4],
-    /// Modal editing, while the preference is on. Dropping the handle turns it off.
-    vim: Option<ExtensionHandle>,
-    /// The mode this note's editor last reported.
-    vim_mode: markraft_vim::Mode,
-}
 pub struct NotesApp {
     library: Library,
     persistence: Option<Persistence>,
@@ -106,11 +99,9 @@ pub struct NotesApp {
     platform: Option<Platform>,
     updater: Updater,
     instance: Instance,
-    sessions: HashMap<String, Session>,
-    session_order: VecDeque<String>,
-    query: Entity<EditorView>,
-    _query_changes: Subscription,
-    panel: Panel,
+    sessions: Sessions,
+    interaction: Interaction,
+    input: Option<InputSession>,
     panel_focus: FocusHandle,
     /// The stop id of the chrome control Tab has moved to. `None` while the caret owns
     /// the keyboard and nothing wears the focus ring.
@@ -124,24 +115,10 @@ pub struct NotesApp {
     settings_scroll: ScrollHandle,
     format_scroll: ScrollHandle,
     code_language_scroll: ScrollHandle,
-    code_language_block: Option<usize>,
     code_language_focus_pending: bool,
     code_language_selected: usize,
-    html_editor: Option<ui::html::HtmlEditor>,
-    dirty: bool,
-    revision: u64,
-    save_at: Option<Instant>,
-    /// The never-filed note whose first line the caret is still in. Autosave holds it
-    /// in recovery rather than naming its file after half a title; see
-    /// [`NotesApp::follow_title`].
-    held_draft: Option<String>,
-    /// Drafts whose name has settled. They are filed by the next save and never held
-    /// again, so a caret wandering back into the first line — or a filing that failed
-    /// and must be reported — cannot put one back into recovery.
-    released_drafts: HashSet<String>,
-    /// When the held draft's name stops being worked on. Typing pushes it back; the
-    /// poll files the note once it passes.
-    name_at: Option<Instant>,
+    save: SaveState,
+    naming: DraftNaming,
     error: Option<String>,
     platform_error: Option<String>,
     notice: Option<Notice>,
@@ -152,20 +129,12 @@ pub struct NotesApp {
     conflict_dialog: bool,
     /// Whether the quit question is already on screen, so a second ⌘Q cannot stack
     /// another one behind it.
-    quit_dialog: bool,
-    /// The card over the lower-left indicator: why this file cannot be written, and
-    /// the ways out of that. Only a read-only note has one; a conflict opens its
-    /// dialog instead of a card.
-    file_status_popover: bool,
+    quitting: QuitState,
     /// Until when that indicator stays lit, after a keystroke the file refused. It
     /// is attention rather than a message, so it expires on its own.
     file_status_flash: Option<Instant>,
     show_words: bool,
     format_toolbar: bool,
-    format_menu: Option<FormatMenu>,
-    link_popover: Option<LinkPopover>,
-    /// The pill under the title that gives the note's file another name.
-    rename: Option<rename::Rename>,
     /// The table the toolbar was last drawn for. It is paint geometry, so it is only
     /// ever as fresh as the last frame, which is also the frame the keyboard walks.
     table: Option<TableInfo>,
@@ -186,9 +155,8 @@ pub struct NotesApp {
     /// Every spelling that reaches a note, for the editor's question about each wiki
     /// link it draws.
     link_index: ui::wiki::LinkIndex,
-    /// The revision the shared list was built from, so it is rebuilt when the library
-    /// moves on rather than on every tick.
-    link_targets_revision: Option<u64>,
+    /// Only note names, paths, membership and the active note invalidate link targets.
+    links_dirty: bool,
     /// When the keyboard was last used here. Someone typing is present even with the
     /// pointer parked outside the window, so the chrome stays up for a moment after.
     last_key_at: Option<Instant>,
@@ -221,26 +189,6 @@ impl NotesApp {
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         ));
-        let query = cx.new(|cx| {
-            EditorView::single_line(cx)
-                .with_style(query_style(dark))
-                .with_placeholder("Search notes…")
-                .with_aria_label("Search notes")
-        });
-        let query_changes = cx.subscribe(&query, |this, _, event: &EditorEvent, cx| {
-            if !matches!(event, EditorEvent::Changed { .. }) {
-                return;
-            }
-            this.selected = 0;
-            this.actions_scroll.scroll_to_item(0);
-            this.picker_scroll.scroll_to_item(0);
-            // Opening clears the search but preserves the current language selection.
-            if !this.code_language_focus_pending {
-                this.code_language_selected = 0;
-                this.code_language_scroll.scroll_to_item(0);
-            }
-            cx.notify();
-        });
         let mut platform_error = None;
         let platform = match platform {
             Ok(mut p) => {
@@ -279,7 +227,7 @@ impl NotesApp {
             ]);
             if this.library.preferences.window_bounds != next {
                 this.library.preferences.window_bounds = next;
-                this.changed(cx);
+                this.schedule_save(cx);
             }
         });
         let appearance = cx.observe_window_appearance(window, |this, window, cx| {
@@ -332,13 +280,9 @@ impl NotesApp {
             platform,
             updater: Updater::new(),
             instance,
-            sessions: HashMap::new(),
-            session_order: VecDeque::new(),
-            query,
-            _query_changes: query_changes,
-            panel: Panel::Editor,
-            link_popover: None,
-            rename: None,
+            sessions: Sessions::default(),
+            interaction: Interaction::default(),
+            input: None,
             table: None,
             panel_focus: cx.focus_handle(),
             selected: 0,
@@ -348,34 +292,26 @@ impl NotesApp {
             settings_scroll: ScrollHandle::new(),
             format_scroll: ScrollHandle::new(),
             code_language_scroll: ScrollHandle::new(),
-            code_language_block: None,
             code_language_focus_pending: false,
             code_language_selected: 0,
-            html_editor: None,
-            dirty: false,
-            revision: 0,
-            save_at: None,
-            held_draft: None,
-            released_drafts: HashSet::new(),
-            name_at: None,
+            save: SaveState::default(),
+            naming: DraftNaming::default(),
             error,
             platform_error,
             notice: None,
             pending_notices: VecDeque::new(),
             conflict_prompted: HashSet::new(),
             conflict_dialog: false,
-            quit_dialog: false,
-            file_status_popover: false,
+            quitting: QuitState::default(),
             file_status_flash: None,
             folder_was_created,
             close_button_shown: false,
             link_targets: Default::default(),
             link_index: Default::default(),
-            link_targets_revision: None,
+            links_dirty: true,
             chrome_focus: None,
             show_words: false,
             format_toolbar: false,
-            format_menu: None,
             format_selected: 0,
             format_snapshot: None,
             dark,
@@ -398,227 +334,11 @@ impl NotesApp {
             window.focus(&app.panel_focus, cx);
         }
         // Application preferences and drafts live outside the document folder.
-        app.changed(cx);
+        app.schedule_save(cx);
         if let Some(error) = app.updater.take_startup_error() {
             app.queue_notice(error);
         }
         app
-    }
-    fn editor(&self) -> Entity<EditorView> {
-        self.sessions[&self.library.active_id].editor.clone()
-    }
-    fn ensure_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.code_language_block = None;
-        // Nobody is typing a held draft's name any more once its editor is not the one
-        // in front: another note became active, or its session was evicted below.
-        if self
-            .held_draft
-            .as_ref()
-            .is_some_and(|held| held != &self.library.active_id)
-        {
-            self.release_title(cx);
-        }
-        let id = self.library.active_id.clone();
-        self.session_order.retain(|entry| entry != &id);
-        self.session_order.push_back(id.clone());
-        while self.session_order.len() > 8 {
-            if let Some(expired) = self.session_order.pop_front() {
-                self.sessions.remove(&expired);
-            }
-        }
-        if self.sessions.contains_key(&id) {
-            return;
-        }
-        let document = self.library.active_note().document.clone();
-        let note = self.library.active_note();
-        let image_base = note
-            .path
-            .as_ref()
-            .and_then(|path| path.parent().map(ToOwned::to_owned));
-        let protected = note.read_only.clone();
-        let source = note
-            .path
-            .as_ref()
-            .and(self.persistence.as_ref())
-            .map(|persistence| {
-                persistence.markdown(note.clone()).and_then(|text| {
-                    markraft_commonmark::SourceDocument::parse(doc::schema(), &text)
-                        .map_err(|error| error.to_string())
-                })
-            });
-        let image_root = source
-            .as_ref()
-            .and_then(|source| source.as_ref().ok())
-            .zip(note.path.as_ref())
-            .map(|(source, path)| assets::image_root(source.source(), path))
-            .unwrap_or(Ok(None));
-        let style = notes_style(self.dark);
-        let editor = cx.new(|cx| {
-            EditorView::new(
-                Setup::new(doc::schema().clone())
-                    .types(doc::types().clone())
-                    .codecs(doc::codecs())
-                    .extensions(doc::extensions())
-                    .doc(document),
-                cx,
-            )
-            .with_style(style)
-            .with_image_base(image_base)
-            .with_image_root(image_root)
-            .with_file_paste(true)
-            .with_document_guard(move |candidate| {
-                if let Some(reason) = &protected {
-                    return Err(EditRejection::ReadOnly(reason.clone()));
-                }
-                match &source {
-                    Some(Ok(source)) => source
-                        .render(doc::schema(), candidate)
-                        .map(|_| ())
-                        .map_err(|error| {
-                            let message = rejection_message(&error);
-                            // The editor shades a protected span, so the boundary the
-                            // keystroke landed in is already on screen; the other two
-                            // have nowhere else to appear.
-                            match error {
-                                markraft_commonmark::SourceError::ProtectedSpan => {
-                                    EditRejection::Marked(message)
-                                }
-                                _ => EditRejection::Protected(message),
-                            }
-                        }),
-                    // The file was read but its Markdown could not be lined up with
-                    // its source, so no keystroke could ever be written back.
-                    Some(Err(error)) => Err(EditRejection::Invalid(format!(
-                        "This file cannot be edited in Markraft: {error}"
-                    ))),
-                    None => Ok(()),
-                }
-            })
-            .with_placeholder("Start writing…")
-        });
-        // Only note editors get the menus; the host's query field gets no extension.
-        // The `/` menu is registered first: the three typeaheads derive from the same
-        // caret and their triggers are disjoint, so only one is ever open, but were they
-        // ever to overlap the first registered one would own the popup and the commands
-        // matter more than a link, and a link more than an emoji. Auto-replace goes last
-        // so that it sees the menu's view of a keystroke settled before it edits.
-        self.refresh_link_targets();
-        let menu = self.slash_menu();
-        let links = self.wiki_menu();
-        let resolver = self.wiki_resolver();
-        let extensions = editor.update(cx, |editor, cx| {
-            editor.set_wiki_resolver(resolver, cx);
-            // What the source codec will refuse, drawn before it is attempted.
-            editor.set_protected_spans(markraft_commonmark::protected_spans, cx);
-            [
-                editor.add_extension(menu, cx),
-                editor.add_extension(links, cx),
-                editor.add_extension(markraft_gpui::emoji_menu(), cx),
-                editor.add_extension(markraft_gpui::EmojiShortcodes, cx),
-            ]
-        });
-        let vim = self
-            .library
-            .preferences
-            .vim_mode
-            .then(|| Self::attach_vim(&editor, cx));
-        let note_id = id.clone();
-        let changes = cx.subscribe_in(
-            &editor,
-            window,
-            move |this, editor, event: &EditorEvent, window, cx| {
-                if let EditorEvent::FilesPasted(item) = event {
-                    if this.library.active_id == note_id {
-                        this.insert_assets(assets::from_clipboard(item.clone()), window, cx);
-                    }
-                    return;
-                }
-                if let EditorEvent::Extension { id, payload } = event {
-                    if *id == markraft_vim::VIM {
-                        this.vim_effect(&note_id, payload, cx);
-                    } else if *id == ui::slash::SLASH_MENU && this.library.active_id == note_id {
-                        this.slash_effect(payload, window, cx);
-                    }
-                    return;
-                }
-                if matches!(event, EditorEvent::CodeCopied) {
-                    if this.library.active_id == note_id {
-                        this.inform("Copied code", cx);
-                    }
-                    return;
-                }
-                if let EditorEvent::CodeLanguageRequested { pos } = event {
-                    if this.library.active_id == note_id && this.panel == Panel::Editor {
-                        this.open_code_language(*pos, cx);
-                    }
-                    return;
-                }
-                if let EditorEvent::RawHtmlRequested { pos } = event {
-                    if this.library.active_id == note_id && this.panel == Panel::Editor {
-                        this.open_html_source(*pos, window, cx);
-                    }
-                    return;
-                }
-                if let EditorEvent::WikiLinkClicked { target, embed } = event {
-                    if this.library.active_id == note_id && this.panel == Panel::Editor {
-                        this.follow_wiki_link(target, *embed, window, cx);
-                    }
-                    return;
-                }
-                if matches!(event, EditorEvent::LinkClicked) {
-                    if this.library.active_id == note_id && this.panel == Panel::Editor {
-                        this.code_language_block = None;
-                        this.link_popover = Some(LinkPopover::View);
-                        cx.notify();
-                    }
-                    return;
-                }
-                if this.library.active_id == note_id {
-                    this.link_popover = None;
-                    this.code_language_block = None;
-                }
-                let document = editor.read(cx).committed_document().clone();
-                if this.library.set_document(&note_id, document) {
-                    this.changed(cx);
-                }
-                cx.notify();
-            },
-        );
-        let state_note_id = id.clone();
-        let state_changes = cx.observe(&editor, move |this, editor, cx| {
-            if this.library.active_id != state_note_id {
-                return;
-            }
-            this.follow_title(cx);
-            if this.format_toolbar {
-                let editor = editor.read(cx);
-                let snapshot = (
-                    editor.active_marks(),
-                    doc::Block::active(editor.state(), &editor.projection()),
-                );
-                if this.format_snapshot.as_ref() != Some(&snapshot) {
-                    this.format_snapshot = Some(snapshot);
-                    cx.notify();
-                }
-            }
-        });
-        self.sessions.insert(
-            id,
-            Session {
-                editor,
-                _changes: changes,
-                _state_changes: state_changes,
-                _extensions: extensions,
-                vim,
-                vim_mode: markraft_vim::Mode::default(),
-            },
-        );
-    }
-    fn sync_documents(&mut self, cx: &App) {
-        for (id, session) in &self.sessions {
-            self.library
-                .set_document(id, session.editor.read(cx).committed_document().clone());
-        }
     }
     /// Reconcile external changes without creating files or reviving deleted paths.
     fn apply_external(
@@ -698,12 +418,12 @@ impl NotesApp {
                 }
             }
             self.sessions.remove(&id);
-            self.session_order.retain(|entry| entry != &id);
+
             ids.push(id);
         }
         self.ensure_session(window, cx);
         // A file appearing or leaving changes what `[[` can link to, and arrives
-        // without touching the revision counter the poll watches.
+        // independently of autosave scheduling.
         self.refresh_link_targets();
         // Replacing an editor session drops its focus handle. Restore editing
         // focus without taking it away from a picker or settings input.
@@ -714,7 +434,7 @@ impl NotesApp {
             persistence.acknowledge(ids);
         }
         if kept > 0 {
-            self.changed(cx);
+            self.schedule_save(cx);
         }
         if vanished > 0 {
             self.queue_notice(if vanished == 1 {
@@ -735,17 +455,21 @@ impl NotesApp {
     pub(crate) fn draft_count(&self) -> usize {
         self.library.notes.iter().filter(|n| is_draft(n)).count()
     }
-    fn changed(&mut self, cx: &mut Context<Self>) {
-        self.revision += 1;
-        self.dirty = true;
-        self.save_at = Some(Instant::now() + Duration::from_millis(350));
-        // A held draft is waiting for its first line to stop changing, so every edit
-        // puts that moment off again.
-        if self.held_draft.is_some() {
-            self.name_at = Some(Instant::now() + NAME_SETTLES);
-        }
+    fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        self.save.schedule(Instant::now());
         cx.notify();
     }
+    fn notes_changed(&mut self, cx: &mut Context<Self>) {
+        self.links_dirty = true;
+        let library = &self.library;
+        self.naming.retain(|id| {
+            library
+                .note(id)
+                .is_some_and(|note| note.path.is_none() && note.deleted_at.is_none())
+        });
+        self.schedule_save(cx);
+    }
+
     /// Keep autosave from naming a new note's file after a half-typed first line.
     ///
     /// Autosave names a note's file once and never again on its own, so a note filed
@@ -753,31 +477,27 @@ impl NotesApp {
     /// "Meeting notes for Q3"; only [`Self::open_rename`] moves it afterwards. While
     /// the caret is still in the line the name would come from, the store holds the
     /// note in recovery instead. The name has settled once the caret leaves that line
-    /// or the typing stops for [`NAME_SETTLES`], and the next save files the note
+    /// or the typing stops for [`workspace::NAME_SETTLES`], and the next save files the note
     /// under what the line says then — a note that is only a first line is filed like
     /// any other.
     ///
     /// Called wherever the editor's state moved, a selection with no edit included.
     fn follow_title(&mut self, cx: &mut Context<Self>) {
-        let id = self.library.active_id.clone();
-        let naming = !self.released_drafts.contains(&id) && self.naming_title(cx);
-        if self
-            .held_draft
-            .as_ref()
-            .is_some_and(|held| *held != id || !naming)
-        {
-            self.release_title(cx);
-        }
-        if naming && self.held_draft.is_none() {
-            self.held_draft = Some(id);
-            self.name_at = Some(Instant::now() + NAME_SETTLES);
-        }
-        // An input method's candidate is a name still being chosen. Only a committed
-        // change reaches `changed`, so without this the deadline would run out while
-        // the candidate window stood open and file the note under the part of the
-        // title already on the page — which is most of a title, typed in Chinese.
-        if self.held_draft.is_some() && self.composing(cx) {
-            self.name_at = Some(Instant::now() + NAME_SETTLES);
+        let naming = self.naming_title(cx);
+        let composing = self.composing(cx);
+        let library = &self.library;
+        if self.naming.observe(
+            &library.active_id,
+            naming,
+            composing,
+            Instant::now(),
+            |id| {
+                library
+                    .note(id)
+                    .is_some_and(|note| !note.document_is_empty())
+            },
+        ) {
+            self.schedule_save(cx);
         }
     }
     /// Whether the active note's editor holds an input method's uncommitted candidate.
@@ -817,16 +537,13 @@ impl NotesApp {
     /// to have settled on, and the page was cleared to begin again, so it is not shut
     /// out of being held: what is typed next deserves the wait a new note gets.
     fn release_title(&mut self, cx: &mut Context<Self>) {
-        self.name_at = None;
-        if let Some(id) = self.held_draft.take() {
-            if !self
-                .library
-                .note(&id)
-                .is_none_or(crate::storage::Note::document_is_empty)
-            {
-                self.released_drafts.insert(id);
-            }
-            self.changed(cx);
+        let library = &self.library;
+        if self.naming.release(|id| {
+            library
+                .note(id)
+                .is_some_and(|note| !note.document_is_empty())
+        }) {
+            self.schedule_save(cx);
         }
     }
     /// Whether the active note is a draft the store has nowhere to file: without a
@@ -853,7 +570,7 @@ impl NotesApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        next: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        next: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>, bool) + 'static,
     ) {
         let id = self.library.active_id.clone();
         let directory = self
@@ -869,74 +586,80 @@ impl NotesApp {
             .unwrap_or_default();
         let prompt = cx.prompt_for_new_path(&directory, Some("Untitled.md"));
         cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(path))) = prompt.await {
-                let _ = cx.update(|window, cx| {
-                    this.update(cx, |this, cx| {
-                        if this.library.active_id != id {
-                            return;
+            let result = prompt.await;
+            let _ = cx.update(|window, cx| {
+                this.update(cx, |this, cx| {
+                    let selected = match result {
+                        Ok(Ok(Some(path))) if this.library.active_id == id => {
+                            if path.exists() {
+                                this.queue_notice(
+                                    "Choose a new filename; the existing file was not changed."
+                                        .to_owned(),
+                                );
+                                false
+                            } else {
+                                let parent = path.parent().map(ToOwned::to_owned);
+                                if let Some(note) =
+                                    this.library.notes.iter_mut().find(|n| n.id == id)
+                                {
+                                    note.path = Some(path);
+                                }
+                                this.editor()
+                                    .update(cx, |editor, cx| editor.set_image_base(parent, cx));
+                                this.notes_changed(cx);
+                                true
+                            }
                         }
-                        if path.exists() {
-                            this.queue_notice(
-                                "Choose a new filename; the existing file was not changed."
-                                    .to_owned(),
-                            );
-                            return;
-                        }
-                        let parent = path.parent().map(ToOwned::to_owned);
-                        if let Some(note) = this.library.notes.iter_mut().find(|n| n.id == id) {
-                            note.path = Some(path);
-                        }
-                        this.editor()
-                            .update(cx, |editor, cx| editor.set_image_base(parent, cx));
-                        next(this, window, cx);
-                    })
-                });
-            }
+                        _ => false,
+                    };
+                    next(this, window, cx, selected);
+                })
+            });
         })
         .detach();
     }
     /// Give the active draft a file, then write it there.
     fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.prompt_for_note_path(window, cx, |this, window, cx| {
-            this.flush(cx);
+        self.prompt_for_note_path(window, cx, |this, window, cx, selected| {
+            if selected {
+                this.flush(cx);
+            }
             this.focus_editor(window, cx);
         });
     }
     fn flush(&mut self, cx: &mut Context<Self>) -> bool {
-        // A flush is asked for — ⌘S, quitting, an update relaunch — so it files a held
-        // draft under whatever its first line says now. The barrier below clears the
-        // save this schedules.
         self.release_title(cx);
         self.sync_documents(cx);
-        self.save_at = None;
-        self.revision += 1; // Discard acknowledgments for snapshots preceding this barrier.
+        let revision = self.save.barrier();
         let result = self
             .persistence
             .as_ref()
-            .ok_or_else(|| "Open or recover the library before saving.".to_string())
-            .and_then(|p| p.flush(self.library.clone()));
+            .ok_or_else(|| "Open or recover the library before saving.".to_owned())
+            .and_then(|p| p.flush(revision, self.library.clone()));
         match result {
-            Ok(()) => {
-                self.dirty = false;
-                self.error = None;
-            }
-            Err(e) => {
-                self.dirty = true;
-                self.error = Some(e);
+            Ok(saved) => self.apply_saved(saved, cx),
+            Err(error) => {
+                self.save.apply_completion(revision, false);
+                self.error = Some(error);
+                cx.notify();
             }
         }
-        if let Some(persistence) = &self.persistence
-            && let Ok(paths) = persistence.paths()
-        {
-            self.update_paths(paths, cx);
+        !self.save.is_dirty()
+    }
+
+    fn apply_saved(&mut self, saved: Saved, cx: &mut Context<Self>) {
+        let completion = self
+            .save
+            .apply_completion(saved.revision, saved.result.is_ok());
+        if completion == SaveCompletion::Ignored {
+            return;
         }
-        if let Some(persistence) = &self.persistence
-            && let Ok(ids) = persistence.conflicts()
-        {
-            self.update_conflicts(ids, cx);
+        self.update_paths(saved.paths, cx);
+        self.update_conflicts(saved.conflicts, cx);
+        if completion == SaveCompletion::Current {
+            self.error = saved.result.err();
         }
         cx.notify();
-        !self.dirty
     }
     /// The title recedes while the window is idle. Corner action buttons and native
     /// traffic lights follow `pointer_inside` alone and fade out completely;
@@ -944,8 +667,8 @@ impl NotesApp {
     fn chrome_visible(&self) -> bool {
         self.pointer_inside
             || self.window_active
-            || self.panel != Panel::Editor
-            || self.format_menu.is_some()
+            || self.interaction.panel() != Panel::Editor
+            || self.interaction.format_menu().is_some()
             || self
                 .last_key_at
                 .is_some_and(|at| at.elapsed() < KEY_PRESENCE)
@@ -968,6 +691,7 @@ impl NotesApp {
         }
     }
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reconcile_interaction(window, cx);
         self.prompt_conflict(window, cx);
         if let Some(rejection) = self
             .editor()
@@ -988,22 +712,22 @@ impl NotesApp {
                 EditRejection::Marked(_) => {}
             }
         }
-        if self.panel == Panel::Editor {
+        if self.interaction.panel() == Panel::Editor {
             self.editor()
                 .update(cx, |editor, cx| editor.refresh_images(cx));
         }
         // The `[[` menu reads a shared list rather than a snapshot, so it follows notes
         // being written, renamed and deleted. Rebuilding costs a string a note, so it
-        // is tied to the counter every change already bumps; a change arriving from
-        // outside refills the list where it lands.
-        if self.link_targets_revision != Some(self.revision) {
-            self.link_targets_revision = Some(self.revision);
+        // is invalidated only by changes to its note catalogue dependencies.
+        if self.links_dirty {
+            self.links_dirty = false;
             self.refresh_link_targets();
         }
         // The platform draws the close button above everything the view renders, so a
         // popup that reaches the top-left corner would be covered by it. It stands down
         // while one is open, the same way it does when the pointer leaves the window.
-        let covered = self.panel == Panel::Editor && self.editor().read(cx).overlay_open();
+        let covered =
+            self.interaction.panel() == Panel::Editor && self.editor().read(cx).overlay_open();
         if let Some(platform) = &self.platform {
             let inside = platform.pointer_inside(window);
             if inside != self.pointer_inside {
@@ -1068,25 +792,7 @@ impl NotesApp {
             .unwrap_or_default();
         for event in events {
             match event {
-                Event::Saved(saved) if saved.revision == self.revision => {
-                    self.update_paths(saved.paths, cx);
-                    self.update_conflicts(saved.conflicts, cx);
-                    match saved.result {
-                        Ok(()) => {
-                            self.dirty = false;
-                            self.error = None;
-                        }
-                        // A save failure is a state of the file now, so the whole
-                        // report stands: the Not saved capsule carries it, and the
-                        // conflict it may mention has a capsule of its own beside it.
-                        Err(e) => self.error = Some(e),
-                    }
-                    cx.notify();
-                }
-                Event::Saved(saved) => {
-                    self.update_paths(saved.paths, cx);
-                    self.update_conflicts(saved.conflicts, cx);
-                }
+                Event::Saved(saved) => self.apply_saved(saved, cx),
                 Event::External(changes) => self.apply_external(changes, window, cx),
             }
         }
@@ -1107,20 +813,22 @@ impl NotesApp {
         }
         // Nobody has touched the name for a while, so it is as settled as it is going
         // to get; the note is filed rather than left waiting for the caret to move.
-        if self.name_at.is_some_and(|at| Instant::now() >= at) {
+        if self.naming.due(Instant::now()) {
             self.release_title(cx);
         }
-        if self.save_at.is_some_and(|at| Instant::now() >= at) {
-            self.save_at = None;
-            if let Some(p) = &self.persistence
-                && let Err(e) = p.save(
-                    self.revision,
-                    self.library.clone(),
-                    self.held_draft.clone().into_iter().collect(),
-                )
-            {
-                self.error = Some(e);
-            }
+        if let Some(revision) = self.save.take_due(Instant::now())
+            && let Some(p) = &self.persistence
+            && let Err(e) = p.save(
+                revision,
+                self.library.clone(),
+                self.naming
+                    .held_id()
+                    .map(str::to_owned)
+                    .into_iter()
+                    .collect(),
+            )
+        {
+            self.error = Some(e);
         }
         if self
             .notice
@@ -1148,7 +856,7 @@ impl NotesApp {
             });
             cx.notify();
         }
-        if self.panel == Panel::Editor
+        if self.interaction.panel() == Panel::Editor
             && self.library.preferences.auto_height
             && self.persistence.is_some()
         {
@@ -1205,22 +913,22 @@ impl NotesApp {
             window.focus(&self.panel_focus, cx);
         } else if self.focus_html_source(window, cx) {
             // Keep the source draft as the keyboard owner after hiding the app.
-        } else if self.panel != Panel::Editor {
-            window.focus(&self.query.focus_handle(cx), cx);
+        } else if self.interaction.panel() != Panel::Editor {
+            window.focus(&self.query().focus_handle(cx), cx);
         } else {
             self.focus_editor(window, cx);
         }
         cx.notify();
     }
     pub fn hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.code_language_block = None;
-        self.query.update(cx, |e, cx| e.cancel_composition(cx));
+        self.close_popover(cx);
+        self.cancel_input(cx);
         self.editor()
             .update(cx, |editor, cx| editor.cancel_composition(cx));
         if !self.flush(cx) {
             // The window staying put is the only sign the key landed at all, and a
             // 24px capsule is a thin place to keep the reason.
-            self.file_status_popover = true;
+            self.show_popover(Popover::FileStatus, cx);
             cx.notify();
             return;
         }
@@ -1252,8 +960,10 @@ impl NotesApp {
     /// this is the last moment to offer it a file. Hiding the window asks nothing:
     /// the note is still open behind it, and that happens many times an hour.
     fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.quit_dialog && self.unfiled_draft() && is_draft(self.library.active_note()) {
-            self.quit_dialog = true;
+        if !self.quitting.begin() {
+            return;
+        }
+        if self.unfiled_draft() && is_draft(self.library.active_note()) {
             let answer = window.prompt(
                 PromptLevel::Warning,
                 "This note has not been saved to a file",
@@ -1267,14 +977,24 @@ impl NotesApp {
                 let choice = answer.await;
                 let _ = cx.update(|window, cx| {
                     this.update(cx, |this, cx| {
-                        this.quit_dialog = false;
                         match choice {
                             // Giving it a file is what the question was about, so
                             // leaving is what follows once it has one.
-                            Ok(0) => this
-                                .prompt_for_note_path(window, cx, |this, _, cx| this.quit_now(cx)),
+                            Ok(0) => {
+                                this.prompt_for_note_path(window, cx, |this, _, cx, selected| {
+                                    if selected {
+                                        this.quit_now(cx);
+                                    } else {
+                                        this.quitting.cancel();
+                                        cx.notify();
+                                    }
+                                })
+                            }
                             Ok(2) => this.quit_now(cx),
-                            _ => cx.notify(),
+                            _ => {
+                                this.quitting.cancel();
+                                cx.notify();
+                            }
                         }
                     })
                 });
@@ -1290,7 +1010,8 @@ impl NotesApp {
             cx.quit();
             return;
         }
-        self.file_status_popover = true;
+        self.quitting.cancel();
+        self.show_popover(Popover::FileStatus, cx);
         cx.notify();
     }
     pub fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1303,8 +1024,8 @@ impl NotesApp {
         if self.cancel_html_source(window, cx) {
             return;
         }
-        if self.query.read(cx).is_composing() {
-            self.query.update(cx, |e, cx| e.cancel_composition(cx));
+        if self.input_composing(cx) {
+            self.cancel_input(cx);
             return;
         }
         if self.editor().read(cx).is_composing() {
@@ -1321,8 +1042,8 @@ impl NotesApp {
             self.notice = None;
             self.chrome_focus = None;
             // Hand the keyboard back to the panel the notice was drawn over.
-            if self.panel != Panel::Editor {
-                window.focus(&self.query.focus_handle(cx), cx);
+            if self.interaction.panel() != Panel::Editor {
+                window.focus(&self.query().focus_handle(cx), cx);
             }
             cx.notify();
             return;
@@ -1334,16 +1055,12 @@ impl NotesApp {
             return;
         }
         self.chrome_focus = None;
-        let had_popover = self.format_menu.take().is_some()
-            | self.link_popover.take().is_some()
-            | self.rename.take().is_some()
-            | self.code_language_block.take().is_some()
-            | std::mem::take(&mut self.file_status_popover);
+        let had_popover = self.close_popover(cx);
         if had_popover {
             self.focus_editor(window, cx);
             cx.notify();
-        } else if self.panel != Panel::Editor {
-            self.panel = Panel::Editor;
+        } else if self.interaction.panel() != Panel::Editor {
+            self.set_panel(Panel::Editor, cx);
             self.focus_editor(window, cx);
             cx.notify();
         } else if self.format_toolbar {
@@ -1354,12 +1071,8 @@ impl NotesApp {
         }
     }
     fn new_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.format_menu = None;
-        self.code_language_block = None;
-        self.link_popover = None;
-        self.rename = None;
-        self.file_status_popover = false;
-        self.query.update(cx, |e, cx| e.cancel_composition(cx));
+        self.close_popover(cx);
+        self.cancel_input(cx);
         if self.persistence.is_none() {
             self.choose_folder(window, cx);
             return;
@@ -1368,24 +1081,20 @@ impl NotesApp {
         self.sync_documents(cx);
         self.library.new_note(doc::empty());
         self.ensure_session(window, cx);
-        self.panel = Panel::Editor;
+        self.set_panel(Panel::Editor, cx);
         self.focus_editor(window, cx);
-        self.changed(cx);
+        self.notes_changed(cx);
     }
     fn select_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.format_menu = None;
-        self.code_language_block = None;
-        self.link_popover = None;
-        self.rename = None;
-        self.file_status_popover = false;
-        self.query.update(cx, |e, cx| e.cancel_composition(cx));
+        self.close_popover(cx);
+        self.cancel_input(cx);
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
         self.sync_documents(cx);
         if self.library.select(id) {
             self.ensure_session(window, cx);
-            self.panel = Panel::Editor;
+            self.set_panel(Panel::Editor, cx);
             self.focus_editor(window, cx);
-            self.changed(cx);
+            self.notes_changed(cx);
         }
     }
     /// Open what a clicked wiki link names, exactly as selecting it in Browse
@@ -1434,23 +1143,22 @@ impl NotesApp {
         }
     }
     fn open_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
-        self.format_menu = None;
-        self.code_language_block = None;
-        self.link_popover = None;
+        self.close_popover(cx);
         if self.persistence.is_none() {
             return;
         }
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
-        self.query.update(cx, |e, cx| e.cancel_composition(cx));
-        self.panel = if self.panel == panel {
+        self.cancel_input(cx);
+        let next = if self.interaction.panel() == panel {
             Panel::Editor
         } else {
             panel
         };
+        self.set_panel(next, cx);
         self.selected = 0;
         self.chrome_focus = None;
         self.confirm_purge = None;
-        let (query, placeholder, label) = match self.panel {
+        let (query, placeholder, label) = match self.interaction.panel() {
             Panel::Settings => (
                 self.library.preferences.hotkey.clone(),
                 "Type a shortcut, e.g. Alt+N",
@@ -1464,10 +1172,10 @@ impl NotesApp {
             ),
             _ => (String::new(), "Search for notes…", "Search notes"),
         };
-        self.link_popover = None;
+        self.close_popover(cx);
         self.set_query(query, placeholder, label, cx);
-        if self.panel != Panel::Editor {
-            window.focus(&self.query.focus_handle(cx), cx);
+        if self.interaction.panel() != Panel::Editor {
+            window.focus(&self.query().focus_handle(cx), cx);
         } else {
             self.focus_editor(window, cx);
         }
@@ -1476,7 +1184,7 @@ impl NotesApp {
     /// Which of the library's notes the open panel is looking at. Drafts and the
     /// trash are the same list the Browse panel draws, filtered two ways.
     pub(crate) fn scope(&self) -> Scope {
-        match self.panel {
+        match self.interaction.panel() {
             Panel::Drafts => Scope::Drafts,
             Panel::Trash => Scope::Deleted,
             _ => Scope::Notes,
@@ -1501,11 +1209,11 @@ impl NotesApp {
             .find(|note| note.id == id && note.deleted_at.is_none())
         {
             note.pinned = !note.pinned;
-            self.changed(cx);
+            self.notes_changed(cx);
         }
         // Pinning reorders results; keep the same note selected.
         self.selected = self
-            .matching_notes(self.query.read(cx).text().trim(), self.scope())
+            .matching_notes(self.search_text(cx).trim(), self.scope())
             .iter()
             .position(|note| note.id == id)
             .unwrap_or(0);
@@ -1516,7 +1224,7 @@ impl NotesApp {
         if self.library.delete(id) {
             self.sessions.remove(id);
             self.ensure_session(window, cx);
-            let query = self.query.read(cx).text().to_owned();
+            let query = self.search_text(cx);
             let root = self.path.clone();
             self.selected = self.selected.min(
                 self.library
@@ -1526,8 +1234,8 @@ impl NotesApp {
             );
             self.picker_scroll.scroll_to_item(self.selected);
             self.chrome_focus = None;
-            window.focus(&self.query.focus_handle(cx), cx);
-            self.changed(cx);
+            window.focus(&self.query().focus_handle(cx), cx);
+            self.notes_changed(cx);
             self.inform_undo("Moved to Recently Deleted", id.to_owned(), cx);
         }
     }
@@ -1537,9 +1245,9 @@ impl NotesApp {
         if self.library.delete(&id) {
             self.sessions.remove(&id);
             self.ensure_session(window, cx);
-            self.panel = Panel::Editor;
+            self.set_panel(Panel::Editor, cx);
             self.focus_editor(window, cx);
-            self.changed(cx);
+            self.notes_changed(cx);
             self.inform_undo("Moved to Recently Deleted", id, cx);
         }
     }
@@ -1550,9 +1258,9 @@ impl NotesApp {
         };
         if self.library.restore(&id) {
             self.ensure_session(window, cx);
-            self.panel = Panel::Editor;
+            self.set_panel(Panel::Editor, cx);
             self.focus_editor(window, cx);
-            self.changed(cx);
+            self.notes_changed(cx);
             self.inform("Restored note", cx);
         } else {
             cx.notify();
@@ -1569,23 +1277,18 @@ impl NotesApp {
         for id in &purged {
             self.library.remove(id);
             self.sessions.remove(id);
-            self.session_order.retain(|entry| entry != id);
         }
         self.confirm_purge = None;
         self.chrome_focus = None;
         self.ensure_session(window, cx);
         self.selected = self.selected.min(
             self.library
-                .search(
-                    self.query.read(cx).text().trim(),
-                    true,
-                    self.path.as_deref(),
-                )
+                .search(self.search_text(cx).trim(), true, self.path.as_deref())
                 .len()
                 .saturating_sub(1),
         );
         self.picker_scroll.scroll_to_item(self.selected);
-        self.changed(cx);
+        self.notes_changed(cx);
         match result {
             Ok(()) if count == 1 => self.inform("Deleted permanently", cx),
             Ok(()) => self.inform("Emptied Recently Deleted", cx),
@@ -1633,10 +1336,10 @@ impl NotesApp {
             self.chrome_focus = None;
             self.confirm_purge = None;
             self.ensure_session(window, cx);
-            self.changed(cx);
+            self.notes_changed(cx);
             self.selected = self.selected.min(
                 self.library
-                    .search(self.query.read(cx).text(), true, self.path.as_deref())
+                    .search(&self.search_text(cx), true, self.path.as_deref())
                     .len()
                     .saturating_sub(1),
             );
@@ -1677,43 +1380,25 @@ impl NotesApp {
                 .editor
                 .update(cx, |e, cx| e.set_style(notes_style(self.dark), cx));
         }
-        self.query
-            .update(cx, |e, cx| e.set_style(query_style(self.dark), cx));
+        self.style_input(cx);
         cx.notify();
-    }
-    /// Lend the one query field to a surface. It holds literal text, so it is never read
-    /// as Markdown, and it takes the name of whatever it is serving: the field reports
-    /// that name itself rather than borrowing one from a group drawn around it.
-    fn set_query(
-        &mut self,
-        text: String,
-        placeholder: &'static str,
-        label: &'static str,
-        cx: &mut Context<Self>,
-    ) {
-        self.query.update(cx, |e, cx| {
-            e.set_value(&text, cx);
-            e.set_placeholder(placeholder, cx);
-            e.set_aria_label(label, cx);
-        });
     }
     /// ⌘L: a link under the caret shows its actions, anything else asks for an address.
     fn open_link_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.persistence.is_none() || self.panel != Panel::Editor {
+        if self.persistence.is_none() || self.interaction.panel() != Panel::Editor {
             return;
         }
-        self.format_menu = None;
-        self.code_language_block = None;
+        self.close_popover(cx);
         self.chrome_focus = None;
         if self.editor().read(cx).active_link().is_some() {
-            self.link_popover = Some(LinkPopover::View);
+            self.show_popover(Popover::Link(LinkPopover::View), cx);
             cx.notify();
         } else {
             self.edit_link(window, cx);
         }
     }
     fn edit_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.code_language_block = None;
+        self.close_popover(cx);
         let url = self
             .editor()
             .read(cx)
@@ -1722,20 +1407,20 @@ impl NotesApp {
             .to_owned();
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
         self.chrome_focus = None;
+        self.show_popover(Popover::Link(LinkPopover::Edit), cx);
         self.set_query(url, "Enter a link…", "Link URL", cx);
-        self.link_popover = Some(LinkPopover::Edit);
-        window.focus(&self.query.focus_handle(cx), cx);
+        window.focus(&self.query().focus_handle(cx), cx);
         cx.notify();
     }
     fn unlink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editor()
             .update(cx, |editor, cx| editor.set_link(None, cx));
-        self.link_popover = None;
+        self.close_popover(cx);
         self.focus_editor(window, cx);
         cx.notify();
     }
     fn apply_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let query = self.query.read(cx);
+        let query = self.query().read(cx);
         let url =
             markraft_core::projection::Projection::of(query.committed_document(), query.schema())
                 .plain_text()
@@ -1744,12 +1429,12 @@ impl NotesApp {
         self.editor().update(cx, |editor, cx| {
             editor.set_link((!url.is_empty()).then_some(url.as_str()), cx)
         });
-        self.link_popover = None;
+        self.close_popover(cx);
         self.focus_editor(window, cx);
         cx.notify();
     }
     fn apply_shortcut(&mut self, cx: &mut Context<Self>) {
-        let query = self.query.read(cx);
+        let query = self.query().read(cx);
         let text =
             markraft_core::projection::Projection::of(query.committed_document(), query.schema())
                 .plain_text()
@@ -1760,7 +1445,7 @@ impl NotesApp {
                 Ok(()) => {
                     self.library.preferences.hotkey = text;
                     self.platform_error = None;
-                    self.changed(cx);
+                    self.schedule_save(cx);
                     self.inform("Updated shortcut", cx);
                 }
                 Err(e) => {
@@ -1827,20 +1512,17 @@ impl NotesApp {
                     library.preferences = self.library.preferences.clone();
                 }
                 self.path = Some(store.directory().to_owned());
-                self.library = library;
                 self.persistence = Some(Persistence::new(store));
-                self.sessions.clear();
-                self.session_order.clear();
-                self.ensure_session(window, cx);
+                self.replace_library(library, window, cx);
                 self.error = None;
-                self.panel = Panel::Editor;
+                self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
                 self.apply_theme(window, cx);
                 self.platform_error = self
                     .platform
                     .as_mut()
                     .and_then(|p| p.set_shortcut(&self.library.preferences.hotkey).err());
-                self.changed(cx);
+                self.notes_changed(cx);
             }
             Err(e) => {
                 self.error = Some(e);
@@ -1904,8 +1586,7 @@ impl NotesApp {
             if answer.await == Ok(1) {
                 let _ = cx.update(|window, cx| {
                     this.update(cx, |this, cx| {
-                        this.revision += 1;
-                        this.save_at = None;
+                        this.save.barrier();
                         let result = this
                             .persistence
                             .as_ref()
@@ -1913,13 +1594,8 @@ impl NotesApp {
                             .and_then(|p| p.reload());
                         match result {
                             Ok(library) => {
-                                this.query.update(cx, |e, cx| e.cancel_composition(cx));
-                                this.library = library;
-                                this.sessions.clear();
-                                this.session_order.clear();
-                                this.ensure_session(window, cx);
-                                this.panel = Panel::Editor;
-                                this.dirty = false;
+                                this.replace_library(library, window, cx);
+                                this.set_panel(Panel::Editor, cx);
                                 this.error = None;
                                 this.focus_editor(window, cx);
                                 this.apply_theme(window, cx);
@@ -2029,7 +1705,7 @@ impl NotesApp {
             ));
         }
         if !dropped.images.is_empty() {
-            if self.panel == Panel::Editor && self.persistence.is_some() {
+            if self.interaction.panel() == Panel::Editor && self.persistence.is_some() {
                 self.insert_assets(
                     dropped
                         .images
@@ -2101,11 +1777,9 @@ impl NotesApp {
             } else {
                 Store::open_file(path, self.settings_path.clone()).map(|(store, mut library)| {
                     library.preferences = self.library.preferences.clone();
-                    self.library = library;
                     self.persistence = Some(Persistence::new(store));
                     self.path = None;
-                    self.sessions.clear();
-                    self.session_order.clear();
+                    self.replace_library(library, window, cx);
                 })
             };
             // Failing to open a file says nothing about saving, so it is a sentence
@@ -2115,10 +1789,10 @@ impl NotesApp {
             }
         }
         self.ensure_session(window, cx);
-        self.panel = Panel::Editor;
+        self.set_panel(Panel::Editor, cx);
         self.show(window, cx);
         self.focus_editor(window, cx);
-        self.changed(cx);
+        self.notes_changed(cx);
     }
 
     fn update_paths(&mut self, paths: Vec<(String, PathBuf)>, cx: &mut Context<Self>) {
@@ -2127,6 +1801,7 @@ impl NotesApp {
                 && note.path.as_ref() != Some(&path)
             {
                 note.path = Some(path.clone());
+                self.links_dirty = true;
                 if let Some(session) = self.sessions.get(&id) {
                     session.editor.update(cx, |editor, cx| {
                         editor.set_image_base(path.parent().map(ToOwned::to_owned), cx)
@@ -2203,7 +1878,7 @@ impl NotesApp {
                 self.sessions.remove(&note.id);
                 self.ensure_session(window, cx);
                 self.error = None;
-                self.changed(cx);
+                self.notes_changed(cx);
                 self.focus_editor(window, cx);
             }
             // The note stays conflicted and its indicator keeps saying so, so this is
@@ -2242,7 +1917,7 @@ impl NotesApp {
                 let _ = this.update(cx, |this, cx| match relative {
                     Ok(relative) if this.path.as_ref() == Some(&root) => {
                         this.library.workspace.new_note_directory = relative;
-                        this.changed(cx);
+                        this.schedule_save(cx);
                     }
                     Ok(_) => {
                         this.inform("The notes folder changed; choose the location again.", cx)
@@ -2282,7 +1957,7 @@ impl NotesApp {
                     Ok(relative) if this.path.as_ref() == Some(&root) => {
                         this.library.workspace.attachments =
                             crate::storage::AttachmentPolicy::WorkspaceFolder(relative);
-                        this.changed(cx);
+                        this.schedule_save(cx);
                     }
                     Ok(_) => {
                         this.inform("The notes folder changed; choose the location again.", cx)
@@ -2315,22 +1990,16 @@ impl NotesApp {
         if !self.flush(cx) {
             return;
         }
-        // In a folder, that flush is what files a new note, so the path it was given
-        // arrives with these. Only a note the store had nothing to write — one that
-        // is still empty — comes back without one.
-        if let Some(persistence) = &self.persistence
-            && let Ok(paths) = persistence.paths()
-        {
-            self.update_paths(paths, cx);
-        }
         let Some(path) = self.library.active_note().path.clone() else {
             // The save panel has no room to say why it opened, so the reason goes
             // before it rather than into it.
             self.queue_notice(
                 "Save this note first — images are stored next to its file.".to_owned(),
             );
-            self.prompt_for_note_path(window, cx, move |this, window, cx| {
-                this.insert_assets(assets, window, cx);
+            self.prompt_for_note_path(window, cx, move |this, window, cx, selected| {
+                if selected {
+                    this.insert_assets(assets, window, cx);
+                }
             });
             return;
         };
@@ -2646,7 +2315,7 @@ pub(crate) fn is_draft(note: &crate::storage::Note) -> bool {
 /// and a drag out of the first line leaves the other end behind; neither is someone
 /// moving on from the title, and filing the note on one of them would name its file
 /// after however much of the title had been typed. Letting go a moment late costs
-/// nothing, because the name settles on its own after [`NAME_SETTLES`].
+/// nothing, because the name settles on its own after [`workspace::NAME_SETTLES`].
 ///
 /// A document with nothing to read has no such block for a selection to reach.
 fn naming_title(doc: &Node, selection: &Selection) -> bool {
@@ -2672,7 +2341,6 @@ const FOOTER_HEIGHT: Pixels = px(48.);
 /// How long a new note's first line has to stand still before it names the file. Long
 /// enough that a pause for thought mid-title does not name the file after half of it,
 /// and short enough that a note which is only that line still reaches the folder.
-const NAME_SETTLES: Duration = Duration::from_millis(2000);
 /// How long a keystroke counts as someone being at the window.
 const KEY_PRESENCE: Duration = Duration::from_millis(2500);
 /// A queued notice is a sentence, not an acknowledgment, so it is given time to read.

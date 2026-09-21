@@ -9,32 +9,11 @@ impl NotesApp {
     /// The pill under the title that names the note's file: the link editor's shape,
     /// holding the name where that one holds an address.
     pub(super) fn rename_pill(
-        &mut self,
+        &self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        // The name field is the shared query, so anything else that opens has taken it.
-        if self.panel != Panel::Editor
-            || self.link_popover.is_some()
-            || self.code_language_block.is_some()
-            || self.format_menu.is_some()
-            || self.file_status_popover
-            || self
-                .rename
-                .as_ref()
-                .is_some_and(|rename| rename.id != self.library.active_id)
-        {
-            self.rename = None;
-        }
-        // Like the link field, it closes as soon as focus goes anywhere else. Tab moves
-        // it to the panel handle, which still belongs to the pill.
-        if self.rename.is_some()
-            && !self.query.focus_handle(cx).is_focused(window)
-            && !self.panel_focus.is_focused(window)
-        {
-            self.rename = None;
-        }
-        let rename = self.rename.as_ref()?;
+        let rename = self.interaction.rename()?;
         let extension = self
             .library
             .active_note()

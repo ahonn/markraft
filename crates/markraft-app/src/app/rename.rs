@@ -168,11 +168,7 @@ impl NotesApp {
         if self.persistence.is_none() {
             return;
         }
-        self.panel = Panel::Editor;
-        self.format_menu = None;
-        self.code_language_block = None;
-        self.link_popover = None;
-        self.file_status_popover = false;
+        self.set_panel(Panel::Editor, cx);
         self.chrome_focus = None;
         let note = self.library.active_note();
         // A note with no file yet has nothing to rename: naming it is saving it.
@@ -204,39 +200,44 @@ impl NotesApp {
             .iter()
             .map(|(_, _, links)| links)
             .sum();
+        self.show_popover(
+            Popover::Rename(Rename {
+                id,
+                links,
+                update_links: true,
+            }),
+            cx,
+        );
         self.set_query(stem, "Name", "File name", cx);
-        self.query.update(cx, |query, cx| query.select_all(cx));
-        self.rename = Some(Rename {
-            id,
-            links,
-            update_links: true,
-        });
-        window.focus(&self.query.focus_handle(cx), cx);
+        self.query().update(cx, |query, cx| query.select_all(cx));
+        window.focus(&self.query().focus_handle(cx), cx);
         cx.notify();
     }
 
     pub(super) fn close_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.rename.take().is_some() {
+        if self.interaction.rename().is_some() && self.close_popover(cx) {
             self.focus_editor(window, cx);
             cx.notify();
         }
     }
 
     pub(super) fn toggle_rename_links(&mut self, cx: &mut Context<Self>) {
-        if let Some(rename) = &mut self.rename {
+        if let Some(rename) = self.interaction.rename_mut() {
             rename.update_links = !rename.update_links;
             cx.notify();
         }
     }
 
     pub(super) fn apply_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(rename) = &self.rename else { return };
+        let Some(rename) = self.interaction.rename() else {
+            return;
+        };
         let (id, update_links) = (rename.id.clone(), rename.update_links);
         if self.library.active_id != id {
             self.close_rename(window, cx);
             return;
         }
-        let name = self.query.read(cx).text().trim().to_owned();
+        let name = self.query().read(cx).text().trim().to_owned();
         // A name that was refused is gone the moment another is typed, so it is said in
         // passing and the pill stays open for the next try.
         if let Err(error) = self.rename_note(&id, &name, update_links, cx) {
@@ -315,7 +316,7 @@ impl NotesApp {
                     .update(cx, |editor, cx| editor.replace_doc(document, cx));
             }
         }
-        self.changed(cx);
+        self.notes_changed(cx);
         self.refresh_link_targets();
         let mut message = format!("Renamed to “{stem}”");
         if updated > 0 {

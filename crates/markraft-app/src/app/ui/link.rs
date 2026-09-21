@@ -7,27 +7,13 @@ const GAP: Pixels = px(6.);
 impl NotesApp {
     /// The pill floating above the linked or selected text.
     pub(super) fn link_pill(
-        &mut self,
+        &self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        if self.panel != Panel::Editor {
-            self.link_popover = None;
-        }
-        // The edit field closes as soon as focus goes anywhere else. Tab moves it to the
-        // panel handle, which still belongs to the popover.
-        if self.link_popover == Some(LinkPopover::Edit)
-            && !self.query.focus_handle(cx).is_focused(window)
-            && !self.panel_focus.is_focused(window)
-        {
-            self.link_popover = None;
-        }
+        let mode = self.interaction.link()?;
         let editor = self.editor().read(cx);
         let url = editor.active_link();
-        if self.link_popover == Some(LinkPopover::View) && url.is_none() {
-            self.link_popover = None;
-        }
-        let mode = self.link_popover?;
         let anchor = editor.anchor_bounds()?;
         let viewport = window.bounds().size;
         let width = WIDTH.min(viewport.width - px(16.));

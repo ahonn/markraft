@@ -14,6 +14,11 @@ use std::{
     time::Duration,
 };
 
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A completed snapshot attempt. Recovery can succeed without a Markdown file or
+/// without resolving a conflict, so the result and file metadata travel together.
+#[derive(Debug)]
 pub struct Saved {
     pub revision: u64,
     pub result: Result<(), String>,
@@ -38,9 +43,7 @@ enum Request {
     Resolve(Note, Sender<Result<Option<Note>, String>>),
     OpenFile(std::path::PathBuf, Sender<Result<Note, String>>),
     Rename(String, String, Sender<Result<std::path::PathBuf, String>>),
-    Paths(Sender<Vec<(String, std::path::PathBuf)>>),
-    Conflicts(Sender<Vec<String>>),
-    Flush(Library, Sender<Result<(), String>>),
+    Flush(u64, Library, Sender<Saved>),
     Reload(Sender<Result<Library, String>>),
     Refresh,
     RefreshPaths(Vec<std::path::PathBuf>),
@@ -73,9 +76,6 @@ impl Persistence {
         std::thread::spawn(move || {
             for request in incoming {
                 match request {
-                    Request::Conflicts(response) => {
-                        let _ = response.send(store.conflicts());
-                    }
                     Request::Review(note, response) => {
                         let _ = response.send(store.review_conflict(&note));
                     }
@@ -94,20 +94,13 @@ impl Persistence {
                     Request::Rename(id, name, response) => {
                         let _ = response.send(store.rename(&id, &name));
                     }
-                    Request::Paths(response) => {
-                        let _ = response.send(store.paths());
-                    }
                     Request::Save(revision, library, held) => {
-                        let result = store.save(&library, &held);
-                        let _ = outgoing.send(Event::Saved(Saved {
-                            revision,
-                            result,
-                            paths: store.paths(),
-                            conflicts: store.conflicts(),
-                        }));
+                        let _ = outgoing.send(Event::Saved(save_snapshot(
+                            &mut store, revision, &library, &held,
+                        )));
                     }
-                    Request::Flush(library, response) => {
-                        let _ = response.send(store.save(&library, &[]));
+                    Request::Flush(revision, library, response) => {
+                        let _ = response.send(save_snapshot(&mut store, revision, &library, &[]));
                     }
                     Request::Reload(response) => {
                         let _ = response.send(store.reload());
@@ -144,26 +137,6 @@ impl Persistence {
     }
     pub fn refresh(&self) {
         let _ = self.requests.send(Request::Refresh);
-    }
-    pub fn conflicts(&self) -> Result<Vec<String>, String> {
-        let (tx, rx) = mpsc::channel();
-        self.requests
-            .send(Request::Conflicts(tx))
-            .map_err(|_| "The save worker stopped")?;
-        rx.recv().map_err(|_| "The save worker stopped".into())
-    }
-    pub fn paths(&self) -> Result<Vec<(String, std::path::PathBuf)>, String> {
-        let (tx, rx) = mpsc::channel();
-        self.requests
-            .send(Request::Paths(tx))
-            .map_err(|_| "The save worker stopped")?;
-        let paths = rx
-            .recv()
-            .map_err(|_| "The save worker stopped".to_owned())?;
-        for (_, path) in &paths {
-            self.watch_file(path);
-        }
-        Ok(paths)
     }
     fn watch_file(&self, path: &std::path::Path) {
         if path.starts_with(&self.watch_root) {
@@ -206,7 +179,7 @@ impl Persistence {
         self.requests
             .send(Request::Markdown(note, tx))
             .map_err(|_| "The save worker stopped")?;
-        rx.recv().map_err(|_| "The save worker stopped")?
+        receive(rx, REPLY_TIMEOUT)?
     }
     pub fn recover(&self, note: Note) -> Result<(), String> {
         let (tx, rx) = mpsc::channel();
@@ -310,30 +283,58 @@ impl Persistence {
         })?
     }
     /// A queue barrier: all earlier requests finish before this latest snapshot is saved.
-    /// A timeout leaves the request queued; callers must retain the note and show the error.
-    pub fn flush(&self, library: Library) -> Result<(), String> {
+    /// The outer result confirms receipt, not whether writing succeeded; callers must
+    /// apply paths and conflicts even when `Saved::result` reports a partial failure.
+    /// A timeout leaves the request queued; callers retain unsaved state until a later
+    /// snapshot confirms it. No result queries are needed after this call.
+    pub fn flush(&self, revision: u64, library: Library) -> Result<Saved, String> {
+        self.flush_with_timeout(revision, library, REPLY_TIMEOUT)
+    }
+    fn flush_with_timeout(
+        &self,
+        revision: u64,
+        library: Library,
+        timeout: Duration,
+    ) -> Result<Saved, String> {
         let (response, result) = mpsc::channel();
         self.requests
-            .send(Request::Flush(library, response))
+            .send(Request::Flush(revision, library, response))
             .map_err(|_| {
                 "Saving stopped working. Copy your note (⇧⌘C), then quit and reopen Markraft."
                     .to_string()
             })?;
-        result
-            .recv_timeout(Duration::from_secs(10))
-            .map_err(|error| {
-                match error {
-                    RecvTimeoutError::Timeout => {
-                        "Saving is taking too long. The note remains open; try again."
-                    }
-                    RecvTimeoutError::Disconnected => {
-                        "Saving stopped before your note was written. \
-                         Copy your note (⇧⌘C), then quit and reopen Markraft."
-                    }
-                }
-                .to_string()
-            })?
+        let saved = receive(result, timeout)?;
+        for (_, path) in &saved.paths {
+            self.watch_file(path);
+        }
+        Ok(saved)
     }
+}
+
+/// Capture metadata after every attempt, including errors after some notes were written.
+fn save_snapshot(store: &mut Store, revision: u64, library: &Library, held: &[String]) -> Saved {
+    let result = store.save(library, held);
+    Saved {
+        revision,
+        result,
+        paths: store.paths(),
+        conflicts: store.conflicts(),
+    }
+}
+
+fn receive<T>(receiver: Receiver<T>, timeout: Duration) -> Result<T, String> {
+    receiver.recv_timeout(timeout).map_err(|error| match error {
+        RecvTimeoutError::Timeout => {
+            "The notes folder is taking too long to respond. The request may still complete; \
+             your note remains open. Try again."
+                .to_string()
+        }
+        RecvTimeoutError::Disconnected => {
+            "The save worker stopped before responding. Copy your note (⇧⌘C), \
+             then quit and reopen Markraft."
+                .to_string()
+        }
+    })
 }
 
 /// One refresh request per burst of file events. A program saving a file produces
@@ -446,7 +447,7 @@ mod tests {
             .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
             .collect();
         assert_eq!(files.len(), 1, "{files:?}");
-        let path = files.remove(0);
+        let path = std::fs::canonicalize(files.remove(0)).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         (path, text)
     }
@@ -474,7 +475,11 @@ mod tests {
             let spec = update_composition(&state, candidate, candidate.chars().count()).unwrap();
             state = state.update([spec]).unwrap().state().clone();
             library.set_document(&id, committed_document(&state).clone());
-            persistence.flush(library.clone()).unwrap();
+            persistence
+                .flush(0, library.clone())
+                .unwrap()
+                .result
+                .unwrap();
             assert!(only_note(directory.path()).1.ends_with("hello\n"));
         }
 
@@ -484,7 +489,7 @@ mod tests {
             .state()
             .clone();
         library.set_document(&id, committed_document(&state).clone());
-        persistence.flush(library).unwrap();
+        persistence.flush(0, library).unwrap().result.unwrap();
         assert!(only_note(directory.path()).1.ends_with("你\n"));
     }
 
@@ -499,7 +504,11 @@ mod tests {
         library.set_document(&id, doc::from_markdown("Title\n\nSecond 👩🏽‍💻"));
         persistence.save(2, library.clone(), Vec::new()).unwrap();
         library.set_document(&id, doc::from_markdown("Title\n\nFinal é"));
-        persistence.flush(library.clone()).unwrap();
+        let receipt = persistence.flush(3, library.clone()).unwrap();
+        assert_eq!(receipt.revision, 3);
+        receipt.result.unwrap();
+        assert_eq!(receipt.paths, vec![(id, only_note(directory.path()).0)]);
+        assert!(receipt.conflicts.is_empty());
         assert!(
             only_note(directory.path())
                 .1
@@ -527,14 +536,35 @@ mod tests {
         persistence
             .save(1, library.clone(), vec![id.clone()])
             .unwrap();
-        // `paths` answers after the save it queued behind, so the folder has had its
-        // chance to receive a file: autosave held the half-typed name back instead.
-        assert!(persistence.paths().unwrap().is_empty());
+        // Await the save receipt itself: a successful recovery write must not claim
+        // that the held title has already become a Markdown file.
+        let Event::Saved(held) = persistence.events.recv_timeout(REPLY_TIMEOUT).unwrap() else {
+            panic!("a held draft must return a save receipt");
+        };
+        assert_eq!(held.revision, 1);
+        held.result.unwrap();
+        assert!(held.paths.is_empty());
+        assert!(held.conflicts.is_empty());
+        let workspace = std::fs::read_dir(directory.path().join("workspaces"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let recovery: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(workspace.join("recovery").join(format!("{id}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recovery["local"], "Meeting no\n");
         // ⌘S, a quit and an update relaunch all come through here, and none of them can
         // hold: what the first line says now is what the file is called.
         library.set_document(&id, doc::from_markdown("Meeting notes for Q3"));
-        persistence.flush(library).unwrap();
+        let filed = persistence.flush(2, library).unwrap();
+        assert_eq!(filed.revision, 2);
+        filed.result.unwrap();
+        assert!(filed.conflicts.is_empty());
         let (path, text) = only_note(directory.path());
+        assert_eq!(filed.paths, vec![(id, path.clone())]);
         assert!(path.ends_with("Meeting notes for Q3.md"), "{path:?}");
         assert_eq!(text, "Meeting notes for Q3\n");
     }
@@ -547,13 +577,28 @@ mod tests {
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Shared"));
         persistence.save(10, library.clone(), Vec::new()).unwrap();
-        persistence.flush(library.clone()).unwrap();
+        persistence
+            .flush(0, library.clone())
+            .unwrap()
+            .result
+            .unwrap();
         let (path, _) = only_note(directory.path());
         std::fs::write(&path, b"external content").unwrap();
         library.set_document(&id, doc::from_markdown("Shared, edited here"));
         library.new_note(doc::from_markdown("Keep this local work"));
         persistence.save(11, library.clone(), Vec::new()).unwrap();
-        assert!(persistence.flush(library).is_err());
+        let receipt = persistence.flush(12, library).unwrap();
+        assert_eq!(receipt.revision, 12);
+        assert!(receipt.result.is_err());
+        assert_eq!(receipt.conflicts, vec![id.clone()]);
+        assert_eq!(receipt.paths.len(), 2);
+        assert!(receipt.paths.contains(&(id, path.clone())));
+        assert!(
+            receipt
+                .paths
+                .iter()
+                .any(|(_, path)| path.ends_with("Keep this local work.md"))
+        );
         let acknowledgments = saves(&persistence);
         assert_eq!(acknowledgments.len(), 2);
         assert!(acknowledgments[0].result.is_ok());
@@ -582,8 +627,47 @@ mod tests {
             extra_watches: Default::default(),
         };
         assert!(persistence.save(1, Library::default(), Vec::new()).is_err());
-        assert!(persistence.flush(Library::default()).is_err());
+        assert!(persistence.flush(0, Library::default()).is_err());
         assert!(persistence.reload().is_err());
+    }
+
+    #[test]
+    fn timed_out_flush_remains_queued_and_can_still_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut store, mut library) = open(directory.path());
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown("Still queued"));
+        let (requests, incoming) = mpsc::channel();
+        let (_, events) = mpsc::channel();
+        let persistence = Persistence {
+            requests,
+            events,
+            notices: Notices::default(),
+            _watcher: std::sync::Mutex::new(None),
+            watch_root: Default::default(),
+            extra_watches: Default::default(),
+        };
+        let error = persistence
+            .flush_with_timeout(42, library, Duration::ZERO)
+            .unwrap_err();
+        assert!(error.contains("may still complete"));
+        let Request::Flush(revision, library, response) = incoming.try_recv().unwrap() else {
+            panic!("the timed-out flush must remain queued");
+        };
+        let saved = save_snapshot(&mut store, revision, &library, &[]);
+        assert_eq!(saved.revision, 42);
+        assert!(saved.result.is_ok());
+        assert!(response.send(saved).is_err());
+        assert_eq!(only_note(directory.path()).1, "Still queued\n");
+    }
+
+    #[test]
+    fn disconnected_response_is_not_reported_as_a_timeout_or_success() {
+        let (response, result) = mpsc::channel::<Saved>();
+        drop(response);
+        let error = receive(result, Duration::ZERO).unwrap_err();
+        assert!(error.contains("stopped before responding"));
+        assert!(!error.contains("may still complete"));
     }
 
     #[test]
@@ -593,7 +677,7 @@ mod tests {
         let persistence = Persistence::start(store, false);
         let id = local.active_id.clone();
         local.set_document(&id, doc::from_markdown("Original"));
-        persistence.flush(local.clone()).unwrap();
+        persistence.flush(0, local.clone()).unwrap().result.unwrap();
         let (path, text) = only_note(directory.path());
         std::fs::write(&path, text.replace("Original", "External text")).unwrap();
         local.set_document(&id, doc::from_markdown("Discard this after confirmation"));
@@ -609,7 +693,7 @@ mod tests {
         assert!(acknowledgments[0].result.is_err());
         reloaded.set_document(&id, doc::from_markdown("External text, continued"));
         persistence.save(2, reloaded.clone(), Vec::new()).unwrap();
-        persistence.flush(reloaded).unwrap();
+        persistence.flush(0, reloaded).unwrap().result.unwrap();
         assert!(saves(&persistence)[0].result.is_ok());
         assert!(
             only_note(directory.path())
@@ -625,7 +709,11 @@ mod tests {
         let persistence = Persistence::new(store);
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Original"));
-        persistence.flush(library.clone()).unwrap();
+        persistence
+            .flush(0, library.clone())
+            .unwrap()
+            .result
+            .unwrap();
         let (path, text) = only_note(directory.path());
         std::fs::write(&path, text.replace("Original", "From another editor")).unwrap();
         std::fs::write(directory.path().join("notes/dropped.md"), "Dropped in").unwrap();
@@ -658,23 +746,29 @@ mod tests {
 
         // A snapshot taken before the change must neither undo it nor claim a successful save.
         library.set_document(&id, doc::from_markdown("Stale local edit"));
-        assert!(persistence.flush(library.clone()).is_err());
+        let failed = persistence.flush(2, library.clone()).unwrap();
+        assert!(failed.result.is_err());
+        assert_eq!(failed.conflicts, vec![id.clone()]);
         assert!(folder_text(directory.path()).contains("From another editor"));
         assert!(!folder_text(directory.path()).contains("Stale local edit"));
-        assert_eq!(persistence.conflicts().unwrap(), vec![id.clone()]);
         library
             .notes
             .iter_mut()
             .find(|n| n.id == id)
             .unwrap()
             .conflicted = true;
-        persistence.flush(library.clone()).unwrap();
+        let recovered = persistence.flush(3, library.clone()).unwrap();
+        recovered.result.unwrap();
+        assert_eq!(recovered.conflicts, vec![id.clone()]);
+        assert!(recovered.paths.contains(&(id.clone(), path.clone())));
+        assert!(folder_text(directory.path()).contains("From another editor"));
+        assert!(!folder_text(directory.path()).contains("Stale local edit"));
         let local = library.note(&id).unwrap().clone();
         persistence.review_conflict(local.clone()).unwrap();
         let disk = persistence.resolve_conflict(local).unwrap().unwrap();
         library.adopt(disk);
         library.set_document(&id, doc::from_markdown("From another editor, continued"));
-        persistence.flush(library).unwrap();
+        persistence.flush(0, library).unwrap().result.unwrap();
         assert!(folder_text(directory.path()).contains("From another editor, continued"));
         assert!(!folder_text(directory.path()).contains("Stale local edit"));
     }

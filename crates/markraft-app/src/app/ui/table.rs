@@ -137,10 +137,9 @@ impl NotesApp {
         // The ring can step off the note onto the pill, which keeps the note's claim on
         // the toolbar while the keyboard is up there.
         let ringed = self.table_ringed();
-        let open = self.panel == Panel::Editor
-            && self.format_menu.is_none()
-            && self.link_popover.is_none()
-            && self.code_language_block.is_none()
+        let open = self.interaction.panel() == Panel::Editor
+            && self.interaction.popover().is_none()
+            && self.interaction.html().is_none()
             && (ringed || self.editor().focus_handle(cx).is_focused(window));
         self.table = open
             .then(|| self.editor().read(cx).table_at_caret())

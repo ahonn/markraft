@@ -255,7 +255,9 @@ fn intent_icon(intent: &Intent) -> Icon {
 
 impl NotesApp {
     fn intent(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.html_editor.is_some() && !matches!(intent, Intent::SaveHtml | Intent::CancelHtml) {
+        if self.interaction.html().is_some()
+            && !matches!(intent, Intent::SaveHtml | Intent::CancelHtml)
+        {
             return;
         }
         match intent {
@@ -270,24 +272,22 @@ impl NotesApp {
             Intent::Trash => self.open_panel(Panel::Trash, window, cx),
             Intent::Actions => self.open_panel(Panel::Actions, window, cx),
             Intent::ToggleFormatToolbar => {
-                self.code_language_block = None;
-                self.link_popover = None;
+                self.close_popover(cx);
                 self.format_toolbar = !self.format_toolbar;
-                self.format_menu = None;
-                self.panel = Panel::Editor;
+                self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
                 cx.notify();
             }
             Intent::ToggleCount => {
                 self.show_words = !self.show_words;
-                self.panel = Panel::Editor;
+                self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
                 cx.notify();
             }
             Intent::FormatMenu(menu) => self.open_format_menu(menu, window, cx),
             Intent::Settings => self.open_panel(Panel::Settings, window, cx),
             Intent::Link => {
-                self.panel = Panel::Editor;
+                self.set_panel(Panel::Editor, cx);
                 self.open_link_popover(window, cx);
             }
             Intent::EditLink => self.edit_link(window, cx),
@@ -302,16 +302,14 @@ impl NotesApp {
                         EditorView::open_link(&url, cx);
                     }
                 }
-                self.link_popover = None;
+                self.close_popover(cx);
                 self.focus_editor(window, cx);
                 cx.notify();
             }
             Intent::Back => {
-                self.code_language_block = None;
-                self.link_popover = None;
-                self.file_status_popover = false;
-                self.query.update(cx, |e, cx| e.cancel_composition(cx));
-                self.panel = Panel::Editor;
+                self.close_popover(cx);
+                self.cancel_input(cx);
+                self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
                 cx.notify();
             }
@@ -393,18 +391,18 @@ impl NotesApp {
             Intent::ImageLocation => self.configure_images(window, cx),
             Intent::ResetImageLocation => {
                 self.library.workspace.attachments = crate::storage::AttachmentPolicy::Default;
-                self.changed(cx);
+                self.schedule_save(cx);
             }
             // An empty relative path is the folder itself, which is where new notes
             // go until another location is chosen.
             Intent::ResetNewNoteLocation => {
                 self.library.workspace.new_note_directory = PathBuf::new();
-                self.changed(cx);
+                self.schedule_save(cx);
             }
             Intent::Theme(mode) => {
                 self.library.preferences.dark_mode = mode;
                 self.apply_theme(window, cx);
-                self.changed(cx);
+                self.schedule_save(cx);
             }
             Intent::Login => {
                 if let Some(platform) = &mut self.platform {
@@ -420,7 +418,7 @@ impl NotesApp {
             }
             Intent::AutoHeight => {
                 self.library.preferences.auto_height = !self.library.preferences.auto_height;
-                self.changed(cx);
+                self.schedule_save(cx);
             }
             Intent::VimMode => self.toggle_vim(window, cx),
             Intent::Shortcut => self.apply_shortcut(cx),
@@ -435,7 +433,7 @@ impl NotesApp {
                 if let Some(path) = &self.library.active_note().path {
                     cx.reveal_path(path);
                 }
-                self.file_status_popover = false;
+                self.close_popover(cx);
                 cx.notify();
             }
             // The indicator answers for whichever state it is showing: a conflict has
@@ -443,11 +441,11 @@ impl NotesApp {
             // Every capsule opens the one card, which lists all of them: the lock no
             // longer owns it and the pause no longer skips it for its dialog.
             Intent::FileStatus => {
-                self.format_menu = None;
-                self.link_popover = None;
-                self.code_language_block = None;
-                self.chrome_focus = None;
-                self.file_status_popover = !self.file_status_popover;
+                if self.interaction.file_status() {
+                    self.close_popover(cx);
+                } else {
+                    self.show_popover(Popover::FileStatus, cx);
+                }
                 cx.notify();
             }
             Intent::ReviewConflict => {
@@ -458,7 +456,7 @@ impl NotesApp {
                 if let Some(path) = self.library.active_note().path.clone() {
                     cx.open_with_system(&path);
                 }
-                self.file_status_popover = false;
+                self.close_popover(cx);
                 cx.notify();
             }
             Intent::ChooseFolder => self.choose_folder(window, cx),
@@ -471,32 +469,31 @@ impl NotesApp {
             Intent::SaveCopy => self.save_copy(cx),
             Intent::Reload => self.reload(window, cx),
             Intent::Mark(mark) => {
-                self.format_menu = None;
+                self.close_popover(cx);
                 self.editor()
                     .update(cx, |e, cx| e.run_command(&mark.command(), cx));
-                self.panel = Panel::Editor;
+                self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
             }
             Intent::Block(block) => {
-                self.format_menu = None;
+                self.close_popover(cx);
                 self.editor()
                     .update(cx, |e, cx| e.run_command(&block.command(), cx));
-                self.panel = Panel::Editor;
+                self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
             }
             Intent::InsertTable => {
-                self.format_menu = None;
-                self.link_popover = None;
+                self.close_popover(cx);
                 self.editor().update(cx, |e, cx| e.insert_table(2, 3, cx));
-                self.panel = Panel::Editor;
+                self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
             }
             // The table commands keep the caret where it is, so the note takes the
             // keyboard back and the toolbar re-anchors from the next paint.
             Intent::Table(edit) => {
-                self.format_menu = None;
+                self.close_popover(cx);
                 self.editor().update(cx, |e, cx| edit.run(e, cx));
-                self.panel = Panel::Editor;
+                self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
             }
         }
@@ -669,10 +666,10 @@ impl NotesApp {
         let id: SharedString = id.into();
         let expanded = match intent {
             Intent::Browse => Some(matches!(
-                self.panel,
+                self.interaction.panel(),
                 Panel::Browse | Panel::Drafts | Panel::Trash
             )),
-            Intent::Actions => Some(self.panel == Panel::Actions),
+            Intent::Actions => Some(self.interaction.panel() == Panel::Actions),
             _ => None,
         };
         let chrome = matches!(
@@ -818,7 +815,7 @@ impl NotesApp {
             .pt(px(12.))
             .child(self.query_field(cx))
     }
-    /// The one query editor, borrowed by whichever surface is open. It carries the name
+    /// The input editor owned by the current surface. It carries the name
     /// of the surface it is serving, set with its text in [`NotesApp::set_query`], so
     /// this is only the box the ring is drawn around.
     fn query_field(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -833,7 +830,7 @@ impl NotesApp {
                     MouseButton::Left,
                     cx.listener(|this, _, _, _| this.chrome_focus = None),
                 )
-                .child(self.query.clone()),
+                .child(self.query().clone()),
         )
     }
     /// What stands in the document area for a file Markraft could not read.
@@ -844,7 +841,7 @@ impl NotesApp {
     fn unreadable_file(&self, cx: &mut Context<Self>) -> Option<Div> {
         let note = self.library.active_note();
         let reason = note.read_only.clone()?;
-        if !note.document_is_empty() || self.panel != Panel::Editor {
+        if !note.document_is_empty() || self.interaction.panel() != Panel::Editor {
             return None;
         }
         let openable = note.path.is_some();
@@ -908,7 +905,7 @@ impl NotesApp {
     fn picker(&self, heading: bool, cx: &mut Context<Self>) -> Div {
         let scope = self.scope();
         let deleted = scope == Scope::Deleted;
-        let query = self.query.read(cx).text().to_owned();
+        let query = self.query().read(cx).text().to_owned();
         let notes = self.matching_notes(query.trim(), scope);
         let total = notes.len();
         let now = crate::storage::timestamp();
@@ -1536,7 +1533,7 @@ impl NotesApp {
         self.scroll_area(content, &self.settings_scroll, cx)
     }
     fn panel_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.html_editor.is_some() {
+        if self.interaction.html().is_some() {
             return self.html_key(key, window, cx);
         }
         // A ringed control answers first, whichever surface it belongs to.
@@ -1551,39 +1548,39 @@ impl NotesApp {
             }
             return false;
         }
-        if self.format_menu.is_some() {
+        if self.interaction.format_menu().is_some() {
             return self.format_key(key, window, cx);
         }
-        if self.query.read(cx).is_composing() {
+        if self.input_composing(cx) {
             return false;
         }
-        if self.code_language_block.is_some() {
+        if self.interaction.code_language().is_some() {
             return self.code_language_key(key, window, cx);
         }
-        if self.link_popover == Some(LinkPopover::Edit) {
+        if self.interaction.link() == Some(LinkPopover::Edit) {
             if key == "enter" {
                 self.apply_link(window, cx);
             }
             // Up and down have nowhere to go in a one-line field.
             return true;
         }
-        if self.rename.is_some() {
+        if self.interaction.rename().is_some() {
             if key == "enter" {
                 self.apply_rename(window, cx);
             }
             return true;
         }
-        if self.panel == Panel::Editor {
+        if self.interaction.panel() == Panel::Editor {
             return false;
         }
-        if self.panel == Panel::Settings {
+        if self.interaction.panel() == Panel::Settings {
             if key == "enter" {
                 self.apply_shortcut(cx);
                 return true;
             }
             return false;
         }
-        if self.panel == Panel::Actions {
+        if self.interaction.panel() == Panel::Actions {
             let items = self.filtered_actions(cx);
             match key {
                 "up" => self.selected = self.selected.saturating_sub(1),
@@ -1597,7 +1594,7 @@ impl NotesApp {
             }
             self.actions_scroll.scroll_to_item(self.selected);
         } else {
-            let query = self.query.read(cx).text().to_owned();
+            let query = self.query().read(cx).text().to_owned();
             let notes = self.matching_notes(query.trim(), self.scope());
             match key {
                 "up" => self.select_row(self.selected.saturating_sub(1)),
@@ -1605,7 +1602,7 @@ impl NotesApp {
                 "enter" => {
                     if let Some(note) = notes.get(self.selected) {
                         let id = note.id.clone();
-                        if self.panel == Panel::Trash {
+                        if self.interaction.panel() == Panel::Trash {
                             self.restore_note(&id, window, cx);
                         } else {
                             self.select_note(&id, window, cx);
@@ -2054,7 +2051,13 @@ impl NotesApp {
         self.count_of(units)
     }
     fn filtered_actions(&self, cx: &App) -> Vec<Command> {
-        let query = self.query.read(cx).text().to_owned().trim().to_lowercase();
+        let query = self
+            .query()
+            .read(cx)
+            .text()
+            .to_owned()
+            .trim()
+            .to_lowercase();
         let editor = self.editor();
         let editor = editor.read(cx);
         let block = doc::Block::active(editor.state(), &editor.projection());
@@ -2165,24 +2168,24 @@ impl NotesApp {
         // edge, so a short window shows a shorter card rather than one running off it.
         let top = if viewport.height < px(400.) {
             px(44.)
-        } else if self.panel == Panel::Settings {
+        } else if self.interaction.panel() == Panel::Settings {
             px(72.)
         } else {
             px(100.)
         };
-        let width = px(if self.panel == Panel::Settings {
+        let width = px(if self.interaction.panel() == Panel::Settings {
             360.
         } else {
             320.
         })
         .min(viewport.width - px(32.));
         let available = (viewport.height - top - px(16.)).max(px(0.));
-        let desired = match self.panel {
+        let desired = match self.interaction.panel() {
             Panel::Browse | Panel::Drafts | Panel::Trash => {
                 let n = self
-                    .matching_notes(self.query.read(cx).text().trim(), self.scope())
+                    .matching_notes(self.query().read(cx).text().trim(), self.scope())
                     .len();
-                let heading = if self.panel == Panel::Editor {
+                let heading = if self.interaction.panel() == Panel::Editor {
                     26.
                 } else {
                     32.
@@ -2211,13 +2214,13 @@ impl NotesApp {
         };
         // Include both border pixels so a fully visible short list does not scroll.
         let height = (desired + px(2.))
-            .min(px(if self.panel == Panel::Settings {
+            .min(px(if self.interaction.panel() == Panel::Settings {
                 440.
             } else {
                 420.
             }))
             .min(available);
-        let contents = match self.panel {
+        let contents = match self.interaction.panel() {
             // A short card gives what room it has to the rows rather than to a heading.
             Panel::Browse | Panel::Drafts | Panel::Trash => self.picker(height >= px(136.), cx),
             Panel::Actions => self.actions_panel(cx),
@@ -2270,14 +2273,14 @@ impl NotesApp {
 }
 impl Render for NotesApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.code_language_block.is_some() && self.code_language_focus_pending {
+        if self.interaction.code_language().is_some() && self.code_language_focus_pending {
             self.code_language_focus_pending = false;
-            window.focus(&self.query.focus_handle(cx), cx);
-            let block = self.code_language_block;
+            window.focus(&self.query().focus_handle(cx), cx);
+            let block = self.interaction.code_language();
             let weak = cx.entity().downgrade();
             window.on_next_frame(move |_, cx| {
                 let _ = weak.update(cx, |this, cx| {
-                    if this.code_language_block == block {
+                    if this.interaction.code_language() == block {
                         this.code_language_scroll
                             .scroll_to_item(this.code_language_selected);
                         cx.notify();
@@ -2351,7 +2354,7 @@ impl Render for NotesApp {
             // field owns the keyboard.
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, w, cx| {
                 this.note_key_press(cx);
-                if this.html_editor.is_some()
+                if this.interaction.html().is_some()
                     && event.keystroke.key == "enter"
                     && event.keystroke.modifiers.platform
                 {
@@ -2383,7 +2386,7 @@ impl Render for NotesApp {
             // note keeps the whole window the rest of the time.
             .drag_over::<ExternalPaths>(move |s, _, _, _| s.border_2().border_color(accent))
             .on_action(cx.listener(|this, _: &Save, w, cx| {
-                if this.html_editor.is_some() {
+                if this.interaction.html().is_some() {
                     this.save_html_source(w, cx);
                 } else if this.library.active_note().conflicted {
                     this.reopen_conflict(w, cx);
@@ -2468,7 +2471,7 @@ impl Render for NotesApp {
                                     .hover(|s| s.text_color(self.control_text()))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         cx.stop_propagation();
-                                        if this.rename.is_some() {
+                                        if this.interaction.rename().is_some() {
                                             this.close_rename(window, cx);
                                         } else {
                                             this.intent(Intent::Rename, window, cx);
@@ -2694,7 +2697,8 @@ impl Render for NotesApp {
                 )
             })
             .when(
-                self.format_menu.is_some() && self.panel == Panel::Editor,
+                self.interaction.format_menu().is_some()
+                    && self.interaction.panel() == Panel::Editor,
                 |s| {
                     s.child(popover_enter(
                         "format-enter",
@@ -2732,7 +2736,7 @@ impl Render for NotesApp {
             .when_some(self.html_source_entry(window, cx), |s, entry| {
                 s.child(entry)
             })
-            .when(self.panel != Panel::Editor, |s| {
+            .when(self.interaction.panel() != Panel::Editor, |s| {
                 s.child(popover_enter(
                     "overlay-enter",
                     self.overlay(window, cx),

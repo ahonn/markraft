@@ -58,11 +58,9 @@ impl NotesApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        if self.panel != Panel::Editor
-            || self.html_editor.is_some()
-            || self.link_popover.is_some()
-            || self.code_language_block.is_some()
-            || self.format_menu.is_some()
+        if self.interaction.panel() != Panel::Editor
+            || self.interaction.html().is_some()
+            || self.interaction.popover().is_some()
         {
             return None;
         }
@@ -124,12 +122,9 @@ impl NotesApp {
                 .with_style(style)
                 .with_aria_label("HTML source")
         });
-        self.format_menu = None;
-        self.link_popover = None;
-        self.code_language_block = None;
-        self.chrome_focus = None;
+        self.leave_input(cx);
         window.focus(&source.focus_handle(cx), cx);
-        self.html_editor = Some(HtmlEditor {
+        self.interaction.begin_html(HtmlEditor {
             note: self.library.active_id.clone(),
             pos,
             original,
@@ -145,7 +140,7 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(edit) = &self.html_editor else {
+        let Some(edit) = self.interaction.html() else {
             return false;
         };
         if edit.source.read(cx).is_composing() {
@@ -153,14 +148,14 @@ impl NotesApp {
                 .update(cx, |editor, cx| editor.cancel_composition(cx));
             return true;
         }
-        self.html_editor = None;
+        self.interaction.end_html();
         self.focus_editor(window, cx);
         cx.notify();
         true
     }
 
     pub(super) fn save_html_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(edit) = self.html_editor.as_ref() else {
+        let Some(edit) = self.interaction.html() else {
             return;
         };
         if edit.note != self.library.active_id {
@@ -185,7 +180,7 @@ impl NotesApp {
             self.focus_html_source(window, cx);
             return;
         }
-        self.html_editor = None;
+        self.interaction.end_html();
         self.focus_editor(window, cx);
         cx.notify();
     }
@@ -195,7 +190,7 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(edit) = &self.html_editor else {
+        let Some(edit) = self.interaction.html() else {
             return false;
         };
         window.focus(&edit.source.focus_handle(cx), cx);
@@ -208,7 +203,7 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(edit) = &self.html_editor else {
+        let Some(edit) = self.interaction.html() else {
             return false;
         };
         let handles = [
@@ -230,7 +225,7 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(edit) = &self.html_editor else {
+        let Some(edit) = self.interaction.html() else {
             return false;
         };
         if matches!(key, "enter" | "space") && edit.save_focus.is_focused(window) {
@@ -249,7 +244,7 @@ impl NotesApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        let edit = self.html_editor.as_ref()?;
+        let edit = self.interaction.html()?;
         let viewport = window.bounds().size;
         let width = px(560.).min(viewport.width - px(24.));
         let height = px(340.).min(viewport.height - px(72.));

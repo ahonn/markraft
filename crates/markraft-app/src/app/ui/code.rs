@@ -3,6 +3,9 @@ use markraft_gpui::canonical_language;
 
 impl NotesApp {
     pub(in crate::app) fn open_code_language(&mut self, pos: usize, cx: &mut Context<Self>) {
+        if self.interaction.html().is_some() {
+            return;
+        }
         let editor = self.editor();
         let Some(active) = editor.read(cx).code_language(pos) else {
             return;
@@ -12,12 +15,7 @@ impl NotesApp {
             .iter()
             .position(|(language, _)| canonical_language(language) == canonical_language(&active))
             .unwrap_or(0);
-        self.format_menu = None;
-        self.link_popover = None;
-        self.query
-            .update(cx, |editor, cx| editor.cancel_composition(cx));
-        self.chrome_focus = None;
-        self.code_language_block = Some(pos);
+        self.show_popover(Popover::CodeLanguage(pos), cx);
         self.code_language_selected = selected;
         self.code_language_focus_pending = true;
         self.set_query(String::new(), "Search languages…", "Filter languages", cx);
@@ -25,7 +23,7 @@ impl NotesApp {
     }
 
     pub(super) fn matching_code_languages(&self, cx: &App) -> Vec<(&'static str, &'static str)> {
-        let query = self.query.read(cx).text().to_owned();
+        let query = self.query().read(cx).text().to_owned();
         let query = query.trim().to_lowercase();
         markraft_gpui::code_languages()
             .iter()
@@ -44,13 +42,13 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(pos) = self.code_language_block.take() {
+        if let Some(pos) = self.interaction.code_language() {
+            self.close_popover(cx);
             self.editor().update(cx, |editor, cx| {
                 editor.set_code_language_at(pos, language, cx)
             });
         }
-        self.query
-            .update(cx, |editor, cx| editor.cancel_composition(cx));
+        self.cancel_input(cx);
         self.focus_editor(window, cx);
         cx.notify();
     }
@@ -82,19 +80,11 @@ impl NotesApp {
     }
 
     pub(super) fn code_language_popover(
-        &mut self,
+        &self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        // Tab moves focus from the field to the panel handle, which still belongs here.
-        if self.panel != Panel::Editor
-            || (!self.code_language_focus_pending
-                && !self.query.focus_handle(cx).is_focused(window)
-                && !self.panel_focus.is_focused(window))
-        {
-            self.code_language_block = None;
-        }
-        let pos = self.code_language_block?;
+        let pos = self.interaction.code_language()?;
         let editor = self.editor().read(cx);
         let active = editor.code_language(pos)?.trim().to_lowercase();
         let anchor = editor.code_header_bounds(pos)?;
@@ -204,9 +194,8 @@ impl NotesApp {
                 .overflow_hidden()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                    this.code_language_block = None;
-                    this.query
-                        .update(cx, |editor, cx| editor.cancel_composition(cx));
+                    this.close_popover(cx);
+                    this.cancel_input(cx);
                     this.focus_editor(window, cx);
                     cx.notify();
                 }))

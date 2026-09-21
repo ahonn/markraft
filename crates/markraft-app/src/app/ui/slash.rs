@@ -184,7 +184,7 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.panel != Panel::Editor {
+        if self.interaction.panel() != Panel::Editor {
             return;
         }
         if let Some(intent) = payload.downcast_ref::<Intent>() {

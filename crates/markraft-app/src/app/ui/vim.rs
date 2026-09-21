@@ -34,9 +34,9 @@ impl NotesApp {
                 session.vim_mode = Mode::default();
             }
         }
-        self.panel = Panel::Editor;
+        self.set_panel(Panel::Editor, cx);
         self.focus_editor(window, cx);
-        self.changed(cx);
+        self.schedule_save(cx);
     }
 
     /// The mode a note's editor reported through `EditorEvent::Extension`. It is kept per
