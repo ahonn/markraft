@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
+  <title>Markraft parallel-cut M, menu bar template at 2x</title>
+  <!-- One unit is one pixel on a Retina display; the same 18-point canvas as
+       markraft-menubar.svg. The glyph is 32 x 24 with 8-unit stems, every straight
+       edge on the grid. Slit edges keep slope 1, y=x-8 and y=x-12: four units
+       across, against the 2.9 a plain reduction of markraft-m.svg would give.
+       Only alpha is used: macOS tints a template image itself. -->
+  <path fill="#000" transform="translate(2 6)" d="M 1 0 H 8 L 21 13 L 16.5 17.5 Q 16 18 15.5 17.5 L 8 10 V 23 Q 8 24 7 24 H 1 Q 0 24 0 23 V 1 Q 0 0 1 0 Z
+M 22 0 H 31 Q 32 0 32 1 V 23 Q 32 24 31 24 H 25 Q 24 24 24 23 V 12 L 17 5 Z"/>
+</svg>

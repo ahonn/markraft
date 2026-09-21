@@ -8,6 +8,8 @@ Editable production artwork for the blue-and-white, parallel-cut M direction.
 - `markraft-m.svg`: off-white glyph on a transparent 1024 × 1024 canvas.
 - `markraft-m-black.svg`: the same geometry in charcoal for use on light backgrounds.
 - `Markraft.png`: 1024-pixel native Default render used by the application bundle.
+- `markraft-menubar.svg`, `markraft-menubar@2x.svg`: the glyph redrawn for the menu bar, once per display scale.
+- `markraft-menubar.png`, `markraft-menubar@2x.png`: their renders, embedded by `crates/markraft-app/src/platform.rs` as the two representations of the status item's template image.
 - `previews/`: native macOS appearance and small-size previews.
 
 The background is `#2F7CF6`, matching `EditorStyle::notes()` marker and link colors in `crates/markraft-gpui/src/style.rs`. The glyph is `#FAFAFA`. The glyph occupies 660 × 491.04 points and is centered. In master coordinates, the opposing slit edges lie on `y = x - 250` and `y = x - 340`. Both have a 45-degree slope; their perpendicular separation on the final canvas is approximately 42 points.
@@ -31,4 +33,19 @@ The document was created using [compose-app-icon](https://github.com/giginet/app
 
 The manifest intentionally omits `color-space-for-untagged-svg-colors`: the skill schema accepts `srgb` for this key, but the installed native renderer rejects it. Omitting it renders successfully; the SVG uses explicit neutral hex fills.
 
-`cargo xtask bundle` uses macOS `sips` and `iconutil` to resize `Markraft.png` into the ten standard iconset representations and packages them as `Contents/Resources/Markraft.icns`. Regular builds do not require Icon Composer or Swift scripts. After changing the `.icon` document, regenerate `Markraft.png` before bundling. The `.icns` uses the Default appearance on all supported macOS versions; dynamic Icon Composer appearances are not bundled. The separate menu bar template image remains unchanged.
+`cargo xtask bundle` uses macOS `sips` and `iconutil` to resize `Markraft.png` into the ten standard iconset representations and packages them as `Contents/Resources/Markraft.icns`. Regular builds do not require Icon Composer or Swift scripts. After changing the `.icon` document, regenerate `Markraft.png` before bundling. The `.icns` uses the Default appearance on all supported macOS versions; dynamic Icon Composer appearances are not bundled.
+
+## Menu bar template
+
+The menu bar glyph is drawn for its size, not reduced from `markraft-m.svg`, and drawn twice because a non-Retina display shows the 18-pixel bitmap and a Retina display the 36-pixel one. Both share an 18-point canvas with a centered 16 × 12 point glyph, stems a quarter of its width, and every straight edge on that file's pixel grid. The slit keeps its 45-degree slope but is wider than the app icon's: 3 pixels across at 1x, which leaves two whole pixels clear in each row, and 4 at 2x. A plain reduction would leave 1.4 and 2.9, and the 1x slit fills in. Keep the two files' outlines in step when editing, but do not derive one from the other.
+
+macOS uses only the alpha channel of a template image, so the fill color is irrelevant and the blue background is never part of it.
+
+After editing, render each SVG at its own size with `sips`, which rasterizes SVG natively and keeps transparency:
+
+```sh
+sips -s format png assets/icon/markraft-menubar.svg --out assets/icon/markraft-menubar.png
+sips -s format png assets/icon/markraft-menubar@2x.svg --out assets/icon/markraft-menubar@2x.png
+```
+
+A test in `platform.rs` checks that the embedded files are 18 and 36 pixels.

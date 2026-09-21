@@ -6,12 +6,14 @@ pub(crate) mod symbols;
 
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use objc2::{
-    class,
+    AllocAnyThread, MainThreadMarker, class,
     encode::{Encode, Encoding},
     msg_send,
     rc::Retained,
     runtime::{AnyClass, AnyObject, Bool},
 };
+use objc2_app_kit::{NSBitmapImageRep, NSImage};
+use objc2_foundation::{NSData, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{ffi::CStr, path::Path, ptr, str::FromStr};
 use tray_icon::{
@@ -107,11 +109,11 @@ impl Platform {
         ];
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_icon(note_icon()?)
-            .with_icon_as_template(true)
+            .with_icon(blank_menu_bar_icon()?)
             .with_tooltip("Markraft")
             .build()
             .map_err(menu_bar_failure)?;
+        show_menu_bar_image(&tray)?;
         let mut platform = Self {
             _tray: tray,
             hotkeys,
@@ -469,23 +471,72 @@ fn ns_string_text(string: *mut AnyObject) -> Option<String> {
     }
 }
 
-fn note_icon() -> Result<Icon, String> {
-    const SIZE: usize = 18;
-    let mut pixels = vec![0_u8; SIZE * SIZE * 4];
-    for y in 2..16 {
-        for x in 3..15 {
-            let border = x == 3 || x == 14 || y == 2 || y == 15;
-            let line = (6..=11).contains(&x) && (y == 6 || y == 9 || y == 12);
-            if border || line {
-                pixels[(y * SIZE + x) * 4 + 3] = 255;
-            }
-        }
+/// tray-icon takes one bitmap and lets AppKit resample it, which blurs either a
+/// Retina or a non-Retina menu bar. It also sizes its click target from the image
+/// it was given and never again, so it gets a blank of the final size and the
+/// status item's button gets the real image afterwards.
+fn blank_menu_bar_icon() -> Result<Icon, String> {
+    const PIXELS: u32 = MENU_BAR_IMAGE_POINTS as u32;
+    Icon::from_rgba(vec![0; (PIXELS * PIXELS * 4) as usize], PIXELS, PIXELS)
+        .map_err(menu_bar_failure)
+}
+
+fn show_menu_bar_image(tray: &TrayIcon) -> Result<(), String> {
+    let main_thread = MainThreadMarker::new()
+        .ok_or_else(|| menu_bar_failure("the status item is set up off the main thread"))?;
+    let button = tray
+        .ns_status_item()
+        .and_then(|item| item.button(main_thread))
+        .ok_or_else(|| menu_bar_failure("the status item has no button"))?;
+    let image = menu_bar_image()
+        .ok_or_else(|| menu_bar_failure("the menu bar image could not be decoded"))?;
+    button.setImage(Some(&image));
+    Ok(())
+}
+
+const MENU_BAR_IMAGE_POINTS: f64 = 18.;
+
+/// The parallel-cut M as a template image, which macOS tints for the menu bar's
+/// appearance. Each representation is drawn on its own pixel grid and AppKit picks
+/// one per display; `assets/icon/README.md` has the render commands.
+fn menu_bar_image() -> Option<Retained<NSImage>> {
+    const REPRESENTATIONS: [&[u8]; 2] = [
+        include_bytes!("../../../assets/icon/markraft-menubar.png"),
+        include_bytes!("../../../assets/icon/markraft-menubar@2x.png"),
+    ];
+    let size = NSSize::new(MENU_BAR_IMAGE_POINTS, MENU_BAR_IMAGE_POINTS);
+    let image = NSImage::initWithSize(NSImage::alloc(), size);
+    for png in REPRESENTATIONS {
+        let representation = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(png))?;
+        // The point size is what makes the 36-pixel bitmap the 2x representation.
+        representation.setSize(size);
+        image.addRepresentation(&representation);
     }
-    Icon::from_rgba(pixels, SIZE as u32, SIZE as u32).map_err(menu_bar_failure)
+    image.setTemplate(true);
+    Some(image)
 }
 
 fn diagnostics(event: &str) {
     if std::env::var_os("MARKRAFT_DIAGNOSTICS").is_some() {
         eprintln!("Markraft: {event}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A re-rendered asset of the wrong size would otherwise only show up as a soft
+    // or missing menu bar item.
+    #[test]
+    fn menu_bar_image_has_a_representation_for_each_display_scale() {
+        let image = menu_bar_image().unwrap();
+        assert!(image.isTemplate());
+        let pixels: Vec<_> = image
+            .representations()
+            .iter()
+            .map(|representation| (representation.pixelsWide(), representation.pixelsHigh()))
+            .collect();
+        assert_eq!(pixels, [(18, 18), (36, 36)]);
     }
 }
