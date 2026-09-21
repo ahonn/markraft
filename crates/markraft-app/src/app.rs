@@ -2450,9 +2450,11 @@ fn folder_label(root: &std::path::Path, relative: &std::path::Path) -> String {
 /// What the conflict dialog calls the note: the file another app changed, or the
 /// note's own title while it has no file yet.
 /// Whether a note is work that is not in a file the way it was left: it has no file
-/// yet, or the file says something else.
+/// yet, or the file says something else. A blank page with no file is not work: the
+/// store never writes one, and the library always keeps one open to type into.
 pub(crate) fn is_draft(note: &crate::storage::Note) -> bool {
-    note.deleted_at.is_none() && (note.path.is_none() || note.conflicted)
+    note.deleted_at.is_none()
+        && (note.conflicted || (note.path.is_none() && !note.document_is_empty()))
 }
 
 fn conflict_subject(note: &crate::storage::Note) -> String {
@@ -2910,6 +2912,9 @@ mod tests {
         };
         // Nothing has been written for it yet, so it lives only in the app.
         assert!(super::is_draft(&note(&library, &id)));
+        // The blank page an empty library opens on has nothing in it to file.
+        let blank = library.new_note(doc::empty());
+        assert!(!super::is_draft(&note(&library, &blank)));
         // Given a file it agrees with, it is an ordinary note.
         let filed = library.notes.iter_mut().find(|n| n.id == id).unwrap();
         filed.path = Some(PathBuf::from("/notes/Unfiled.md"));
