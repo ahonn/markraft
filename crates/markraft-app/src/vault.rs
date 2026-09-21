@@ -2285,9 +2285,14 @@ mod tests {
             file_name(library.note(&id).unwrap())
         };
         for (source, expected) in [
-            // A wiki link is an atom, and the title reads nothing at all in it, so the
-            // rest of the line is what the file is named after.
-            ("[[Link]] notes", "notes"),
+            // A wiki link is an atom, and the title reads it as the label the editor
+            // draws — never as its brackets, which is what keeps the stem reachable.
+            ("[[Link]] notes", "Link notes"),
+            ("[[page|Alias]] notes", "Alias notes"),
+            // A line that is only a link is named after it. The name may be the one
+            // the link points at, and the note is filed beside it as "Link 2.md"
+            // rather than over it.
+            ("[[Link]]", "Link"),
             // Brackets the source only spells out do reach the title, and a stem
             // holding them is one no `[[link]]` can name.
             ("[TODO] Fix the bug", "TODO Fix the bug"),

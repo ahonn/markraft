@@ -1,9 +1,9 @@
 //! Plain text, for the `text/plain` flavour of a clipboard and for search.
 //!
 //! One line per block, and one line per hard break inside a block. An atom
-//! contributes the text a reader would see in its place: an image's `alt`. A
-//! thematic break contributes nothing, because it has no text; a raw block
-//! contributes its source, which is its text already.
+//! contributes the text a reader would see in its place: an image's `alt`, a
+//! wiki link's label. A thematic break contributes nothing, because it has no
+//! text; a raw block contributes its source, which is its text already.
 //!
 //! A table is the one block that is not one line: its cells are separated by
 //! tabs and its rows by line endings, which is what a spreadsheet reads and
@@ -78,6 +78,14 @@ fn leaf_text(schema: &Schema, node: &Node) -> String {
         md::SOFT_BREAK => " ".to_string(),
         md::HARD_BREAK => "\n".to_string(),
         md::IMAGE => attr("alt"),
+        // An atom keeps the source's own spacing in its attributes, so `[[ a ]]`
+        // reads as the label without it, the way the editor draws one. An embed
+        // reads as its target too, where the editor has room to shorten it to the
+        // file it names.
+        md::WIKI_LINK => {
+            let (target, alias) = (attr("target"), attr("alias"));
+            crate::wiki::label(target.trim(), alias.trim()).to_string()
+        }
         _ => String::new(),
     }
 }

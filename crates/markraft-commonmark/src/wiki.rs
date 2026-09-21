@@ -36,14 +36,20 @@ pub struct WikiLink {
     pub embed: bool,
 }
 
+/// What a wiki link reads as: the alias the author gave it, or the target it
+/// names where there is none.
+///
+/// Free-standing because a [`WIKI_LINK`](crate::schema::WIKI_LINK) atom carries
+/// the two parts as separate attributes, and the plain-text projection has to ask
+/// the same question of those without rebuilding the link.
+pub fn label<'a>(target: &'a str, alias: &'a str) -> &'a str {
+    if alias.is_empty() { target } else { alias }
+}
+
 impl WikiLink {
     /// What the editor shows for it: the alias, or the target as written.
     pub fn label(&self) -> &str {
-        if self.alias.is_empty() {
-            &self.target
-        } else {
-            &self.alias
-        }
+        label(&self.target, &self.alias)
     }
 
     /// The source of this link: `[[target]]`, `[[target|alias]]`, with a

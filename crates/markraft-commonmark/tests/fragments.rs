@@ -43,6 +43,24 @@ fn plain_text_reads_an_atom_as_the_text_it_stands_for() {
 }
 
 #[test]
+fn plain_text_reads_a_wiki_link_as_its_label() {
+    let codec = Codec::new();
+    // A link with no label of its own reads as the target it names, `#heading` and
+    // all, and one with an alias reads as the alias — what the editor draws for it.
+    // The spacing a source keeps inside the brackets is not part of either.
+    let doc = codec.parse("See [[ Note#H ]] and ![[x.png|Cover]]");
+    assert_eq!(to_plain_text(&codec.schema, &doc), "See Note#H and Cover");
+    // A line built around a link still reads as a whole sentence. Notes are named
+    // after their first such line, so a link contributing nothing would file this
+    // one under "kickoff" alone.
+    let opening = codec.parse("[[Project Alpha]] kickoff");
+    assert_eq!(
+        to_plain_text(&codec.schema, &opening),
+        "Project Alpha kickoff"
+    );
+}
+
+#[test]
 fn plain_text_reads_a_table_as_tab_separated_rows() {
     let codec = Codec::new();
     let doc = codec.parse("| a | b |\n| - | - |\n| 1 |  |");
