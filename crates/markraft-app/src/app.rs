@@ -768,6 +768,19 @@ impl NotesApp {
             self.held_draft = Some(id);
             self.name_at = Some(Instant::now() + NAME_SETTLES);
         }
+        // An input method's candidate is a name still being chosen. Only a committed
+        // change reaches `changed`, so without this the deadline would run out while
+        // the candidate window stood open and file the note under the part of the
+        // title already on the page — which is most of a title, typed in Chinese.
+        if self.held_draft.is_some() && self.composing(cx) {
+            self.name_at = Some(Instant::now() + NAME_SETTLES);
+        }
+    }
+    /// Whether the active note's editor holds an input method's uncommitted candidate.
+    fn composing(&self, cx: &App) -> bool {
+        self.sessions
+            .get(&self.library.active_id)
+            .is_some_and(|session| session.editor.read(cx).is_composing())
     }
     /// Whether the active note is one the store would file under its first line, with
     /// the selection still working on that line.
