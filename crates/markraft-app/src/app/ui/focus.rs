@@ -20,7 +20,7 @@ pub(super) enum Surface {
     CodeLanguage,
     LinkView,
     LinkEdit,
-    /// The card under the title that renames the note's file.
+    /// The pill under the title that renames the note's file.
     Rename,
     /// The card over the lower-left file status indicator.
     FileStatus,

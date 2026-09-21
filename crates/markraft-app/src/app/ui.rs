@@ -53,7 +53,7 @@ enum Intent {
     PastePlain,
     PasteMarkdown,
     Export,
-    /// The popover under the title, and the two things done inside it.
+    /// The pill under the title, and the two things done inside it.
     Rename,
     ApplyRename,
     RenameLinks,
@@ -2704,7 +2704,9 @@ impl Render for NotesApp {
                     ))
                 },
             )
-            .when_some(self.rename_card(window, cx), |s, card| s.child(card))
+            .when_some(self.rename_pill(window, cx), |s, pill| {
+                s.child(popover_enter("rename-enter", pill, false, reduce_motion))
+            })
             .when_some(self.link_pill(window, cx), |s, pill| {
                 s.child(popover_enter("link-enter", pill, true, reduce_motion))
             })

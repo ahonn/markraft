@@ -8,14 +8,13 @@ use super::*;
 use markraft_core::Fragment;
 use std::path::Path;
 
-/// The rename popover under the title: whose file it names, and what applying it
-/// would do beyond the file itself.
+/// The rename pill under the title: whose file it names, and what applying it would
+/// do beyond the file itself.
 pub(super) struct Rename {
     pub(super) id: String,
     /// How many links elsewhere in the folder reach this note by its present name.
     pub(super) links: usize,
     pub(super) update_links: bool,
-    pub(super) error: Option<String>,
 }
 
 /// The notes a link can resolve to, as `resolve_wiki_link` reads them.
@@ -211,7 +210,6 @@ impl NotesApp {
             id,
             links,
             update_links: true,
-            error: None,
         });
         window.focus(&self.query.focus_handle(cx), cx);
         cx.notify();
@@ -239,11 +237,10 @@ impl NotesApp {
             return;
         }
         let name = self.query.read(cx).text().trim().to_owned();
+        // A name that was refused is gone the moment another is typed, so it is said in
+        // passing and the pill stays open for the next try.
         if let Err(error) = self.rename_note(&id, &name, update_links, cx) {
-            if let Some(rename) = &mut self.rename {
-                rename.error = Some(error);
-            }
-            cx.notify();
+            self.inform(error, cx);
             return;
         }
         self.close_rename(window, cx);

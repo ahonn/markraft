@@ -158,7 +158,7 @@ pub struct NotesApp {
     format_toolbar: bool,
     format_menu: Option<FormatMenu>,
     link_popover: Option<LinkPopover>,
-    /// The popover under the title that gives the note's file another name.
+    /// The pill under the title that gives the note's file another name.
     rename: Option<rename::Rename>,
     /// The table the toolbar was last drawn for. It is paint geometry, so it is only
     /// ever as fresh as the last frame, which is also the frame the keyboard walks.
