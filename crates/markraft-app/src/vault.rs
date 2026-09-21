@@ -698,7 +698,10 @@ impl Store {
         self.archive_recovery(&note.id)?;
         Ok(result)
     }
-    pub fn save(&mut self, library: &Library) -> Result<(), String> {
+    /// Write the library out. `held` names the never-filed notes whose title the
+    /// application says is still being typed; they wait in recovery rather than being
+    /// filed under half a name. Everything else is written as it always was.
+    pub fn save(&mut self, library: &Library, held: &[String]) -> Result<(), String> {
         library.validate()?;
         self.manifest.workspace = library.workspace.clone();
         let mut errors = Vec::new();
@@ -765,8 +768,14 @@ impl Store {
             }
             // Without a folder there is nowhere to file a new note, so a standalone
             // draft is held in recovery until the user names a file for it. It is
-            // waiting for a location, not failing to be written.
-            if saved.is_none() && note.path.is_none() && self.standalone {
+            // waiting for a location, not failing to be written. A note whose first
+            // line is still being typed waits the same way: the file would be named
+            // after however much of the title had arrived 350ms in, and it is never
+            // renamed afterwards.
+            if saved.is_none()
+                && note.path.is_none()
+                && (self.standalone || held.contains(&note.id))
+            {
                 self.write_recovery(note, false)?;
                 continue;
             }
@@ -1432,6 +1441,13 @@ mod tests {
         fs::write(&path, text).unwrap();
         path
     }
+    /// Every Markdown file in the notes folder, sorted.
+    fn markdown_files(root: &Path) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        collect_markdown(&root.join("notes"), &mut paths).unwrap();
+        paths.sort();
+        paths
+    }
     #[test]
     fn a_file_removed_while_closed_is_named_once() {
         let root = tempfile::tempdir().unwrap();
@@ -1458,7 +1474,7 @@ mod tests {
         let (mut store, mut library) = open(root.path());
         let id = library.active_id.clone();
         library.notes[0].pinned = true;
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         fs::remove_file(&path).unwrap();
         assert!(matches!(
             store.refresh().unwrap().as_slice(),
@@ -1506,7 +1522,7 @@ mod tests {
         let (mut store, mut library) = open(root.path());
         let id = library.active_id.clone();
         library.notes[0].pinned = true;
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         assert_eq!(fs::read(&path).unwrap(), bytes);
         assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
         assert!(!root.path().join("notes/.markraft").exists());
@@ -1526,7 +1542,7 @@ mod tests {
             &id,
             doc::from_markdown("changed [site](https://example.com)"),
         );
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "\u{feff}---\r\nid: custom\r\n# comment\r\n---\r\n\r\nchanged [site][s]\r\n\r\n[s]: https://example.com\r\n"
@@ -1562,7 +1578,7 @@ mod tests {
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Local"));
         fs::write(&path, b"External\n").unwrap();
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &[]).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"External\n");
         let record: Recovery = serde_json::from_slice(
             &fs::read(store.state.join("recovery").join(format!("{id}.json"))).unwrap(),
@@ -1587,7 +1603,7 @@ mod tests {
         fs::remove_file(&path).unwrap();
         store.refresh().unwrap();
         store.recover(library.active_note()).unwrap();
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &[]).is_err());
         assert!(!path.exists());
         assert_eq!(fs::read_dir(root.path().join("notes")).unwrap().count(), 0);
     }
@@ -1615,7 +1631,7 @@ mod tests {
         let (mut store, library) = open(root.path());
         assert_eq!(library.notes.len(), 2);
         assert!(library.notes.iter().all(|n| n.read_only.is_some()));
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         assert_eq!(fs::read(path).unwrap(), b"invalid\xff");
         let note = store
             .add_file(root.path().join("notes/symlink.md"))
@@ -1629,11 +1645,11 @@ mod tests {
         let id = library.active_id.clone();
         library.workspace.new_note_directory = "inbox".into();
         library.set_document(&id, doc::from_markdown("Title"));
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         let path = store.paths()[0].1.clone();
         assert_eq!(fs::read_to_string(&path).unwrap(), "Title\n");
         library.set_document(&id, doc::from_markdown("Changed"));
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         assert_eq!(store.paths()[0].1, fs::canonicalize(&path).unwrap());
         assert!(path.ends_with("inbox/Title.md"));
     }
@@ -1666,9 +1682,9 @@ mod tests {
         let id = library.active_id.clone();
         let original = library.active_note().document.clone();
         library.set_document(&id, doc::from_markdown("# Title\n\nchanged"));
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         library.set_document(&id, original);
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"Title\n=====\n\noriginal\n\n");
     }
     #[test]
@@ -1716,7 +1732,7 @@ mod tests {
         let id = library.active_id.clone();
         library.notes[0].path = Some(path.clone());
         library.set_document(&id, doc::from_markdown("Exact place"));
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         assert_eq!(fs::read_to_string(path).unwrap(), "Exact place\n");
         assert_eq!(fs::read_dir(root.path().join("notes")).unwrap().count(), 0);
     }
@@ -1764,10 +1780,10 @@ mod tests {
         let (mut store, mut library) = open(root.path());
         assert!(library.note(&id).unwrap().deleted_at.is_some());
         assert!(library.restore(&id));
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &[]).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"Another document");
         fs::remove_file(&path).unwrap();
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         let restored = store.files.get(&id).unwrap();
         assert_eq!(restored.bytes, original);
         assert!(restored.path.ends_with("note.md"));
@@ -1794,7 +1810,7 @@ mod tests {
             .unwrap();
         assert!(!path.exists() && trash.exists());
         assert!(library.restore(&id));
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         assert!(!trash.exists(), "the trashed file was left behind");
         assert_eq!(fs::read(&path).unwrap(), original);
         assert_eq!(
@@ -1823,7 +1839,7 @@ mod tests {
             .unwrap();
         fs::remove_file(&trash).unwrap();
         assert!(library.restore(&id));
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         assert_eq!(fs::read(&path).unwrap(), original);
     }
     #[test]
@@ -1835,7 +1851,7 @@ mod tests {
         fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
         let (mut store, mut library) = open(root.path());
         let id = library.new_note(doc::from_markdown("Fresh note"));
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         let path = store.files.get(&id).unwrap().path.clone();
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -1844,7 +1860,7 @@ mod tests {
         );
         fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
         let private = library.new_note(doc::from_markdown("Private note"));
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         let path = store.files.get(&private).unwrap().path.clone();
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -1861,7 +1877,7 @@ mod tests {
         library.set_document(&id, doc::from_markdown("Dirty local"));
         fs::write(path, b"Disk").unwrap();
         store.refresh().unwrap();
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &[]).is_err());
         assert_eq!(store.conflicts(), vec![id.clone()]);
         library
             .notes
@@ -1869,7 +1885,7 @@ mod tests {
             .find(|n| n.id == id)
             .unwrap()
             .conflicted = true;
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
     }
     #[test]
     fn invalid_encoding_stays_read_only_after_unchanged_refresh() {
@@ -1922,6 +1938,97 @@ mod tests {
         assert_eq!(restored, paths.into_iter().collect());
     }
     #[test]
+    fn a_new_note_is_not_filed_while_its_name_is_still_being_typed() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut store, mut library) = open(root.path());
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown("M"));
+        // The name is half a keystroke old, so the folder gets nothing and the work
+        // waits in recovery instead. This is not a failure to write it.
+        store.save(&library, std::slice::from_ref(&id)).unwrap();
+        assert!(store.paths().is_empty());
+        assert!(markdown_files(root.path()).is_empty());
+        let record = store.state.join("recovery").join(format!("{id}.json"));
+        assert!(record.exists());
+        // Once the name has settled the note is filed under the whole of it, and the
+        // private copy is retired.
+        library.set_document(&id, doc::from_markdown("Meeting notes for Q3"));
+        store.save(&library, &[]).unwrap();
+        assert_eq!(
+            markdown_files(root.path()),
+            [root.path().join("notes/Meeting notes for Q3.md")]
+        );
+        assert!(!record.exists());
+    }
+    #[test]
+    fn holding_one_draft_leaves_every_other_note_to_be_written() {
+        let root = tempfile::tempdir().unwrap();
+        let existing = fixture(root.path(), "note.md", b"Original");
+        let (mut store, mut library) = open(root.path());
+        let filed = library.active_id.clone();
+        library.set_document(&filed, doc::from_markdown("Edited"));
+        let named = library.new_note(doc::from_markdown("Named by hand"));
+        let target = root.path().join("notes/named.md");
+        library
+            .notes
+            .iter_mut()
+            .find(|n| n.id == named)
+            .unwrap()
+            .path = Some(target.clone());
+        let held = library.new_note(doc::from_markdown("H"));
+        // A note with a file, and a draft given a location with Save As, are written
+        // whatever the app says about their titles; only the third is held.
+        store
+            .save(&library, &[filed.clone(), named.clone(), held.clone()])
+            .unwrap();
+        assert!(fs::read_to_string(&existing).unwrap().starts_with("Edited"));
+        assert!(
+            fs::read_to_string(&target)
+                .unwrap()
+                .starts_with("Named by hand")
+        );
+        let state = store.state.clone();
+        let record = |id: &str| state.join("recovery").join(format!("{id}.json"));
+        assert!(!record(&filed).exists());
+        assert!(!record(&named).exists());
+        assert!(record(&held).exists());
+        // Something thrown away is not held either, whatever was last said about its
+        // title: there is no file to make and nothing to come back to.
+        let gone = library.new_note(doc::from_markdown("G"));
+        assert!(library.delete(&gone));
+        store.save(&library, std::slice::from_ref(&gone)).unwrap();
+        assert!(!record(&gone).exists());
+    }
+    #[test]
+    fn a_held_draft_comes_back_and_is_filed_once_its_name_settles() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut store, mut library) = open(root.path());
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown("Meeting no"));
+        store.save(&library, std::slice::from_ref(&id)).unwrap();
+        drop(store);
+        let (mut store, mut library) = open(root.path());
+        // It comes back as an ordinary note with no file, and nothing to resolve.
+        let draft = library.note(&id).expect("the draft came back");
+        assert_eq!(draft.path, None);
+        assert_eq!(doc::plain_text(&draft.document), "Meeting no");
+        assert!(store.conflicts().is_empty());
+        assert!(store.notices().take().is_empty());
+        library.set_document(&id, doc::from_markdown("Meeting notes"));
+        store.save(&library, &[]).unwrap();
+        assert_eq!(
+            markdown_files(root.path()),
+            [root.path().join("notes/Meeting notes.md")]
+        );
+        assert!(
+            !store
+                .state
+                .join("recovery")
+                .join(format!("{id}.json"))
+                .exists()
+        );
+    }
+    #[test]
     fn a_standalone_draft_survives_until_it_is_given_a_file() {
         let root = tempfile::tempdir().unwrap();
         let first = fixture(root.path(), "one.md", b"One");
@@ -1929,7 +2036,7 @@ mod tests {
         let (mut store, mut library) = Store::open_file(first.clone(), settings.clone()).unwrap();
         let id = library.new_note(doc::from_markdown("Draft text"));
         // There is no folder to file it in, which is not a failure to write it.
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         assert!(
             store
                 .state
@@ -1944,7 +2051,7 @@ mod tests {
         assert_eq!(doc::plain_text(&draft.document), "Draft text");
         let target = root.path().join("notes/draft.md");
         library.notes.iter_mut().find(|n| n.id == id).unwrap().path = Some(target.clone());
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         assert_eq!(fs::read_to_string(target).unwrap(), "Draft text\n");
         assert!(
             !store
@@ -1963,7 +2070,7 @@ mod tests {
             let (mut store, mut library) =
                 Store::open_file(first.clone(), settings.clone()).unwrap();
             let id = library.new_note(doc::from_markdown("Draft text"));
-            store.save(&library).unwrap();
+            store.save(&library, &[]).unwrap();
             match discard {
                 "trash" => assert!(library.delete(&id)),
                 "blank" => assert!(library.set_document(&id, doc::empty())),
@@ -1972,7 +2079,7 @@ mod tests {
             if discard == "purge" {
                 assert!(store.purge(std::slice::from_ref(&id)).1.is_ok());
             }
-            store.save(&library).unwrap();
+            store.save(&library, &[]).unwrap();
             drop(store);
             let (_, library) = Store::open_file(first, settings).unwrap();
             assert!(
@@ -1991,7 +2098,7 @@ mod tests {
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Local"));
         fs::write(&path, b"External").unwrap();
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &[]).is_err());
         let record = store.state.join("recovery").join(format!("{id}.json"));
         assert!(record.exists());
         // An unrelated purge never reaches a note whose conflict is still open.
@@ -2003,7 +2110,7 @@ mod tests {
             .find(|n| n.id == id)
             .unwrap()
             .conflicted = true;
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         assert!(record.exists());
     }
     #[test]
@@ -2015,7 +2122,7 @@ mod tests {
         let id = library.new_note(doc::from_markdown("New note"));
         let target = root.path().join("notes/new.md");
         library.notes.iter_mut().find(|n| n.id == id).unwrap().path = Some(target.clone());
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         drop(store);
         let (_, library) = Store::open_file(first, settings).unwrap();
         assert!(library.note(&id).is_some());
@@ -2029,11 +2136,11 @@ mod tests {
         let path = fixture(root.path(), "occupied.md", b"Existing");
         library.notes[0].path = Some(path.clone());
         library.set_document(&id, doc::from_markdown("Draft"));
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &[]).is_err());
         assert!(store.conflicts().is_empty());
         assert!(!store.pending.contains(&id));
         library.notes[0].path = Some(root.path().join("notes/free.md"));
-        store.save(&library).unwrap();
+        store.save(&library, &[]).unwrap();
         assert_eq!(fs::read(path).unwrap(), b"Existing");
         assert!(
             !store
@@ -2078,7 +2185,7 @@ mod tests {
                 doc::from_markdown("# Changed\n\nText with [a link](https://example.com)."),
             );
             let start = std::time::Instant::now();
-            store.save(&library).unwrap();
+            store.save(&library, &[]).unwrap();
             let save = start.elapsed();
             eprintln!(
                 "workspace_count={count} cold_ms={} incremental_ms={} save_ms={}",
@@ -2096,7 +2203,7 @@ mod tests {
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Local"));
         fs::write(path, b"Disk").unwrap();
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &[]).is_err());
         store.reload().unwrap();
         drop(store);
         let (_, again) = open(root.path());

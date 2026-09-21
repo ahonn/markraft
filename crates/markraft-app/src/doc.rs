@@ -80,17 +80,27 @@ pub fn plain_text(doc: &Node) -> String {
 /// `<div class="note">` is not named after the tag. A note with nothing to read
 /// has no title line.
 pub fn title_line(doc: &Node) -> Option<String> {
-    doc.children().find_map(|block| {
-        let text = if schema().node_type(block.type_id()).name() == md::RAW_BLOCK {
-            strip_tags(&plain_text(block))
-        } else {
-            plain_text(block)
-        };
-        text.lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(one_line)
-    })
+    doc.children().find_map(title_of)
+}
+
+/// Which of the document's blocks [`title_line`] reads the title from.
+///
+/// A new note's file is named after that line, so the application watches whether
+/// the caret is still inside it before letting a name be settled.
+pub fn title_block(doc: &Node) -> Option<usize> {
+    doc.children().position(|block| title_of(block).is_some())
+}
+
+fn title_of(block: &Node) -> Option<String> {
+    let text = if schema().node_type(block.type_id()).name() == md::RAW_BLOCK {
+        strip_tags(&plain_text(block))
+    } else {
+        plain_text(block)
+    };
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(one_line)
 }
 
 /// A title is one line of prose, and it also names the note's file, so the tabs a

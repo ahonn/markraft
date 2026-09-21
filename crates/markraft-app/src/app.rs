@@ -11,7 +11,7 @@ use crate::{
     vault::{External, Store},
 };
 use gpui::{prelude::*, *};
-use markraft_core::MarkSet;
+use markraft_core::{MarkSet, Node};
 use markraft_gpui::{
     ColumnAlignment, EditRejection, EditorEvent, EditorStyle, EditorView, ExtensionHandle, Setup,
     TableInfo,
@@ -85,7 +85,10 @@ struct Notice {
 struct Session {
     editor: Entity<EditorView>,
     _changes: Subscription,
-    _format_changes: Subscription,
+    /// Everything else the editor's state does, a selection that moved without an edit
+    /// included: the format toolbar reads it, and so does the line a new note's file
+    /// would be named after.
+    _state_changes: Subscription,
     /// Unregisters the note's editor extensions when the session is evicted.
     _extensions: [ExtensionHandle; 4],
     /// Modal editing, while the preference is on. Dropping the handle turns it off.
@@ -127,6 +130,14 @@ pub struct NotesApp {
     dirty: bool,
     revision: u64,
     save_at: Option<Instant>,
+    /// The never-filed note whose first line the caret is still in. Autosave holds it
+    /// in recovery rather than naming its file after half a title; see
+    /// [`NotesApp::follow_title`].
+    held_draft: Option<String>,
+    /// Drafts whose name has settled. They are filed by the next save and never held
+    /// again, so a caret wandering back into the first line — or a filing that failed
+    /// and must be reported — cannot put one back into recovery.
+    released_drafts: HashSet<String>,
     error: Option<String>,
     platform_error: Option<String>,
     notice: Option<Notice>,
@@ -267,10 +278,14 @@ impl NotesApp {
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
-            if this.window_active
-                && let Some(persistence) = &this.persistence
-            {
-                persistence.refresh();
+            if this.window_active {
+                if let Some(persistence) = &this.persistence {
+                    persistence.refresh();
+                }
+            } else {
+                // Nobody is typing here now, so a held draft's name is as settled as it
+                // is going to get; it is filed rather than left waiting in recovery.
+                this.release_title(cx);
             }
             cx.notify();
         });
@@ -330,6 +345,8 @@ impl NotesApp {
             dirty: false,
             revision: 0,
             save_at: None,
+            held_draft: None,
+            released_drafts: HashSet::new(),
             error,
             platform_error,
             notice: None,
@@ -380,6 +397,15 @@ impl NotesApp {
     }
     fn ensure_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.code_language_block = None;
+        // Nobody is typing a held draft's name any more once its editor is not the one
+        // in front: another note became active, or its session was evicted below.
+        if self
+            .held_draft
+            .as_ref()
+            .is_some_and(|held| held != &self.library.active_id)
+        {
+            self.release_title(cx);
+        }
         let id = self.library.active_id.clone();
         self.session_order.retain(|entry| entry != &id);
         self.session_order.push_back(id.clone());
@@ -546,9 +572,13 @@ impl NotesApp {
                 cx.notify();
             },
         );
-        let format_note_id = id.clone();
-        let format_changes = cx.observe(&editor, move |this, editor, cx| {
-            if this.format_toolbar && this.library.active_id == format_note_id {
+        let state_note_id = id.clone();
+        let state_changes = cx.observe(&editor, move |this, editor, cx| {
+            if this.library.active_id != state_note_id {
+                return;
+            }
+            this.follow_title(cx);
+            if this.format_toolbar {
                 let editor = editor.read(cx);
                 let snapshot = (
                     editor.active_marks(),
@@ -565,7 +595,7 @@ impl NotesApp {
             Session {
                 editor,
                 _changes: changes,
-                _format_changes: format_changes,
+                _state_changes: state_changes,
                 _extensions: extensions,
                 vim,
                 vim_mode: markraft_vim::Mode::default(),
@@ -699,6 +729,63 @@ impl NotesApp {
         self.save_at = Some(Instant::now() + Duration::from_millis(350));
         cx.notify();
     }
+    /// Keep autosave from naming a new note's file after a half-typed first line.
+    ///
+    /// A note is filed 350ms after the first keystroke and never renamed, so a note
+    /// whose first line will read "Meeting notes for Q3" would be called `M.md` for
+    /// good. While the caret is still in the line the name would come from, the store
+    /// holds the note in recovery instead; the moment the caret leaves it the name has
+    /// settled, and the next save files the note under what the line says then.
+    ///
+    /// Called wherever the editor's state moved, a selection with no edit included.
+    fn follow_title(&mut self, cx: &mut Context<Self>) {
+        let id = self.library.active_id.clone();
+        let naming = !self.released_drafts.contains(&id) && self.naming_title(cx);
+        if self
+            .held_draft
+            .as_ref()
+            .is_some_and(|held| *held != id || !naming)
+        {
+            self.release_title(cx);
+        }
+        if naming && self.held_draft.is_none() {
+            self.held_draft = Some(id);
+        }
+    }
+    /// Whether the active note is one the store would file under its first line, with
+    /// the caret still inside that line.
+    ///
+    /// The editor's live document answers where the caret is; an input method's
+    /// uncommitted candidate sits at the caret, so composing a title counts as still
+    /// typing it, which is what holds the note back.
+    fn naming_title(&self, cx: &App) -> bool {
+        if self.persistence.is_none() || self.path.is_none() {
+            return false;
+        }
+        let note = self.library.active_note();
+        if note.path.is_some()
+            || note.conflicted
+            || note.deleted_at.is_some()
+            || note.document_is_empty()
+        {
+            return false;
+        }
+        self.sessions
+            .get(&self.library.active_id)
+            .map(|session| session.editor.read(cx))
+            .is_some_and(|editor| {
+                in_title_block(editor.doc(), editor.state().selection().head(editor.doc()))
+            })
+    }
+    /// Let go of the held draft: its name has settled, the next save files it, and it is
+    /// never held again. A caret leaving the first line and a window losing focus are
+    /// not edits, so the save this needs is scheduled here.
+    fn release_title(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.held_draft.take() {
+            self.released_drafts.insert(id);
+            self.changed(cx);
+        }
+    }
     /// Whether the active note is a draft the store has nowhere to file: without a
     /// folder a new note is held privately until the user names a file for it.
     fn unfiled_draft(&self) -> bool {
@@ -773,6 +860,10 @@ impl NotesApp {
         });
     }
     fn flush(&mut self, cx: &mut Context<Self>) -> bool {
+        // A flush is asked for — ⌘S, quitting, an update relaunch — so it files a held
+        // draft under whatever its first line says now. The barrier below clears the
+        // save this schedules.
+        self.release_title(cx);
         self.sync_documents(cx);
         self.save_at = None;
         self.revision += 1; // Discard acknowledgments for snapshots preceding this barrier.
@@ -974,7 +1065,11 @@ impl NotesApp {
         if self.save_at.is_some_and(|at| Instant::now() >= at) {
             self.save_at = None;
             if let Some(p) = &self.persistence
-                && let Err(e) = p.save(self.revision, self.library.clone())
+                && let Err(e) = p.save(
+                    self.revision,
+                    self.library.clone(),
+                    self.held_draft.clone().into_iter().collect(),
+                )
             {
                 self.error = Some(e);
             }
@@ -2457,6 +2552,15 @@ pub(crate) fn is_draft(note: &crate::storage::Note) -> bool {
         && (note.conflicted || (note.path.is_none() && !note.document_is_empty()))
 }
 
+/// Whether `head` is in the block the note's title — and so the name of the file it
+/// would be filed under — is read from. A document with nothing to read has no such
+/// block, so nothing is inside it.
+fn in_title_block(doc: &Node, head: usize) -> bool {
+    doc::title_block(doc)
+        .zip(doc.resolve(head).ok())
+        .is_some_and(|(title, head)| head.index(0) == title)
+}
+
 fn conflict_subject(note: &crate::storage::Note) -> String {
     note.path
         .as_ref()
@@ -2931,5 +3035,23 @@ mod tests {
         let gone = library.notes.iter_mut().find(|n| n.id == id).unwrap();
         gone.deleted_at = Some(1);
         assert!(!super::is_draft(&note(&library, &id)));
+    }
+
+    #[test]
+    fn the_caret_is_naming_the_file_until_it_leaves_the_title_line() {
+        let inside = |source: &str| {
+            let document = doc::from_markdown(source);
+            (0..=document.content_size())
+                .filter(|pos| super::in_title_block(&document, *pos))
+                .collect::<Vec<_>>()
+        };
+        // "Meet" is the line the file would be named after, so the caret is still
+        // naming it anywhere in that paragraph; the body below it is not.
+        assert_eq!(inside("Meet\n\nbody"), (0..=5).collect::<Vec<_>>());
+        // A block with nothing to read is not the title line: the name comes from the
+        // first line that says something.
+        assert_eq!(inside("***\n\nMeet\n\nbody"), (1..=6).collect::<Vec<_>>());
+        // A note with nothing to read has no title line for the caret to be in.
+        assert!(inside("***").is_empty());
     }
 }

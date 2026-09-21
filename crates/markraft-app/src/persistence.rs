@@ -28,7 +28,10 @@ pub enum Event {
 }
 type Purged = (Vec<String>, Result<(), String>);
 enum Request {
-    Save(u64, Library),
+    /// A snapshot, and the never-filed notes whose title is still being typed. Only
+    /// this request can hold one back; a flush carries no such list, so ⌘S, a quit and
+    /// an update relaunch always file what they are given.
+    Save(u64, Library, Vec<String>),
     Recover(Note, Sender<Result<(), String>>),
     Markdown(Note, Sender<Result<String, String>>),
     Review(Note, Sender<Result<Option<String>, String>>),
@@ -90,8 +93,8 @@ impl Persistence {
                     Request::Paths(response) => {
                         let _ = response.send(store.paths());
                     }
-                    Request::Save(revision, library) => {
-                        let result = store.save(&library);
+                    Request::Save(revision, library, held) => {
+                        let result = store.save(&library, &held);
                         let _ = outgoing.send(Event::Saved(Saved {
                             revision,
                             result,
@@ -100,7 +103,7 @@ impl Persistence {
                         }));
                     }
                     Request::Flush(library, response) => {
-                        let _ = response.send(store.save(&library));
+                        let _ = response.send(store.save(&library, &[]));
                     }
                     Request::Reload(response) => {
                         let _ = response.send(store.reload());
@@ -214,9 +217,12 @@ impl Persistence {
             .map_err(|_| "The save worker stopped")?;
         rx.recv().map_err(|_| "The save worker stopped")?
     }
-    pub fn save(&self, revision: u64, library: Library) -> Result<(), String> {
+    /// Queue a snapshot. `held` names the never-filed notes whose title is still being
+    /// typed; the store keeps those in recovery instead of naming a file after part of
+    /// a first line.
+    pub fn save(&self, revision: u64, library: Library, held: Vec<String>) -> Result<(), String> {
         self.requests
-            .send(Request::Save(revision, library))
+            .send(Request::Save(revision, library, held))
             .map_err(|_| {
                 "Saving stopped working. Copy your note (⇧⌘C), then quit and reopen Markraft."
                     .into()
@@ -477,9 +483,9 @@ mod tests {
         let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Title\n\nFirst 中文"));
-        persistence.save(1, library.clone()).unwrap();
+        persistence.save(1, library.clone(), Vec::new()).unwrap();
         library.set_document(&id, doc::from_markdown("Title\n\nSecond 👩🏽‍💻"));
-        persistence.save(2, library.clone()).unwrap();
+        persistence.save(2, library.clone(), Vec::new()).unwrap();
         library.set_document(&id, doc::from_markdown("Title\n\nFinal é"));
         persistence.flush(library.clone()).unwrap();
         assert!(
@@ -500,19 +506,41 @@ mod tests {
     }
 
     #[test]
+    fn a_flush_files_a_draft_autosave_was_still_holding() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, mut library) = open(directory.path());
+        let persistence = Persistence::start(store, false);
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown("Meeting no"));
+        persistence
+            .save(1, library.clone(), vec![id.clone()])
+            .unwrap();
+        // `paths` answers after the save it queued behind, so the folder has had its
+        // chance to receive a file: autosave held the half-typed name back instead.
+        assert!(persistence.paths().unwrap().is_empty());
+        // ⌘S, a quit and an update relaunch all come through here, and none of them can
+        // hold: what the first line says now is what the file is called.
+        library.set_document(&id, doc::from_markdown("Meeting notes for Q3"));
+        persistence.flush(library).unwrap();
+        let (path, text) = only_note(directory.path());
+        assert!(path.ends_with("Meeting notes for Q3.md"), "{path:?}");
+        assert_eq!(text, "Meeting notes for Q3\n");
+    }
+
+    #[test]
     fn a_note_changed_by_another_program_is_not_overwritten_but_others_are_saved() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());
         let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Shared"));
-        persistence.save(10, library.clone()).unwrap();
+        persistence.save(10, library.clone(), Vec::new()).unwrap();
         persistence.flush(library.clone()).unwrap();
         let (path, _) = only_note(directory.path());
         std::fs::write(&path, b"external content").unwrap();
         library.set_document(&id, doc::from_markdown("Shared, edited here"));
         library.new_note(doc::from_markdown("Keep this local work"));
-        persistence.save(11, library.clone()).unwrap();
+        persistence.save(11, library.clone(), Vec::new()).unwrap();
         assert!(persistence.flush(library).is_err());
         let acknowledgments = saves(&persistence);
         assert_eq!(acknowledgments.len(), 2);
@@ -541,7 +569,7 @@ mod tests {
             watch_root: Default::default(),
             extra_watches: Default::default(),
         };
-        assert!(persistence.save(1, Library::default()).is_err());
+        assert!(persistence.save(1, Library::default(), Vec::new()).is_err());
         assert!(persistence.flush(Library::default()).is_err());
         assert!(persistence.reload().is_err());
     }
@@ -557,7 +585,7 @@ mod tests {
         let (path, text) = only_note(directory.path());
         std::fs::write(&path, text.replace("Original", "External text")).unwrap();
         local.set_document(&id, doc::from_markdown("Discard this after confirmation"));
-        persistence.save(1, local).unwrap();
+        persistence.save(1, local, Vec::new()).unwrap();
         let mut reloaded = persistence.reload().unwrap();
         assert_eq!(
             doc::plain_text(&reloaded.note(&id).unwrap().document),
@@ -568,7 +596,7 @@ mod tests {
         assert_eq!(acknowledgments[0].revision, 1);
         assert!(acknowledgments[0].result.is_err());
         reloaded.set_document(&id, doc::from_markdown("External text, continued"));
-        persistence.save(2, reloaded.clone()).unwrap();
+        persistence.save(2, reloaded.clone(), Vec::new()).unwrap();
         persistence.flush(reloaded).unwrap();
         assert!(saves(&persistence)[0].result.is_ok());
         assert!(
