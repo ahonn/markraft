@@ -10,6 +10,7 @@ use plist::{Dictionary, Value};
 use crate::{output, run};
 
 const APP_NAME: &str = "Markraft.app";
+const VOLUME_NAME: &str = "Markraft";
 const FEED_URL: &str = "https://github.com/ahonn/markraft/releases/latest/download/appcast.xml";
 
 #[derive(Default)]
@@ -256,6 +257,41 @@ pub fn sign(app: &Path, identity: &str) -> Result<()> {
     run(Command::new("codesign")
         .args(["--verify", "--deep", "--strict"])
         .arg(app))
+}
+
+/// Package the app as the drag-to-Applications disk image people download.
+pub fn dmg(app: &Path, image: &Path) -> Result<()> {
+    if let Some(parent) = image.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let name = app.file_name().context("App bundle path has no name")?;
+    let contents = tempfile::tempdir()?;
+    // ditto keeps the symlinks and extended attributes the code signature covers.
+    run(Command::new("ditto")
+        .arg(app)
+        .arg(contents.path().join(name)))?;
+    run(Command::new("ln")
+        .args(["-s", "/Applications"])
+        .arg(contents.path().join("Applications")))?;
+    run(Command::new("hdiutil")
+        .args(["create", "-volname", VOLUME_NAME])
+        .args(["-fs", "APFS", "-format", "ULFO", "-ov", "-srcfolder"])
+        .arg(contents.path())
+        .arg(image))
+}
+
+/// A disk image carries its own signature; Gatekeeper assesses it before the app inside.
+pub fn sign_image(image: &Path, identity: &str) -> Result<()> {
+    ensure!(
+        identity != "-",
+        "A distributed disk image needs a Developer ID signature"
+    );
+    run(Command::new("codesign")
+        .args(["--force", "--sign", identity, "--timestamp"])
+        .arg(image))?;
+    run(Command::new("codesign")
+        .args(["--verify", "--strict"])
+        .arg(image))
 }
 
 pub fn zip(app: &Path, archive: &Path) -> Result<()> {

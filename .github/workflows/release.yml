@@ -75,7 +75,7 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Markraft $GITHUB_REF_NAME" --generate-notes
           fi
-          gh release upload "$GITHUB_REF_NAME" "target/release-artifacts/Markraft-${GITHUB_REF_NAME#v}-universal.zip" target/release-artifacts/appcast.xml target/release-artifacts/SHA256SUMS --clobber
+          gh release upload "$GITHUB_REF_NAME" "target/release-artifacts/Markraft-${GITHUB_REF_NAME#v}-universal.dmg" "target/release-artifacts/Markraft-${GITHUB_REF_NAME#v}-universal.zip" target/release-artifacts/appcast.xml target/release-artifacts/SHA256SUMS --clobber
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest
       - name: Remove signing credentials
         if: always()

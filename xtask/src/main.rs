@@ -24,6 +24,9 @@ enum Task {
         universal: bool,
         #[arg(long)]
         mock_updates: bool,
+        /// Also package the bundle as a disk image, signed only with a Developer ID.
+        #[arg(long)]
+        dmg: bool,
     },
     /// Build signed, notarized artifacts without uploading them.
     Release { tag: String },
@@ -110,6 +113,7 @@ fn main() -> Result<()> {
             release,
             universal,
             mock_updates,
+            dmg,
         } => {
             let app = macos::bundle(
                 &root,
@@ -120,6 +124,17 @@ fn main() -> Result<()> {
                 },
             )?;
             println!("Built {} (not installed).", app.display());
+            if dmg {
+                let image = app.with_extension("dmg");
+                macos::dmg(&app, &image)?;
+                if let Some(identity) = std::env::var("MARKRAFT_SIGN_IDENTITY")
+                    .ok()
+                    .filter(|identity| identity != "-")
+                {
+                    macos::sign_image(&image, &identity)?;
+                }
+                println!("Built {} (not notarized).", image.display());
+            }
             Ok(())
         }
         Task::Release { tag } => release::release(&root, &tag),

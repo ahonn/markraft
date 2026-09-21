@@ -71,6 +71,36 @@ fn required_env(name: &str) -> Result<String> {
     Ok(value)
 }
 
+struct Notary {
+    apple_id: String,
+    team: String,
+    password: String,
+}
+
+impl Notary {
+    /// Notarize a ZIP or disk image, then staple the ticket to `target`.
+    fn notarize(&self, submission: &Path, target: &Path) -> Result<()> {
+        run(Command::new("xcrun")
+            .args(["notarytool", "submit"])
+            .arg(submission)
+            .args([
+                "--wait",
+                "--apple-id",
+                &self.apple_id,
+                "--team-id",
+                &self.team,
+                "--password",
+                &self.password,
+            ]))?;
+        run(Command::new("xcrun")
+            .args(["stapler", "staple"])
+            .arg(target))?;
+        run(Command::new("xcrun")
+            .args(["stapler", "validate"])
+            .arg(target))
+    }
+}
+
 pub fn release(root: &Path, tag: &str) -> Result<()> {
     let identity = required_env("MARKRAFT_SIGN_IDENTITY")?;
     ensure!(
@@ -84,9 +114,11 @@ pub fn release(root: &Path, tag: &str) -> Result<()> {
         key_file.is_file(),
         "Sparkle private key file does not exist"
     );
-    let apple_id = required_env("APPLE_ID")?;
-    let team = required_env("APPLE_TEAM_ID")?;
-    let password = required_env("APPLE_APP_SPECIFIC_PASSWORD")?;
+    let notary = Notary {
+        apple_id: required_env("APPLE_ID")?,
+        team: required_env("APPLE_TEAM_ID")?,
+        password: required_env("APPLE_APP_SPECIFIC_PASSWORD")?,
+    };
     let metadata: serde_json::Value = serde_json::from_str(&output(
         Command::new("cargo")
             .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
@@ -117,22 +149,7 @@ pub fn release(root: &Path, tag: &str) -> Result<()> {
     let temporary = tempfile::tempdir_in(root.join("target"))?;
     let submission = temporary.path().join("notarization.zip");
     macos::zip(&app, &submission)?;
-    run(Command::new("xcrun")
-        .args(["notarytool", "submit"])
-        .arg(&submission)
-        .args([
-            "--wait",
-            "--apple-id",
-            &apple_id,
-            "--team-id",
-            &team,
-            "--password",
-            &password,
-        ]))?;
-    run(Command::new("xcrun").args(["stapler", "staple"]).arg(&app))?;
-    run(Command::new("xcrun")
-        .args(["stapler", "validate"])
-        .arg(&app))?;
+    notary.notarize(&submission, &app)?;
     run(Command::new("codesign")
         .args(["--verify", "--deep", "--strict"])
         .arg(&app))?;
@@ -152,15 +169,27 @@ pub fn release(root: &Path, tag: &str) -> Result<()> {
         &format!("https://github.com/ahonn/markraft/releases/tag/{tag}"),
     )?;
     verify_feed(&feed, &archive, &public_key)?;
+    // The disk image is what people download; updates keep using the ZIP. It joins
+    // the folder only now because generate_appcast advertises every archive it finds.
+    let image_name = format!("Markraft-{version}-universal.dmg");
+    let image = staging.join(&image_name);
+    macos::dmg(&app, &image)?;
+    macos::sign_image(&image, &identity)?;
+    // The app inside is already stapled, so it opens offline once dragged out.
+    notary.notarize(&image, &image)?;
+    run(Command::new("spctl")
+        .args(["--assess", "--type", "open"])
+        .args(["--context", "context:primary-signature", "--verbose"])
+        .arg(&image))?;
     let checksums = output(
         Command::new("shasum")
-            .args(["-a", "256", &filename, "appcast.xml"])
+            .args(["-a", "256", &image_name, &filename, "appcast.xml"])
             .current_dir(&staging),
     )?;
     fs::write(staging.join("SHA256SUMS"), format!("{checksums}\n"))?;
     let destination = root.join("target/release-artifacts");
     fs::create_dir_all(&destination)?;
-    for filename in [&filename, "appcast.xml", "SHA256SUMS"] {
+    for filename in [&image_name, &filename, "appcast.xml", "SHA256SUMS"] {
         fs::copy(staging.join(filename), destination.join(filename))?;
     }
     println!(

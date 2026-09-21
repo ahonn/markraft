@@ -25,6 +25,6 @@ jobs:
       - run: cargo test --workspace --locked
       - run: cargo test -p markraft-app --features updater-mock --locked updater::tests
       - run: cargo install cargo-bundle --version 0.11.0 --locked
-      - run: cargo xtask bundle
+      - run: cargo xtask bundle --dmg
       - name: Verify embedded framework without development paths
         run: env -u DYLD_FRAMEWORK_PATH 'target/debug/bundle/osx/Markraft.app/Contents/MacOS/markraft-app' --help
