@@ -28,10 +28,15 @@ pub enum External {
     Removed(Note),
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct Identity {
     id: String,
     pinned: bool,
     created: u64,
+    /// The file left while Markraft was watching, which the window reported then.
+    /// The identity stays for a file that comes straight back, as one does when an
+    /// editor replaces it; the next launch drops it without saying so twice.
+    gone: bool,
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -332,6 +337,7 @@ impl Store {
                     .id
                     .clone()
             });
+        self.forget_missing();
         for saved in self.files.values() {
             self.manifest
                 .paths
@@ -339,6 +345,50 @@ impl Store {
         }
         self.persist_manifest()?;
         Ok(library)
+    }
+    /// A file that left while Markraft was not watching has no note to vanish from
+    /// the window, so the list would simply be shorter with nothing said. Name what
+    /// went, once, and stop expecting it. A folder that was missing altogether has
+    /// already been reported, and may only be a drive that is not mounted: its notes
+    /// keep their identities for when it returns.
+    fn forget_missing(&mut self) {
+        if self.created {
+            return;
+        }
+        let known: HashSet<_> = self.files.values().map(|saved| &saved.path).collect();
+        let mut missing: Vec<_> = self
+            .manifest
+            .paths
+            .iter()
+            .filter(|(path, _)| {
+                !known.contains(path)
+                    && fs::symlink_metadata(path)
+                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+            })
+            .map(|(path, identity)| (path.clone(), identity.gone))
+            .collect();
+        missing.sort();
+        for (path, _) in &missing {
+            self.manifest.paths.remove(path);
+        }
+        // One the window already reported leaving is dropped without a second notice.
+        let missing: Vec<_> = missing
+            .into_iter()
+            .filter_map(|(path, reported)| (!reported).then_some(path))
+            .collect();
+        match missing.as_slice() {
+            [] => {}
+            [path] => self.notices.raise(format!(
+                "“{}” was removed outside Markraft, so the note is gone too.",
+                path.file_name()
+                    .map(|name| name.to_string_lossy())
+                    .unwrap_or_default()
+            )),
+            _ => self.notices.raise(format!(
+                "{} notes' files were removed outside Markraft, so those notes are gone too.",
+                missing.len()
+            )),
+        }
     }
     pub fn add_file(&mut self, path: PathBuf) -> Result<Note, String> {
         let path = absolute_file(&path)?;
@@ -387,6 +437,9 @@ impl Store {
                     .entry(id.clone())
                     .or_insert_with(|| saved.clone());
                 changes.push(External::Removed(saved.note.clone()));
+                if let Some(identity) = self.manifest.paths.get_mut(&saved.path) {
+                    identity.gone = true;
+                }
             }
         }
         for change in &changes {
@@ -448,6 +501,9 @@ impl Store {
                 (Some(old), None) => {
                     let id = old.note.id.clone();
                     changes.push(External::Removed(old.note.clone()));
+                    if let Some(identity) = self.manifest.paths.get_mut(&old.path) {
+                        identity.gone = true;
+                    }
                     self.pending.insert(id.clone());
                     self.files.remove(&id);
                     self.previous.entry(id).or_insert(old);
@@ -1015,6 +1071,7 @@ fn identity(note: &Note) -> Identity {
         id: note.id.clone(),
         pinned: note.pinned,
         created: note.created_at,
+        gone: false,
     }
 }
 fn render(saved: Option<&Saved>, note: &Note) -> Result<String, String> {
@@ -1374,6 +1431,67 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, text).unwrap();
         path
+    }
+    #[test]
+    fn a_file_removed_while_closed_is_named_once() {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), "Kept.md", b"kept");
+        let gone = fixture(root.path(), "Gone.md", b"gone");
+        let (store, _) = open(root.path());
+        assert!(store.notices().take().is_empty());
+        drop(store);
+        fs::remove_file(&gone).unwrap();
+        let (store, library) = open(root.path());
+        assert_eq!(library.notes.len(), 1);
+        assert_eq!(
+            store.notices().take(),
+            ["“Gone.md” was removed outside Markraft, so the note is gone too."]
+        );
+        drop(store);
+        let (store, _) = open(root.path());
+        assert!(store.notices().take().is_empty());
+    }
+    #[test]
+    fn a_removal_the_window_reported_is_not_repeated_at_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "Pinned.md", b"text");
+        let (mut store, mut library) = open(root.path());
+        let id = library.active_id.clone();
+        library.notes[0].pinned = true;
+        store.save(&library).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            store.refresh().unwrap().as_slice(),
+            [External::Removed(note)] if note.id == id
+        ));
+        // An editor that deletes before it writes brings the same note back.
+        fs::write(&path, b"text").unwrap();
+        store.refresh().unwrap();
+        assert!(store.files[&id].note.pinned);
+        fs::remove_file(&path).unwrap();
+        store.refresh().unwrap();
+        drop(store);
+        let (store, _) = open(root.path());
+        assert!(store.notices().take().is_empty());
+        assert!(store.manifest.paths.is_empty());
+    }
+    #[test]
+    fn a_missing_folder_keeps_its_notes_identities() {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), "Note.md", b"text");
+        let (store, library) = open(root.path());
+        let id = library.active_id.clone();
+        drop(store);
+        let away = root.path().join("unmounted");
+        fs::rename(root.path().join("notes"), &away).unwrap();
+        let (store, _) = open(root.path());
+        assert!(store.created_folder());
+        assert!(store.notices().take().is_empty());
+        drop(store);
+        fs::remove_dir_all(root.path().join("notes")).unwrap();
+        fs::rename(&away, root.path().join("notes")).unwrap();
+        let (_, library) = open(root.path());
+        assert_eq!(library.active_id, id);
     }
     #[test]
     fn opening_and_pinning_do_not_touch_user_files() {
