@@ -744,12 +744,14 @@ impl NotesApp {
     }
     /// Keep autosave from naming a new note's file after a half-typed first line.
     ///
-    /// A note is filed 350ms after the first keystroke and never renamed, so a note
-    /// whose first line will read "Meeting notes for Q3" would be called `M.md` for
-    /// good. While the caret is still in the line the name would come from, the store
-    /// holds the note in recovery instead. The name has settled once the caret leaves
-    /// that line or the typing stops, and the next save files the note under what the
-    /// line says then — a note that is only a first line is filed like any other.
+    /// Autosave names a note's file once and never again on its own, so a note filed
+    /// on its first keystroke would stay `M.md` while its first line went on to read
+    /// "Meeting notes for Q3"; only [`Self::open_rename`] moves it afterwards. While
+    /// the caret is still in the line the name would come from, the store holds the
+    /// note in recovery instead. The name has settled once the caret leaves that line
+    /// or the typing stops for [`NAME_SETTLES`], and the next save files the note
+    /// under what the line says then — a note that is only a first line is filed like
+    /// any other.
     ///
     /// Called wherever the editor's state moved, a selection with no edit included.
     fn follow_title(&mut self, cx: &mut Context<Self>) {
@@ -793,10 +795,20 @@ impl NotesApp {
     /// Let go of the held draft: its name has settled, the next save files it, and it is
     /// never held again. A caret leaving the first line and a window losing focus are
     /// not edits, so the save this needs is scheduled here.
+    ///
+    /// A note emptied while it was held is the exception. It has no name for anything
+    /// to have settled on, and the page was cleared to begin again, so it is not shut
+    /// out of being held: what is typed next deserves the wait a new note gets.
     fn release_title(&mut self, cx: &mut Context<Self>) {
         self.name_at = None;
         if let Some(id) = self.held_draft.take() {
-            self.released_drafts.insert(id);
+            if !self
+                .library
+                .note(&id)
+                .is_none_or(crate::storage::Note::document_is_empty)
+            {
+                self.released_drafts.insert(id);
+            }
             self.changed(cx);
         }
     }
@@ -3112,5 +3124,26 @@ mod tests {
         let ruled = doc::from_markdown("***\n\nMeet\n\nbody");
         assert!(super::naming_title(&ruled, &Selection::All));
         assert!(!super::naming_title(&ruled, &Selection::cursor(9)));
+    }
+}
+
+#[cfg(test)]
+mod scratch_probe {
+    use crate::{doc, storage::Library};
+    #[test]
+    fn probe_blank_and_names() {
+        for source in [
+            " ", "   ", "\t", "\u{00a0}", ".", "...", "[[Link]]", "#", "- ",
+        ] {
+            let d = doc::from_markdown(source);
+            let mut lib = Library::default();
+            let id = lib.new_note(d.clone());
+            println!(
+                "{source:?} blank={} title={:?} draft={}",
+                doc::is_blank(&d),
+                lib.note(&id).unwrap().title(),
+                crate::app::is_draft(lib.note(&id).unwrap()),
+            );
+        }
     }
 }
