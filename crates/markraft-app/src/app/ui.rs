@@ -2285,17 +2285,17 @@ impl Render for NotesApp {
                 });
             });
         }
-        // A file Markraft cannot read has no title of its own to show — its text
-        // never became a document — but it does have a name, and that is what the
-        // user is looking at.
+        // The title bar names the file, extension included, as a macOS document window
+        // does: it is what a click on it renames and what a `[[link]]` has to spell, and
+        // the first line is already on the page below. A note with no file yet is named
+        // by that first line instead, since that is what its file will be called.
         let note = self.library.active_note();
-        let title = match (&note.read_only, &note.path) {
-            (Some(_), Some(path)) if note.document_is_empty() => path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| note.title()),
-            _ => note.title(),
-        };
+        let title = note
+            .path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| note.title());
         // With no folder open there is no note to name, and a stray "Untitled"
         // over the gate reads as a bug rather than as a state.
         let unopened = self.persistence.is_none();
