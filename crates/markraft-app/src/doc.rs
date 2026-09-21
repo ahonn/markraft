@@ -86,7 +86,7 @@ pub fn title_line(doc: &Node) -> Option<String> {
 /// Which of the document's blocks [`title_line`] reads the title from.
 ///
 /// A new note's file is named after that line, so the application watches whether
-/// the caret is still inside it before letting a name be settled.
+/// the selection still reaches it before letting a name be settled.
 pub fn title_block(doc: &Node) -> Option<usize> {
     doc.children().position(|block| title_of(block).is_some())
 }

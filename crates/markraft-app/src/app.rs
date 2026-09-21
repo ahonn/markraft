@@ -12,7 +12,7 @@ use crate::{
     vault::{External, Store},
 };
 use gpui::{prelude::*, *};
-use markraft_core::{MarkSet, Node};
+use markraft_core::{MarkSet, Node, Selection};
 use markraft_gpui::{
     ColumnAlignment, EditRejection, EditorEvent, EditorStyle, EditorView, ExtensionHandle, Setup,
     TableInfo,
@@ -768,9 +768,9 @@ impl NotesApp {
         }
     }
     /// Whether the active note is one the store would file under its first line, with
-    /// the caret still inside that line.
+    /// the selection still working on that line.
     ///
-    /// The editor's live document answers where the caret is; an input method's
+    /// The editor's live document answers where the selection is; an input method's
     /// uncommitted candidate sits at the caret, so composing a title counts as still
     /// typing it, which is what holds the note back.
     fn naming_title(&self, cx: &App) -> bool {
@@ -788,9 +788,7 @@ impl NotesApp {
         self.sessions
             .get(&self.library.active_id)
             .map(|session| session.editor.read(cx))
-            .is_some_and(|editor| {
-                in_title_block(editor.doc(), editor.state().selection().head(editor.doc()))
-            })
+            .is_some_and(|editor| naming_title(editor.doc(), editor.state().selection()))
     }
     /// Let go of the held draft: its name has settled, the next save files it, and it is
     /// never held again. A caret leaving the first line and a window losing focus are
@@ -2566,8 +2564,6 @@ fn folder_label(root: &std::path::Path, relative: &std::path::Path) -> String {
     }
 }
 
-/// What the conflict dialog calls the note: the file another app changed, or the
-/// note's own title while it has no file yet.
 /// Whether a note is work that is not in a file the way it was left: it has no file
 /// yet, or the file says something else. A blank page with no file is not work: the
 /// store never writes one, and the library always keeps one open to type into.
@@ -2576,15 +2572,26 @@ pub(crate) fn is_draft(note: &crate::storage::Note) -> bool {
         && (note.conflicted || (note.path.is_none() && !note.document_is_empty()))
 }
 
-/// Whether `head` is in the block the note's title — and so the name of the file it
-/// would be filed under — is read from. A document with nothing to read has no such
-/// block, so nothing is inside it.
-fn in_title_block(doc: &Node, head: usize) -> bool {
+/// Whether `selection` still reaches the block the note's title — and so the name of
+/// the file it would be filed under — is read from.
+///
+/// A selection covers the blocks between its ends, and touching that one anywhere is
+/// enough. Select All reaches from the start of the document to past its last block,
+/// and a drag out of the first line leaves the other end behind; neither is someone
+/// moving on from the title, and filing the note on one of them would name its file
+/// after however much of the title had been typed. Letting go a moment late costs
+/// nothing, because the name settles on its own after [`NAME_SETTLES`].
+///
+/// A document with nothing to read has no such block for a selection to reach.
+fn naming_title(doc: &Node, selection: &Selection) -> bool {
+    let block_at = |pos: usize| Some(doc.resolve(pos).ok()?.index(0));
     doc::title_block(doc)
-        .zip(doc.resolve(head).ok())
-        .is_some_and(|(title, head)| head.index(0) == title)
+        .zip(block_at(selection.from(doc)).zip(block_at(selection.to(doc))))
+        .is_some_and(|(title, (first, last))| (first..=last).contains(&title))
 }
 
+/// What the conflict dialog calls the note: the file another app changed, or the
+/// note's own title while it has no file yet.
 fn conflict_subject(note: &crate::storage::Note) -> String {
     note.path
         .as_ref()
@@ -2596,11 +2603,11 @@ fn conflict_subject(note: &crate::storage::Note) -> String {
 /// Heights of the toolbar and footer, which float over the top and bottom of the note.
 const TOOLBAR_HEIGHT: Pixels = px(52.);
 const FOOTER_HEIGHT: Pixels = px(48.);
-/// How long a keystroke counts as someone being at the window.
 /// How long a new note's first line has to stand still before it names the file. Long
 /// enough that a pause for thought mid-title does not name the file after half of it,
 /// and short enough that a note which is only that line still reaches the folder.
 const NAME_SETTLES: Duration = Duration::from_millis(2000);
+/// How long a keystroke counts as someone being at the window.
 const KEY_PRESENCE: Duration = Duration::from_millis(2500);
 /// A queued notice is a sentence, not an acknowledgment, so it is given time to read.
 const READING_NOTICE: Duration = Duration::from_secs(8);
@@ -3070,7 +3077,9 @@ mod tests {
         let inside = |source: &str| {
             let document = doc::from_markdown(source);
             (0..=document.content_size())
-                .filter(|pos| super::in_title_block(&document, *pos))
+                .filter(|pos| {
+                    super::naming_title(&document, &markraft_core::Selection::cursor(*pos))
+                })
                 .collect::<Vec<_>>()
         };
         // "Meet" is the line the file would be named after, so the caret is still
@@ -3081,5 +3090,27 @@ mod tests {
         assert_eq!(inside("***\n\nMeet\n\nbody"), (1..=6).collect::<Vec<_>>());
         // A note with nothing to read has no title line for the caret to be in.
         assert!(inside("***").is_empty());
+    }
+
+    #[test]
+    fn a_selection_reaching_out_of_the_title_line_is_still_naming_it() {
+        use markraft_core::Selection;
+        let document = doc::from_markdown("Meet\n\nbody");
+        let naming = |selection: Selection| super::naming_title(&document, &selection);
+        // Select All runs past the last block, to a position in no block at all.
+        // Copying a half-typed note must not be what files it.
+        assert!(naming(Selection::All));
+        // Nor does dragging out of the title into the body, either way round.
+        assert!(naming(Selection::text(2, 8)));
+        assert!(naming(Selection::text(8, 2)));
+        // Having moved on to the body is.
+        assert!(!naming(Selection::cursor(8)));
+        assert!(!naming(Selection::text(7, 10)));
+        // A note whose title is not its first block is reached all the same: the
+        // anchor Select All leaves at the start of the document is in the rule above
+        // it, not in the line being named.
+        let ruled = doc::from_markdown("***\n\nMeet\n\nbody");
+        assert!(super::naming_title(&ruled, &Selection::All));
+        assert!(!super::naming_title(&ruled, &Selection::cursor(9)));
     }
 }
