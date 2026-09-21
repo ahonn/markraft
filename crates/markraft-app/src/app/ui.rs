@@ -2598,36 +2598,60 @@ impl Render for NotesApp {
                     Some(_) => format!("{} · Undo available", notice.text),
                     None => notice.text.to_string(),
                 };
+                let toast = div()
+                    .id("notice")
+                    .role(Role::Status)
+                    .aria_label(announced)
+                    // A folder's notices are sentences rather than acknowledgments,
+                    // so the toast wraps instead of running off the window.
+                    .max_w(window.bounds().size.width - px(24.))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    // Wide enough that the text clears the curve of the rounded ends.
+                    .px_4()
+                    .py_1()
+                    .rounded_full()
+                    .bg(self.surface_color())
+                    .border_1()
+                    .border_color(self.border_color())
+                    .shadow(popover_shadow())
+                    .text_size(px(12.))
+                    .text_color(self.control_text())
+                    .child(div().flex_1().min_w_0().child(notice.text.clone()))
+                    .when_some(notice.undo.as_ref(), |s, _| {
+                        s.child(div().text_color(self.muted()).child("·")).child(
+                            self.button("notice-undo", "Undo", Intent::UndoDelete, cx)
+                                .h(px(22.))
+                                .text_color(self.control_text()),
+                        )
+                    });
                 s.child(
+                    // Centred above the footer, so it never sits on the count or the
+                    // buttons there. The row itself takes no clicks from the note.
                     div()
-                        .id("notice")
-                        .role(Role::Status)
-                        .aria_label(announced)
                         .absolute()
-                        .bottom(px(52.))
-                        .right(px(12.))
-                        // A folder's notices are sentences rather than acknowledgments,
-                        // so the strip wraps instead of running off the window.
-                        .max_w(window.bounds().size.width - px(24.))
+                        .left_0()
+                        .right_0()
+                        .bottom(super::FOOTER_HEIGHT + px(4.))
                         .flex()
-                        .items_center()
-                        .gap_1()
-                        .px_3()
-                        .py_1()
-                        .rounded(ROW_RADIUS)
-                        .bg(self.surface_color())
-                        .border_1()
-                        .border_color(self.border_color())
-                        .text_size(px(12.))
-                        .text_color(self.control_text())
-                        .child(div().flex_1().min_w_0().child(notice.text.clone()))
-                        .when_some(notice.undo.as_ref(), |s, _| {
-                            s.child(div().text_color(self.muted()).child("·")).child(
-                                self.button("notice-undo", "Undo", Intent::UndoDelete, cx)
-                                    .h(px(22.))
-                                    .text_color(self.control_text()),
-                            )
-                        }),
+                        .justify_center()
+                        // Keyed by what it says, so each notice rises rather than
+                        // swapping its words inside one that is already up.
+                        .child(
+                            toast.with_spring(
+                                SharedString::from(format!("notice-{}", notice.text)),
+                                SpringAnimation::new(SpringConfig::new(900., 60., 1.))
+                                    .to(true)
+                                    .from(false)
+                                    .playback(playback(reduce_motion)),
+                                |s, phase| {
+                                    s.opacity(phase.interpolate_clamped(0., 1.))
+                                        .mt(phase.interpolate_clamped(px(12.), px(0.)))
+                                        .mb(phase.interpolate_clamped(px(-12.), px(0.)))
+                                },
+                            ),
+                        ),
                 )
             })
             .when(
