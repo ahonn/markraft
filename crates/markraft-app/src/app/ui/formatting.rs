@@ -591,9 +591,23 @@ impl NotesApp {
                 },
             });
         }
+        // Without a folder there is nowhere to file a new note, so it waits in
+        // recovery for as long as it takes. A draft whose name is still settling files
+        // itself in a moment and needs nothing said about it; this one is waiting for
+        // the user, and nothing else on the window says so.
+        if self.unfiled_draft() && crate::app::is_draft(note) {
+            states.push(FileState {
+                id: "state-unfiled",
+                icon: Icon::Drafts,
+                label: "No file".into(),
+                detail: "This note is kept inside Markraft until you give it a file.".into(),
+                urgent: false,
+                actions: vec![("Save As…", Intent::Save)],
+            });
+        }
         // The capsule is a pointer to work that is not on screen. When the only note
         // that is not in a file is the one being written, it points at itself, and the
-        // note already says what it is.
+        // note already says what it is — the card above, where it has no file to go to.
         let drafts = self.draft_count();
         let elsewhere = drafts - usize::from(crate::app::is_draft(note));
         if elsewhere > 0 {
