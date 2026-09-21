@@ -191,7 +191,7 @@ fn configure_metadata(info: &mut Dictionary, public_key: &str, mock: bool) -> Re
         info.insert("MarkraftMockUpdates".into(), true.into());
         info.insert(
             "CFBundleIdentifier".into(),
-            "dev.markraft.update-test".into(),
+            "app.markraft.mac.update-test".into(),
         );
         info.insert("CFBundleName".into(), "Markraft Update Test".into());
         info.insert("CFBundleDisplayName".into(), "Markraft Update Test".into());
@@ -203,7 +203,7 @@ fn configure_metadata(info: &mut Dictionary, public_key: &str, mock: bool) -> Re
         transport.insert("NSAllowsLocalNetworking".into(), true.into());
         info.insert("NSAppTransportSecurity".into(), transport.into());
     } else {
-        info.insert("CFBundleIdentifier".into(), "dev.markraft.app".into());
+        info.insert("CFBundleIdentifier".into(), "app.markraft.mac".into());
         info.insert("CFBundleName".into(), "Markraft".into());
         info.insert("CFBundleDisplayName".into(), "Markraft".into());
         info.insert("SUFeedURL".into(), FEED_URL.into());
@@ -371,7 +371,7 @@ mod tests {
         assert_eq!(info["MarkraftMockUpdates"].as_boolean(), Some(true));
         assert_eq!(
             info["CFBundleIdentifier"].as_string(),
-            Some("dev.markraft.update-test")
+            Some("app.markraft.mac.update-test")
         );
         assert_eq!(
             info["SUFeedURL"].as_string(),
@@ -381,7 +381,7 @@ mod tests {
         configure_metadata(&mut info, "", false).unwrap();
         assert_eq!(
             info["CFBundleIdentifier"].as_string(),
-            Some("dev.markraft.app")
+            Some("app.markraft.mac")
         );
         assert!(!info.contains_key("MarkraftMockUpdates"));
         assert!(!info.contains_key("NSAppTransportSecurity"));

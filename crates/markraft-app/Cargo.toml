@@ -40,7 +40,7 @@ objc2-foundation = { version = "0.3", features = ["NSBundle", "NSString"] }
 
 [package.metadata.bundle]
 name = "Markraft"
-identifier = "dev.markraft.app"
+identifier = "app.markraft.mac"
 icon = ["target/Markraft.icns"]
 category = "Productivity"
 osx_minimum_system_version = "13.0"

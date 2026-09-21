@@ -35,7 +35,7 @@ impl Updater {
                 .as_ref()
                 .map(|id| id.to_string())
                 .as_deref()
-                != Some("dev.markraft.update-test")
+                != Some("app.markraft.mac.update-test")
         {
             this.unavailable =
                 "The mock updater requires the isolated update-test app bundle.".into();

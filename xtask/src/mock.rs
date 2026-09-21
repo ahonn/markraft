@@ -10,7 +10,7 @@ use std::{
 };
 
 const APP_NAME: &str = "Markraft Update Test.app";
-const BUNDLE_ID: &str = "dev.markraft.update-test";
+const BUNDLE_ID: &str = "app.markraft.mac.update-test";
 const SCENARIOS: &[&str] = &["valid", "invalid-signature", "no-update"];
 
 pub fn prepare(
@@ -402,7 +402,7 @@ mod tests {
         assert!(check_collisions(&work, &app, &settings, true).is_ok());
         fs::create_dir_all(app.join("Contents")).unwrap();
         let mut info = plist::Dictionary::new();
-        info.insert("CFBundleIdentifier".into(), "dev.markraft.notes".into());
+        info.insert("CFBundleIdentifier".into(), "app.markraft.mac".into());
         plist::Value::Dictionary(info)
             .to_file_xml(app.join("Contents/Info.plist"))
             .unwrap();
