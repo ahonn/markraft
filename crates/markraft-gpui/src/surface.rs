@@ -755,6 +755,32 @@ enum CellWidth {
     Column(Pixels),
 }
 
+/// The document's rows, shaped again only when shaping would answer differently.
+///
+/// Every frame asks for these twice — once to measure the note's height, once to
+/// draw it — and a redraw is usually about something shaping never reads: the
+/// caret blinked, the selection moved, a popup opened above. Shaping walks every
+/// line of the document and asks the platform to lay out its text, so repeating
+/// it for those frames is the single largest avoidable cost in the view.
+///
+/// What it reads is the projection (which stands for the document), the width,
+/// and the inputs [`Shaping`](crate::shaping::Shaping) holds. An image file that
+/// changed under the editor reaches those through
+/// [`EditorView::refresh_images`], which the host polls.
+pub(crate) fn shape_cached(
+    view: &crate::EditorView,
+    width: Pixels,
+    text_system: &WindowTextSystem,
+) -> Vec<LayoutLine> {
+    let projection = view.projection_arc();
+    if let Some(lines) = view.shaping().rows(projection, width) {
+        return lines;
+    }
+    let lines = shape(&view.shape_input(), width, text_system);
+    view.shaping().keep(projection, width, &lines);
+    lines
+}
+
 pub(crate) fn shape(
     input: &ShapeInput<'_>,
     width: Pixels,
@@ -2473,7 +2499,7 @@ impl Element for EditorSurface {
                     _ if view.single_line => px(0.),
                     _ => px(600.),
                 });
-                let rows = shape(&view.shape_input(), width, window.text_system());
+                let rows = shape_cached(view, width, window.text_system());
                 let height = rows
                     .iter()
                     .fold(if view.single_line { px(0.) } else { px(40.) }, |h, row| {
@@ -2494,7 +2520,7 @@ impl Element for EditorSurface {
         cx: &mut App,
     ) -> Vec<LayoutLine> {
         let view = self.editor.read(cx);
-        let mut rows = shape(&view.shape_input(), bounds.size.width, window.text_system());
+        let mut rows = shape_cached(view, bounds.size.width, window.text_system());
         let mut y = bounds.top();
         for row in &mut rows {
             y += row.top_gap;
@@ -2589,8 +2615,8 @@ impl Element for EditorSurface {
                     let caret = row.caret(offset, editor.upstream);
                     let viewport = editor.scroll.bounds();
                     let margin = px(12.);
-                    let top = viewport.top() + editor.style.top_overlay;
-                    let bottom = viewport.bottom() - editor.style.bottom_overlay;
+                    let top = viewport.top() + editor.style().top_overlay;
+                    let bottom = viewport.bottom() - editor.style().bottom_overlay;
                     let correction = if caret.y < top + margin {
                         top + margin - caret.y
                     } else if caret.y + row.line_height > bottom - margin {
@@ -2644,7 +2670,7 @@ impl Element for EditorSurface {
             .flatten();
         let focus = editor.focus.clone();
         let upstream = editor.upstream;
-        let style = editor.style.clone();
+        let style = editor.style().clone();
         let scroll = editor.tables.clone();
         let placeholder = (projection.line_count() == 1 && projection.plain_text().is_empty())
             .then(|| editor.placeholder.clone());

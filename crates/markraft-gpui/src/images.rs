@@ -68,6 +68,10 @@ pub(crate) struct Images {
 }
 
 impl Images {
+    /// A cache resolving relative sources against `base`. The view builds its
+    /// own through [`Shaping`](crate::shaping::Shaping); the tests build one
+    /// directly.
+    #[cfg(test)]
     pub(crate) fn new(base: Option<PathBuf>) -> Self {
         Self {
             base: base.and_then(|directory| std::path::absolute(directory).ok()),

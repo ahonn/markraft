@@ -19,6 +19,7 @@ mod images;
 pub mod ime;
 mod keymap;
 mod links;
+mod shaping;
 mod single_line;
 mod style;
 mod surface;
@@ -390,14 +391,9 @@ pub struct EditorView {
     /// Whether the last frame drew an extension's popup, for a host whose window
     /// chrome is drawn by the platform above everything this view renders.
     overlay_open: bool,
-    /// What the host says a wiki link target can open, so that a link leading nowhere
-    /// is not drawn as one that leads somewhere. Absent until the host says.
-    wiki_resolver: Option<WikiResolver>,
-    /// What the host keeps exactly as written. Absent until the host says, and then
-    /// nothing is shaded, which is right for an editor whose text is all alike.
-    protected_spans: Option<ProtectedSpans>,
-    pub(crate) style: EditorStyle,
-    pub(crate) images: images::Images,
+    /// The style, the images and the two host callbacks shaping reads, and the
+    /// rows it last produced from them.
+    shaping: shaping::Shaping,
     pub(crate) placeholder: SharedString,
     /// What the editor calls itself to assistive technology. A host that lends one
     /// editor to several surfaces renames it as it hands it over.
@@ -485,14 +481,10 @@ impl EditorView {
             codecs,
             extension_selection: state.selection().clone(),
             overlay_open: false,
-            wiki_resolver: None,
-            protected_spans: None,
             state,
             projection,
             host_extensions: extensions,
             extensions: Vec::new(),
-            style: EditorStyle::default(),
-            images: images::Images::new(None),
             placeholder: SharedString::default(),
             aria_label: DEFAULT_ARIA_LABEL.into(),
             single_line: false,
@@ -516,6 +508,7 @@ impl EditorView {
             caret_blink_task: None,
             scrollbar_active: false,
             scrollbar_task: None,
+            shaping: shaping::Shaping::default(),
         }
     }
 
@@ -531,12 +524,12 @@ impl EditorView {
     }
 
     pub fn with_style(mut self, style: EditorStyle) -> Self {
-        self.style = style;
+        self.shaping.set_style(style);
         self
     }
     /// Resolve relative image URLs against the directory containing the document.
     pub fn with_image_base(mut self, directory: Option<std::path::PathBuf>) -> Self {
-        self.images.set_base(directory);
+        self.shaping.set_image_base(directory);
         self
     }
 
@@ -544,7 +537,7 @@ impl EditorView {
     /// still use the document directory, and explicit `file://` URLs stay absolute.
     /// An unsupported root disables these previews instead of guessing a location.
     pub fn with_image_root(mut self, root: Result<Option<std::path::PathBuf>, String>) -> Self {
-        self.images.set_root(root);
+        self.shaping.set_image_root(root);
         self
     }
 
@@ -554,7 +547,7 @@ impl EditorView {
         root: Result<Option<std::path::PathBuf>, String>,
         cx: &mut Context<Self>,
     ) {
-        self.images.set_root(root);
+        self.shaping.set_image_root(root);
         cx.notify();
     }
 
@@ -566,7 +559,7 @@ impl EditorView {
         resolves: impl Fn(&str) -> bool + 'static,
         cx: &mut Context<Self>,
     ) {
-        self.wiki_resolver = Some(Box::new(resolves));
+        self.shaping.set_wiki(Box::new(resolves));
         cx.notify();
     }
 
@@ -578,7 +571,7 @@ impl EditorView {
         spans: impl Fn(&str) -> Vec<std::ops::Range<usize>> + 'static,
         cx: &mut Context<Self>,
     ) {
-        self.protected_spans = Some(Box::new(spans));
+        self.shaping.set_protected(Box::new(spans));
         cx.notify();
     }
 
@@ -605,13 +598,13 @@ impl EditorView {
         directory: Option<std::path::PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        self.images.set_base(directory);
+        self.shaping.set_image_base(directory);
         cx.notify();
     }
 
     /// Refresh changed image files without modifying document state or history.
     pub fn refresh_images(&mut self, cx: &mut Context<Self>) {
-        if self.images.refresh() {
+        if self.shaping.refresh_images() {
             cx.notify();
         }
     }
@@ -637,7 +630,7 @@ impl EditorView {
         cx.notify();
     }
     pub fn set_style(&mut self, style: EditorStyle, cx: &mut Context<Self>) {
-        self.style = style;
+        self.shaping.set_style(style);
         self.reveal = true;
         cx.notify();
     }
@@ -660,20 +653,34 @@ impl EditorView {
     pub fn projection(&self) -> Arc<Projection> {
         self.projection.clone()
     }
+    /// The same projection, as the handle the laid-out rows are keyed by: a
+    /// document that has not changed hands back the very same `Arc`.
+    pub(crate) fn projection_arc(&self) -> &Arc<Projection> {
+        &self.projection
+    }
     /// The whole document as text, lines joined by `'\n'`.
     pub fn text(&self) -> &str {
         self.projection.plain_text()
+    }
+    /// The style rows are shaped and drawn with.
+    pub(crate) fn style(&self) -> &crate::style::EditorStyle {
+        self.shaping.style()
+    }
+    /// Everything shaping reads besides the document, the projection and the
+    /// width, and the rows it last produced from them.
+    pub(crate) fn shaping(&self) -> &shaping::Shaping {
+        &self.shaping
     }
     pub(crate) fn shape_input(&self) -> ShapeInput<'_> {
         ShapeInput {
             doc: self.state.doc(),
             types: &self.types,
             projection: &self.projection,
-            style: &self.style,
+            style: self.shaping.style(),
             single_line: self.single_line,
-            images: &self.images,
-            wiki: self.wiki_resolver.as_ref(),
-            protected: self.protected_spans.as_ref(),
+            images: self.shaping.images(),
+            wiki: self.shaping.wiki(),
+            protected: self.shaping.protected(),
         }
     }
     /// The laid-out row holding `pos`, and the `char` offset into it.
@@ -707,9 +714,9 @@ impl EditorView {
         (!self.layout.is_empty()).then(|| {
             self.layout.iter().fold(
                 (if self.single_line { px(0.) } else { px(40.) })
-                    + self.style.padding * 2.
-                    + self.style.top_overlay
-                    + self.style.bottom_overlay,
+                    + self.style().padding * 2.
+                    + self.style().top_overlay
+                    + self.style().bottom_overlay,
                 |height, row| height + row.top_gap + row.height,
             )
         })
@@ -1127,14 +1134,14 @@ impl EditorView {
         let inset = px(4.);
         let viewport = self.scroll.bounds().size.height;
         let max = self.scroll.max_offset().y;
-        let track = viewport - inset * 2. - self.style.top_overlay - self.style.bottom_overlay;
+        let track = viewport - inset * 2. - self.style().top_overlay - self.style().bottom_overlay;
         if self.single_line || max <= px(1.) || track <= px(48.) {
             return None;
         }
         let height = (track * (viewport / (viewport + max))).max(px(28.));
         let progress = (-self.scroll.offset().y / max).clamp(0., 1.);
         Some((
-            self.style.top_overlay + inset + (track - height) * progress,
+            self.style().top_overlay + inset + (track - height) * progress,
             height,
         ))
     }
@@ -1580,18 +1587,18 @@ impl Render for EditorView {
             .when(!self.single_line, |this| this.overflow_y_scroll())
             .track_scroll(&self.scroll)
             .on_scroll_wheel(cx.listener(|this, _, _, cx| this.flash_scrollbar(cx)))
-            .p(self.style.padding)
-            .pt(self.style.padding + self.style.top_overlay)
-            .pb(self.style.padding + self.style.bottom_overlay)
-            .bg(self.style.background)
-            .text_color(self.style.text)
+            .p(self.style().padding)
+            .pt(self.style().padding + self.style().top_overlay)
+            .pb(self.style().padding + self.style().bottom_overlay)
+            .bg(self.style().background)
+            .text_color(self.style().text)
             .child(EditorSurface {
                 editor: cx.entity(),
             });
         // The thumb sits beside the scroller rather than inside it, so it does not
         // scroll with the content. It is an indicator only and takes no pointer input.
         let active = self.scrollbar_active;
-        let color = self.style.scrollbar;
+        let color = self.style().scrollbar;
         // Reduced motion keeps the fade's two end states and drops the travel
         // between them.
         let reduce_motion = cx.reduce_motion();

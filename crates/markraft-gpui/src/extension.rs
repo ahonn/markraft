@@ -271,7 +271,7 @@ impl<'a> EditorCx<'a> {
         self.view.focused
     }
     pub fn style(&self) -> &EditorStyle {
-        &self.view.style
+        self.view.style()
     }
     /// Window bounds of the caret at `pos`; see [`EditorView::caret_bounds`].
     pub fn caret_bounds(&self, pos: usize) -> Option<Bounds<Pixels>> {
