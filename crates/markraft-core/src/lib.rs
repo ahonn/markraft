@@ -95,6 +95,14 @@
 //! [`transaction_appender`] reacts to a finished transaction with another one;
 //! [`EditorState::update_with_appended`] is what returns the whole chain.
 //!
+//! [`history`] and [`composition`] are configured separately but are not
+//! independent of each other: cancelling a composition has to put back the undo
+//! history the composition's own transactions grew, so a composition snapshot
+//! carries the [`HistoryState`] from before it started and the history reads
+//! that snapshot back when a composition is cancelled. Configure composition
+//! without history and the snapshot simply holds nothing; the two cannot be
+//! given *different* implementations of each other's job.
+//!
 //! # Editing, presentation and layout
 //!
 //! Three namespaced modules sit on top of that:
@@ -113,6 +121,17 @@
 //! about, and how a [`Slice`] becomes text, markup or HTML and reads back.
 //! Neither names a document kind or a platform, so a view is written against
 //! them and a host supplies the implementations.
+//!
+//! These two are a **presentation contract, not part of the document model**.
+//! Nothing in this crate reads either of them: the model, the change system and
+//! every command are parameterised by [`NodeTypeId`] and [`MarkTypeId`] and
+//! never consult a role table. They live here so that a view crate and a
+//! document-kind crate can be written against the same vocabulary without
+//! depending on one another — and that vocabulary, the roles
+//! [`DocTypeNames`] enumerates, is the shape rich text has taken since
+//! CommonMark and GFM. A kind with roles of its own resolves its ids itself and
+//! leaves the unfilled entries `None`; it is not made to pretend it has
+//! headings.
 //!
 //! # Known limitations
 //!

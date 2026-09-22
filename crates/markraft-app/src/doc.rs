@@ -19,12 +19,19 @@ use markraft_core::projection::{Line, Projection};
 use markraft_core::{
     Attrs, EditorState, Extension, Fragment, MarkSet, MarkTypeId, Node, NodeTypeId, Schema, Slice,
 };
-use markraft_gpui::DocTypes;
+use markraft_gpui::{CalloutAttrs, DocTypes};
 use std::sync::{Arc, LazyLock};
 
 static SCHEMA: LazyLock<Schema> = LazyLock::new(commonmark_schema);
-static TYPES: LazyLock<DocTypes> =
-    LazyLock::new(|| DocTypes::from_schema_names(schema(), &commonmark_doc_type_names()));
+static TYPES: LazyLock<DocTypes> = LazyLock::new(|| DocTypes {
+    // The preset spells a callout in a block quote's own attributes, so no role
+    // table can name them and the view has to be told.
+    callout: Some(CalloutAttrs {
+        kind: "callout",
+        title: "title",
+    }),
+    ..DocTypes::from_schema_names(schema(), &commonmark_doc_type_names())
+});
 static CODECS: LazyLock<Arc<dyn Codecs>> =
     LazyLock::new(|| Arc::new(CommonMarkCodecs::new(schema().clone())));
 

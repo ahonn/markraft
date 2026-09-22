@@ -4,6 +4,17 @@
 //! Neither item names a concrete document kind, a platform or a schema type, so
 //! a view can be built against them and a host plugs its own kind in. The
 //! CommonMark implementations live in `markraft-commonmark`.
+//!
+//! This module is a contract between a view and a document kind, and nothing
+//! else in this crate reads it: the model, the change system and every command
+//! take a [`NodeTypeId`](crate::NodeTypeId) or a
+//! [`MarkTypeId`](crate::MarkTypeId) and never ask what role it plays. The
+//! roles below are therefore not the model's idea of what a document is — they
+//! are the vocabulary editing surfaces have converged on, which is the one
+//! CommonMark and GFM gave them. A kind that has no heading leaves
+//! [`DocTypeNames::heading`] `None` and the bindings that would need it do
+//! nothing; a kind whose roles are not on this list resolves its own ids and
+//! hands the view whatever it needs beside this table.
 
 use crate::slice::Slice;
 

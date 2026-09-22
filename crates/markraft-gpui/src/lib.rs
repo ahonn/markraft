@@ -35,7 +35,7 @@ pub use markraft_core::commands::ColumnAlignment;
 pub use style::EditorStyle;
 pub use syntax::{canonical_language, code_languages};
 pub use typeahead::{Typeahead, TypeaheadItem, TypeaheadProvider};
-pub use types::DocTypes;
+pub use types::{CalloutAttrs, DocTypes};
 
 use extension::AnchoredOverlay;
 use gpui::{prelude::*, *};

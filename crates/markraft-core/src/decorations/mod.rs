@@ -38,7 +38,12 @@ use crate::node::Node;
 use crate::schema::{NodeTypeId, Schema};
 use crate::state::{EditorState, Facet};
 
-pub use range_set::{PointItem, PointSet, RangeItem, RangeSet};
+// The interval sets are how a decoration set stores and maps its ranges, not
+// something a view reads: everything outside this crate goes through
+// [`DecorationSet::find`] and [`DecorationSet::all`], which answer in
+// [`Decoration`]s. Keeping them internal leaves the representation free to
+// change.
+pub(crate) use range_set::{PointItem, PointSet, RangeItem, RangeSet};
 
 /// What a decoration tells a view.
 #[derive(Clone, Default)]
@@ -321,18 +326,30 @@ impl DecorationSet {
         self.add(other.all())
     }
 
-    /// The inline decorations.
-    pub fn inline(&self) -> &RangeSet<DecorationSpec> {
+    /// The inline decorations, in the set's own representation:
+    /// the tests reach for it to pin how mapping moves a range. Everything
+    /// else asks [`DecorationSet::find`] or [`DecorationSet::all`], which
+    /// answer in [`Decoration`]s.
+    #[cfg(test)]
+    pub(crate) fn inline(&self) -> &RangeSet<DecorationSpec> {
         &self.inline
     }
 
-    /// The node decorations.
-    pub fn nodes(&self) -> &RangeSet<DecorationSpec> {
+    /// The node decorations, in the set's own representation:
+    /// the tests reach for it to pin how mapping moves a range. Everything
+    /// else asks [`DecorationSet::find`] or [`DecorationSet::all`], which
+    /// answer in [`Decoration`]s.
+    #[cfg(test)]
+    pub(crate) fn nodes(&self) -> &RangeSet<DecorationSpec> {
         &self.nodes
     }
 
-    /// The widgets.
-    pub fn widgets(&self) -> &PointSet<DecorationSpec> {
+    /// The widgets, in the set's own representation:
+    /// the tests reach for it to pin how mapping moves a range. Everything
+    /// else asks [`DecorationSet::find`] or [`DecorationSet::all`], which
+    /// answer in [`Decoration`]s.
+    #[cfg(test)]
+    pub(crate) fn widgets(&self) -> &PointSet<DecorationSpec> {
         &self.widgets
     }
 

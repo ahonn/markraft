@@ -1,10 +1,13 @@
 //! What the view has to know about a callout, which is as little as possible.
 //!
-//! A callout is a block quote carrying a `callout` type, a `fold` marker and a
-//! `title`. The view reads three things off that: whether the quote has a
-//! header at all, what the header says, and which accent it and the quote's bar
-//! are drawn in. Every type name the mapping knows lives here, so the rest of
-//! the surface reads "this quote has a header and a tone" and nothing more.
+//! A callout is a block quote carrying a type and a title in attributes. Which
+//! attributes those are is the host's to say, through
+//! [`DocTypes::callout`](crate::DocTypes::callout): leave it unset and nothing
+//! here finds a callout, whatever a quote's attributes are called. The view
+//! reads three things off a quote that is one: whether it has a header at all,
+//! what the header says, and which accent it and the quote's bar are drawn in.
+//! The tone table below is Obsidian's, which is where the convention comes
+//! from; it only ever runs for a host that opted in by naming the attributes.
 //!
 //! The fold marker is deliberately *not* acted on: the content is always drawn.
 //! A note whose body an editor hid would be a note whose body could not be
@@ -111,7 +114,8 @@ pub(crate) fn header_of(types: &DocTypes, line: &Line, previous: Option<&Line>) 
     if continues || !opens_quote(types, line) {
         return None;
     }
-    head_of(attr(quote, "callout"), attr(quote, "title"))
+    let attrs = types.callout?;
+    head_of(attr(quote, attrs.kind), attr(quote, attrs.title))
 }
 
 /// The tone of every block quote a line sits in, outermost first, for the bars
@@ -122,7 +126,10 @@ pub(crate) fn tones_beside(types: &DocTypes, line: &Line) -> Vec<Option<Tone>> {
         .iter()
         .filter(|ancestor| Some(ancestor.node_type) == types.blockquote)
         .map(|quote| {
-            let kind = attr(quote, "callout");
+            let kind = types
+                .callout
+                .map(|attrs| attr(quote, attrs.kind))
+                .unwrap_or_default();
             (!kind.is_empty()).then(|| tone_of(kind))
         })
         .collect()

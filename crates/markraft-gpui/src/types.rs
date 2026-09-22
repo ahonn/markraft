@@ -15,6 +15,25 @@ const RAW_INLINE: &str = "raw_inline";
 const INLINE_SPAN: &str = "inline_span";
 const WIKI_LINK: &str = "wiki_link";
 
+/// Which attributes of a block quote make it a callout, and where its header
+/// reads from.
+///
+/// A callout is a block quote carrying a type and a title in attributes — the
+/// shape Obsidian gave it — rather than a node type of its own, so the view
+/// cannot find one by node type the way it finds every other role. A host that
+/// wants callouts drawn names those two attributes here; one that leaves
+/// [`DocTypes::callout`] unset gets ordinary block quotes, whatever its
+/// attributes are called.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CalloutAttrs {
+    /// The attribute naming the callout's type — `note`, `warning`, anything
+    /// at all. A quote whose value here is empty is an ordinary quote.
+    pub kind: &'static str,
+    /// The attribute holding the title written beside the type. A callout with
+    /// no title is headed by its type instead.
+    pub title: &'static str,
+}
+
 /// The roles the view, its key bindings and its extensions know about, as the
 /// ids one schema gives them.
 ///
@@ -100,6 +119,10 @@ pub struct DocTypes {
     /// A link, carrying an `href` attribute. Without it links cannot be set,
     /// followed or pasted as links.
     pub link: Option<MarkTypeId>,
+    /// Which attributes of a [`DocTypes::blockquote`] spell a callout. Unset —
+    /// which is what [`DocTypes::from_schema_names`] leaves it, since no role
+    /// table names these — no quote is given a header or an accent of its own.
+    pub callout: Option<CalloutAttrs>,
 }
 
 impl DocTypes {
@@ -118,6 +141,10 @@ impl DocTypes {
     /// that spells them differently sets those fields itself; leaving
     /// [`DocTypes::raw_inline`] unset costs the source text an inline primitive
     /// is drawn as.
+    ///
+    /// [`DocTypes::callout`] is left unset: a role table names node and mark
+    /// types, and a callout is spelled in a block quote's *attributes*. A host
+    /// that wants them drawn sets that field after this call.
     pub fn from_schema_names(schema: &Schema, names: &DocTypeNames) -> DocTypes {
         let node = |name: Option<&str>| name.and_then(|name| schema.node_id(name));
         let mark = |name: Option<&str>| name.and_then(|name| schema.mark_id(name));
@@ -146,6 +173,7 @@ impl DocTypes {
             strikethrough: mark(names.strikethrough),
             underline: mark(names.underline),
             link: mark(names.link),
+            callout: None,
         }
     }
 

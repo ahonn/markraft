@@ -3675,10 +3675,25 @@ mod tests {
 
     /// Every line of `source`, laid out at a note's width.
     fn shaped(source: &str) -> Vec<LayoutLine> {
+        shaped_with(source, callout_types())
+    }
+
+    /// What a CommonMark host hands the view: the preset's roles, plus the two
+    /// block-quote attributes that spell a callout, which no role table names.
+    fn callout_types() -> DocTypes {
+        let schema = commonmark_schema();
+        DocTypes {
+            callout: Some(crate::CalloutAttrs {
+                kind: "callout",
+                title: "title",
+            }),
+            ..DocTypes::from_schema_names(&schema, &commonmark_doc_type_names())
+        }
+    }
+
+    fn shaped_with(source: &str, types: DocTypes) -> Vec<LayoutLine> {
         let state = state_of(source);
         let projection = projection_of(&state);
-        let schema = commonmark_schema();
-        let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
         let images = crate::images::Images::default();
         let style = EditorStyle::notes();
         let input = ShapeInput {
@@ -3932,6 +3947,26 @@ mod tests {
         let lines = shaped("> plain");
         assert!(lines[0].callout_header().is_none());
         assert_eq!(lines[0].top_gap, Pixels::ZERO);
+    }
+
+    /// Callouts are the host's to ask for: the attributes that spell one are not
+    /// in any role table, so a host that names none gets the block quotes its
+    /// schema declares and nothing drawn around them — however those attributes
+    /// happen to be spelled.
+    #[test]
+    fn a_host_that_names_no_callout_attributes_draws_plain_quotes() {
+        let schema = commonmark_schema();
+        let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
+        assert!(types.callout.is_none(), "no role table names them");
+        let lines = shaped_with("> [!tip] Custom title\n> Body", types);
+        assert!(lines[0].callout_header().is_none());
+        assert_eq!(lines[0].top_gap, Pixels::ZERO);
+        // The quote is still a quote, with a bar of the ordinary tone.
+        let Some(Decoration::Quote { levels, tones, .. }) = lines[0].decoration else {
+            panic!("a quote line is decorated as a quote");
+        };
+        assert_eq!(levels, 1);
+        assert_eq!(tones[0], None);
     }
 
     /// A table of two rows of two cells, as the measuring pass leaves them:
