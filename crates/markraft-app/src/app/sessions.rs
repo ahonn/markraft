@@ -2,18 +2,47 @@
 use super::*;
 
 pub(super) struct Session {
-    pub(super) editor: Entity<EditorView>,
-    pub(super) _changes: Subscription,
+    editor: Entity<EditorView>,
+    _changes: Subscription,
     /// Everything else the editor's state does, a selection that moved without an edit
     /// included: the format toolbar reads it, and so does the line a new note's file
     /// would be named after.
-    pub(super) _state_changes: Subscription,
+    _state_changes: Subscription,
     /// Unregisters the note's editor extensions when the session is evicted.
-    pub(super) _extensions: [ExtensionHandle; 4],
+    _extensions: [ExtensionHandle; 4],
     /// Modal editing, while the preference is on. Dropping the handle turns it off.
-    pub(super) vim: Option<ExtensionHandle>,
-    /// The mode this note's editor last reported.
-    pub(super) vim_mode: markraft_vim::Mode,
+    vim: Option<ExtensionHandle>,
+    /// The mode this note's editor last reported. It belongs beside the handle:
+    /// a session that has just been given modal editing, or had it taken away,
+    /// is in the mode a fresh editor starts in, and the two must never be set
+    /// apart — a badge reading `INSERT` over an editor with no vim at all is
+    /// what setting one without the other looks like.
+    vim_mode: markraft_vim::Mode,
+}
+
+impl Session {
+    pub(super) fn editor(&self) -> &Entity<EditorView> {
+        &self.editor
+    }
+
+    /// The mode this note's editor is in, which is `Normal` for one that has no
+    /// modal editing.
+    pub(super) fn vim_mode(&self) -> markraft_vim::Mode {
+        self.vim_mode
+    }
+
+    /// Give this session modal editing, or take it away. Assigning drops the
+    /// previous handle, which unregisters it, and the mode goes back to what a
+    /// fresh editor reports.
+    pub(super) fn set_vim(&mut self, handle: Option<ExtensionHandle>) {
+        self.vim = handle;
+        self.vim_mode = markraft_vim::Mode::default();
+    }
+
+    /// The mode the editor just reported.
+    pub(super) fn report_mode(&mut self, mode: markraft_vim::Mode) {
+        self.vim_mode = mode;
+    }
 }
 
 #[derive(Default)]
@@ -70,7 +99,7 @@ impl NotesApp {
         self.sessions
             .get(&self.library.active_id)
             .expect("the active note has an editor")
-            .editor
+            .editor()
             .clone()
     }
     pub(super) fn ensure_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -259,8 +288,9 @@ impl NotesApp {
                 let title = this.library.note(&note_id).map(|note| note.title());
                 if this.library.set_document(&note_id, document) {
                     this.naming.committed_edit(&note_id, Instant::now());
-                    this.links_dirty |=
-                        title != this.library.note(&note_id).map(|note| note.title());
+                    this.links.invalidate_if(
+                        title != this.library.note(&note_id).map(|note| note.title()),
+                    );
                     this.schedule_save(cx);
                 }
                 cx.notify();
@@ -272,16 +302,14 @@ impl NotesApp {
                 return;
             }
             this.follow_title(cx);
-            if this.format_toolbar {
+            if this.toolbar.formats_changed(|| {
                 let editor = editor.read(cx);
-                let snapshot = (
+                (
                     editor.active_marks(),
                     doc::Block::active(editor.state(), &editor.projection()),
-                );
-                if this.format_snapshot.as_ref() != Some(&snapshot) {
-                    this.format_snapshot = Some(snapshot);
-                    cx.notify();
-                }
+                )
+            }) {
+                cx.notify();
             }
         });
         self.sessions.insert(
@@ -301,11 +329,12 @@ impl NotesApp {
     }
     pub(super) fn sync_documents(&mut self, cx: &App) {
         for (id, session) in self.sessions.iter() {
-            let document = session.editor.read(cx).committed_document().clone();
+            let document = session.editor().read(cx).committed_document().clone();
             let title = self.library.note(id).map(|note| note.title());
             if self.library.set_document(id, document) {
                 self.naming.committed_edit(id, Instant::now());
-                self.links_dirty |= title != self.library.note(id).map(|note| note.title());
+                self.links
+                    .invalidate_if(title != self.library.note(id).map(|note| note.title()));
                 self.save.schedule(Instant::now());
             }
         }
@@ -322,8 +351,8 @@ impl NotesApp {
         self.sessions.clear();
         self.save.reset();
         self.naming.reset();
-        self.conflict_prompted.clear();
-        self.links_dirty = true;
+        self.conflicts.reset();
+        self.links.invalidate();
         self.ensure_session(window, cx);
     }
 }

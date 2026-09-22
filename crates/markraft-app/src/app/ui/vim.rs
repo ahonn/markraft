@@ -24,14 +24,12 @@ impl NotesApp {
         let editors: Vec<_> = self
             .sessions
             .iter()
-            .map(|(id, session)| (id.clone(), session.editor.clone()))
+            .map(|(id, session)| (id.clone(), session.editor().clone()))
             .collect();
         for (id, editor) in editors {
             let handle = enabled.then(|| Self::attach_vim(&editor, cx));
             if let Some(session) = self.sessions.get_mut(&id) {
-                // Assigning drops the previous handle, which unregisters it.
-                session.vim = handle;
-                session.vim_mode = Mode::default();
+                session.set_vim(handle);
             }
         }
         self.set_panel(Panel::Editor, cx);
@@ -51,7 +49,7 @@ impl NotesApp {
             return;
         };
         if let Some(session) = self.sessions.get_mut(note) {
-            session.vim_mode = *mode;
+            session.report_mode(*mode);
         }
         cx.notify();
     }
@@ -62,7 +60,7 @@ impl NotesApp {
         if !self.library.preferences.vim_mode {
             return None;
         }
-        let mode = self.sessions.get(&self.library.active_id)?.vim_mode;
+        let mode = self.sessions.get(&self.library.active_id)?.vim_mode();
         let label = if compact {
             match mode {
                 Mode::Normal => "N",

@@ -108,18 +108,19 @@ impl NotesApp {
         } else {
             self.show_popover(Popover::Format(menu), cx);
         }
-        self.format_selected = self
+        let selected = self
             .format_items(cx)
             .iter()
             .position(|item| item.3)
             .unwrap_or(0);
+        self.format.select(selected);
         if self.interaction.format_menu().is_some() {
-            window.focus(&self.panel_focus, cx);
+            window.focus(self.ring.panel(), cx);
             let weak = cx.entity().downgrade();
             window.on_next_frame(move |_, cx| {
                 let _ = weak.update(cx, |this, cx| {
                     if this.interaction.format_menu() == Some(menu) {
-                        this.format_scroll.scroll_to_item(this.format_selected);
+                        this.format.select(this.format.row());
                         cx.notify();
                     }
                 });
@@ -223,18 +224,15 @@ impl NotesApp {
     ) -> bool {
         let items = self.format_items(cx);
         match key {
-            "up" => self.format_selected = self.format_selected.saturating_sub(1),
-            "down" => {
-                self.format_selected = (self.format_selected + 1).min(items.len().saturating_sub(1))
-            }
+            "up" => self.format.up(),
+            "down" => self.format.down(items.len()),
             "enter" => {
-                if let Some((_, _, intent, _)) = items.get(self.format_selected) {
+                if let Some((_, _, intent, _)) = items.get(self.format.row()) {
                     self.intent(intent.clone(), window, cx);
                 }
             }
             _ => return false,
         }
-        self.format_scroll.scroll_to_item(self.format_selected);
         cx.notify();
         true
     }
@@ -373,7 +371,7 @@ impl NotesApp {
         // The toolbar is 268px wide and centered, so its left edge sits 91px from a
         // 450px window's. The full mode label takes about that much; adding the
         // indicator and its gap needs some 22px more, which a 500px window has.
-        let compact_vim = self.format_toolbar
+        let compact_vim = self.toolbar.shown()
             && (viewport < px(450.) || (!states.is_empty() && viewport < px(500.)));
         div()
             .h(FOOTER_HEIGHT)
@@ -392,7 +390,7 @@ impl NotesApp {
                     .children(self.vim_badge(compact_vim))
                     .children(self.status_capsules(&states, cx)),
             )
-            .when(!self.format_toolbar, |s| {
+            .when(!self.toolbar.shown(), |s| {
                 s.child(
                     div()
                         .id("word-count")
@@ -423,12 +421,12 @@ impl NotesApp {
                         self.chrome_capsule().size(px(32.)).justify_center().child(
                             self.icon_button(
                                 "format-toolbar-toggle",
-                                if self.format_toolbar {
+                                if self.toolbar.shown() {
                                     "Hide Formatting Toolbar"
                                 } else {
                                     "Show Formatting Toolbar"
                                 },
-                                if self.format_toolbar {
+                                if self.toolbar.shown() {
                                     Icon::Close
                                 } else {
                                     Icon::Text
@@ -439,18 +437,18 @@ impl NotesApp {
                             .size(px(32.))
                             .rounded_full()
                             .opacity(1.)
-                            .aria_expanded(self.format_toolbar),
+                            .aria_expanded(self.toolbar.shown()),
                         ),
                     )
                     .with_spring(
                         "format-toggle-fade",
                         // The close button follows window hover even while the
                         // center formatting toolbar remains expanded.
-                        Self::chrome_spring(self.pointer_inside, reduce_motion),
+                        Self::chrome_spring(self.presence.pointer_inside(), reduce_motion),
                         |s, phase| s.opacity(phase.interpolate_clamped(0., 1.)),
                     ),
             )
-            .when(self.format_toolbar, |s| {
+            .when(self.toolbar.shown(), |s| {
                 s.child(
                     self.chrome_capsule()
                         .p(px(4.))
@@ -551,7 +549,7 @@ impl NotesApp {
             return states;
         }
         let note = self.library.active_note();
-        if let Some(error) = &self.error {
+        if let Some(error) = self.feedback.error() {
             states.push(FileState {
                 id: "state-unsaved",
                 icon: Icon::Alert,
@@ -661,9 +659,7 @@ impl NotesApp {
         if states.is_empty() {
             return Vec::new();
         }
-        let lit = self
-            .file_status_flash
-            .is_some_and(|until| Instant::now() < until);
+        let lit = self.feedback.file_status_flashing();
         let shown = states.len().min(CAPSULES_SHOWN);
         let mut row: Vec<AnyElement> = states[..shown]
             .iter()
@@ -873,7 +869,7 @@ impl NotesApp {
             .id("format-menu-items")
             .role(Role::ListBox)
             .aria_label("Formatting")
-            .track_scroll(&self.format_scroll)
+            .track_scroll(self.format.scroll())
             .overflow_y_scroll()
             .size_full()
             .p(px(4.));
@@ -887,7 +883,7 @@ impl NotesApp {
                         .id(stop.clone())
                         .role(Role::Button)
                         .aria_label(label)
-                        .aria_selected(index == self.format_selected)
+                        .aria_selected(index == self.format.row())
                         .aria_position_in_set(index + 1)
                         .aria_size_of_set(total)
                         .aria_toggled(if checked {
@@ -903,14 +899,12 @@ impl NotesApp {
                         .rounded(ROW_RADIUS)
                         .text_size(px(13.))
                         .cursor_pointer()
-                        .when(index == self.format_selected, |s| {
-                            s.bg(self.selected_color())
-                        })
+                        .when(index == self.format.row(), |s| s.bg(self.selected_color()))
                         .hover(|s| s.bg(self.selected_color()))
                         .active(|s| s.bg(self.pressed_color()))
                         .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                            if this.format_selected != index {
-                                this.format_selected = index;
+                            if this.format.row() != index {
+                                this.format.select(index);
                                 cx.notify();
                             }
                         }))

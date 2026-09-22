@@ -113,9 +113,7 @@ impl TableEdit {
 impl NotesApp {
     /// Whether the ring rests on the table toolbar rather than on the surface below it.
     fn table_ringed(&self) -> bool {
-        self.chrome_focus
-            .as_deref()
-            .is_some_and(|id| id.starts_with(STOP))
+        self.ring.at().is_some_and(|id| id.starts_with(STOP))
     }
 
     /// Every control of the toolbar, in the order it is drawn, so the ring walks the
@@ -141,13 +139,14 @@ impl NotesApp {
             && self.interaction.popover().is_none()
             && self.interaction.html().is_none()
             && (ringed || self.editor().focus_handle(cx).is_focused(window));
-        self.table = open
-            .then(|| self.editor().read(cx).table_at_caret())
-            .flatten();
-        let Some(table) = self.table else {
+        self.toolbar.set_table(
+            open.then(|| self.editor().read(cx).table_at_caret())
+                .flatten(),
+        );
+        let Some(table) = self.toolbar.table().copied() else {
             // The ring cannot rest on a toolbar that is no longer drawn.
             if ringed {
-                self.chrome_focus = None;
+                self.ring.release();
             }
             return None;
         };

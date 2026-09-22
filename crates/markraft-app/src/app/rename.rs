@@ -169,7 +169,7 @@ impl NotesApp {
             return;
         }
         self.set_panel(Panel::Editor, cx);
-        self.chrome_focus = None;
+        self.ring.release();
         let note = self.library.active_note();
         // A note with no file yet has nothing to rename: naming it is saving it.
         let Some(path) = note.path.clone() else {
@@ -262,8 +262,9 @@ impl NotesApp {
     ) -> Result<(), String> {
         if !self.flush(cx) {
             return Err(self
-                .error
-                .clone()
+                .feedback
+                .error()
+                .cloned()
                 .unwrap_or_else(|| "Save this note before renaming it.".into()));
         }
         let persistence = self
@@ -312,7 +313,7 @@ impl NotesApp {
                 // The editor owns its document; replacing it costs that note its undo
                 // history, which is the price of the link being right in both places.
                 session
-                    .editor
+                    .editor()
                     .update(cx, |editor, cx| editor.replace_doc(document, cx));
             }
         }

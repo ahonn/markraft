@@ -16,8 +16,7 @@ impl NotesApp {
             .position(|(language, _)| canonical_language(language) == canonical_language(&active))
             .unwrap_or(0);
         self.show_popover(Popover::CodeLanguage(pos), cx);
-        self.code_language_selected = selected;
-        self.code_language_focus_pending = true;
+        self.code_language.open_at(selected);
         self.set_query(String::new(), "Search languages…", "Filter languages", cx);
         cx.notify();
     }
@@ -61,20 +60,15 @@ impl NotesApp {
     ) -> bool {
         let languages = self.matching_code_languages(cx);
         match key {
-            "up" => self.code_language_selected = self.code_language_selected.saturating_sub(1),
-            "down" => {
-                self.code_language_selected =
-                    (self.code_language_selected + 1).min(languages.len().saturating_sub(1));
-            }
+            "up" => self.code_language.up(),
+            "down" => self.code_language.down(languages.len()),
             "enter" => {
-                if let Some((language, _)) = languages.get(self.code_language_selected) {
+                if let Some((language, _)) = languages.get(self.code_language.row()) {
                     self.apply_code_language(language, window, cx);
                 }
             }
             _ => return false,
         }
-        self.code_language_scroll
-            .scroll_to_item(self.code_language_selected);
         cx.notify();
         true
     }
@@ -109,7 +103,7 @@ impl NotesApp {
             .id("code-language-list")
             .role(Role::ListBox)
             .aria_label("Code languages")
-            .track_scroll(&self.code_language_scroll)
+            .track_scroll(self.code_language.scroll())
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -125,7 +119,7 @@ impl NotesApp {
                         .id(stop.clone())
                         .role(Role::Button)
                         .aria_label(label)
-                        .aria_selected(index == self.code_language_selected)
+                        .aria_selected(index == self.code_language.row())
                         .aria_position_in_set(index + 1)
                         .aria_size_of_set(total)
                         .aria_toggled(if checked {
@@ -141,14 +135,14 @@ impl NotesApp {
                         .rounded(ROW_RADIUS)
                         .text_size(px(13.))
                         .cursor_pointer()
-                        .when(index == self.code_language_selected, |s| {
+                        .when(index == self.code_language.row(), |s| {
                             s.bg(self.selected_color())
                         })
                         .hover(|s| s.bg(self.selected_color()))
                         .active(|s| s.bg(self.pressed_color()))
                         .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                            if this.code_language_selected != index {
-                                this.code_language_selected = index;
+                            if this.code_language.row() != index {
+                                this.code_language.select(index);
                                 cx.notify();
                             }
                         }))

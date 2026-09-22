@@ -81,6 +81,50 @@ impl SaveState {
     }
 }
 
+/// Which notes have already been asked about their conflict, and whether the
+/// question is on screen right now.
+///
+/// Two rules the callers used to keep by hand. A note is asked once: answering
+/// "Keep Mine" leaves the conflict standing, and asking again on every save
+/// would make the note unusable. And only one question at a time — the dialog is
+/// modal, so a second one would stack behind the first and be answered blind.
+/// Asking again on purpose (⌘S, the footer indicator, the command) is
+/// [`Conflicts::ask_again`], which is the one way to forget an answer.
+#[derive(Default)]
+pub(super) struct Conflicts {
+    asked: HashSet<String>,
+    on_screen: bool,
+}
+
+impl Conflicts {
+    /// Whether to put the question up for `id`, which from here on counts as
+    /// asked. `false` when it has been asked already or another question is up.
+    pub(super) fn ask(&mut self, id: &str) -> bool {
+        if self.on_screen || self.asked.contains(id) {
+            return false;
+        }
+        self.asked.insert(id.to_owned());
+        self.on_screen = true;
+        true
+    }
+
+    /// The question has been answered and the screen is free.
+    pub(super) fn answered(&mut self) {
+        self.on_screen = false;
+    }
+
+    /// Forget that `id` was asked, so the next [`Conflicts::ask`] puts the
+    /// question up again.
+    pub(super) fn ask_again(&mut self, id: &str) {
+        self.asked.remove(id);
+    }
+
+    /// Forget every answer: the notes these were about are gone.
+    pub(super) fn reset(&mut self) {
+        self.asked.clear();
+    }
+}
+
 struct HeldDraft {
     id: String,
     deadline: Instant,
@@ -197,6 +241,43 @@ impl QuitState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A note is asked about its conflict once. "Keep Mine" leaves the conflict
+    /// standing, and a question that came back on every save would make the note
+    /// unusable; only asking on purpose forgets the answer.
+    #[test]
+    fn a_conflict_is_asked_about_once_until_someone_asks_again() {
+        let mut conflicts = Conflicts::default();
+        assert!(conflicts.ask("a"));
+        conflicts.answered();
+        assert!(!conflicts.ask("a"), "answered once already");
+        conflicts.ask_again("a");
+        assert!(conflicts.ask("a"));
+        conflicts.answered();
+        // Another note is another question.
+        assert!(conflicts.ask("b"));
+    }
+
+    /// The dialog is modal, so a second question would stack behind the first
+    /// and be answered blind.
+    #[test]
+    fn only_one_conflict_question_is_on_screen_at_a_time() {
+        let mut conflicts = Conflicts::default();
+        assert!(conflicts.ask("a"));
+        assert!(!conflicts.ask("b"), "one is already up");
+        conflicts.answered();
+        assert!(conflicts.ask("b"));
+    }
+
+    /// A new workspace is new notes: the answers were about the old ones.
+    #[test]
+    fn reopening_the_folder_forgets_every_answer() {
+        let mut conflicts = Conflicts::default();
+        assert!(conflicts.ask("a"));
+        conflicts.answered();
+        conflicts.reset();
+        assert!(conflicts.ask("a"));
+    }
 
     #[test]
     fn edits_debounce_autosave_without_clearing_dirty_on_dispatch() {

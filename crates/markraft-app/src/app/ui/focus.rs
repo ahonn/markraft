@@ -106,7 +106,7 @@ impl NotesApp {
         }
         if self.interaction.panel() == Panel::Editor
             && self.interaction.html().is_none()
-            && self.table.is_some()
+            && self.toolbar.table().is_some()
         {
             return Surface::Table;
         }
@@ -129,9 +129,9 @@ impl NotesApp {
         let mut stops = Vec::new();
         // A notice offering an action is reachable from whatever else is open.
         if self
-            .notice
-            .as_ref()
-            .is_some_and(|notice| notice.undo.is_some())
+            .feedback
+            .notice()
+            .is_some_and(|notice| notice.undo().is_some())
         {
             stops.push(Stop::run("notice-undo", Intent::UndoDelete));
         }
@@ -316,7 +316,7 @@ impl NotesApp {
         if self.surface() == Surface::Table {
             return self.table_step(forward, &stops, window, cx);
         }
-        let current = match &self.chrome_focus {
+        let current = match self.ring.at() {
             Some(id) => stops.iter().position(|stop| &stop.id == id),
             // A caret in the query field is already standing on that stop.
             None => self
@@ -339,11 +339,11 @@ impl NotesApp {
         if let Some(row) = row {
             self.select_row(row);
         }
-        self.chrome_focus = Some(id);
+        self.ring.move_to(id);
         if query {
             window.focus(&self.query().focus_handle(cx), cx);
         } else {
-            window.focus(&self.panel_focus, cx);
+            window.focus(self.ring.panel(), cx);
         }
         cx.notify();
         true
@@ -361,15 +361,16 @@ impl NotesApp {
         cx: &mut Context<Self>,
     ) -> bool {
         let current = self
-            .chrome_focus
-            .as_ref()
+            .ring
+            .at()
             .and_then(|id| stops.iter().position(|stop| &stop.id == id));
         let next = match current {
             Some(index) if forward => (index + 1 < stops.len()).then_some(index + 1),
             Some(index) => index.checked_sub(1),
             None if !forward
                 && self
-                    .table
+                    .toolbar
+                    .table()
                     .is_some_and(|table| table.row == 0 && table.column == 0) =>
             {
                 Some(0)
@@ -379,8 +380,8 @@ impl NotesApp {
         };
         match next {
             Some(index) => {
-                self.chrome_focus = Some(stops[index].id.clone());
-                window.focus(&self.panel_focus, cx);
+                self.ring.move_to(stops[index].id.clone());
+                window.focus(self.ring.panel(), cx);
             }
             None => self.focus_editor(window, cx),
         }
@@ -391,9 +392,9 @@ impl NotesApp {
     /// The first stop of the row the open surface has selected, if it has a list.
     fn selected_stop(&self, stops: &[Stop]) -> Option<usize> {
         let row = match self.surface() {
-            Surface::Format => self.format_selected,
-            Surface::CodeLanguage => self.code_language_selected,
-            Surface::Picker | Surface::Actions => self.selected,
+            Surface::Format => self.format.row(),
+            Surface::CodeLanguage => self.code_language.row(),
+            Surface::Picker | Surface::Actions => self.picker.row(),
             _ => return None,
         };
         stops.iter().position(|stop| stop.row == Some(row))
@@ -403,24 +404,14 @@ impl NotesApp {
     /// changes a selection goes through here — the ring, the arrow keys and the
     /// pointer — so a question standing on the row being left is taken back with it.
     pub(super) fn select_row(&mut self, row: usize) {
-        self.confirm_purge = None;
+        // Whatever list this lands in, the ring has moved: a question standing
+        // on a Browse row is answered for that row alone, so it goes with it.
+        self.picker.forget_question();
         match self.surface() {
-            Surface::Format => {
-                self.format_selected = row;
-                self.format_scroll.scroll_to_item(row);
-            }
-            Surface::CodeLanguage => {
-                self.code_language_selected = row;
-                self.code_language_scroll.scroll_to_item(row);
-            }
-            Surface::Picker => {
-                self.selected = row;
-                self.picker_scroll.scroll_to_item(row);
-            }
-            Surface::Actions => {
-                self.selected = row;
-                self.actions_scroll.scroll_to_item(row);
-            }
+            Surface::Format => self.format.select(row),
+            Surface::CodeLanguage => self.code_language.select(row),
+            Surface::Picker => self.picker.select_in_browse(row),
+            Surface::Actions => self.picker.select_in_actions(row),
             _ => {}
         }
     }
@@ -428,7 +419,7 @@ impl NotesApp {
     /// Run the ringed control. Returns false when the ring is on the query field, on a
     /// row that only selects, or nowhere, so Enter keeps its ordinary panel meaning.
     pub(super) fn focus_activate(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(id) = self.chrome_focus.clone() else {
+        let Some(id) = self.ring.at().cloned() else {
             return false;
         };
         let intent = self
@@ -449,7 +440,7 @@ impl NotesApp {
     /// Draw the keyboard focus ring around `element` while the ring rests on `id`. It
     /// sits outside the control's own box, so showing it moves nothing.
     pub(super) fn ring(&self, id: &str, radius: Pixels, element: Stateful<Div>) -> Stateful<Div> {
-        if self.chrome_focus.as_deref() != Some(id) {
+        if !self.ring.rests_on(id) {
             return element;
         }
         element.child(

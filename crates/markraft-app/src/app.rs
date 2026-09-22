@@ -1,11 +1,21 @@
 mod assets;
+mod feedback;
 mod interaction;
+mod lists;
+mod presence;
+mod ring;
 mod sessions;
+mod toolbar;
 use sessions::Sessions;
 mod workspace;
 
+use feedback::Feedback;
 use interaction::{InputSession, Interaction, Popover};
-use workspace::{DraftNaming, QuitState, SaveCompletion, SaveState};
+use lists::{Cursor, Picker};
+use presence::{Presence, WindowSize};
+use ring::FocusRing;
+use toolbar::Toolbar;
+use workspace::{Conflicts, DraftNaming, QuitState, SaveCompletion, SaveState};
 mod rename;
 mod ui;
 
@@ -19,13 +29,13 @@ use crate::{
     vault::{External, Store},
 };
 use gpui::{prelude::*, *};
-use markraft_core::{MarkSet, Node, Selection};
+use markraft_core::{Node, Selection};
 use markraft_gpui::{
     ColumnAlignment, EditRejection, EditorEvent, EditorStyle, EditorView, ExtensionHandle, Setup,
     TableInfo,
 };
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::VecDeque,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -81,15 +91,6 @@ enum FormatMenu {
     Inline,
     List,
 }
-/// A transient message over the note. One that carries an action shows it as a button
-/// and stays longer, because reaching that button takes a moment.
-#[derive(Clone)]
-struct Notice {
-    text: SharedString,
-    until: Instant,
-    /// The note an "Undo" button puts back; a plain notice carries none.
-    undo: Option<String>,
-}
 pub struct NotesApp {
     library: Library,
     persistence: Option<Persistence>,
@@ -102,68 +103,40 @@ pub struct NotesApp {
     sessions: Sessions,
     interaction: Interaction,
     input: Option<InputSession>,
-    panel_focus: FocusHandle,
-    /// The stop id of the chrome control Tab has moved to. `None` while the caret owns
-    /// the keyboard and nothing wears the focus ring.
-    chrome_focus: Option<SharedString>,
-    selected: usize,
-    /// The deleted note whose "Delete Permanently" button has been asked once and is
-    /// waiting for the confirming second click.
-    confirm_purge: Option<String>,
-    picker_scroll: ScrollHandle,
-    actions_scroll: ScrollHandle,
-    settings_scroll: ScrollHandle,
-    format_scroll: ScrollHandle,
-    code_language_scroll: ScrollHandle,
-    code_language_focus_pending: bool,
-    code_language_selected: usize,
+    /// Where Tab has walked the chrome, and the handle its controls share.
+    ring: FocusRing,
+    /// Browse and the command list: one selected row between them, a scroll
+    /// each, and the delete question that stands on a row.
+    picker: Picker,
+    /// The code block's language list.
+    code_language: Cursor,
     save: SaveState,
     naming: DraftNaming,
-    error: Option<String>,
-    platform_error: Option<String>,
-    notice: Option<Notice>,
-    /// Things the notes folder gave the user to read. They are sentences rather than
-    /// acknowledgments, so they wait their turn instead of replacing one another.
-    pending_notices: VecDeque<String>,
-    conflict_prompted: HashSet<String>,
-    conflict_dialog: bool,
+    /// Everything the window has to tell the user: the errors that stand, the
+    /// notices that pass, and whose turn it is.
+    feedback: Feedback,
+    /// Which notes have been asked about their conflict, and whether that
+    /// question is on screen.
+    conflicts: Conflicts,
     /// Whether the quit question is already on screen, so a second ⌘Q cannot stack
     /// another one behind it.
     quitting: QuitState,
-    /// Until when that indicator stays lit, after a keystroke the file refused. It
-    /// is attention rather than a message, so it expires on its own.
-    file_status_flash: Option<Instant>,
-    show_words: bool,
-    format_toolbar: bool,
-    /// The table the toolbar was last drawn for. It is paint geometry, so it is only
-    /// ever as fresh as the last frame, which is also the frame the keyboard walks.
-    table: Option<TableInfo>,
-    format_selected: usize,
-    format_snapshot: Option<(MarkSet, Option<doc::Block>)>,
+    /// The formatting toolbar over the note, and what the footer counts.
+    toolbar: Toolbar,
+    /// The format menu's list.
+    format: Cursor,
     dark: bool,
-    // Corner action buttons and traffic lights follow window hover alone.
-    pointer_inside: bool,
+
     /// Whether the notes folder had to be made on open because the one the settings
     /// named was gone.
     folder_was_created: bool,
-    /// Whether the platform's close button is currently shown. It follows window hover
-    /// like the rest of the chrome, but also stands down for a popup it would cover.
-    close_button_shown: bool,
-    /// The notes the `[[` menu offers, shared with the editor's provider so that a note
-    /// written after this editor opened can still be linked to.
-    link_targets: ui::wiki::LinkTargets,
-    /// Every spelling that reaches a note, for the editor's question about each wiki
-    /// link it draws.
-    link_index: ui::wiki::LinkIndex,
-    /// Only note names, paths, membership and the active note invalidate link targets.
-    links_dirty: bool,
-    /// When the keyboard was last used here. Someone typing is present even with the
-    /// pointer parked outside the window, so the chrome stays up for a moment after.
-    last_key_at: Option<Instant>,
-    chrome_shown: bool,
-    window_active: bool,
-    expected_size: Option<Size<Pixels>>,
-    last_size: Size<Pixels>,
+    /// What the `[[` menu offers and what the editor asks about each link it
+    /// draws, and whether either is out of date.
+    links: ui::wiki::Links,
+    /// Whether someone is at the window, which is what the chrome follows.
+    presence: Presence,
+    /// The window's own size, and the one resize the app asked for.
+    window_size: WindowSize,
     _poll: Task<()>,
     _bounds: Subscription,
     _appearance: Subscription,
@@ -205,19 +178,17 @@ impl NotesApp {
                 None
             }
         };
+        let mut feedback = Feedback::default();
+        if let Some(error) = error {
+            feedback.set_error(error);
+        }
+        feedback.set_platform_error(platform_error);
         let bounds = cx.observe_window_bounds(window, |this, window, cx| {
             let bounds = window.bounds();
-            if bounds.size != this.last_size {
-                if this.expected_size.is_some_and(|expected| {
-                    (expected.width - bounds.size.width).abs() <= px(2.)
-                        && (expected.height - bounds.size.height).abs() <= px(2.)
-                }) {
-                    this.expected_size = None;
-                } else {
-                    this.library.preferences.auto_height = false;
-                    this.expected_size = None;
-                }
-                this.last_size = bounds.size;
+            // A resize the app did not ask for is the user's, and dragging the
+            // window's edge is how they say they want the height left alone.
+            if this.window_size.settled(bounds.size) == Some(false) {
+                this.library.preferences.auto_height = false;
             }
             let next = Some([
                 f32::from(bounds.origin.x),
@@ -234,8 +205,8 @@ impl NotesApp {
             this.apply_theme(window, cx);
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
-            this.window_active = window.is_window_active();
-            if this.window_active {
+            this.presence.set_window_active(window.is_window_active());
+            if this.presence.window_active() {
                 if let Some(persistence) = &this.persistence {
                     persistence.refresh();
                 }
@@ -250,7 +221,10 @@ impl NotesApp {
             if !this.prepare_to_quit(cx) {
                 eprintln!(
                     "Markraft: {}",
-                    this.error.as_deref().unwrap_or("Could not save")
+                    this.feedback
+                        .error()
+                        .map(String::as_str)
+                        .unwrap_or("Could not save")
                 );
             }
             async {}
@@ -283,44 +257,21 @@ impl NotesApp {
             sessions: Sessions::default(),
             interaction: Interaction::default(),
             input: None,
-            table: None,
-            panel_focus: cx.focus_handle(),
-            selected: 0,
-            confirm_purge: None,
-            picker_scroll: ScrollHandle::new(),
-            actions_scroll: ScrollHandle::new(),
-            settings_scroll: ScrollHandle::new(),
-            format_scroll: ScrollHandle::new(),
-            code_language_scroll: ScrollHandle::new(),
-            code_language_focus_pending: false,
-            code_language_selected: 0,
+            ring: FocusRing::new(cx.focus_handle()),
+            picker: Picker::default(),
+            code_language: Cursor::default(),
             save: SaveState::default(),
             naming: DraftNaming::default(),
-            error,
-            platform_error,
-            notice: None,
-            pending_notices: VecDeque::new(),
-            conflict_prompted: HashSet::new(),
-            conflict_dialog: false,
+            feedback,
+            conflicts: Conflicts::default(),
             quitting: QuitState::default(),
-            file_status_flash: None,
             folder_was_created,
-            close_button_shown: false,
-            link_targets: Default::default(),
-            link_index: Default::default(),
-            links_dirty: true,
-            chrome_focus: None,
-            show_words: false,
-            format_toolbar: false,
-            format_selected: 0,
-            format_snapshot: None,
+            links: Default::default(),
+            toolbar: Toolbar::default(),
+            format: Cursor::default(),
             dark,
-            pointer_inside,
-            last_key_at: None,
-            chrome_shown: true,
-            window_active: window.is_window_active(),
-            expected_size: None,
-            last_size: window.bounds().size,
+            presence: Presence::new(pointer_inside, window.is_window_active()),
+            window_size: WindowSize::new(window.bounds().size),
             _poll: poll,
             _bounds: bounds,
             _appearance: appearance,
@@ -331,12 +282,12 @@ impl NotesApp {
         if app.persistence.is_some() {
             app.focus_editor(window, cx);
         } else {
-            window.focus(&app.panel_focus, cx);
+            window.focus(app.ring.panel(), cx);
         }
         // Application preferences and drafts live outside the document folder.
         app.schedule_save(cx);
         if let Some(error) = app.updater.take_startup_error() {
-            app.queue_notice(error);
+            app.feedback.queue(error);
         }
         app
     }
@@ -355,7 +306,7 @@ impl NotesApp {
         for change in changes {
             let (External::Updated { note, .. } | External::Removed(note)) = &change;
             let id = note.id.clone();
-            self.conflict_prompted.remove(&id);
+            self.conflicts.ask_again(&id);
             let local = self.library.note(&id).cloned();
             match change {
                 External::Updated { previous, note } => {
@@ -380,7 +331,7 @@ impl NotesApp {
                             if let Some(persistence) = &self.persistence
                                 && let Err(error) = persistence.recover(local.clone())
                             {
-                                self.error = Some(error);
+                                self.feedback.set_error(error);
                             }
                             local.conflicted = true;
                             self.library.adopt(local);
@@ -408,7 +359,7 @@ impl NotesApp {
                         if let Some(persistence) = &self.persistence
                             && let Err(error) = persistence.recover(local.clone())
                         {
-                            self.error = Some(error);
+                            self.feedback.set_error(error);
                         }
                         local.conflicted = true;
                         self.library.adopt(local);
@@ -437,7 +388,7 @@ impl NotesApp {
             self.schedule_save(cx);
         }
         if vanished > 0 {
-            self.queue_notice(if vanished == 1 {
+            self.feedback.queue(if vanished == 1 {
                 "A note's file was deleted outside Markraft, so the note is gone too."
                     .to_owned()
             } else {
@@ -460,7 +411,7 @@ impl NotesApp {
         cx.notify();
     }
     fn notes_changed(&mut self, cx: &mut Context<Self>) {
-        self.links_dirty = true;
+        self.links.invalidate();
         let library = &self.library;
         self.naming.retain(|id| {
             library
@@ -504,7 +455,7 @@ impl NotesApp {
     fn composing(&self, cx: &App) -> bool {
         self.sessions
             .get(&self.library.active_id)
-            .is_some_and(|session| session.editor.read(cx).is_composing())
+            .is_some_and(|session| session.editor().read(cx).is_composing())
     }
     /// Whether the active note is one the store would file under its first line, with
     /// the selection still working on that line.
@@ -526,7 +477,7 @@ impl NotesApp {
         }
         self.sessions
             .get(&self.library.active_id)
-            .map(|session| session.editor.read(cx))
+            .map(|session| session.editor().read(cx))
             .is_some_and(|editor| naming_title(editor.doc(), editor.state().selection()))
     }
     /// Let go of the held draft: its name has settled, the next save files it, and it is
@@ -592,7 +543,7 @@ impl NotesApp {
                     let selected = match result {
                         Ok(Ok(Some(path))) if this.library.active_id == id => {
                             if path.exists() {
-                                this.queue_notice(
+                                this.feedback.queue(
                                     "Choose a new filename; the existing file was not changed."
                                         .to_owned(),
                                 );
@@ -640,7 +591,7 @@ impl NotesApp {
             Ok(saved) => self.apply_saved(saved, cx),
             Err(error) => {
                 self.save.apply_completion(revision, false);
-                self.error = Some(error);
+                self.feedback.set_error(error);
                 cx.notify();
             }
         }
@@ -657,7 +608,10 @@ impl NotesApp {
         self.update_paths(saved.paths, cx);
         self.update_conflicts(saved.conflicts, cx);
         if completion == SaveCompletion::Current {
-            self.error = saved.result.err();
+            match saved.result {
+                Ok(()) => self.feedback.clear_error(),
+                Err(error) => self.feedback.set_error(error),
+            }
         }
         cx.notify();
     }
@@ -665,13 +619,9 @@ impl NotesApp {
     /// traffic lights follow `pointer_inside` alone and fade out completely;
     /// typing, focus and open panels must not keep those buttons visible.
     fn chrome_visible(&self) -> bool {
-        self.pointer_inside
-            || self.window_active
-            || self.interaction.panel() != Panel::Editor
-            || self.interaction.format_menu().is_some()
-            || self
-                .last_key_at
-                .is_some_and(|at| at.elapsed() < KEY_PRESENCE)
+        let busy =
+            self.interaction.panel() != Panel::Editor || self.interaction.format_menu().is_some();
+        self.presence.at_window(busy)
     }
     /// Critically damped: chrome fades without overshoot, and a reversal while the
     /// pointer crosses the window edge continues from the current opacity. Reduced
@@ -681,11 +631,11 @@ impl NotesApp {
             .to(visible)
             .playback(ui::playback(reduce_motion))
     }
-    /// A keystroke counts as presence for a moment, so the chrome does not vanish from
-    /// under someone who is writing with the pointer parked outside the window.
+    /// Someone is at the window. Only a keystroke that brings the chrome *back*
+    /// is worth a redraw: while it is already up, every key would ask for one.
     pub(super) fn note_key_press(&mut self, cx: &mut Context<Self>) {
         let was_visible = self.chrome_visible();
-        self.last_key_at = Some(Instant::now());
+        self.presence.note_key_press();
         if !was_visible {
             cx.notify();
         }
@@ -702,11 +652,11 @@ impl NotesApp {
                 // opens the ways out of it. A sentence per keystroke would only say
                 // it again, so the capsule lights instead.
                 EditRejection::ReadOnly(_) => {
-                    self.file_status_flash = Some(Instant::now() + FILE_STATUS_FLASH);
+                    self.feedback.flash_file_status();
                     cx.notify();
                 }
                 EditRejection::Protected(message) | EditRejection::Invalid(message) => {
-                    self.queue_notice(message);
+                    self.feedback.queue(message);
                 }
                 // The shading said it where the edit landed.
                 EditRejection::Marked(_) => {}
@@ -719,8 +669,7 @@ impl NotesApp {
         // The `[[` menu reads a shared list rather than a snapshot, so it follows notes
         // being written, renamed and deleted. Rebuilding costs a string a note, so it
         // is invalidated only by changes to its note catalogue dependencies.
-        if self.links_dirty {
-            self.links_dirty = false;
+        if self.links.take_stale() {
             self.refresh_link_targets();
         }
         // The platform draws the close button above everything the view renders, so a
@@ -730,25 +679,20 @@ impl NotesApp {
             self.interaction.panel() == Panel::Editor && self.editor().read(cx).overlay_open();
         if let Some(platform) = &self.platform {
             let inside = platform.pointer_inside(window);
-            if inside != self.pointer_inside {
-                self.pointer_inside = inside;
+            if self.presence.set_pointer_inside(inside) {
                 cx.notify();
             }
-            let shown = inside && !covered;
-            if shown != self.close_button_shown {
-                self.close_button_shown = shown;
+            if self.presence.close_button_changed(inside && !covered) {
                 platform.set_traffic_lights_alpha(
                     window,
-                    if shown { 1. } else { 0. },
+                    if inside && !covered { 1. } else { 0. },
                     !cx.reduce_motion(),
                 );
             }
         }
         // The keystroke timer expires on its own, so the chrome is compared here rather
         // than only where its inputs change.
-        let chrome = self.chrome_visible();
-        if chrome != self.chrome_shown {
-            self.chrome_shown = chrome;
+        if self.presence.chrome_changed(self.chrome_visible()) {
             cx.notify();
         }
         for request in self.instance.requests() {
@@ -783,7 +727,7 @@ impl NotesApp {
             .map(Persistence::notices)
             .unwrap_or_default()
         {
-            self.queue_notice(notice);
+            self.feedback.queue(notice);
         }
         let events = self
             .persistence
@@ -828,32 +772,9 @@ impl NotesApp {
                     .collect(),
             )
         {
-            self.error = Some(e);
+            self.feedback.set_error(e);
         }
-        if self
-            .notice
-            .as_ref()
-            .is_some_and(|notice| Instant::now() > notice.until)
-        {
-            self.notice = None;
-            cx.notify();
-        }
-        if self
-            .file_status_flash
-            .is_some_and(|until| Instant::now() >= until)
-        {
-            self.file_status_flash = None;
-            cx.notify();
-        }
-        // One queued sentence at a time, once whatever was on screen has had its turn.
-        if self.notice.is_none()
-            && let Some(text) = self.pending_notices.pop_front()
-        {
-            self.notice = Some(Notice {
-                text: text.into(),
-                until: Instant::now() + READING_NOTICE,
-                undo: None,
-            });
+        if self.feedback.tick() {
             cx.notify();
         }
         if self.interaction.panel() == Panel::Editor
@@ -879,7 +800,7 @@ impl NotesApp {
                 .max(MINIMUM_HEIGHT);
             // The toolbar and footer float over the editor and are already part of its
             // content height; only an error banner adds to it.
-            let chrome = if self.error.is_some() {
+            let chrome = if self.feedback.error().is_some() {
                 px(64.)
             } else {
                 px(0.)
@@ -887,15 +808,15 @@ impl NotesApp {
             let desired = px(f32::from((height + chrome).max(MINIMUM_HEIGHT).min(maximum)).round());
             let size = size(window.bounds().size.width, desired);
             if (size.height - window.bounds().size.height).abs() > px(2.)
-                && self.expected_size.is_none()
+                && !self.window_size.waiting()
             {
-                self.expected_size = Some(size);
+                self.window_size.expect(size);
                 window.resize(size);
             }
         }
     }
     fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.chrome_focus = None;
+        self.ring.release();
         if !self.focus_html_source(window, cx) {
             window.focus(&self.editor().focus_handle(cx), cx);
         }
@@ -903,14 +824,14 @@ impl NotesApp {
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(p) = &mut self.platform {
             if let Err(e) = p.show(window) {
-                self.error = Some(e);
+                self.feedback.set_error(e);
             }
         } else {
             window.activate_window();
         }
-        self.chrome_focus = None;
+        self.ring.release();
         if self.persistence.is_none() {
-            window.focus(&self.panel_focus, cx);
+            window.focus(self.ring.panel(), cx);
         } else if self.focus_html_source(window, cx) {
             // Keep the source draft as the keyboard owner after hiding the app.
         } else if self.interaction.panel() != Panel::Editor {
@@ -934,7 +855,7 @@ impl NotesApp {
         }
         if let Some(p) = &mut self.platform {
             if let Err(e) = p.hide(window) {
-                self.error = Some(e);
+                self.feedback.set_error(e);
                 cx.notify();
             }
         } else {
@@ -1034,13 +955,8 @@ impl NotesApp {
         }
         // A notice offering an action takes the first Escape; the cascade below resumes
         // on the next one.
-        if self
-            .notice
-            .as_ref()
-            .is_some_and(|notice| notice.undo.is_some())
-        {
-            self.notice = None;
-            self.chrome_focus = None;
+        if self.feedback.dismiss_action() {
+            self.ring.release();
             // Hand the keyboard back to the panel the notice was drawn over.
             if self.interaction.panel() != Panel::Editor {
                 window.focus(&self.query().focus_handle(cx), cx);
@@ -1050,11 +966,11 @@ impl NotesApp {
         }
         // A question standing on a row takes the first Escape, so nothing behind it
         // closes while the answer is still pending.
-        if self.confirm_purge.take().is_some() {
+        if self.picker.forget_question() {
             cx.notify();
             return;
         }
-        self.chrome_focus = None;
+        self.ring.release();
         let had_popover = self.close_popover(cx);
         if had_popover {
             self.focus_editor(window, cx);
@@ -1063,8 +979,7 @@ impl NotesApp {
             self.set_panel(Panel::Editor, cx);
             self.focus_editor(window, cx);
             cx.notify();
-        } else if self.format_toolbar {
-            self.format_toolbar = false;
+        } else if self.toolbar.dismiss() {
             cx.notify();
         } else {
             self.hide(window, cx);
@@ -1137,7 +1052,8 @@ impl NotesApp {
                 Some(path) => cx.open_with_system(&path),
                 None => {
                     let what = if embed { "file" } else { "note" };
-                    self.queue_notice(format!("No {what} named “{page}” in this folder."))
+                    self.feedback
+                        .queue(format!("No {what} named “{page}” in this folder."))
                 }
             },
         }
@@ -1155,9 +1071,8 @@ impl NotesApp {
             panel
         };
         self.set_panel(next, cx);
-        self.selected = 0;
-        self.chrome_focus = None;
-        self.confirm_purge = None;
+        self.picker.reopen_browse();
+        self.ring.release();
         let (query, placeholder, label) = match self.interaction.panel() {
             Panel::Settings => (
                 self.library.preferences.hotkey.clone(),
@@ -1212,12 +1127,12 @@ impl NotesApp {
             self.notes_changed(cx);
         }
         // Pinning reorders results; keep the same note selected.
-        self.selected = self
+        let row = self
             .matching_notes(self.search_text(cx).trim(), self.scope())
             .iter()
             .position(|note| note.id == id)
             .unwrap_or(0);
-        self.picker_scroll.scroll_to_item(self.selected);
+        self.picker.select_in_browse(row);
     }
     fn trash_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_documents(cx);
@@ -1226,14 +1141,12 @@ impl NotesApp {
             self.ensure_session(window, cx);
             let query = self.search_text(cx);
             let root = self.path.clone();
-            self.selected = self.selected.min(
+            self.picker.clamp_to(
                 self.library
                     .search(query.trim(), false, root.as_deref())
-                    .len()
-                    .saturating_sub(1),
+                    .len(),
             );
-            self.picker_scroll.scroll_to_item(self.selected);
-            self.chrome_focus = None;
+            self.ring.release();
             window.focus(&self.query().focus_handle(cx), cx);
             self.notes_changed(cx);
             self.inform_undo("Moved to Recently Deleted", id.to_owned(), cx);
@@ -1253,7 +1166,7 @@ impl NotesApp {
     }
     /// Take back the deletion the notice still offers, and open that note again.
     fn undo_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.notice.take().and_then(|notice| notice.undo) else {
+        let Some(id) = self.feedback.take_undo() else {
             return;
         };
         if self.library.restore(&id) {
@@ -1278,22 +1191,20 @@ impl NotesApp {
             self.library.remove(id);
             self.sessions.remove(id);
         }
-        self.confirm_purge = None;
-        self.chrome_focus = None;
+        self.picker.forget_question();
+        self.ring.release();
         self.ensure_session(window, cx);
-        self.selected = self.selected.min(
+        self.picker.clamp_to(
             self.library
                 .search(self.search_text(cx).trim(), true, self.path.as_deref())
-                .len()
-                .saturating_sub(1),
+                .len(),
         );
-        self.picker_scroll.scroll_to_item(self.selected);
         self.notes_changed(cx);
         match result {
             Ok(()) if count == 1 => self.inform("Deleted permanently", cx),
             Ok(()) => self.inform("Emptied Recently Deleted", cx),
             Err(error) => {
-                self.error = Some(error);
+                self.feedback.set_error(error);
                 cx.notify();
             }
         }
@@ -1333,41 +1244,25 @@ impl NotesApp {
     fn restore_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.library.restore(id) {
             // The row and its buttons leave the list with the note.
-            self.chrome_focus = None;
-            self.confirm_purge = None;
+            self.ring.release();
+            self.picker.forget_question();
             self.ensure_session(window, cx);
             self.notes_changed(cx);
-            self.selected = self.selected.min(
+            self.picker.clamp_to(
                 self.library
                     .search(&self.search_text(cx), true, self.path.as_deref())
-                    .len()
-                    .saturating_sub(1),
+                    .len(),
             );
             self.inform("Restored note", cx);
         }
     }
     fn inform(&mut self, text: impl AsRef<str>, cx: &mut Context<Self>) {
-        self.notice = Some(Notice {
-            text: text.as_ref().to_owned().into(),
-            until: Instant::now() + Duration::from_secs(3),
-            undo: None,
-        });
+        self.feedback.inform(text);
         cx.notify();
-    }
-    /// A sentence the user has to read, rather than an acknowledgment of what they just
-    /// did. It waits for the notice on screen instead of replacing it, and stays longer.
-    fn queue_notice(&mut self, text: String) {
-        if !self.pending_notices.contains(&text) {
-            self.pending_notices.push_back(text);
-        }
     }
     /// A notice whose deletion can still be taken back.
     fn inform_undo(&mut self, text: &str, note: String, cx: &mut Context<Self>) {
-        self.notice = Some(Notice {
-            text: text.into(),
-            until: Instant::now() + Duration::from_secs(8),
-            undo: Some(note),
-        });
+        self.feedback.inform_undo(text, note);
         cx.notify();
     }
     fn apply_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1377,7 +1272,7 @@ impl NotesApp {
         ));
         for session in self.sessions.values() {
             session
-                .editor
+                .editor()
                 .update(cx, |e, cx| e.set_style(notes_style(self.dark), cx));
         }
         self.style_input(cx);
@@ -1389,7 +1284,7 @@ impl NotesApp {
             return;
         }
         self.close_popover(cx);
-        self.chrome_focus = None;
+        self.ring.release();
         if self.editor().read(cx).active_link().is_some() {
             self.show_popover(Popover::Link(LinkPopover::View), cx);
             cx.notify();
@@ -1406,7 +1301,7 @@ impl NotesApp {
             .unwrap_or_default()
             .to_owned();
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
-        self.chrome_focus = None;
+        self.ring.release();
         self.show_popover(Popover::Link(LinkPopover::Edit), cx);
         self.set_query(url, "Enter a link…", "Link URL", cx);
         window.focus(&self.query().focus_handle(cx), cx);
@@ -1444,12 +1339,12 @@ impl NotesApp {
             match platform.set_shortcut(&text) {
                 Ok(()) => {
                     self.library.preferences.hotkey = text;
-                    self.platform_error = None;
+                    self.feedback.set_platform_error(None);
                     self.schedule_save(cx);
                     self.inform("Updated shortcut", cx);
                 }
                 Err(e) => {
-                    self.platform_error = Some(e);
+                    self.feedback.set_platform_error(Some(e));
                     cx.notify();
                 }
             }
@@ -1514,18 +1409,19 @@ impl NotesApp {
                 self.path = Some(store.directory().to_owned());
                 self.persistence = Some(Persistence::new(store));
                 self.replace_library(library, window, cx);
-                self.error = None;
+                self.feedback.clear_error();
                 self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
                 self.apply_theme(window, cx);
-                self.platform_error = self
+                let refused = self
                     .platform
                     .as_mut()
                     .and_then(|p| p.set_shortcut(&self.library.preferences.hotkey).err());
+                self.feedback.set_platform_error(refused);
                 self.notes_changed(cx);
             }
             Err(e) => {
-                self.error = Some(e);
+                self.feedback.set_error(e);
                 cx.notify();
             }
         }
@@ -1535,7 +1431,7 @@ impl NotesApp {
         let bytes = match crate::vault::backup(&self.library) {
             Ok(bytes) => bytes,
             Err(e) => {
-                self.error = Some(e);
+                self.feedback.set_error(e);
                 return;
             }
         };
@@ -1566,7 +1462,7 @@ impl NotesApp {
                 let _ = this.update(cx, |this, cx| match result {
                     Ok(()) => this.inform("Saved library copy", cx),
                     Err(e) => {
-                        this.error = Some(e);
+                        this.feedback.set_error(e);
                         cx.notify();
                     }
                 });
@@ -1596,14 +1492,15 @@ impl NotesApp {
                             Ok(library) => {
                                 this.replace_library(library, window, cx);
                                 this.set_panel(Panel::Editor, cx);
-                                this.error = None;
+                                this.feedback.clear_error();
                                 this.focus_editor(window, cx);
                                 this.apply_theme(window, cx);
-                                this.platform_error = this.platform.as_mut().and_then(|p| {
+                                let refused = this.platform.as_mut().and_then(|p| {
                                     p.set_shortcut(&this.library.preferences.hotkey).err()
                                 });
+                                this.feedback.set_platform_error(refused);
                             }
-                            Err(e) => this.error = Some(e),
+                            Err(e) => this.feedback.set_error(e),
                         }
                         cx.notify();
                     })
@@ -1626,7 +1523,8 @@ impl NotesApp {
             Ok(document) => document,
             // Nothing was written, so this is not the save banner's business.
             Err(error) => {
-                self.queue_notice(format!("Could not prepare the export: {error}"));
+                self.feedback
+                    .queue(format!("Could not prepare the export: {error}"));
                 cx.notify();
                 return;
             }
@@ -1652,7 +1550,7 @@ impl NotesApp {
                 let _ = this.update(cx, |this, cx| match result {
                     Ok(()) => this.inform("Exported Markdown", cx),
                     Err(e) => {
-                        this.error = Some(e);
+                        this.feedback.set_error(e);
                         cx.notify();
                     }
                 });
@@ -1689,12 +1587,12 @@ impl NotesApp {
             && dropped.markdown.is_empty())
         .then(|| dropped.folders[0].clone());
         if folder.is_none() && !dropped.folders.is_empty() {
-            self.queue_notice(
+            self.feedback.queue(
                 "Drop one folder on its own to open it; folders were left alone.".to_owned(),
             );
         }
         if dropped.skipped > 0 {
-            self.queue_notice(format!(
+            self.feedback.queue(format!(
                 "Skipped {} {} Markraft cannot open.",
                 dropped.skipped,
                 if dropped.skipped == 1 {
@@ -1716,7 +1614,7 @@ impl NotesApp {
                     cx,
                 );
             } else {
-                self.queue_notice(
+                self.feedback.queue(
                     "Open a note before dropping images; they are inserted where the caret is."
                         .to_owned(),
                 );
@@ -1785,7 +1683,8 @@ impl NotesApp {
             // Failing to open a file says nothing about saving, so it is a sentence
             // rather than the save banner — and each file gets its own.
             if let Err(error) = result {
-                self.queue_notice(format!("Could not open “{name}”: {error}"));
+                self.feedback
+                    .queue(format!("Could not open “{name}”: {error}"));
             }
         }
         self.ensure_session(window, cx);
@@ -1801,9 +1700,9 @@ impl NotesApp {
                 && note.path.as_ref() != Some(&path)
             {
                 note.path = Some(path.clone());
-                self.links_dirty = true;
+                self.links.invalidate();
                 if let Some(session) = self.sessions.get(&id) {
-                    session.editor.update(cx, |editor, cx| {
+                    session.editor().update(cx, |editor, cx| {
                         editor.set_image_base(path.parent().map(ToOwned::to_owned), cx)
                     });
                 }
@@ -1825,19 +1724,20 @@ impl NotesApp {
     /// asked again from wherever the user looks for it.
     fn reopen_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.library.active_id.clone();
-        self.conflict_prompted.remove(&id);
+        self.conflicts.ask_again(&id);
         self.prompt_conflict(window, cx);
     }
 
     fn prompt_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let note = self.library.active_note();
-        if !note.conflicted || self.conflict_dialog || self.conflict_prompted.contains(&note.id) {
+        if !note.conflicted {
             return;
         }
         let id = note.id.clone();
         let subject = conflict_subject(note);
-        self.conflict_prompted.insert(id.clone());
-        self.conflict_dialog = true;
+        if !self.conflicts.ask(&id) {
+            return;
+        }
         let answer = window.prompt(
             PromptLevel::Warning,
             &format!("“{subject}” changed on disk"),
@@ -1849,7 +1749,7 @@ impl NotesApp {
             let load = answer.await == Ok(1);
             let _ = cx.update(|window, cx| {
                 this.update(cx, |this, cx| {
-                    this.conflict_dialog = false;
+                    this.conflicts.answered();
                     if load && this.library.active_id == id {
                         this.resolve_conflict(window, cx);
                     }
@@ -1877,14 +1777,15 @@ impl NotesApp {
                 }
                 self.sessions.remove(&note.id);
                 self.ensure_session(window, cx);
-                self.error = None;
+                self.feedback.clear_error();
                 self.notes_changed(cx);
                 self.focus_editor(window, cx);
             }
             // The note stays conflicted and its indicator keeps saying so, so this is
             // one sentence about a failed load rather than a standing save banner.
             Err(error) => {
-                self.queue_notice(format!("Could not load the version on disk: {error}"));
+                self.feedback
+                    .queue(format!("Could not load the version on disk: {error}"));
                 cx.notify();
             }
         }
@@ -1979,7 +1880,7 @@ impl NotesApp {
             return;
         }
         if self.library.active_note().read_only.is_some() || self.library.active_note().conflicted {
-            self.queue_notice(
+            self.feedback.queue(
                 "Resolve the file's read-only or conflict state before inserting images."
                     .to_owned(),
             );
@@ -1993,9 +1894,8 @@ impl NotesApp {
         let Some(path) = self.library.active_note().path.clone() else {
             // The save panel has no room to say why it opened, so the reason goes
             // before it rather than into it.
-            self.queue_notice(
-                "Save this note first — images are stored next to its file.".to_owned(),
-            );
+            self.feedback
+                .queue("Save this note first — images are stored next to its file.".to_owned());
             self.prompt_for_note_path(window, cx, move |this, window, cx, selected| {
                 if selected {
                     this.insert_assets(assets, window, cx);
@@ -2036,7 +1936,7 @@ impl NotesApp {
                 let inserted = match result {
                     Ok(inserted) => inserted,
                     Err(error) => {
-                        this.queue_notice(error);
+                        this.feedback.queue(error);
                         return;
                     }
                 };
@@ -2046,7 +1946,7 @@ impl NotesApp {
                     |what: &str| format!("{what} The images are in {}.", inserted.urls.join(", "));
                 let note = this.library.active_note();
                 if this.library.active_id != id || note.read_only.is_some() || note.conflicted {
-                    this.queue_notice(format!(
+                    this.feedback.queue(format!(
                         "The note changed before the images could be added. They are in {}, beside “{beside}”.",
                         inserted.urls.join(", ")
                     ));
@@ -2058,7 +1958,7 @@ impl NotesApp {
                 ) {
                     Ok(slice) => slice,
                     Err(error) => {
-                        this.queue_notice(kept(&error.to_string()));
+                        this.feedback.queue(kept(&error.to_string()));
                         return;
                     }
                 };
@@ -2068,7 +1968,7 @@ impl NotesApp {
                     editor.run_command(&markraft_core::commands::replace_selection(slice), cx)
                 });
                 if !applied {
-                    this.queue_notice(kept("This note would not take the images."));
+                    this.feedback.queue(kept("This note would not take the images."));
                 }
             });
         })
@@ -2341,10 +2241,6 @@ const FOOTER_HEIGHT: Pixels = px(48.);
 /// How long a new note's first line has to stand still before it names the file. Long
 /// enough that a pause for thought mid-title does not name the file after half of it,
 /// and short enough that a note which is only that line still reaches the folder.
-/// How long a keystroke counts as someone being at the window.
-const KEY_PRESENCE: Duration = Duration::from_millis(2500);
-/// A queued notice is a sentence, not an acknowledgment, so it is given time to read.
-const READING_NOTICE: Duration = Duration::from_secs(8);
 /// Characters a live Browse row's second line holds at 12px. The card is a fixed
 /// width and every live row keeps 60px clear for its buttons, which leaves about
 /// 226px; measured on a real run the line averages 6px a character.
@@ -2353,9 +2249,6 @@ const LIVE_META_CHARS: usize = 38;
 /// is selected and then take 202px of it.
 const DELETED_META_CHARS: usize = 46;
 const DELETED_SELECTED_META_CHARS: usize = 12;
-/// How long the file status indicator stays lit after a keystroke the file refused.
-/// Long enough to be seen without following the typing that provoked it.
-const FILE_STATUS_FLASH: Duration = Duration::from_millis(900);
 /// The shortest the window is allowed to become while it follows its content. Below
 /// this the chrome has nowhere to sit, so a window with less room than this keeps the
 /// height and lets the editor scroll instead.

@@ -273,13 +273,13 @@ impl NotesApp {
             Intent::Actions => self.open_panel(Panel::Actions, window, cx),
             Intent::ToggleFormatToolbar => {
                 self.close_popover(cx);
-                self.format_toolbar = !self.format_toolbar;
+                self.toolbar.toggle();
                 self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
                 cx.notify();
             }
             Intent::ToggleCount => {
-                self.show_words = !self.show_words;
+                self.toolbar.toggle_counting();
                 self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
                 cx.notify();
@@ -354,10 +354,10 @@ impl NotesApp {
             Intent::Select(id) => self.select_note(&id, window, cx),
             Intent::Restore(id) => self.restore_note(&id, window, cx),
             Intent::PurgeNote(id) => {
-                if self.confirm_purge.as_deref() == Some(id.as_str()) {
+                if self.picker.confirming(&id) {
                     self.purge_notes(vec![id], window, cx);
                 } else {
-                    self.confirm_purge = Some(id);
+                    self.picker.ask_about(id);
                     cx.notify();
                 }
             }
@@ -410,7 +410,7 @@ impl NotesApp {
                     match platform.set_launch_at_login(!enabled) {
                         Ok(()) => self.inform("Updated login setting", cx),
                         Err(e) => {
-                            self.platform_error = Some(e);
+                            self.feedback.set_platform_error(Some(e));
                             cx.notify();
                         }
                     }
@@ -701,7 +701,7 @@ impl NotesApp {
         // Dropping it also keeps the label honest: a pointer that has not moved keeps
         // the tooltip it opened with, which by then names the opposite action.
         let showing = expanded == Some(true)
-            || (matches!(intent, Intent::ToggleFormatToolbar) && self.format_toolbar);
+            || (matches!(intent, Intent::ToggleFormatToolbar) && self.toolbar.shown());
         self.ring(
             &id.clone(),
             px(if chrome { 16. } else { 6. }),
@@ -738,7 +738,7 @@ impl NotesApp {
     }
     /// Toolbar icons recede while another application is active.
     pub(super) fn chrome_icon_color(&self) -> Hsla {
-        if self.window_active {
+        if self.presence.window_active() {
             self.control_text()
         } else {
             self.muted()
@@ -828,7 +828,7 @@ impl NotesApp {
                 // Clicking into the field hands the keyboard back to the caret.
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, _, _| this.chrome_focus = None),
+                    cx.listener(|this, _, _, _| this.ring.release()),
                 )
                 .child(self.query().clone()),
         )
@@ -916,7 +916,7 @@ impl NotesApp {
             // static text and its AXPress lands outside the row, closing the panel instead.
             .role(Role::ListBox)
             .aria_label(if deleted { "Deleted notes" } else { "Notes" })
-            .track_scroll(&self.picker_scroll)
+            .track_scroll(self.picker.browse_scroll())
             .overflow_y_scroll()
             .px_2()
             .pb_2();
@@ -937,7 +937,7 @@ impl NotesApp {
         for (index, note) in notes.iter().enumerate() {
             let id = note.id.clone();
             let current = note.id == self.library.active_id;
-            let selected = index == self.selected;
+            let selected = index == self.picker.row();
             let status = if scope == Scope::Drafts {
                 // In this scope every row is a draft, so the useful thing to say is
                 // which kind: one with no file yet, or one its file disagrees with.
@@ -1030,7 +1030,7 @@ impl NotesApp {
                 // Putting a note back is spelled out; the row itself only selects.
                 // Deleting for good is asked twice: the button becomes its own
                 // confirmation, and Escape puts the question away.
-                let confirming = self.confirm_purge.as_deref() == Some(id.as_str());
+                let confirming = self.picker.confirming(&id);
                 let danger = self.danger();
                 controls = controls
                     .child(
@@ -1103,19 +1103,21 @@ impl NotesApp {
                         // The pointer picks a row without scrolling it: the list must
                         // not move out from under the cursor that is aiming at it.
                         .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                            if this.selected != index {
-                                this.selected = index;
-                                this.confirm_purge = None;
+                            if this.picker.row() != index {
+                                this.picker.point_at(index);
                                 cx.notify();
                             }
                         }))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             if deleted {
-                                if this.selected != index {
-                                    this.confirm_purge = None;
+                                // Clicking the row the question stands on keeps it:
+                                // the answer is the second click on the button.
+                                if this.picker.row() == index {
+                                    this.picker.point_at_keeping_question(index);
+                                } else {
+                                    this.picker.point_at(index);
                                 }
-                                this.selected = index;
-                                this.chrome_focus = None;
+                                this.ring.release();
                                 cx.notify();
                             } else {
                                 this.intent(Intent::Select(select.clone()), window, cx);
@@ -1215,7 +1217,7 @@ impl NotesApp {
                         }),
                 )
             })
-            .child(self.scroll_area(list, &self.picker_scroll, cx))
+            .child(self.scroll_area(list, self.picker.browse_scroll(), cx))
     }
     /// One "where do these files go" setting: what it is, where it points now, and
     /// the buttons that move it. `id` names the Change… control, so it is also the
@@ -1296,7 +1298,7 @@ impl NotesApp {
         let folder = self.path.clone();
         let content = div()
             .id("settings-content")
-            .track_scroll(&self.settings_scroll)
+            .track_scroll(self.picker.settings_scroll())
             .overflow_y_scroll()
             .px_4()
             .pb_4()
@@ -1530,7 +1532,7 @@ impl NotesApp {
                     .text_color(self.muted())
                     .child("Saved on this Mac. Closing the window keeps Markraft running."),
             );
-        self.scroll_area(content, &self.settings_scroll, cx)
+        self.scroll_area(content, self.picker.settings_scroll(), cx)
     }
     fn panel_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.interaction.html().is_some() {
@@ -1583,24 +1585,31 @@ impl NotesApp {
         if self.interaction.panel() == Panel::Actions {
             let items = self.filtered_actions(cx);
             match key {
-                "up" => self.selected = self.selected.saturating_sub(1),
-                "down" => self.selected = (self.selected + 1).min(items.len().saturating_sub(1)),
+                "up" => self
+                    .picker
+                    .select_in_actions(self.picker.row().saturating_sub(1)),
+                "down" => self
+                    .picker
+                    .select_in_actions((self.picker.row() + 1).min(items.len().saturating_sub(1))),
                 "enter" => {
-                    if let Some(intent) = items.get(self.selected).and_then(|c| c.intent.clone()) {
+                    if let Some(intent) =
+                        items.get(self.picker.row()).and_then(|c| c.intent.clone())
+                    {
                         self.intent(intent, window, cx);
                     }
                 }
                 _ => return false,
             }
-            self.actions_scroll.scroll_to_item(self.selected);
         } else {
             let query = self.query().read(cx).text().to_owned();
             let notes = self.matching_notes(query.trim(), self.scope());
             match key {
-                "up" => self.select_row(self.selected.saturating_sub(1)),
-                "down" => self.select_row((self.selected + 1).min(notes.len().saturating_sub(1))),
+                "up" => self.select_row(self.picker.row().saturating_sub(1)),
+                "down" => {
+                    self.select_row((self.picker.row() + 1).min(notes.len().saturating_sub(1)))
+                }
                 "enter" => {
-                    if let Some(note) = notes.get(self.selected) {
+                    if let Some(note) = notes.get(self.picker.row()) {
                         let id = note.id.clone();
                         if self.interaction.panel() == Panel::Trash {
                             self.restore_note(&id, window, cx);
@@ -1611,7 +1620,6 @@ impl NotesApp {
                 }
                 _ => return false,
             }
-            self.picker_scroll.scroll_to_item(self.selected);
         }
         cx.notify();
         true
@@ -1827,7 +1835,7 @@ impl NotesApp {
             ),
             Command::new(
                 "toggle-format-toolbar",
-                if self.format_toolbar {
+                if self.toolbar.shown() {
                     "Hide Formatting Toolbar"
                 } else {
                     "Show Formatting Toolbar"
@@ -1837,7 +1845,7 @@ impl NotesApp {
             ),
             Command::new(
                 "toggle-count",
-                if self.show_words {
+                if self.toolbar.counts_words() {
                     "Show Character Count"
                 } else {
                     "Show Word Count"
@@ -2009,14 +2017,14 @@ impl NotesApp {
         items
     }
     fn count_units(&self, text: &str) -> usize {
-        if self.show_words {
+        if self.toolbar.counts_words() {
             text.unicode_words().count()
         } else {
             text.graphemes(true).count()
         }
     }
     fn count_of(&self, units: usize) -> String {
-        if self.show_words {
+        if self.toolbar.counts_words() {
             format!("{units} {}", if units == 1 { "word" } else { "words" })
         } else {
             format!(
@@ -2042,7 +2050,8 @@ impl NotesApp {
             let table = doc::table_of(line);
             // The break this line opened with, unless it fell between two cells of one
             // table, or the count is of words, which no break adds to.
-            if !self.show_words && previous.is_some_and(|before| table.is_none() || before != table)
+            if !self.toolbar.counts_words()
+                && previous.is_some_and(|before| table.is_none() || before != table)
             {
                 units += 1;
             }
@@ -2087,7 +2096,7 @@ impl NotesApp {
             .id("actions-list")
             .role(Role::ListBox)
             .aria_label("Actions")
-            .track_scroll(&self.actions_scroll)
+            .track_scroll(self.picker.actions_scroll())
             .overflow_y_scroll()
             .px_2()
             .pb_2();
@@ -2131,7 +2140,7 @@ impl NotesApp {
                             .h(ACTION_ROW_HEIGHT)
                             .text_size(px(14.))
                             .role(Role::Button)
-                            .aria_selected(index == self.selected)
+                            .aria_selected(index == self.picker.row())
                             .aria_position_in_set(index + 1)
                             .aria_size_of_set(total)
                             // The one alignment the caret's column already has wears a
@@ -2144,10 +2153,10 @@ impl NotesApp {
                                 })
                                 .when(checked, |s| s.child(icon(Icon::Check, self.control_text())))
                             })
-                            .when(index == self.selected, |s| s.bg(self.selected_color()))
+                            .when(index == self.picker.row(), |s| s.bg(self.selected_color()))
                             .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                                if this.selected != index {
-                                    this.selected = index;
+                                if this.picker.row() != index {
+                                    this.picker.point_at(index);
                                     cx.notify();
                                 }
                             })),
@@ -2160,7 +2169,7 @@ impl NotesApp {
             .flex_1()
             .min_h_0()
             .child(self.search_field(cx))
-            .child(self.scroll_area(list, &self.actions_scroll, cx))
+            .child(self.scroll_area(list, self.picker.actions_scroll(), cx))
     }
     fn overlay(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let viewport = window.bounds().size;
@@ -2273,16 +2282,14 @@ impl NotesApp {
 }
 impl Render for NotesApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.interaction.code_language().is_some() && self.code_language_focus_pending {
-            self.code_language_focus_pending = false;
+        if self.interaction.code_language().is_some() && self.code_language.take_focus() {
             window.focus(&self.query().focus_handle(cx), cx);
             let block = self.interaction.code_language();
             let weak = cx.entity().downgrade();
             window.on_next_frame(move |_, cx| {
                 let _ = weak.update(cx, |this, cx| {
                     if this.interaction.code_language() == block {
-                        this.code_language_scroll
-                            .scroll_to_item(this.code_language_selected);
+                        this.code_language.select(this.code_language.row());
                         cx.notify();
                     }
                 });
@@ -2310,7 +2317,7 @@ impl Render for NotesApp {
         let accent = style.marker;
         let root = div()
             .key_context("MarkraftApp")
-            .track_focus(&self.panel_focus)
+            .track_focus(self.ring.panel())
             .capture_action(cx.listener(|this, _: &markraft_gpui::Up, w, cx| {
                 if this.panel_key("up", w, cx) {
                     cx.stop_propagation();
@@ -2492,7 +2499,7 @@ impl Render for NotesApp {
                     .child(actions)
                     .with_spring(
                         "capsule-fade",
-                        Self::chrome_spring(self.pointer_inside, reduce_motion),
+                        Self::chrome_spring(self.presence.pointer_inside(), reduce_motion),
                         |s, phase| s.opacity(phase.interpolate_clamped(0., 1.)),
                     ),
             );
@@ -2552,7 +2559,7 @@ impl Render for NotesApp {
                 .mt_3()
                 .text_size(px(12.))
                 .text_color(self.muted())
-                .child(self.error.clone().unwrap_or_default());
+                .child(self.feedback.error().cloned().unwrap_or_default());
             return root.child(toolbar).child(
                 div()
                     .flex_1()
@@ -2565,7 +2572,7 @@ impl Render for NotesApp {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(title),
                     )
-                    .when(self.error.is_some(), |s| s.child(detail))
+                    .when(self.feedback.error().is_some(), |s| s.child(detail))
                     .child(
                         div()
                             .mt_3()
@@ -2621,7 +2628,7 @@ impl Render for NotesApp {
             );
         root.child(body)
             // Both banners are live regions, so a failure is spoken rather than only shown.
-            .when_some(self.platform_error.clone(), |s, error| {
+            .when_some(self.feedback.platform_error().cloned(), |s, error| {
                 let message = format!("{error} · Change the shortcut in Settings.");
                 s.child(
                     div()
@@ -2635,8 +2642,8 @@ impl Render for NotesApp {
                         .child(message),
                 )
             })
-            .when_some(self.notice.clone(), |s, notice| {
-                let announced = match &notice.undo {
+            .when_some(self.feedback.notice().cloned(), |s, notice| {
+                let announced = match notice.undo() {
                     Some(_) => format!("{} · Undo available", notice.text),
                     None => notice.text.to_string(),
                 };
@@ -2661,7 +2668,7 @@ impl Render for NotesApp {
                     .text_size(px(12.))
                     .text_color(self.control_text())
                     .child(div().flex_1().min_w_0().child(notice.text.clone()))
-                    .when_some(notice.undo.as_ref(), |s, _| {
+                    .when_some(notice.undo(), |s, _| {
                         s.child(div().text_color(self.muted()).child("·")).child(
                             self.button("notice-undo", "Undo", Intent::UndoDelete, cx)
                                 .h(px(22.))

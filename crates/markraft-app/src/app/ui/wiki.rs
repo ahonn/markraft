@@ -40,6 +40,74 @@ pub(in crate::app) type LinkTargets = Rc<RefCell<Vec<LinkTarget>>>;
 /// editor asks it once per link per layout, so it answers from here rather than the disk.
 pub(in crate::app) type LinkIndex = Rc<RefCell<HashMap<String, ()>>>;
 
+/// What the `[[` menu offers and what the editor asks about each link it draws,
+/// together with the one rule they share: when they are out of date.
+///
+/// Both lists are handed to editors that outlive any one refill, so they are
+/// shared handles rather than values — refilling means writing through them, not
+/// replacing them. Refilling walks every note in the library, so only what can
+/// actually change what a link reaches may ask for one: a note's name, its path,
+/// whether it is in the library at all, and which note is open. Everything else
+/// leaves them alone, which is why marking them stale goes through
+/// [`Links::invalidate`] rather than a `bool` any caller can set.
+pub(in crate::app) struct Links {
+    targets: LinkTargets,
+    index: LinkIndex,
+    stale: bool,
+}
+
+impl Default for Links {
+    /// Stale: nothing has been read yet, so the first poll fills them.
+    fn default() -> Links {
+        Links {
+            targets: LinkTargets::default(),
+            index: LinkIndex::default(),
+            stale: true,
+        }
+    }
+}
+
+impl Links {
+    /// The list the `[[` menu reads, as the handle it keeps.
+    pub(in crate::app) fn targets(&self) -> LinkTargets {
+        self.targets.clone()
+    }
+
+    /// What the editor asks about each wiki link it draws. Nothing is known before the
+    /// folder has been read, and treating every link as broken then would be a page of
+    /// dead links that are not dead, so an empty index answers yes.
+    pub(in crate::app) fn resolver(&self) -> markraft_gpui::WikiResolver {
+        let index = self.index.clone();
+        Box::new(move |target: &str| {
+            let index = index.borrow();
+            index.is_empty() || reaches(&index, target)
+        })
+    }
+
+    /// Something that decides what a link reaches has changed.
+    pub(in crate::app) fn invalidate(&mut self) {
+        self.stale = true;
+    }
+
+    /// The same, for the callers that are asking a question — a title that may or
+    /// may not have changed — rather than stating a fact.
+    pub(in crate::app) fn invalidate_if(&mut self, changed: bool) {
+        self.stale |= changed;
+    }
+
+    /// Whether a refill is due, and no longer is. The poll asks once a tick, so
+    /// several changes between two ticks cost one walk over the notes.
+    pub(in crate::app) fn take_stale(&mut self) -> bool {
+        std::mem::take(&mut self.stale)
+    }
+
+    /// Write both lists through the handles the editors hold.
+    fn fill(&self, targets: Vec<LinkTarget>, index: HashMap<String, ()>) {
+        *self.targets.borrow_mut() = targets;
+        *self.index.borrow_mut() = index;
+    }
+}
+
 /// Whether `target` reaches a note in `index`. The target is cut down the same way
 /// resolving cuts it: the place inside a note goes, then `./`, then `.md`.
 pub(in crate::app) fn reaches(index: &HashMap<String, ()>, target: &str) -> bool {
@@ -118,7 +186,7 @@ impl NotesApp {
             WIKI_MENU,
             TRIGGERS.to_vec(),
             WikiProvider {
-                targets: self.link_targets.clone(),
+                targets: self.links.targets(),
             },
         )
     }
@@ -144,7 +212,7 @@ impl NotesApp {
                     .or_default() += 1;
             }
         }
-        let targets = live()
+        let targets: Vec<LinkTarget> = live()
             .filter(|note| note.id != self.library.active_id)
             .filter_map(|note| {
                 let path = note.path.as_deref()?;
@@ -168,7 +236,6 @@ impl NotesApp {
                 })
             })
             .collect();
-        *self.link_targets.borrow_mut() = targets;
         // The index covers every note, the open one included: a link to the note it
         // sits in still reaches somewhere, even though the menu does not offer it.
         //
@@ -192,18 +259,12 @@ impl NotesApp {
                 );
             }
         }
-        *self.link_index.borrow_mut() = index;
+        self.links.fill(targets, index);
     }
 
-    /// What the editor asks about each wiki link it draws. Nothing is known before the
-    /// folder has been read, and treating every link as broken then would be a page of
-    /// dead links that are not dead, so an empty index answers yes.
+    /// What the editor asks about each wiki link it draws.
     pub(in crate::app) fn wiki_resolver(&self) -> markraft_gpui::WikiResolver {
-        let index = self.link_index.clone();
-        Box::new(move |target: &str| {
-            let index = index.borrow();
-            index.is_empty() || reaches(&index, target)
-        })
+        self.links.resolver()
     }
 }
 

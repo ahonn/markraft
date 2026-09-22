@@ -205,9 +205,9 @@ impl NotesApp {
             Some(
                 Popover::Link(LinkPopover::Edit) | Popover::Rename(_) | Popover::CodeLanguage(_),
             ) => {
-                !self.code_language_focus_pending
+                !self.code_language.focus_pending()
                     && !self.query_focused(window, cx)
-                    && !self.panel_focus.is_focused(window)
+                    && !self.ring.panel().is_focused(window)
             }
             Some(Popover::FileStatus) => !self.has_file_status(),
             _ => false,
@@ -229,8 +229,8 @@ impl NotesApp {
     pub(super) fn leave_input(&mut self, cx: &mut Context<Self>) {
         self.cancel_input(cx);
         self.input = None;
-        self.chrome_focus = None;
-        self.code_language_focus_pending = false;
+        self.ring.release();
+        self.code_language.released();
     }
 
     pub(super) fn set_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
@@ -239,7 +239,7 @@ impl NotesApp {
         }
         self.leave_input(cx);
         self.interaction.switch_panel(panel);
-        self.confirm_purge = None;
+        self.picker.forget_question();
     }
 
     pub(super) fn show_popover(&mut self, popover: Popover, cx: &mut Context<Self>) {
@@ -248,7 +248,7 @@ impl NotesApp {
         }
         self.leave_input(cx);
         self.interaction.open(&self.library.active_id, popover);
-        self.confirm_purge = None;
+        self.picker.forget_question();
     }
 
     pub(super) fn close_popover(&mut self, cx: &mut Context<Self>) -> bool {
@@ -292,18 +292,11 @@ impl NotesApp {
             }
             input.text = text;
             match kind {
-                InputKind::Language => {
-                    this.code_language_selected = 0;
-                    this.code_language_scroll.scroll_to_item(0);
-                }
+                InputKind::Language => this.code_language.reopen(),
                 InputKind::Notes | InputKind::Drafts | InputKind::Trash => {
-                    this.selected = 0;
-                    this.picker_scroll.scroll_to_item(0);
+                    this.picker.reopen_browse()
                 }
-                InputKind::Actions => {
-                    this.selected = 0;
-                    this.actions_scroll.scroll_to_item(0);
-                }
+                InputKind::Actions => this.picker.reopen_actions(),
                 _ => {}
             }
             cx.notify();
