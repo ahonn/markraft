@@ -11,7 +11,8 @@
 //! `target`, an `<img>` with a `width` and a `<br>` in a table cell all stay
 //! raw primitives, because the alternative loses what they carry.
 
-use crate::inline::wrap_mark;
+use crate::escape::code_span_delimiters;
+use crate::inline::{style_delimiters, wrap_mark, wrap_mark_method_b};
 use comrak::nodes::{AstNode, NodeValue};
 use markraft_core::{Attrs, Fragment, Mark, MarkSet, MarkTypeId, Node, Schema, attrs};
 
@@ -88,11 +89,29 @@ impl<'a> Walk<'a> {
             match rule {
                 ParseRule::Ignore => {}
                 ParseRule::Text { text, marks: extra } => {
+                    let content = text(target);
+                    // Code spans are Method-B: backticks stay in the tree.
+                    if extra.len() == 1 && extra[0] == md::CODE {
+                        let (open, close) = code_span_delimiters(&content);
+                        let code = Mark::new(self.mark_id(md::CODE)?);
+                        let open_leaf = crate::inline::syntax_text(self.schema, &open)?;
+                        let close_leaf = crate::inline::syntax_text(self.schema, &close)?;
+                        let open_leaf =
+                            open_leaf.mark(open_leaf.marks().add(self.schema, code.clone()));
+                        let close_leaf =
+                            close_leaf.mark(close_leaf.marks().add(self.schema, code.clone()));
+                        builder.push_node(open_leaf, marks);
+                        let mut inner = marks.to_vec();
+                        inner.push(code);
+                        builder.push_text(&content, &inner);
+                        builder.push_node(close_leaf, marks);
+                        continue;
+                    }
                     let mut all = marks.to_vec();
                     for name in &extra {
                         all.push(Mark::new(self.mark_id(name)?));
                     }
-                    builder.push_text(&text(target), &all);
+                    builder.push_text(&content, &all);
                 }
                 ParseRule::Atom { node_type, attrs } => {
                     let ty = self.node_id(&node_type(target))?;
@@ -105,11 +124,17 @@ impl<'a> Walk<'a> {
                     builder.push_node(node, marks);
                 }
                 ParseRule::Mark { mark_type, attrs } => {
-                    let id = self.mark_id(&mark_type(target))?;
+                    let name = mark_type(target);
+                    let id = self.mark_id(&name)?;
                     let mark =
                         Mark::with_attrs(id, self.schema.build_mark_attrs(id, &attrs(target))?);
                     let children = self.inlines(child)?;
-                    for node in wrap_mark(self.schema, mark, children)? {
+                    let wrapped = if let Some((open, close)) = style_delimiters(&name) {
+                        wrap_mark_method_b(self.schema, mark, open, close, children)?
+                    } else {
+                        wrap_mark(self.schema, mark, children)?
+                    };
+                    for node in wrapped {
                         builder.push_node(node, marks);
                     }
                 }
@@ -546,7 +571,13 @@ impl Inlines<'_> {
             let children = std::mem::take(&mut self.out);
             let (mark, before) = self.html.pop().expect("matched open tag");
             self.out = before;
-            for node in wrap_mark(self.schema, mark, children)? {
+            let name = self.schema.mark_type(mark.ty).name().to_string();
+            let wrapped = if let Some((open, close)) = style_delimiters(&name) {
+                wrap_mark_method_b(self.schema, mark, open, close, children)?
+            } else {
+                wrap_mark(self.schema, mark, children)?
+            };
+            for node in wrapped {
                 self.push_node(node, &[]);
             }
         }
@@ -562,9 +593,14 @@ impl Inlines<'_> {
             return;
         }
         let set = self.mark_set(marks);
-        if let Some(last) = self.out.last_mut()
+        // Method-B delimiter leaves must not merge with each other.
+        let syntax = self.schema.mark_id(md::SYNTAX);
+        let mergeable = syntax.is_none_or(|ty| set.get(ty).is_none());
+        if mergeable
+            && let Some(last) = self.out.last_mut()
             && last.is_text()
             && *last.marks() == set
+            && syntax.is_none_or(|ty| last.marks().get(ty).is_none())
         {
             let joined = format!("{}{text}", last.text().unwrap_or_default());
             *last = last.with_text(&joined);

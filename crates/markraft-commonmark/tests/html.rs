@@ -119,7 +119,7 @@ fn whitespace_is_collapsed_the_way_a_browser_lays_it_out() {
     );
     assert_eq!(
         shape("<p>a <strong> b </strong> c</p>"),
-        r#"doc(paragraph("a ", "b "{strong}, "c"))"#,
+        r#"doc(paragraph("a ", "**"{strong,syntax}, "b "{strong}, "**"{strong,syntax}, "c"))"#,
         "a space between styled runs still separates the words"
     );
     // A non-breaking space is not whitespace.
@@ -145,12 +145,15 @@ fn loose_text_becomes_blocks_at_the_boundaries_around_it() {
 fn an_unknown_element_preserves_boundaries_and_editable_children() {
     assert_eq!(
         shape("<p>a <custom-tag>b <b>c</b></custom-tag></p>"),
-        r#"doc(paragraph("a ", raw_inline[source=Str("<custom-tag>")], "b ", "c"{strong}, raw_inline[source=Str("</custom-tag>")]))"#
+        r#"doc(paragraph("a ", raw_inline[source=Str("<custom-tag>")], "b ", "**"{strong,syntax}, "c"{strong}, "**"{strong,syntax}, raw_inline[source=Str("</custom-tag>")]))"#
     );
 }
 
 #[test]
 fn every_styling_tag_has_a_mark() {
+    // A mark with a Markdown spelling is Method-B: the delimiter characters come
+    // in as syntax leaves beside the content. Underline has no spelling of its
+    // own, so it arrives as a bare mark.
     for (tag, mark) in [
         ("strong", "strong"),
         ("b", "strong"),
@@ -163,9 +166,16 @@ fn every_styling_tag_has_a_mark() {
         ("ins", "underline"),
         ("code", "code"),
     ] {
+        let expected = match mark {
+            "strong" => r#"doc(paragraph("**"{strong,syntax}, "x"{strong}, "**"{strong,syntax}))"#.to_string(),
+            "em" => r#"doc(paragraph("*"{em,syntax}, "x"{em}, "*"{em,syntax}))"#.to_string(),
+            "strikethrough" => r#"doc(paragraph("~~"{strikethrough,syntax}, "x"{strikethrough}, "~~"{strikethrough,syntax}))"#.to_string(),
+            "code" => r#"doc(paragraph("`"{code,syntax}, "x"{code}, "`"{code,syntax}))"#.to_string(),
+            _ => format!("doc(paragraph(\"x\"{{{mark}}}))"),
+        };
         assert_eq!(
             shape(&format!("<p><{tag}>x</{tag}></p>")),
-            format!("doc(paragraph(\"x\"{{{mark}}}))"),
+            expected,
             "<{tag}>"
         );
     }
@@ -242,7 +252,10 @@ fn the_rule_table_can_be_replaced() {
     let doc = parser
         .parse("<p><mark>hit</mark></p><aside>gone</aside>")
         .expect("parses");
-    assert_eq!(codec.describe(&doc), r#"doc(paragraph("hit"{strong}))"#);
+    assert_eq!(
+        codec.describe(&doc),
+        r#"doc(paragraph("**"{strong,syntax}, "hit"{strong}, "**"{strong,syntax}))"#
+    );
     // An empty table keeps the text and nothing else.
     let bare = HtmlParser::new(commonmark_schema(), HtmlRules::new());
     assert_eq!(
@@ -424,7 +437,9 @@ fn a_copied_slice_writes_as_html_and_reads_back_as_the_same_fragment() {
 fn a_cut_inside_one_paragraph_writes_as_bare_inline_html() {
     let codec = Codec::new();
     let doc = codec.parse("hello **world**");
-    let slice = doc.slice(1, 11).expect("a slice");
+    // Method-B: the opening `**` is two of the slice's own tokens, and HTML
+    // writes the mark rather than the characters that spell it.
+    let slice = doc.slice(1, 13).expect("a slice");
     assert_eq!(
         serializer().serialize_fragment(&slice),
         "<p>hello <strong>worl</strong></p>"

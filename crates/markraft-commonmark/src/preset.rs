@@ -608,14 +608,123 @@ fn escape_trailing_hashes(state: &mut SerializerState<'_>) {
 pub fn commonmark_mark_rules() -> MarkRules {
     let mut rules = MarkRules::new();
     rules.insert(md::LINK.to_string(), autolink_link_rule());
-    rules.insert(md::STRONG.to_string(), emphasis_rule("**", '*'));
-    rules.insert(md::EM.to_string(), emphasis_rule("*", '*'));
-    rules.insert(md::STRIKETHROUGH.to_string(), emphasis_rule("~~", '~'));
+    rules.insert(md::STRONG.to_string(), method_b_emphasis_rule("**", '*'));
+    rules.insert(md::EM.to_string(), method_b_emphasis_rule("*", '*'));
+    rules.insert(
+        md::STRIKETHROUGH.to_string(),
+        method_b_emphasis_rule("~~", '~'),
+    );
     // No CommonMark/Obsidian spelling exists. Keep the mark in the tree for HTML
     // paste, but write plain text so `.md` files stay portable.
     rules.insert(md::UNDERLINE.to_string(), MarkRule::fixed("", ""));
-    rules.insert(md::CODE.to_string(), code_rule());
+    rules.insert(md::CODE.to_string(), method_b_code_rule());
+    // Delimiter characters already live in the text; this mark only flags them.
+    rules.insert(
+        md::SYNTAX.to_string(),
+        MarkRule {
+            open: Arc::new(|_, _| String::new()),
+            close: Arc::new(|_, _| String::new()),
+            mixable: false,
+            expel_enclosing_whitespace: false,
+            escape: false,
+            lead: None,
+            trail: None,
+        },
+    );
     rules
+}
+
+/// Whether *this* mark already spells itself with Method-B delimiter leaves.
+///
+/// A delimiter leaf carries the style mark as well as [`SYNTAX`](md::SYNTAX), so
+/// a Method-B span holds its own delimiters inside the mark's run. The rule is
+/// asked once per node the run covers, so the run is walked out from
+/// [`MarkTarget::index`] rather than assumed to start at it.
+///
+/// Asking the whole textblock instead would suppress the delimiters of a mark
+/// that has none of its own — a paste or a legacy toggle leaves a bare style
+/// mark, and a block that also holds one Method-B span would then write that
+/// mark as plain text and lose it on the next load. Asking only for the leaf at
+/// the run's edge would invent the missing half of a pair an edit has broken,
+/// turning `em*` back into emphasis.
+fn method_b_spelled(target: &MarkTarget<'_>, schema: &Schema) -> bool {
+    let child = |index: usize| target.parent.maybe_child(index);
+    let carries =
+        |index: usize| child(index).is_some_and(|node| node.marks().contains_type(target.mark.ty));
+    let mut start = target.index;
+    while start > 0 && carries(start - 1) {
+        start -= 1;
+    }
+    let mut end = target.index;
+    while carries(end + 1) {
+        end += 1;
+    }
+    (start..=end)
+        .any(|index| child(index).is_some_and(|node| crate::inline::is_syntax(schema, node)))
+}
+
+/// A mark written as a delimiter run, suppressed when its own Method-B syntax
+/// leaf already carries those characters.
+fn method_b_emphasis_rule(run: &'static str, delimiter: char) -> MarkRule {
+    let spelled = |state: &SerializerState<'_>, target: &MarkTarget<'_>| {
+        method_b_spelled(target, state.schema())
+    };
+    MarkRule {
+        open: Arc::new(move |state, target| {
+            if spelled(state, target) {
+                String::new()
+            } else {
+                run.to_string()
+            }
+        }),
+        close: Arc::new(move |state, target| {
+            if spelled(state, target) {
+                String::new()
+            } else {
+                run.to_string()
+            }
+        }),
+        mixable: true,
+        expel_enclosing_whitespace: true,
+        escape: true,
+        lead: Some(delimiter),
+        trail: Some(delimiter),
+    }
+}
+
+fn method_b_code_rule() -> MarkRule {
+    let text_of = |target: &MarkTarget<'_>| {
+        target
+            .parent
+            .maybe_child(target.index)
+            .and_then(|node| node.text())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let spelled = |state: &SerializerState<'_>, target: &MarkTarget<'_>| {
+        method_b_spelled(target, state.schema())
+    };
+    MarkRule {
+        open: Arc::new(move |state, target| {
+            if spelled(state, target) {
+                String::new()
+            } else {
+                code_span_delimiters(&text_of(target)).0
+            }
+        }),
+        close: Arc::new(move |state, target| {
+            if spelled(state, target) {
+                String::new()
+            } else {
+                code_span_delimiters(&text_of(target)).1
+            }
+        }),
+        mixable: false,
+        expel_enclosing_whitespace: false,
+        escape: false,
+        lead: Some('`'),
+        trail: Some('`'),
+    }
 }
 
 /// The link written `[text](href "title")`, whatever its text says.
@@ -684,18 +793,20 @@ fn closing_brackets(target: &MarkTarget<'_>) -> String {
 
 /// Whether the link opening here is the one a reader builds from its own text.
 ///
-/// The marked run has to be a single text leaf carrying the link and nothing
-/// else: another mark writes its delimiter between the URL and what surrounds
-/// it, and a bare URL is only a URL where it sits. What surrounds it is then
+/// The marked run has to be a single text leaf carrying the link: another
+/// *non-style* construct between the URL and what surrounds it would need
+/// brackets. Style marks (and Method-B delimiter leaves beside the run) are
+/// fine — their delimiters sit outside the URL. What surrounds it is then
 /// exactly what the output already holds and what the nodes after it will
 /// write, which is what [`crate::autolink::writes_bare`] is asked about.
 fn writes_bare_url(state: &SerializerState<'_>, target: &MarkTarget<'_>) -> bool {
-    let Some(text) = target
-        .parent
-        .maybe_child(target.index)
-        .filter(|node| node.marks().len() == 1)
-        .and_then(|node| node.text())
-    else {
+    let Some(node) = target.parent.maybe_child(target.index) else {
+        return false;
+    };
+    if !node.marks().contains(target.mark) {
+        return false;
+    }
+    let Some(text) = node.text() else {
         return false;
     };
     // The run ends at this leaf, or the URL is not all of the link's text.
@@ -726,13 +837,20 @@ fn writes_bare_url(state: &SerializerState<'_>, target: &MarkTarget<'_>) -> bool
 /// pull into a bare URL.
 ///
 /// `None` where what follows is not plain text — an image, a hard break, a
-/// marked run — and so cannot be shown to stay out of the URL.
+/// marked run — and so cannot be shown to stay out of the URL. Method-B
+/// delimiter leaves count as the characters they hold (they end the URL).
 fn following_text(state: &SerializerState<'_>, parent: &Node, from: usize) -> Option<String> {
     let mut out = String::new();
     for index in from..parent.child_count() {
         let child = parent.child(index);
         // A source line ending is whitespace wherever it is written.
         if state.schema().node_type(child.type_id()).name() == md::SOFT_BREAK {
+            break;
+        }
+        if crate::inline::is_syntax(state.schema(), child) {
+            // Delimiter leaves are written by their own step, not as "text
+            // after the URL" the bare-link probe should see — including them
+            // turns `*https://…*` into emphasis and rejects a valid bare URL.
             break;
         }
         let text = child.text().filter(|_| child.marks().is_empty())?;
@@ -744,41 +862,6 @@ fn following_text(state: &SerializerState<'_>, parent: &Node, from: usize) -> Op
     let end = out.find(char::is_whitespace).unwrap_or(out.len());
     out.truncate(end);
     Some(out)
-}
-
-fn code_rule() -> MarkRule {
-    let text_of = |target: &MarkTarget<'_>| {
-        target
-            .parent
-            .maybe_child(target.index)
-            .and_then(|node| node.text())
-            .unwrap_or_default()
-            .to_string()
-    };
-    MarkRule {
-        open: Arc::new(move |_, target| code_span_delimiters(&text_of(target)).0),
-        close: Arc::new(move |_, target| code_span_delimiters(&text_of(target)).1),
-        mixable: false,
-        expel_enclosing_whitespace: false,
-        escape: false,
-        lead: Some('`'),
-        trail: Some('`'),
-    }
-}
-
-/// A mark written as a delimiter run. When flanking fails, the delimiters are
-/// still written — CommonMark will read them as plain text — rather than falling
-/// back to HTML tags other Markdown editors do not expect in portable files.
-fn emphasis_rule(run: &'static str, delimiter: char) -> MarkRule {
-    MarkRule {
-        open: Arc::new(move |_, _| run.to_string()),
-        close: Arc::new(move |_, _| run.to_string()),
-        mixable: true,
-        expel_enclosing_whitespace: true,
-        escape: true,
-        lead: Some(delimiter),
-        trail: Some(delimiter),
-    }
 }
 
 /// A serialiser for `schema` with the CommonMark/GFM rules.

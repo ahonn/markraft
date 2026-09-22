@@ -166,11 +166,13 @@ mod tests {
 
     #[test]
     fn nested_links_are_detected_and_partially_unlinked() {
-        let state = crate::typeahead::tests::state_of("[**foo **bar****](https://example.com)");
+        let state = crate::typeahead::tests::state_of("[foo **bar**](https://example.com)");
         let ty = state.schema().mark_id("link").unwrap();
         let projection = projection_of(&state);
-        let from = projection.line_offset_to_pos(0, 4).unwrap();
-        let to = projection.line_offset_to_pos(0, 7).unwrap();
+        let plain = projection.plain_text();
+        let bar = plain.find("bar").expect("bar");
+        let from = projection.line_offset_to_pos(0, bar).unwrap();
+        let to = projection.line_offset_to_pos(0, bar + 3).unwrap();
         let state = state
             .update([TransactionSpec::new().selection(Selection::text(from, to))])
             .unwrap()
@@ -183,10 +185,30 @@ mod tests {
         assert!(link_at(state.doc(), ty, from).is_some());
         let spec = set_link(&state, ty, None).unwrap();
         let changed = state.update([spec]).unwrap();
+        // The `**` lives in the tree, so the prose reads through the
+        // plain-text flavour while the projection still carries the delimiters.
+        assert_eq!(
+            markraft_commonmark::to_plain_text(changed.state().schema(), changed.new_doc()),
+            "foo bar"
+        );
         let projection = projection_of(changed.state());
-        assert_eq!(projection.plain_text(), "foo bar");
+        assert_eq!(projection.plain_text(), "foo **bar**");
+        let bar = projection
+            .plain_text()
+            .find("bar")
+            .expect("bar still in projection");
         for run in &projection.lines()[0].runs {
-            assert_eq!(run.marks.contains_type(ty), run.char_from < 4);
+            let overlaps_bar = run.char_from < bar + 3 && run.char_to > bar;
+            let is_syntax = run
+                .marks
+                .iter()
+                .any(|m| changed.state().schema().mark_type(m.ty).name() == "syntax");
+            if overlaps_bar && !is_syntax {
+                assert!(
+                    !run.marks.contains_type(ty),
+                    "unlinked bar still linked: {run:?}"
+                );
+            }
         }
     }
 }

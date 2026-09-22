@@ -15,6 +15,9 @@ use crate::schema as md;
 
 /// The plain text of a whole document.
 ///
+/// Method-B delimiter leaves are omitted so the result reads as prose, not as
+/// Markdown source.
+///
 /// ```
 /// use markraft_commonmark::{commonmark_schema, from_markdown, to_plain_text};
 ///
@@ -23,45 +26,97 @@ use crate::schema as md;
 /// assert_eq!(to_plain_text(&schema, &doc), "Title\nsome text");
 /// ```
 pub fn to_plain_text(schema: &Schema, doc: &Node) -> String {
-    let cell = |cell: &Node| {
-        cell.text_between(
-            schema,
-            0,
-            cell.content_size(),
-            None,
-            Some(&|node| leaf_text(schema, node)),
-        )
-    };
+    let cell = |cell: &Node| prose_between(schema, cell, 0, cell.content_size(), None);
     let flat = flatten_tables(schema, doc, &cell);
     let doc = flat.as_ref().unwrap_or(doc);
-    doc.text_between(
-        schema,
-        0,
-        doc.content_size(),
-        Some("\n"),
-        Some(&|node| leaf_text(schema, node)),
-    )
+    prose_between(schema, doc, 0, doc.content_size(), Some("\n"))
+}
+
+/// Like [`Node::text_between`], but skips Method-B delimiter leaves.
+fn prose_between(
+    schema: &Schema,
+    node: &Node,
+    from: usize,
+    to: usize,
+    block_separator: Option<&str>,
+) -> String {
+    let syntax = schema.mark_id(md::SYNTAX);
+    let mut text = String::new();
+    let mut first = true;
+    node.nodes_between(from, to, &mut |child, pos, _, _| {
+        if syntax.is_some_and(|ty| child.marks().get(ty).is_some()) {
+            return true;
+        }
+        let piece = if let Some(node_text) = child.text() {
+            let start = from.max(pos) - pos;
+            let end = (to - pos).min(child.text_len());
+            let start_b = node_text
+                .char_indices()
+                .nth(start)
+                .map(|(i, _)| i)
+                .unwrap_or(node_text.len());
+            let end_b = node_text
+                .char_indices()
+                .nth(end)
+                .map(|(i, _)| i)
+                .unwrap_or(node_text.len());
+            node_text[start_b..end_b].to_string()
+        } else if child.is_leaf() {
+            leaf_text(schema, child)
+        } else {
+            String::new()
+        };
+        let ty = schema.node_type(child.type_id());
+        if ty.is_block()
+            && (ty.is_textblock() || (child.is_leaf() && !piece.is_empty()))
+            && let Some(sep) = block_separator
+        {
+            if first {
+                first = false;
+            } else {
+                text.push_str(sep);
+            }
+        }
+        text.push_str(&piece);
+        true
+    });
+    text
 }
 
 /// The plain text of a slice — what a copied selection puts on the clipboard
 /// beside its Markdown.
 ///
-/// This is [`markraft_core::projection::slice_to_plain_text`] over a slice
-/// whose tables have been laid out as rows of tab-separated cells, so a host
-/// finds both halves of the plain-text surface in one place.
+/// Method-B delimiter leaves are omitted so the clipboard reads as prose.
+/// Tables are laid out as rows of tab-separated cells first.
 pub fn slice_to_plain_text(schema: &Schema, slice: &Slice) -> String {
     let cell = |cell: &Node| {
-        markraft_core::projection::slice_to_plain_text(
-            schema,
-            &Slice::new(cell.content().clone(), 0, 0),
-        )
+        let stripped = strip_syntax(schema, cell.content());
+        markraft_core::projection::slice_to_plain_text(schema, &Slice::new(stripped, 0, 0))
     };
     let flat = flatten_fragment(schema, slice.content(), &cell);
-    let Some(content) = flat else {
-        return markraft_core::projection::slice_to_plain_text(schema, slice);
-    };
+    let content = flat.unwrap_or_else(|| strip_syntax(schema, slice.content()));
     let flattened = Slice::new(content, slice.open_start(), slice.open_end());
     markraft_core::projection::slice_to_plain_text(schema, &flattened)
+}
+
+/// Drop Method-B delimiter leaves from a fragment (recursively through
+/// containers) so plain-text views read as prose.
+fn strip_syntax(schema: &Schema, content: &Fragment) -> Fragment {
+    let syntax = schema.mark_id(md::SYNTAX);
+    let children: Vec<Node> = content
+        .iter()
+        .filter_map(|node| {
+            if syntax.is_some_and(|ty| node.marks().get(ty).is_some()) {
+                return None;
+            }
+            if node.is_container() {
+                Some(node.copy(strip_syntax(schema, node.content())))
+            } else {
+                Some(node.clone())
+            }
+        })
+        .collect();
+    Fragment::from_nodes(children)
 }
 
 /// What a leaf reads as when its structure is thrown away.

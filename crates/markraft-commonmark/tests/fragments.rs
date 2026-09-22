@@ -127,7 +127,7 @@ fn a_single_paragraph_merges_into_the_block_the_caret_is_in() {
     let pasted = paste(&codec, &doc, 2, 2, &fragment);
     assert_eq!(
         codec.describe(&pasted),
-        r#"doc(paragraph("xa ", "b"{strong}, "y"))"#
+        r#"doc(paragraph("xa ", "**"{strong,syntax}, "b"{strong}, "**"{strong,syntax}, "y"))"#
     );
 }
 
@@ -151,11 +151,10 @@ fn a_multi_block_fragment_keeps_its_blocks() {
 fn a_cut_inside_one_paragraph_copies_as_bare_text() {
     let codec = Codec::new();
     let doc = codec.parse("hello **world**");
-    let slice = doc.slice(1, 11).expect("a slice");
-    assert_eq!(
-        codec.serializer.serialize_fragment(&slice),
-        "hello **worl**"
-    );
+    // Method-B: cutting mid-span keeps the opening delimiter characters that
+    // fall inside the slice; the mark rule does not invent a closing pair.
+    let slice = doc.slice(1, 13).expect("a slice");
+    assert_eq!(codec.serializer.serialize_fragment(&slice), "hello **worl");
 }
 
 #[test]

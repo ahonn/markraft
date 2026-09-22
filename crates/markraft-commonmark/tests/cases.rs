@@ -204,7 +204,7 @@ fn a_pipe_in_a_cell_is_escaped_even_inside_a_code_span() {
         shape(source),
         concat!(
             r#"doc(table[alignments=Str("none,none")]("#,
-            r#"table_row(table_cell("a|b"), table_cell("c|d"{code})), "#,
+            r#"table_row(table_cell("a|b"), table_cell("`"{code,syntax}, "c|d"{code}, "`"{code,syntax})), "#,
             r#"table_row(table_cell("x"), table_cell("y"))))"#
         )
     );
@@ -257,7 +257,7 @@ fn a_cell_holds_the_marks_links_and_images_a_paragraph_holds() {
         shape(source),
         concat!(
             r#"doc(table[alignments=Str("none")](table_row(table_cell("#,
-            r#""b"{strong}, " ", "i"{em}, " ", "c"{code}, " ", "l"{link}, " ", "#,
+            r#""**"{strong,syntax}, "b"{strong}, "**"{strong,syntax}, " ", "*"{em,syntax}, "i"{em}, "*"{em,syntax}, " ", "`"{code,syntax}, "c"{code}, "`"{code,syntax}, " ", "l"{link}, " ", "#,
             r#"image[alt=Str("alt"),src=Str("p"),title=Str("")])), "#,
             r#"table_row(table_cell("u"{underline}))))"#
         )
@@ -560,14 +560,17 @@ fn underline_reads_from_html_but_writes_plain() {
 
 #[test]
 fn html_emphasis_tags_import_as_marks_and_stray_ones_stay_raw() {
-    assert_eq!(shape("<em>a</em>"), r#"doc(paragraph("a"{em}))"#);
+    assert_eq!(
+        shape("<em>a</em>"),
+        r#"doc(paragraph("*"{em,syntax}, "a"{em}, "*"{em,syntax}))"#
+    );
     assert_eq!(
         shape("<strong>a</strong>"),
-        r#"doc(paragraph("a"{strong}))"#
+        r#"doc(paragraph("**"{strong,syntax}, "a"{strong}, "**"{strong,syntax}))"#
     );
     assert_eq!(
         shape("<del>a</del>"),
-        r#"doc(paragraph("a"{strikethrough}))"#
+        r#"doc(paragraph("~~"{strikethrough,syntax}, "a"{strikethrough}, "~~"{strikethrough,syntax}))"#
     );
     // An unpaired tag is a raw HTML primitive, not escaped text.
     assert_eq!(
@@ -603,7 +606,7 @@ fn an_anchor_with_nothing_but_a_destination_is_the_link_mark() {
     // An anchor nests with the marks around it the way `<em>` does.
     assert_eq!(
         shape("<a href=\"/u\"><em>x</em> y</a>"),
-        r#"doc(paragraph("x"{link,em}, " y"{link}))"#
+        r#"doc(paragraph("*"{link,em,syntax}, "x"{link,em}, "*"{link,em,syntax}, " y"{link}))"#
     );
     // Anything the mark cannot hold keeps the tag as source text instead.
     for source in [
@@ -745,7 +748,10 @@ fn a_wiki_link_is_an_atom_that_writes_back_the_bytes_it_took() {
         assert!(shape(source).contains("wiki_link"), "{source:?}");
     }
     // A code literal is code, whatever it spells.
-    assert_eq!(shape("`[[Note]]`"), r#"doc(paragraph("[[Note]]"{code}))"#);
+    assert_eq!(
+        shape("`[[Note]]`"),
+        r#"doc(paragraph("`"{code,syntax}, "[[Note]]"{code}, "`"{code,syntax}))"#
+    );
     assert!(shape("```\n[[Note]]\n```").ends_with(r#"("[[Note]]"))"#));
 }
 
@@ -804,9 +810,18 @@ fn a_break_tag_is_a_hard_break_where_one_can_be_written_back() {
 
 #[test]
 fn a_code_span_carries_the_marks_around_it() {
-    assert_eq!(shape("**`x`**"), r#"doc(paragraph("x"{strong,code}))"#);
-    assert_eq!(shape("*`x`*"), r#"doc(paragraph("x"{em,code}))"#);
-    assert_eq!(shape("[`x`](/u)"), r#"doc(paragraph("x"{link,code}))"#);
+    assert_eq!(
+        shape("**`x`**"),
+        r#"doc(paragraph("**"{strong,syntax}, "`"{strong,code,syntax}, "x"{strong,code}, "`"{strong,code,syntax}, "**"{strong,syntax}))"#
+    );
+    assert_eq!(
+        shape("*`x`*"),
+        r#"doc(paragraph("*"{em,syntax}, "`"{em,code,syntax}, "x"{em,code}, "`"{em,code,syntax}, "*"{em,syntax}))"#
+    );
+    assert_eq!(
+        shape("[`x`](/u)"),
+        r#"doc(paragraph("`"{link,code,syntax}, "x"{link,code}, "`"{link,code,syntax}))"#
+    );
     for source in ["**`x`**", "*`x`*", "[`x`](/u)"] {
         assert_eq!(round(source), source, "{source:?}");
     }
@@ -1201,13 +1216,13 @@ fn a_url_under_another_mark_is_not_a_link_of_its_own() {
     assert_eq!(round("*https://a.example*"), "*https://a.example*");
     assert_eq!(
         shape("*https://a.example*"),
-        r#"doc(paragraph(inline_span{em}("https://a.example"{link})))"#
+        r#"doc(paragraph("*"{em,syntax}, "https://a.example"{link,em}, "*"{em,syntax}))"#
     );
     // A code span is literal, so there is no link in it at all.
     assert_eq!(round("`https://a.example`"), "`https://a.example`");
     assert_eq!(
         shape("`https://a.example`"),
-        r#"doc(paragraph("https://a.example"{code}))"#
+        r#"doc(paragraph("`"{code,syntax}, "https://a.example"{code}, "`"{code,syntax}))"#
     );
     // A URL inside a label is that label, not a second link.
     let source = "[https://a.example](https://b.example)";

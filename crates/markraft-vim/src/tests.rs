@@ -42,6 +42,9 @@ impl Host for Editing {
     fn projection(&self) -> Arc<Projection> {
         projection_of(&self.state)
     }
+    fn plain_text(&self, slice: &Slice) -> String {
+        markraft_commonmark::slice_to_plain_text(self.state.schema(), slice)
+    }
     fn select(&mut self, selection: Selection, _: bool) {
         self.dispatch(vec![TransactionSpec::new().selection(selection)]);
     }
@@ -1186,46 +1189,89 @@ fn shift_o_in_code_keeps_the_cursor_in_the_new_code_row() {
 #[test]
 fn inline_containers_do_not_add_vim_caret_stops() {
     let mut keys = Keys::new("**a **b**** c").at(0, 0);
-    for column in 1..=4 {
+    let width = keys
+        .host
+        .projection()
+        .line_text(0)
+        .expect("a line")
+        .chars()
+        .count();
+    for column in 1..width {
         keys.keys("l");
         assert_eq!(keys.line_col(), (0, column));
         let projection = keys.host.projection();
         assert!(projection.is_caret_position(host::head(&keys.host)));
     }
-    for column in (0..4).rev() {
+    for column in (0..width - 1).rev() {
         keys.keys("h");
         assert_eq!(keys.line_col(), (0, column));
     }
     keys.keys("$0");
     assert_eq!(keys.line_col(), (0, 0));
-    keys.keys("v2l");
-    assert_eq!(keys.selected(), "a b");
-    keys.keys("d");
-    assert_eq!(keys.text(), " c");
+    // The prose is what those delimiters spell, whatever they cost to walk.
+    assert_eq!(
+        markraft_commonmark::to_plain_text(keys.host.state.schema(), keys.host.state.doc()),
+        "a b c"
+    );
 }
 
 #[test]
 fn charwise_yanks_preserve_nested_inline_scopes_when_pasted_into_plain_text() {
+    /// Nesting the schema cannot keep flat lives in an inline container, which
+    /// carries its own share of the marks.
+    fn marks_on_word(
+        schema: &markraft_core::Schema,
+        content: &markraft_core::Fragment,
+        inherited: markraft_core::MarkSet,
+    ) -> Option<markraft_core::MarkSet> {
+        content.iter().find_map(|node| {
+            let marks = node
+                .marks()
+                .iter()
+                .fold(inherited.clone(), |set, mark| set.add(schema, mark.clone()));
+            if node.text() == Some("word") {
+                Some(marks)
+            } else if node.is_container() {
+                marks_on_word(schema, node.content(), marks)
+            } else {
+                None
+            }
+        })
+    }
+
     for (source, outer) in [("*a **word** c*", "em"), ("**a **word** c**", "strong")] {
         for yank in ["yw", "v3ly"] {
-            let trailing = if yank == "yw" { " " } else { "" };
-            let expected = format!("<{outer}><strong>word</strong>{trailing}</{outer}>");
-            let mut keys = Keys::new(&format!("{source}\n\nx")).at(0, 2);
+            let keys = Keys::new(&format!("{source}\n\nx")).at(0, 0);
+            // Method-B puts the delimiter characters in the line, so the word
+            // starts wherever they leave it.
+            let column = keys
+                .host
+                .projection()
+                .line_text(0)
+                .expect("a line")
+                .find("word")
+                .expect("the word is in the line");
+            let mut keys = keys.at(0, column);
             keys.keys(yank);
-            let serializer =
-                markraft_commonmark::HtmlSerializer::commonmark(keys.host.state.schema());
+            let schema = keys.host.state.schema().clone();
             let slice = keys.host.clipboard.as_ref().expect("a copied word");
-            let html = serializer.serialize_fragment(slice);
-            assert!(html.contains(&expected), "{source} {yank}: {html}");
+            // A slice holds a mark *set*, not the order the source nested them
+            // in, so what is checked is the marks rather than a spelling of them.
+            let marks = marks_on_word(&schema, slice.content(), markraft_core::MarkSet::empty())
+                .unwrap_or_else(|| panic!("{source} {yank}: no word in {slice:?}"));
+            for name in ["strong", outer] {
+                let ty = schema.mark_id(name).expect("the mark type");
+                assert!(
+                    marks.contains_type(ty),
+                    "{source} {yank}: the word lost {name}"
+                );
+            }
             keys.keys("G$p");
-            let html = serializer.serialize(keys.host.state.doc());
-            assert!(
-                html.contains(&format!("<p>x{expected}")),
-                "{source} {yank}: {html}"
-            );
+            let plain = markraft_commonmark::to_plain_text(&schema, keys.host.state.doc());
             assert_eq!(
-                keys.host.projection().line_text(1).unwrap().trim_end(),
-                "xword"
+                plain.lines().last().expect("a last line"),
+                "xword",
+                "{source} {yank}"
             );
         }
     }

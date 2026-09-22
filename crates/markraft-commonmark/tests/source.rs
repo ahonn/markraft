@@ -508,10 +508,7 @@ fn real_enter_and_typing_commands_still_save() {
         let rendered = source
             .render(&schema, state.doc())
             .unwrap_or_else(|_| markraft_commonmark::to_markdown(&schema, state.doc()));
-        assert!(
-            rendered.contains("typed"),
-            "{original:?} -> {rendered:?}"
-        );
+        assert!(rendered.contains("typed"), "{original:?} -> {rendered:?}");
         assert!(
             !rendered.contains("<br>"),
             "empty paragraphs must not write <br>: {rendered:?}"
@@ -555,14 +552,8 @@ fn typing_into_a_saved_break_tag_paragraph_writes_the_text() {
         let rendered = source
             .render(&schema, typed.doc())
             .unwrap_or_else(|_| markraft_commonmark::to_markdown(&schema, typed.doc()));
-        assert!(
-            rendered.contains("hello"),
-            "{original:?} -> {rendered:?}"
-        );
-        assert!(
-            !rendered.contains("<br>"),
-            "{original:?} -> {rendered:?}"
-        );
+        assert!(rendered.contains("hello"), "{original:?} -> {rendered:?}");
+        assert!(!rendered.contains("<br>"), "{original:?} -> {rendered:?}");
     }
 }
 

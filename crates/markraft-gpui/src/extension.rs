@@ -408,6 +408,19 @@ impl<'a> EditorCx<'a> {
     pub fn end_undo_group(&mut self) {
         self.view.end_undo_group();
     }
+    /// `slice` as the prose a plain-text surface shows: whatever the host's
+    /// codecs call text, which for Markdown leaves the delimiter characters out.
+    ///
+    /// An editor with no codecs falls back to the model's own flattening, which
+    /// knows nothing of a document kind's spelling.
+    pub fn plain_text(&self, slice: &Slice) -> String {
+        match &self.view.codecs {
+            Some(codecs) => codecs.to_text(slice),
+            None => {
+                markraft_core::projection::slice_to_plain_text(self.view.state().schema(), slice)
+            }
+        }
+    }
     /// Put a slice and its markup on the system clipboard, exactly as ⌘C does, so
     /// another application pastes the markup and this one pastes the slice.
     ///

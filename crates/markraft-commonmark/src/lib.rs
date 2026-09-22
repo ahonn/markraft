@@ -115,6 +115,7 @@
 
 mod autolink;
 pub mod callout;
+mod commands;
 pub mod escape;
 mod extensions;
 mod fit;
@@ -122,6 +123,7 @@ pub mod fragment;
 pub mod html;
 mod inline;
 mod kind;
+mod normalize;
 pub mod parse;
 mod preset;
 pub mod rules;
@@ -137,6 +139,7 @@ pub mod wiki;
 pub use comrak;
 
 pub use callout::{Callout, read_callout};
+pub use commands::toggle_style_mark;
 pub use extensions::{commonmark_corrections, commonmark_extensions, commonmark_input_rules};
 pub use fragment::open_fragment;
 pub use html::{

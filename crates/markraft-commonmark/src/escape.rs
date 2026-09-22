@@ -362,4 +362,3 @@ pub fn code_span_delimiters(text: &str) -> (String, String) {
         (ticks.clone(), ticks)
     }
 }
-

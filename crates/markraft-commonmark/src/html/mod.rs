@@ -179,7 +179,7 @@ impl<'s> Build<'s> {
 
     /// Whether a space written now would be collapsed away.
     fn at_space(&self) -> bool {
-        match self.inline.last() {
+        match self.inline.last_prose() {
             None => self.leading_space,
             Some(node) => ends_in_space(self.schema, node),
         }
@@ -306,7 +306,23 @@ impl<'s> Build<'s> {
                 self.leading_space = previous_leading;
                 self.inline.restore(before);
                 let mark = self.mark(&mark_type, attrs(target))?;
-                for node in crate::inline::wrap_mark(self.schema, mark, children)? {
+                let name = self.schema.mark_type(mark.ty).name().to_string();
+                let wrapped = if let Some((open, close)) = crate::inline::style_delimiters(&name) {
+                    crate::inline::wrap_mark_method_b(self.schema, mark, open, close, children)?
+                } else if name == md::CODE {
+                    let text: String = children.iter().filter_map(|n| n.text()).collect();
+                    let (open, close) = crate::escape::code_span_delimiters(&text);
+                    crate::inline::wrap_mark_method_b(self.schema, mark, &open, &close, children)?
+                } else {
+                    crate::inline::wrap_mark(self.schema, mark, children)?
+                };
+                for node in wrapped {
+                    // Delimiter leaves keep their syntax mark; outer path marks
+                    // land on content only.
+                    if crate::inline::is_syntax(self.schema, &node) {
+                        self.inline.push_node(node.clone(), node.marks().clone());
+                        continue;
+                    }
                     let set = marks.iter().fold(node.marks().clone(), |set, mark| {
                         set.add(self.schema, mark.clone())
                     });

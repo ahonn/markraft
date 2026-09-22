@@ -207,6 +207,11 @@ pub const STRIKETHROUGH: &str = "strikethrough";
 pub const UNDERLINE: &str = "underline";
 /// A code span.
 pub const CODE: &str = "code";
+/// A Method-B delimiter leaf: the Markdown characters (`**`, `*`, `~~`,
+/// backticks) that open or close a style span. The characters live in the text;
+/// this mark marks them as syntax so Markdown write leaves them alone, HTML
+/// write skips them, and the view can hide them when the caret is elsewhere.
+pub const SYNTAX: &str = "syntax";
 
 /// The group holding [`STRONG`], [`EM`], [`STRIKETHROUGH`] and [`UNDERLINE`]:
 /// the marks that have a delimiter run or a tag of their own.
@@ -380,6 +385,15 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
         .mark(MarkTypeSpec::new(STRONG).rank(40).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(EM).rank(50).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(CODE).rank(60))
+        // Below style marks so a delimiter leaf never shares a set with them:
+        // wrap_mark skips nodes that already carry syntax. `delim` holds the
+        // characters so adjacent pairs (e.g. `**` next to `` ` ``) do not merge.
+        .mark(
+            MarkTypeSpec::new(SYNTAX)
+                .rank(70)
+                .inclusive(false)
+                .attr(str_attr("delim", "")),
+        )
 }
 
 /// The compiled CommonMark/GFM schema.

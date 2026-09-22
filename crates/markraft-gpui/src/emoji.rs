@@ -498,14 +498,15 @@ mod tests {
 
     #[test]
     fn the_code_mark_check_covers_the_whole_run() {
-        // Guards `is_code`'s walk against an off-by-one at the run's edges.
+        // The backticks of `ab`cd`ef` are in the tree.
+        // Positions: 1..2 ab, 3 `, 4..5 cd, 6 `, 7..8 ef
         let state = state_of("ab`cd`ef");
         let types = crate::typeahead::tests::types_of(&state);
         assert!(!is_code(&state, &types, 1, 3));
-        assert!(is_code(&state, &types, 2, 4));
-        assert!(is_code(&state, &types, 3, 5));
-        assert!(is_code(&state, &types, 4, 7));
-        assert!(!is_code(&state, &types, 5, 7));
+        assert!(is_code(&state, &types, 3, 4));
+        assert!(is_code(&state, &types, 4, 6));
+        assert!(is_code(&state, &types, 6, 7));
+        assert!(!is_code(&state, &types, 7, 9));
     }
 
     #[test]

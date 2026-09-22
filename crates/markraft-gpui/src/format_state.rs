@@ -172,21 +172,24 @@ mod tests {
 
     #[test]
     fn a_range_intersects_only_the_content_it_covers_in_either_direction() {
-        // Source nesting may introduce transparent inline containers; select
-        // the visible text rather than assuming one token per character.
+        // The delimiters are in the projection; select by finding the
+        // visible letter runs rather than assuming one token per character.
         let (schema, state) = state_of("***ab***cd*ef*");
         let em = schema.mark_id(md::EM).unwrap();
         let strong = schema.mark_id(md::STRONG).unwrap();
-        // "ab" carries em+strong, "cd" nothing, "ef" em.
         let projection = projection_of(&state);
+        let plain = projection.plain_text();
+        let ab = plain.find("ab").expect("ab");
+        let cd = plain.find("cd").expect("cd");
+        let ef = plain.find("ef").expect("ef");
         let pos = |offset| projection.line_offset_to_pos(0, offset).unwrap();
-        let both = select(&state, pos(0), pos(2));
+        let both = select(&state, pos(ab), pos(ab + 2));
         assert!(active_marks(&both).contains_type(em));
         assert!(active_marks(&both).contains_type(strong));
-        assert!(active_marks(&select(&state, pos(2), pos(0))).contains_type(strong));
-        assert!(!active_marks(&select(&state, pos(0), pos(4))).contains_type(strong));
-        assert!(active_marks(&select(&state, pos(4), pos(6))).contains_type(em));
-        assert!(active_marks(&select(&state, pos(6), pos(4))).contains_type(em));
+        assert!(active_marks(&select(&state, pos(ab + 2), pos(ab))).contains_type(strong));
+        assert!(!active_marks(&select(&state, pos(ab), pos(cd + 2))).contains_type(strong));
+        assert!(active_marks(&select(&state, pos(ef), pos(ef + 2))).contains_type(em));
+        assert!(active_marks(&select(&state, pos(ef + 2), pos(ef))).contains_type(em));
     }
 
     #[test]
@@ -195,20 +198,20 @@ mod tests {
         let heading = schema.node_id(md::HEADING).unwrap();
         let strong = schema.mark_id(md::STRONG).unwrap();
         let projection = projection_of(&state);
-        // The heading holds 1..3, the paragraph starts at 5.
-        let to_next_block = select(&state, 1, 5);
+        let para_start = projection.lines()[1].from;
+        let to_next_block = select(&state, 1, para_start);
         assert!(active_marks(&to_next_block).contains_type(strong));
         assert_eq!(
             active_block_type(&to_next_block, &projection).map(|(ty, _)| ty),
             Some(heading)
         );
-        let backwards = select(&state, 5, 1);
+        let backwards = select(&state, para_start, 1);
         assert_eq!(
             active_block_type(&backwards, &projection).map(|(ty, _)| ty),
             Some(heading)
         );
         // One character into the paragraph and the two formats differ.
-        let into_next = select(&state, 1, 6);
+        let into_next = select(&state, 1, para_start + 1);
         assert!(!active_marks(&into_next).contains_type(strong));
         assert_eq!(active_block_type(&into_next, &projection), None);
     }

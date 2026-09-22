@@ -213,7 +213,8 @@ fn charwise(state: &mut State, cx: &mut impl Host, operator: Operator, range: Ra
     if operator != Operator::Yank && table::crosses_cells(cx.types(), &cx.projection(), &range) {
         return;
     }
-    let register = edit::charwise_register(cx.state(), range.clone());
+    let register =
+        edit::charwise_register(cx.state(), range.clone(), &|slice| cx.plain_text(slice));
     yank(state, cx, register);
     match operator {
         Operator::Yank => {
@@ -258,7 +259,11 @@ fn linewise(state: &mut State, cx: &mut impl Host, operator: Operator, lines: Ra
         charwise(state, cx, operator, line.from..line.to);
         return;
     }
-    if let Some(register) = edit::linewise_register(cx.state(), &projection, lines.clone()) {
+    if let Some(register) =
+        edit::linewise_register(cx.state(), &projection, lines.clone(), &|slice| {
+            cx.plain_text(slice)
+        })
+    {
         yank(state, cx, register);
     }
     match operator {
@@ -376,14 +381,14 @@ pub(crate) fn to_line_end(state: &mut State, cx: &mut impl Host, operator: Opera
 /// pastes here; it counts as linewise only while it still holds the last yank, which is
 /// what remembers that whole lines were taken.
 fn register(state: &State, cx: &mut impl Host) -> Option<Register> {
-    let schema = cx.state().schema().clone();
+    let _schema = cx.state().schema().clone();
     let Some(slice) = cx.read_clipboard() else {
         return state.register.clone();
     };
     match &state.register {
         Some(register) if register.slice == slice => Some(register.clone()),
         _ => Some(Register {
-            text: markraft_core::projection::slice_to_plain_text(&schema, &slice),
+            text: cx.plain_text(&slice),
             slice,
             linewise: false,
             depth: 0,
@@ -409,7 +414,13 @@ pub(crate) fn paste(state: &mut State, cx: &mut impl Host, after: bool) {
     {
         register.depth = level;
     }
-    if let Some(spec) = edit::paste(cx.state(), &projection, from, &register, after) {
+    // Pasting into a code or raw block puts characters in, not structure.
+    let doc = cx.state().doc();
+    let literal = doc.resolve(from).is_ok_and(|resolved| {
+        let ty = Some(resolved.parent().type_id());
+        ty == cx.types().code_block || ty == cx.types().raw_block
+    });
+    if let Some(spec) = edit::paste(cx.state(), &projection, from, &register, after, literal) {
         cx.dispatch(vec![spec]);
     }
     state.mode = Mode::Normal;

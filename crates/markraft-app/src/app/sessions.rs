@@ -143,6 +143,7 @@ impl NotesApp {
                 Setup::new(doc::schema().clone())
                     .types(doc::types().clone())
                     .codecs(doc::codecs())
+                    .mark_toggle(doc::mark_toggle())
                     .extensions(doc::extensions())
                     .doc(document),
                 cx,

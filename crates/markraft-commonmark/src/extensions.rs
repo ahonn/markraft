@@ -23,9 +23,10 @@
 
 use markraft_core::commands::structure::markup_of;
 use markraft_core::commands::{InputRule, InputRuleMatch, input_rules};
+use markraft_core::projection::OBJECT_REPLACEMENT;
 use markraft_core::{
-    Attrs, Change, Correction, Extension, Fragment, MarkSet, Markup, Node, NodeTypeId, Schema,
-    Slice, Token, attrs, corrections, fill_required_content,
+    Attrs, Change, Correction, Extension, Fragment, Mark, MarkSet, Markup, Node, NodeTypeId,
+    Schema, Selection, Slice, Token, attrs, corrections, fill_required_content,
 };
 
 use crate::schema as md;
@@ -38,10 +39,9 @@ pub fn commonmark_extensions(schema: &Schema) -> Extension {
     ])
 }
 
-/// The corrections the preset needs: merge adjacent identical lists, and fill
-/// in the block a container's content rule requires — an emptied table gets a
-/// row back, and an emptied row a cell, so neither can be left describing
-/// something the format cannot write.
+/// The corrections the preset needs: merge adjacent identical lists, fill in
+/// the block a container's content rule requires, and re-derive Method-B
+/// delimiter leaves after inline edits.
 pub fn commonmark_corrections(schema: &Schema) -> Vec<Correction> {
     let containers = [
         md::DOC,
@@ -61,6 +61,7 @@ pub fn commonmark_corrections(schema: &Schema) -> Vec<Correction> {
         out.push(fill_required_content(ty));
         out.push(Correction::on_child_list(ty, merge_adjacent_lists));
     }
+    out.extend(crate::normalize::method_b_normalize_corrections(schema));
     out
 }
 
@@ -103,7 +104,92 @@ pub fn commonmark_input_rules() -> Vec<InputRule> {
         task_rule(),
         wiki_link_rule(),
         callout_rule(),
+        // Longest delimiter first: `**bold**` must not be read as emphasis
+        // around `*bold*`.
+        inline_style_rule("~~", md::STRIKETHROUGH),
+        inline_style_rule("**", md::STRONG),
+        inline_style_rule("*", md::EM),
+        inline_style_rule("`", md::CODE),
     ]
+}
+
+/// `**bold**`, `*em*`, `~~struck~~` and `` `code` `` become the mark and its
+/// Method-B delimiter leaves as soon as the closing run is typed.
+///
+/// A rule rather than a reparse of the block: the tree cannot tell a delimiter
+/// a writer just typed from one that was written `\*` in the source, so the only
+/// characters safe to read as spelling are the ones the caret has just closed.
+fn inline_style_rule(delim: &'static str, mark_name: &'static str) -> InputRule {
+    InputRule::new(
+        move |before| {
+            let head = before.strip_suffix(delim)?;
+            let start = head.rfind(delim)?;
+            let content = &head[start + delim.len()..];
+            if content.is_empty() || content.contains(delim) {
+                return None;
+            }
+            // A longer run of the same character is a longer delimiter still
+            // being typed: `**bold*` is on its way to strong, not emphasis
+            // around `bold`.
+            let repeated = delim.chars().next()?;
+            if head[..start].ends_with(repeated)
+                || content.starts_with(repeated)
+                || content.ends_with(repeated)
+            {
+                return None;
+            }
+            // CommonMark will not read a run that flanks whitespace as emphasis,
+            // and neither does the writer who typed it.
+            if content.starts_with(char::is_whitespace) || content.ends_with(char::is_whitespace) {
+                return None;
+            }
+            Some(before[start..].chars().count())
+        },
+        move |m| {
+            let ty = m.schema.mark_id(mark_name)?;
+            let code = m.schema.mark_id(md::CODE);
+            let width = delim.chars().count();
+            let (inner_from, inner_to) = (m.from + width, m.to - width);
+            if inner_from >= inner_to {
+                return None;
+            }
+            // Inside a code span every character is literal, and an atom is one
+            // token that no delimiter may be pushed into.
+            let in_code = code.is_some_and(|code| {
+                m.doc
+                    .resolve(m.from)
+                    .is_ok_and(|resolved| resolved.marks(m.schema).contains_type(code))
+            });
+            if in_code || m.text.contains(OBJECT_REPLACEMENT) {
+                return None;
+            }
+            // A code span holds no other marks, so one that would swallow some
+            // is left as the characters the writer typed.
+            if Some(ty) == code
+                && m.doc
+                    .slice(inner_from, inner_to)
+                    .is_ok_and(|slice| slice.content().iter().any(|node| !node.marks().is_empty()))
+            {
+                return None;
+            }
+            let mark = Mark::new(ty);
+            let leaf = |text: &str| -> Option<Slice> {
+                let leaf = crate::inline::syntax_text(m.schema, text).ok()?;
+                let leaf = leaf.mark(leaf.marks().add(m.schema, mark.clone()));
+                Some(Slice::from_fragment(Fragment::from_node(leaf)))
+            };
+            Some(
+                spec(vec![
+                    Change::replace(m.from, inner_from, leaf(delim)?),
+                    Change::add_mark(inner_from, inner_to, mark.clone()),
+                    Change::replace(inner_to, m.to, leaf(delim)?),
+                ])
+                // The caret stands past the closing delimiter, where the style is
+                // over: what is typed next is ordinary text.
+                .selection(Selection::cursor_with_marks(m.to, MarkSet::empty())),
+            )
+        },
+    )
 }
 
 /// Replace the block's own open and close tokens and drop the marker text,

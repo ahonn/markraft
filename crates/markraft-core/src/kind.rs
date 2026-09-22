@@ -70,6 +70,12 @@ pub struct DocTypeNames {
     pub underline: Option<&'static str>,
     /// A link, carrying an `href` attribute.
     pub link: Option<&'static str>,
+    /// The mark a kind puts on the characters that *spell* another mark, where
+    /// it keeps that spelling in the document rather than only in its source —
+    /// the `**` of `**bold**`. A view hides such a run while the caret is
+    /// outside the span it belongs to, and shows it inside; a kind that writes
+    /// its marks some other way leaves this `None` and nothing is hidden.
+    pub syntax: Option<&'static str>,
 }
 
 /// How a document kind turns a [`Slice`] into the flavours a clipboard carries,

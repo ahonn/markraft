@@ -14,8 +14,8 @@ use markraft_core::commands::{
     goto_cell_below, goto_next_cell, goto_prev_cell, guard_cell_boundary, guard_cell_range,
     guard_cell_split, join_backward, join_forward, lift, lift_empty_block, lift_list_item,
     move_by_grapheme, move_by_word, new_line_in_code, select_node_backward, select_node_forward,
-    set_block_type, sink_list_item, split_block_keep_marks, split_list_item, toggle_mark,
-    undo_input_rule, wrap_in, wrap_in_list,
+    set_block_type, sink_list_item, split_block_keep_marks, split_list_item, undo_input_rule,
+    wrap_in, wrap_in_list,
 };
 use markraft_core::projection::projection_of;
 use markraft_core::{
@@ -330,14 +330,6 @@ pub(crate) fn history(undo: bool) -> Command {
             markraft_core::redo(state)
         }
     })
-}
-
-/// Toggle a mark over the selection.
-pub(crate) fn mark(ty: Option<markraft_core::MarkTypeId>) -> Command {
-    match ty {
-        Some(ty) => toggle_mark(ty, Attrs::empty()),
-        None => command(|_| None),
-    }
 }
 
 /// Set a textblock type, or return to a paragraph when it is already that type.

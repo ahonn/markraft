@@ -19,6 +19,7 @@ use markraft_core::projection::{Line, Projection};
 use markraft_core::{
     Attrs, EditorState, Extension, Fragment, MarkSet, MarkTypeId, Node, NodeTypeId, Schema, Slice,
 };
+use markraft_gpui::MarkToggle;
 use markraft_gpui::{CalloutAttrs, DocTypes};
 use std::sync::{Arc, LazyLock};
 
@@ -54,6 +55,15 @@ pub fn codecs() -> Arc<dyn Codecs> {
 /// The input rules and corrections a CommonMark editor wants.
 pub fn extensions() -> Extension {
     commonmark_extensions(schema())
+}
+
+/// How this document kind toggles an inline mark.
+///
+/// Markdown keeps the characters that spell a mark in the document, so a toggle
+/// edits those rather than the mark alone; the model's own `toggle_mark` would
+/// leave the two disagreeing.
+pub fn mark_toggle() -> MarkToggle {
+    Arc::new(markraft_commonmark::toggle_style_mark)
 }
 
 /// The smallest document the schema allows: one empty paragraph.

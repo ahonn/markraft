@@ -562,6 +562,8 @@ mod tests {
                 images: &images,
                 wiki: None,
                 protected: None,
+                selection: 0..0,
+                composition: None,
             },
             gpui::px(400.),
             &text_system,

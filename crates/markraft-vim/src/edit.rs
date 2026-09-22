@@ -7,7 +7,7 @@
 
 use crate::motion::{self, Span};
 use markraft_core::commands::delete_range_changes;
-use markraft_core::projection::{Projection, slice_to_plain_text};
+use markraft_core::projection::Projection;
 use markraft_core::{
     Change, ChangeSet, EditorState, Fit, Fragment, Node, Selection, Slice, TrackMode,
     TransactionSpec,
@@ -147,10 +147,11 @@ pub(crate) fn linewise_register(
     state: &EditorState,
     projection: &Projection,
     lines: Range<usize>,
+    plain: &dyn Fn(&Slice) -> String,
 ) -> Option<Register> {
     let (slice, _, depth) = linewise_content(state, projection, lines)?;
     Some(Register {
-        text: slice_to_plain_text(state.schema(), &slice),
+        text: plain(&slice),
         slice,
         linewise: true,
         depth,
@@ -158,13 +159,17 @@ pub(crate) fn linewise_register(
 }
 
 /// The register a charwise range would yank.
-pub(crate) fn charwise_register(state: &EditorState, range: Range<usize>) -> Register {
+pub(crate) fn charwise_register(
+    state: &EditorState,
+    range: Range<usize>,
+    plain: &dyn Fn(&Slice) -> String,
+) -> Register {
     let slice = state
         .doc()
         .slice_with_schema(state.schema(), range.start, range.end)
         .unwrap_or_else(|_| Slice::empty());
     Register {
-        text: slice_to_plain_text(state.schema(), &slice),
+        text: plain(&slice),
         slice,
         linewise: false,
         depth: 0,
@@ -271,15 +276,27 @@ pub(crate) fn paste(
     cursor: usize,
     register: &Register,
     after: bool,
+    literal: bool,
 ) -> Option<TransactionSpec> {
     if register.slice.is_empty() {
         return None;
     }
+    // A verbatim block holds characters, not structure: what goes in is the
+    // register's prose, without the marks or the characters that spell them.
+    let content = if literal {
+        let text = register.text.trim_end_matches('\n');
+        if text.is_empty() {
+            return None;
+        }
+        Slice::from_fragment(Fragment::from_node(state.schema().text(text)))
+    } else {
+        register.slice.clone()
+    };
     if register.linewise {
         let at = linewise_paste_position(state.doc(), projection, cursor, register, after)?;
         let (set, doc) = resolve(
             state,
-            vec![Change::replace(at, at, register.slice.clone()).with_fit(Fit::Auto)],
+            vec![Change::replace(at, at, content).with_fit(Fit::Auto)],
         )?;
         let start = set.map_pos(at, -1, TrackMode::Simple).unwrap_or(at);
         let after_doc = Projection::of(&doc, state.schema());
@@ -296,7 +313,7 @@ pub(crate) fn paste(
     };
     let (set, doc) = resolve(
         state,
-        vec![Change::replace(at, at, register.slice.clone()).with_fit(Fit::Auto)],
+        vec![Change::replace(at, at, content).with_fit(Fit::Auto)],
     )?;
     let end = set
         .map_pos(at, 1, TrackMode::Simple)
@@ -368,7 +385,7 @@ mod tests {
     use markraft_commonmark::{
         commonmark_extensions, commonmark_schema, from_markdown, to_markdown,
     };
-    use markraft_core::projection::projection_of;
+    use markraft_core::projection::{projection_of, slice_to_plain_text};
     use markraft_core::{EditorStateConfig, Extension};
 
     fn state_of(markdown: &str) -> EditorState {
@@ -426,7 +443,8 @@ mod tests {
     fn a_linewise_yank_keeps_marks_and_structure() {
         let state = state_of("- **a**\n  - b");
         let projection = projection_of(&state);
-        let register = linewise_register(&state, &projection, 1..2).expect("a register");
+        let plain = |slice: &Slice| slice_to_plain_text(state.schema(), slice);
+        let register = linewise_register(&state, &projection, 1..2, &plain).expect("a register");
         assert!(register.linewise);
         assert_eq!(register.text, "b");
         assert_eq!(
@@ -439,11 +457,12 @@ mod tests {
     fn a_linewise_paste_puts_nodes_below_and_above() {
         let state = state_of("- one\n- two");
         let projection = projection_of(&state);
-        let register = linewise_register(&state, &projection, 0..1).expect("a register");
+        let plain = |slice: &Slice| slice_to_plain_text(state.schema(), slice);
+        let register = linewise_register(&state, &projection, 0..1, &plain).expect("a register");
         let cursor = projection.lines()[1].from;
-        let below = paste(&state, &projection, cursor, &register, true).expect("a paste");
+        let below = paste(&state, &projection, cursor, &register, true, false).expect("a paste");
         assert_eq!(applied(&state, below), "- one\n- two\n- one");
-        let above = paste(&state, &projection, cursor, &register, false).expect("a paste");
+        let above = paste(&state, &projection, cursor, &register, false, false).expect("a paste");
         assert_eq!(applied(&state, above), "- one\n- one\n- two");
     }
 
@@ -453,13 +472,15 @@ mod tests {
         let projection = projection_of(&state);
         let source = state_of("**XY**");
         let source_projection = projection_of(&source);
+        let plain = |slice: &Slice| slice_to_plain_text(source.schema(), slice);
         let register = charwise_register(
             &source,
             motion::line_start(&source_projection, 0)..motion::line_end(&source_projection, 0),
+            &plain,
         );
-        let spec = paste(&state, &projection, 1, &register, true).expect("a paste");
+        let spec = paste(&state, &projection, 1, &register, true, false).expect("a paste");
         assert_eq!(applied(&state, spec), "a**XY**b");
-        let spec = paste(&state, &projection, 2, &register, false).expect("a paste");
+        let spec = paste(&state, &projection, 2, &register, false, false).expect("a paste");
         assert_eq!(applied(&state, spec), "a**XY**b");
     }
 

@@ -119,6 +119,9 @@ pub struct DocTypes {
     /// A link, carrying an `href` attribute. Without it links cannot be set,
     /// followed or pasted as links.
     pub link: Option<MarkTypeId>,
+    /// The mark on the characters that spell another mark. Without it such a
+    /// run is drawn like any other text, so the spelling stays visible.
+    pub syntax: Option<MarkTypeId>,
     /// Which attributes of a [`DocTypes::blockquote`] spell a callout. Unset —
     /// which is what [`DocTypes::from_schema_names`] leaves it, since no role
     /// table names these — no quote is given a header or an accent of its own.
@@ -173,6 +176,7 @@ impl DocTypes {
             strikethrough: mark(names.strikethrough),
             underline: mark(names.underline),
             link: mark(names.link),
+            syntax: mark(names.syntax),
             callout: None,
         }
     }

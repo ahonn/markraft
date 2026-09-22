@@ -271,6 +271,11 @@ pub struct Setup {
     /// How the clipboard reads and writes this document kind. Without it a copy
     /// writes plain text and a paste is inserted literally.
     pub codecs: Option<Arc<dyn markraft_core::Codecs>>,
+    /// How this document kind toggles an inline mark. A kind that keeps the
+    /// characters spelling a mark in the document edits *those*, which the
+    /// model's own [`toggle_mark`](markraft_core::commands::toggle_mark) knows
+    /// nothing about; one that does not leaves this unset and gets it.
+    pub mark_toggle: Option<MarkToggle>,
     /// The document to open with. The schema's smallest valid document
     /// otherwise.
     pub doc: Option<Node>,
@@ -283,6 +288,7 @@ impl Setup {
             types: DocTypes::none(),
             extensions: markraft_core::Extension::none(),
             codecs: None,
+            mark_toggle: None,
             doc: None,
         }
     }
@@ -298,11 +304,19 @@ impl Setup {
         self.codecs = Some(codecs);
         self
     }
+    pub fn mark_toggle(mut self, toggle: MarkToggle) -> Setup {
+        self.mark_toggle = Some(toggle);
+        self
+    }
     pub fn doc(mut self, doc: Node) -> Setup {
         self.doc = Some(doc);
         self
     }
 }
+
+/// How a document kind toggles one inline mark over the selection.
+pub type MarkToggle =
+    Arc<dyn Fn(markraft_core::MarkTypeId, Attrs) -> markraft_core::commands::Command + Send + Sync>;
 
 /// Why an edit did not reach the document. The editor only keeps the cases apart;
 /// the host words each one, because only it knows what the document is stored in.
@@ -382,6 +396,8 @@ pub struct EditorView {
     pub(crate) types: DocTypes,
     /// The host's clipboard codecs, absent for an editor that only holds text.
     pub(crate) codecs: Option<Arc<dyn markraft_core::Codecs>>,
+    /// How the host's document kind toggles a mark; see [`Setup::mark_toggle`].
+    mark_toggle: Option<MarkToggle>,
     /// The host's extensions, kept so the state can be rebuilt on a replacement.
     host_extensions: markraft_core::Extension,
     pub(crate) extensions: Vec<extension::Registration>,
@@ -468,6 +484,7 @@ impl EditorView {
             types,
             extensions,
             codecs,
+            mark_toggle,
             doc,
         } = setup;
         let state = build_state(&schema, &extensions, doc);
@@ -478,6 +495,7 @@ impl EditorView {
             file_paste: false,
             types,
             codecs,
+            mark_toggle,
             extension_selection: state.selection().clone(),
             overlay_open: false,
             state,
@@ -671,8 +689,10 @@ impl EditorView {
         &self.shaping
     }
     pub(crate) fn shape_input(&self) -> ShapeInput<'_> {
+        let doc = self.state.doc();
+        let selection = self.state.selection();
         ShapeInput {
-            doc: self.state.doc(),
+            doc,
             types: &self.types,
             projection: &self.projection,
             style: self.shaping.style(),
@@ -680,6 +700,9 @@ impl EditorView {
             images: self.shaping.images(),
             wiki: self.shaping.wiki(),
             protected: self.shaping.protected(),
+            selection: selection.from(doc)..selection.to(doc),
+            composition: markraft_core::composition_range(&self.state)
+                .map(|range| range.from..range.to),
         }
     }
     /// The laid-out row holding `pos`, and the `char` offset into it.
@@ -733,7 +756,7 @@ impl EditorView {
     /// Replace the document, discarding the undo history with it.
     pub fn replace_doc(&mut self, doc: Node, cx: &mut Context<Self>) {
         let doc = if self.single_line {
-            single_line::document(&doc, &self.state.schema().clone())
+            single_line::document(&doc, &self.state.schema().clone(), self.codecs.as_deref())
         } else {
             doc
         };
@@ -868,8 +891,16 @@ impl EditorView {
     }
 
     pub fn toggle_mark(&mut self, ty: MarkTypeId, attrs: Attrs, cx: &mut Context<Self>) {
-        let command = markraft_core::commands::toggle_mark(ty, attrs);
+        let command = self.mark_command(ty, attrs);
         self.run_command(&command, cx);
+    }
+
+    /// The host's way of toggling `ty`, or the model's where it has none.
+    fn mark_command(&self, ty: MarkTypeId, attrs: Attrs) -> markraft_core::commands::Command {
+        match &self.mark_toggle {
+            Some(toggle) => toggle(ty, attrs),
+            None => markraft_core::commands::toggle_mark(ty, attrs),
+        }
     }
 
     pub fn set_block_type(&mut self, ty: NodeTypeId, attrs: Attrs, cx: &mut Context<Self>) {
@@ -1742,12 +1773,25 @@ impl EditorView {
         run!(Undo, |_: &DocTypes| keymap::history(true));
         run!(Redo, |_: &DocTypes| keymap::history(false));
         run!(SelectAll, keymap::select_all);
-        rich!(Bold, |types: &DocTypes| keymap::mark(types.strong));
-        rich!(Italic, |types: &DocTypes| keymap::mark(types.em));
-        rich!(Code, |types: &DocTypes| keymap::mark(types.code));
-        rich!(Strikethrough, |types: &DocTypes| keymap::mark(
-            types.strikethrough
-        ));
+        macro_rules! mark {
+            ($action:ty, $role:ident) => {
+                root = root.on_action(cx.listener(|this, _: &$action, _, cx| {
+                    let command = this
+                        .types
+                        .$role
+                        .filter(|_| !this.single_line)
+                        .map(|ty| this.mark_command(ty, Attrs::empty()));
+                    match command {
+                        Some(command) if this.run_command(&command, cx) => {}
+                        _ => cx.propagate(),
+                    }
+                }));
+            };
+        }
+        mark!(Bold, strong);
+        mark!(Italic, em);
+        mark!(Code, code);
+        mark!(Strikethrough, strikethrough);
         rich!(Paragraph, |types: &DocTypes| block(
             types,
             types.paragraph,

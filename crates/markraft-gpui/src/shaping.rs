@@ -30,6 +30,9 @@ struct Shaped {
     projection: Arc<Projection>,
     width: Pixels,
     revision: u64,
+    /// Which delimiter runs stood open when the rows were shaped; see
+    /// [`crate::surface::reveal_key`].
+    reveal: u64,
     lines: Vec<LayoutLine>,
 }
 
@@ -118,33 +121,48 @@ impl Shaping {
         &self,
         projection: &Arc<Projection>,
         width: Pixels,
+        reveal: u64,
     ) -> Option<Vec<LayoutLine>> {
         self.shaped
             .borrow()
             .iter()
-            .find(|shaped| self.matches(shaped, projection, width))
+            .find(|shaped| self.matches(shaped, projection, width, reveal))
             .map(|shaped| shaped.lines.clone())
     }
 
     /// Keep `lines` as the rows of `projection` at `width`.
-    pub(crate) fn keep(&self, projection: &Arc<Projection>, width: Pixels, lines: &[LayoutLine]) {
+    pub(crate) fn keep(
+        &self,
+        projection: &Arc<Projection>,
+        width: Pixels,
+        reveal: u64,
+        lines: &[LayoutLine],
+    ) {
         let mut shaped = self.shaped.borrow_mut();
-        shaped.retain(|kept| !self.matches(kept, projection, width));
+        shaped.retain(|kept| !self.matches(kept, projection, width, reveal));
         shaped.insert(
             0,
             Shaped {
                 projection: projection.clone(),
                 width,
                 revision: self.revision,
+                reveal,
                 lines: lines.to_vec(),
             },
         );
         shaped.truncate(KEPT);
     }
 
-    fn matches(&self, shaped: &Shaped, projection: &Arc<Projection>, width: Pixels) -> bool {
+    fn matches(
+        &self,
+        shaped: &Shaped,
+        projection: &Arc<Projection>,
+        width: Pixels,
+        reveal: u64,
+    ) -> bool {
         shaped.width == width
             && shaped.revision == self.revision
+            && shaped.reveal == reveal
             && Arc::ptr_eq(&shaped.projection, projection)
     }
 
@@ -178,13 +196,13 @@ mod tests {
         let shaping = Shaping::default();
         let projection = projection_of("hello");
         assert!(
-            shaping.rows(&projection, px(600.)).is_none(),
+            shaping.rows(&projection, px(600.), 0).is_none(),
             "nothing kept yet"
         );
-        shaping.keep(&projection, px(600.), &[]);
-        assert!(shaping.rows(&projection, px(600.)).is_some());
+        shaping.keep(&projection, px(600.), 0, &[]);
+        assert!(shaping.rows(&projection, px(600.), 0).is_some());
         // A second handle on the same projection is the same document.
-        assert!(shaping.rows(&projection.clone(), px(600.)).is_some());
+        assert!(shaping.rows(&projection.clone(), px(600.), 0).is_some());
     }
 
     /// Every input shaping reads drops them: a different document, a different
@@ -194,38 +212,47 @@ mod tests {
         let projection = projection_of("hello");
         let kept = || {
             let shaping = Shaping::default();
-            shaping.keep(&projection, px(600.), &[]);
+            shaping.keep(&projection, px(600.), 0, &[]);
             shaping
         };
 
         // A document that changed is a new projection, whatever it holds.
         let shaping = kept();
-        assert!(shaping.rows(&projection_of("hello"), px(600.)).is_none());
-        assert!(shaping.rows(&projection_of("other"), px(600.)).is_none());
+        assert!(shaping.rows(&projection_of("hello"), px(600.), 0).is_none());
+        assert!(shaping.rows(&projection_of("other"), px(600.), 0).is_none());
 
         // A window that resized.
-        assert!(shaping.rows(&projection, px(599.)).is_none());
+        assert!(shaping.rows(&projection, px(599.), 0).is_none());
 
         // And each setter in turn.
         let mut shaping = kept();
         shaping.set_style(EditorStyle::default());
-        assert!(shaping.rows(&projection, px(600.)).is_none(), "style");
+        assert!(shaping.rows(&projection, px(600.), 0).is_none(), "style");
 
         let mut shaping = kept();
         shaping.set_wiki(Box::new(|_| true));
-        assert!(shaping.rows(&projection, px(600.)).is_none(), "wiki");
+        assert!(shaping.rows(&projection, px(600.), 0).is_none(), "wiki");
 
         let mut shaping = kept();
         shaping.set_protected(Box::new(|_| Vec::new()));
-        assert!(shaping.rows(&projection, px(600.)).is_none(), "protected");
+        assert!(
+            shaping.rows(&projection, px(600.), 0).is_none(),
+            "protected"
+        );
 
         let mut shaping = kept();
         shaping.set_image_base(Some("/tmp".into()));
-        assert!(shaping.rows(&projection, px(600.)).is_none(), "image base");
+        assert!(
+            shaping.rows(&projection, px(600.), 0).is_none(),
+            "image base"
+        );
 
         let mut shaping = kept();
         shaping.set_image_root(Ok(Some("/tmp".into())));
-        assert!(shaping.rows(&projection, px(600.)).is_none(), "image root");
+        assert!(
+            shaping.rows(&projection, px(600.), 0).is_none(),
+            "image root"
+        );
     }
 
     /// A frame measures at one width and draws at another, over and over. Both
@@ -235,16 +262,16 @@ mod tests {
         let shaping = Shaping::default();
         let projection = projection_of("hello");
         for _ in 0..3 {
-            shaping.keep(&projection, px(600.), &[]);
-            shaping.keep(&projection, px(584.), &[]);
-            assert!(shaping.rows(&projection, px(600.)).is_some(), "measured");
-            assert!(shaping.rows(&projection, px(584.)).is_some(), "drawn");
+            shaping.keep(&projection, px(600.), 0, &[]);
+            shaping.keep(&projection, px(584.), 0, &[]);
+            assert!(shaping.rows(&projection, px(600.), 0).is_some(), "measured");
+            assert!(shaping.rows(&projection, px(584.), 0).is_some(), "drawn");
         }
         // A third width is one too many, and the oldest goes.
-        shaping.keep(&projection, px(320.), &[]);
-        assert!(shaping.rows(&projection, px(600.)).is_none());
-        assert!(shaping.rows(&projection, px(584.)).is_some());
-        assert!(shaping.rows(&projection, px(320.)).is_some());
+        shaping.keep(&projection, px(320.), 0, &[]);
+        assert!(shaping.rows(&projection, px(600.), 0).is_none());
+        assert!(shaping.rows(&projection, px(584.), 0).is_some());
+        assert!(shaping.rows(&projection, px(320.), 0).is_some());
     }
 
     /// The host polls for changed image files several times a second; a poll
@@ -254,8 +281,8 @@ mod tests {
     fn polling_for_unchanged_images_keeps_the_rows() {
         let mut shaping = Shaping::default();
         let projection = projection_of("hello");
-        shaping.keep(&projection, px(600.), &[]);
+        shaping.keep(&projection, px(600.), 0, &[]);
         assert!(!shaping.refresh_images(), "nothing is cached to change");
-        assert!(shaping.rows(&projection, px(600.)).is_some());
+        assert!(shaping.rows(&projection, px(600.), 0).is_some());
     }
 }

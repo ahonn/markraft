@@ -235,12 +235,20 @@ impl HtmlState<'_> {
 
     /// Write `parent`'s children as inline content, opening each mark once for
     /// the whole run that carries it.
+    ///
+    /// Method-B delimiter leaves (the [`crate::schema::SYNTAX`] mark) are
+    /// skipped: their characters exist for Markdown round-trip and editing, not
+    /// for HTML. Style marks that are already open are kept as a prefix even
+    /// when rank order would otherwise close them — nested `*a **b** c*` must
+    /// write `<em>a <strong>b</strong> c</em>`, not reopen `<em>` around `b`.
     pub fn render_inline(&mut self, parent: &Node) {
         let mut open: Vec<Mark> = Vec::new();
+        let syntax = self.schema().mark_id(crate::schema::SYNTAX);
         for child in parent.children() {
-            let marks = child.marks();
-            // Both lists are sorted by rank, so the marks that stay open are the
-            // longest prefix the two share.
+            if syntax.is_some_and(|ty| child.marks().get(ty).is_some()) {
+                continue;
+            }
+            let marks = self.ordered_marks(&open, child.marks());
             let keep = open
                 .iter()
                 .zip(marks.iter())
@@ -250,10 +258,10 @@ impl HtmlState<'_> {
                 let close = self.mark_tags(&mark).1;
                 self.write(&close);
             }
-            for mark in marks.iter().skip(keep) {
-                let open_tag = self.mark_tags(mark).0;
+            for mark in marks.into_iter().skip(keep) {
+                let open_tag = self.mark_tags(&mark).0;
                 self.write(&open_tag);
-                open.push(mark.clone());
+                open.push(mark);
             }
             self.render(child, Some(parent));
         }
@@ -261,6 +269,24 @@ impl HtmlState<'_> {
             let close = self.mark_tags(&mark).1;
             self.write(&close);
         }
+    }
+
+    /// Reorder `marks` so every mark still in `open` stays as a prefix.
+    fn ordered_marks(&self, open: &[Mark], marks: &markraft_core::MarkSet) -> Vec<Mark> {
+        let mut pending: Vec<Mark> = marks
+            .iter()
+            .filter(|mark| self.serializer.mark_rule(mark.ty).is_some())
+            .cloned()
+            .collect();
+        let mut ordered = Vec::with_capacity(pending.len());
+        for kept in open {
+            let Some(index) = pending.iter().position(|mark| mark == kept) else {
+                break;
+            };
+            ordered.push(pending.remove(index));
+        }
+        ordered.append(&mut pending);
+        ordered
     }
 
     fn mark_tags(&self, mark: &Mark) -> (String, String) {
@@ -612,6 +638,7 @@ pub fn commonmark_html_mark_rules() -> HtmlMarkRules {
     rules.insert(md::STRONG.to_string(), tags("<strong>", "</strong>"));
     rules.insert(md::EM.to_string(), tags("<em>", "</em>"));
     rules.insert(md::CODE.to_string(), tags("<code>", "</code>"));
+    rules.insert(md::SYNTAX.to_string(), tags("", ""));
     rules
 }
 

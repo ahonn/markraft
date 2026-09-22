@@ -16,6 +16,9 @@ pub(crate) trait Host {
     /// the host wired them. The `markraft_gpui::commands` take it.
     fn types(&self) -> &DocTypes;
     fn projection(&self) -> Arc<Projection>;
+    /// `slice` as the prose a register holds: the document kind's own plain-text
+    /// flavour, so Markdown's delimiter characters are not yanked as text.
+    fn plain_text(&self, slice: &Slice) -> String;
     /// See [`EditorCx::select`].
     fn select(&mut self, selection: Selection, keep_column: bool);
     /// One command's whole edit, as one transaction and one undo step.
@@ -56,6 +59,9 @@ impl Host for EditorCx<'_> {
     }
     fn projection(&self) -> Arc<Projection> {
         EditorCx::projection(self)
+    }
+    fn plain_text(&self, slice: &Slice) -> String {
+        EditorCx::plain_text(self, slice)
     }
     fn select(&mut self, selection: Selection, keep_column: bool) {
         EditorCx::select(self, selection, keep_column);

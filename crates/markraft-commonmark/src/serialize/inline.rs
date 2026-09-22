@@ -32,6 +32,35 @@ impl SerializerState<'_> {
         trailing: &mut String,
     ) {
         let mut node = parent.maybe_child(index).cloned();
+        // Pure Method-B delimiter leaves are transparent to the mark stack: their
+        // characters are the spelling of an enclosing style. Delimiters that also
+        // carry another mark (e.g. backticks inside a link label) follow the
+        // normal stack so that mark stays open around them.
+        //
+        // When a style mark is configured to write HTML tags instead of Markdown
+        // delimiters (strict CommonMark strikethrough), skip the delimiter
+        // characters — the mark rule supplies the spelling.
+        if let Some(current) = node.as_ref()
+            && crate::inline::is_syntax(self.schema(), current)
+        {
+            let write_chars = self.syntax_chars_authoritative(current);
+            if current.marks().len() == 1 {
+                let leading = std::mem::take(trailing);
+                if !leading.is_empty() {
+                    self.text(&leading, true);
+                }
+                if write_chars && let Some(text) = current.text() {
+                    self.text(text, false);
+                }
+                self.after_mark_close = false;
+                return;
+            }
+            if !write_chars {
+                // Fall through to the mark stack without emitting delimiter text:
+                // pretend this leaf is empty text carrying the same marks.
+                node = Some(current.clone().with_text(""));
+            }
+        }
         let mut marks = self.marks_of(node.as_ref(), parent, index);
         let mut leading = std::mem::take(trailing);
         if let Some(current) = node.clone()
@@ -113,6 +142,41 @@ impl SerializerState<'_> {
             (_, Some(text)) => self.text(text, true),
             (_, None) => self.render(&current, Some(parent), index),
         }
+    }
+
+    /// Whether a Method-B delimiter leaf's characters should be written, or
+    /// suppressed because a style mark on it spells itself as HTML (or another
+    /// non-delimiter form) instead.
+    fn syntax_chars_authoritative(&self, node: &Node) -> bool {
+        let Some(delim) = node.text() else {
+            return false;
+        };
+        for mark in node.marks().iter() {
+            let name = self.schema().mark_type(mark.ty).name();
+            // Only judge the mark this delimiter leaf belongs to — an outer
+            // style that uses HTML tags must not suppress an inner `*` leaf.
+            let belongs = match name {
+                crate::schema::STRONG => delim == "**",
+                crate::schema::EM => delim == "*",
+                crate::schema::STRIKETHROUGH => delim == "~~",
+                crate::schema::CODE => !delim.is_empty() && delim.chars().all(|c| c == '`'),
+                _ => continue,
+            };
+            if !belongs {
+                continue;
+            }
+            let Some(rule) = self.serializer.mark_rule(mark.ty) else {
+                continue;
+            };
+            // Emphasis/code leads match their delimiter; an HTML spelling such
+            // as `<del>` has a lead that the delimiter does not start with.
+            if let Some(lead) = rule.lead
+                && !delim.starts_with(lead)
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// Whether a link already encloses the node, so a reader reads no autolink
