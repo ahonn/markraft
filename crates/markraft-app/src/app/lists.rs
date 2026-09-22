@@ -38,6 +38,12 @@ impl Cursor {
         self.scroll.scroll_to_item(row);
     }
 
+    /// Select `row` without scrolling: the pointer is already on it, and a
+    /// list that moved under the pointer would take the row with it.
+    pub(super) fn point_at(&mut self, row: usize) {
+        self.row = row;
+    }
+
     pub(super) fn up(&mut self) {
         self.select(self.row.saturating_sub(1));
     }

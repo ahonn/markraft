@@ -97,6 +97,14 @@ pub(super) struct Conflicts {
 }
 
 impl Conflicts {
+    /// Whether a question for `id` would go up, asking nothing and changing
+    /// nothing. The poll runs twenty times a second and the note it asks about
+    /// is usually one that has been answered, so the caller checks this before
+    /// it builds the strings [`Conflicts::ask`] would need.
+    pub(super) fn would_ask(&self, id: &str) -> bool {
+        !self.on_screen && !self.asked.contains(id)
+    }
+
     /// Whether to put the question up for `id`, which from here on counts as
     /// asked. `false` when it has been asked already or another question is up.
     pub(super) fn ask(&mut self, id: &str) -> bool {

@@ -904,7 +904,7 @@ impl NotesApp {
                         .active(|s| s.bg(self.pressed_color()))
                         .on_mouse_move(cx.listener(move |this, _, _, cx| {
                             if this.format.row() != index {
-                                this.format.select(index);
+                                this.format.point_at(index);
                                 cx.notify();
                             }
                         }))

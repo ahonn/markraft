@@ -1748,7 +1748,7 @@ impl NotesApp {
 
     fn prompt_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let note = self.library.active_note();
-        if !note.conflicted {
+        if !note.conflicted || !self.conflicts.would_ask(&note.id) {
             return;
         }
         let id = note.id.clone();

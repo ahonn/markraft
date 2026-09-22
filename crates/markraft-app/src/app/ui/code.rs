@@ -142,7 +142,7 @@ impl NotesApp {
                         .active(|s| s.bg(self.pressed_color()))
                         .on_mouse_move(cx.listener(move |this, _, _, cx| {
                             if this.code_language.row() != index {
-                                this.code_language.select(index);
+                                this.code_language.point_at(index);
                                 cx.notify();
                             }
                         }))
