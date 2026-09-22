@@ -410,7 +410,15 @@ impl NotesApp {
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.intent(Intent::ToggleCount, window, cx)
                         }))
-                        .child(count),
+                        .child(count)
+                        .with_spring(
+                            "word-count-enter",
+                            SpringAnimation::new(super::FORMAT_SPRING)
+                                .to(true)
+                                .from(false)
+                                .playback(playback(reduce_motion)),
+                            |s, phase| s.opacity(phase.interpolate_clamped(0., 1.)),
+                        ),
                 )
             })
             .child(
@@ -528,7 +536,18 @@ impl NotesApp {
                                 Some(doc::Block::Bullet | doc::Block::Ordered | doc::Block::Task)
                             )),
                             cx,
-                        )),
+                        ))
+                        .with_spring(
+                            "format-toolbar-enter",
+                            SpringAnimation::new(super::FORMAT_SPRING)
+                                .to(true)
+                                .from(false)
+                                .playback(playback(reduce_motion)),
+                            |s, phase| {
+                                s.opacity(phase.interpolate_clamped(0., 1.))
+                                    .mt(phase.interpolate_clamped(px(4.), px(0.)))
+                            },
+                        ),
                 )
             })
     }

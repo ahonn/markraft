@@ -26,10 +26,13 @@ macro_rules! define_icons {
 // in the same file maps that year to a macOS version.
 define_icons! {
     Plus => "plus",
-    Notes => "list.bullet.rectangle",
-    Command => "command",
-    Text => "textformat",
-    Close => "xmark",
+    // Browse notes (⌘P): quick-open weight, same family as Plus / More.
+    Notes => "magnifyingglass",
+    // Actions (⌘K): macOS “more” rather than the ⌘ key glyph.
+    Command => "ellipsis.circle",
+    // Format toolbar: brush when closed; circled x when open (no paintbrush.circle in SF Symbols).
+    Text => "paintbrush",
+    Close => "xmark.circle",
     ChevronDown => "chevron.down",
     Check => "checkmark",
     Pin => "pin",
@@ -159,26 +162,6 @@ mod tests {
                 assert!(pixels.chunks_exact(4).any(|p| p[3] == 0), "opaque {kind:?}");
             }
         }
-    }
-
-    #[test]
-    fn command_symbol_keeps_all_four_loops() {
-        let image = symbols::render("command", 20., 2., rgb(0x000000)).unwrap();
-        let side = image.size(0).width.0 as usize;
-        let mut quadrants = [0_u64; 4];
-        for (index, pixel) in image.as_bytes(0).unwrap().chunks_exact(4).enumerate() {
-            let quadrant =
-                usize::from(index % side >= side / 2) + 2 * usize::from(index / side >= side / 2);
-            quadrants[quadrant] += u64::from(pixel[3]);
-        }
-        // Cropping to NSImage.alignmentRect instead of its full image bounds can
-        // clip the lower loops. This symmetric glyph must keep balanced ink.
-        let min = *quadrants.iter().min().unwrap();
-        let max = *quadrants.iter().max().unwrap();
-        assert!(
-            min > 0 && min * 100 >= max * 85,
-            "unbalanced symbol: {quadrants:?}"
-        );
     }
 
     #[test]

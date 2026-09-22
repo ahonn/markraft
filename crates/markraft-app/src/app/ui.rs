@@ -155,6 +155,9 @@ fn is_switch(id: &str) -> bool {
 /// Critically damped, settling in about 150 ms: the switch knob eases into its new
 /// end and reverses from wherever it is when the row is flipped back.
 const SWITCH_SPRING: SpringConfig = SpringConfig::new(3700., 121.7, 1.);
+/// Soft fade for the format toolbar and its toggle glyphs — a touch slower than the
+/// title chrome, still under a beat.
+const FORMAT_SPRING: SpringConfig = SpringConfig::new(800., 55., 1.);
 const ACTION_ROW_HEIGHT: Pixels = px(36.);
 
 /// A stored timestamp read on this Mac's clock. Notes carry UTC; a date label has to be
@@ -657,6 +660,49 @@ impl NotesApp {
         } else {
             16.
         };
+        let ink = self.chrome_icon_color();
+        let glyph = if matches!(intent, Intent::ToggleFormatToolbar) {
+            let shown = self.toolbar.shown();
+            let reduce_motion = cx.reduce_motion();
+            div()
+                .relative()
+                .size(px(icon_size))
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .with_spring(
+                            "format-toggle-brush",
+                            SpringAnimation::new(FORMAT_SPRING)
+                                .to(!shown)
+                                .playback(playback(reduce_motion)),
+                            |s, phase| s.opacity(phase.interpolate_clamped(0., 1.)),
+                        )
+                        .child(sized_icon(Icon::Text, ink, icon_size)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .with_spring(
+                            "format-toggle-close",
+                            SpringAnimation::new(FORMAT_SPRING)
+                                .to(shown)
+                                .playback(playback(reduce_motion)),
+                            |s, phase| s.opacity(phase.interpolate_clamped(0., 1.)),
+                        )
+                        .child(sized_icon(Icon::Close, ink, icon_size)),
+                )
+                .into_any_element()
+        } else {
+            sized_icon(kind, ink, icon_size).into_any_element()
+        };
         // Whatever this button opens sits directly under it, so a tooltip describing
         // the button is both noise and drawn over the thing the user just asked for.
         // Dropping it also keeps the label honest: a pointer that has not moved keeps
@@ -694,7 +740,7 @@ impl NotesApp {
                     cx.stop_propagation();
                     this.intent(intent.clone(), window, cx);
                 }))
-                .child(sized_icon(kind, self.chrome_icon_color(), icon_size)),
+                .child(glyph),
         )
     }
     /// Toolbar icons recede while another application is active.
@@ -2144,15 +2190,14 @@ impl Render for NotesApp {
                 });
             });
         }
-        // The title bar names the file, extension included, as a macOS document window
-        // does: it is what a click on it renames and what a `[[link]]` has to spell, and
-        // the first line is already on the page below. A note with no file yet is named
-        // by that first line instead, since that is what its file will be called.
+        // The title bar shows the file stem; the rename pill adds the extension beside
+        // the field. A note with no file yet is named by its first line instead, since
+        // that is what its file will be called.
         let note = self.library.active_note();
         let title = note
             .path
             .as_ref()
-            .and_then(|path| path.file_name())
+            .and_then(|path| path.file_stem())
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| note.title());
         // With no folder open there is no note to name, and a stray "Untitled"
