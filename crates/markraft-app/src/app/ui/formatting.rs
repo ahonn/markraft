@@ -179,12 +179,6 @@ impl NotesApp {
                     Intent::Mark(doc::Inline::Strikethrough),
                     doc::Inline::Strikethrough.is_active(&marks),
                 ),
-                (
-                    "Underline",
-                    "⌘U",
-                    Intent::Mark(doc::Inline::Underline),
-                    doc::Inline::Underline.is_active(&marks),
-                ),
             ],
             Some(FormatMenu::List) => vec![
                 (
@@ -480,7 +474,6 @@ impl NotesApp {
                                         doc::Inline::Bold,
                                         doc::Inline::Italic,
                                         doc::Inline::Strikethrough,
-                                        doc::Inline::Underline,
                                     ]
                                     .iter()
                                     .any(|inline| inline.is_active(&marks)),

@@ -23,30 +23,29 @@
 //! | rank | mark | written as |
 //! |-----:|------|------------|
 //! | 10 | [`LINK`] | `[…](href "title")` — outermost, so a link wraps its styling |
-//! | 20 | [`UNDERLINE`] | `<u>…</u>` — no CommonMark syntax exists |
-//! | 30 | [`STRIKETHROUGH`] | `~~…~~` or `<del>…</del>` |
-//! | 40 | [`STRONG`] | `**…**` or `<strong>…</strong>` |
-//! | 50 | [`EM`] | `*…*` or `<em>…</em>` |
+//! | 20 | [`UNDERLINE`] | plain text on Markdown write — no CommonMark spelling exists |
+//! | 30 | [`STRIKETHROUGH`] | `~~…~~` |
+//! | 40 | [`STRONG`] | `**…**` |
+//! | 50 | [`EM`] | `*…*` |
 //! | 60 | [`CODE`] | `` `…` `` — innermost, because its content is literal |
 //!
-//! Simultaneous strong/em openings use a tag where adjacent delimiters would
-//! reverse their nesting. The tag-only underline sits outside delimiter runs.
-//! A nested inline span preserves the source order independently of ranks.
+//! Underline is kept in the tree for HTML paste, but Markdown write strips it.
+//! Emphasis always uses Markdown delimiters, never HTML tags. A nested inline
+//! span preserves the source order independently of ranks.
 //!
 //! [`CODE`] excludes nothing but itself. A code span's *content* is literal —
 //! no emphasis is read inside the backticks — but the span as a whole carries
 //! whatever marks surround it: `` *`code`* `` is `<em><code>code</code></em>`,
 //! and `` [`code`](href) `` is a link around a code span. The serialiser writes
-//! the outer delimiters around the backticks, falling back to `<em>`/`<strong>`
-//! tags where a delimiter run could not flank there.
+//! the outer delimiters around the backticks.
 //!
 //! # Why `block+` for list items but `paragraph block*` for task items
 //!
 //! CommonMark lets a list item start with any block — `- > quote` and
 //! `- - nested` are both normal — so [`LIST_ITEM`] takes `block+` rather than
 //! `paragraph block*`. The stricter rule would force the importer to invent a
-//! leading empty paragraph for those items, which then serialises as a `<br>`
-//! line and changes what the document renders as.
+//! leading empty paragraph for those items, which would then be an empty
+//! paragraph with no CommonMark spelling.
 //!
 //! A [`TASK_ITEM`] is the exception, because GFM puts its check box *inside*
 //! the item's first paragraph: an item whose first block is a nested list has
@@ -78,7 +77,9 @@ use markraft_core::{
 /// The top node type: `block+`.
 pub const DOC: &str = "doc";
 /// A paragraph: `inline*`. A paragraph with no content is an *empty
-/// paragraph*, which the codec writes as a line holding only `<br>`.
+/// paragraph*. CommonMark has no spelling for those; they write as blank
+/// separators (and may collapse on re-read). A lone `<br>` HTML block still
+/// imports as an empty paragraph for older files.
 pub const PARAGRAPH: &str = "paragraph";
 /// An ATX or setext heading: `inline*`, attribute `level` (`Int`, 1..=6,
 /// default 1). Always written back as ATX.
@@ -201,7 +202,8 @@ pub const STRONG: &str = "strong";
 pub const EM: &str = "em";
 /// GFM strikethrough.
 pub const STRIKETHROUGH: &str = "strikethrough";
-/// Underline, written as `<u>…</u>`; CommonMark has no syntax for it.
+/// Underline. CommonMark has no syntax for it: HTML paste may create the mark,
+/// but Markdown write drops the tags so `.md` files stay portable.
 pub const UNDERLINE: &str = "underline";
 /// A code span.
 pub const CODE: &str = "code";

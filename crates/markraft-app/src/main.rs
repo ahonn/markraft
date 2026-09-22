@@ -102,12 +102,8 @@ fn main() {
         }
     }
     let home = env::var_os("HOME").map(PathBuf::from);
-    let directory = resolve_notes_folder(
-        directory,
-        settings.notes_folder.clone(),
-        home.as_deref(),
-    )
-    .unwrap_or_else(|error| fail(&error));
+    let directory = resolve_notes_folder(directory, settings.notes_folder.clone(), home.as_deref())
+        .unwrap_or_else(|error| fail(&error));
     let (store, library, error) = match Store::open(directory.clone(), settings_path.clone()) {
         Ok((mut store, library)) => {
             if let Some(notice) = settings.recovery_notice() {

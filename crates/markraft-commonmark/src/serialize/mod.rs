@@ -578,9 +578,9 @@ impl<'a> SerializerState<'a> {
             .as_ref()
             .is_some_and(|c| c.type_id() == node.type_id())
         {
-            // Two lists of the same type in a row: a blank line alone would not
-            // keep a reader from joining them, so the rule that picked this
-            // list's marker has to differ. See `distinct_marker` in the preset.
+            // Two lists of the same type in a row: CommonMark joins them even
+            // across blank lines when the markers match. Extra blanks here are
+            // only cosmetic; portable Markdown cannot keep them apart.
             self.flush_close(3);
         } else {
             // Separate the list from whatever came before it while the *outer*
@@ -594,6 +594,8 @@ impl<'a> SerializerState<'a> {
                 self.flush_close(1);
             }
             let marker = first_delim(index);
+            // `delim` is the shared content column. Task check boxes append to
+            // `marker` only — they are first-paragraph content in CommonMark.
             self.wrap_block(delim, Some(&marker), node, |state| {
                 state.render(child, Some(node), index)
             });

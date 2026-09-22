@@ -180,10 +180,11 @@ mod tests {
         assert_eq!(slice.open_end(), 1);
         assert_eq!(slice.content().child_count(), 2);
         assert_eq!(codecs.to_markup(&slice).as_deref(), Some("one\n\ntwo"));
-        // A blank line is an empty paragraph, which the codec writes as `<br>`.
+        // Blank lines in plain text become empty paragraphs; CommonMark has no
+        // spelling for those, so they collapse back to a single separator.
         assert_eq!(
             codecs.to_markup(&codecs.from_text("one\n\ntwo")).as_deref(),
-            Some("one\n\n<br>\n\ntwo")
+            Some("one\n\ntwo")
         );
     }
 

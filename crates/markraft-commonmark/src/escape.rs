@@ -363,30 +363,3 @@ pub fn code_span_delimiters(text: &str) -> (String, String) {
     }
 }
 
-/// Whether a run of `delimiter` wrapped around text whose first character is
-/// `first` and last is `last` would both open and close emphasis where it sits.
-///
-/// CommonMark only lets a run open when a word follows it, or the punctuation
-/// that follows is matched by whitespace or punctuation before it, and mirrors
-/// that for closing. A run that touches another delimiter run merges with it,
-/// so neither may be read as emphasis. A mark this rule turns down is written
-/// as an HTML tag instead.
-pub fn flanks(
-    first: Option<char>,
-    last: Option<char>,
-    before: Option<char>,
-    after: Option<char>,
-    delimiter: char,
-) -> bool {
-    let opens = first.is_some_and(|c| !c.is_whitespace() && (!punctuation(c) || boundary(before)));
-    let closes = last.is_some_and(|c| !c.is_whitespace() && (!punctuation(c) || boundary(after)));
-    opens && closes && before != Some(delimiter)
-}
-
-fn punctuation(c: char) -> bool {
-    c.is_ascii_punctuation() || c.is_punctuation() || c.is_symbol()
-}
-
-fn boundary(edge: Option<char>) -> bool {
-    edge.is_none_or(|c| (c.is_whitespace() || punctuation(c)) && !matches!(c, '*' | '_' | '~'))
-}

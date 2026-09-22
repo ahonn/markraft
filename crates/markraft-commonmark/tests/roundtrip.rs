@@ -12,6 +12,7 @@
 //!   them, and a loose list with nowhere to put a blank line — one item holding
 //!   one block always reads back tight;
 //! * two lists of the same kind side by side, which a reader joins;
+//! * underline, which has no CommonMark spelling;
 //! * a fence character run inside a code block, which forces the fence to grow;
 //! * a line ending inside a code span, which CommonMark turns into a space;
 //! * a hard break inside a table cell, which a row of one source line cannot
@@ -123,6 +124,8 @@ const ALIGNMENTS: &[&str] = &["none", "left", "center", "right"];
 struct Gen<'a> {
     schema: &'a Schema,
     rng: Rng,
+    /// Markdown has no underline spelling; HTML clipboard round-trips keep it.
+    allow_underline: bool,
 }
 
 impl Gen<'_> {
@@ -137,9 +140,33 @@ impl Gen<'_> {
             let title = if self.rng.one_in(3) { "a title" } else { "" };
             picked.push(self.mark(md::LINK, attrs! {"href" => href, "title" => title}));
         }
-        for name in [md::UNDERLINE, md::STRIKETHROUGH, md::STRONG, md::EM] {
+        let style: &[&str] = if self.allow_underline {
+            &[md::UNDERLINE, md::STRIKETHROUGH, md::STRONG, md::EM]
+        } else {
+            // Strong+em together writes `***…***`, which CommonMark re-reads with
+            // a nesting order that becomes an `inline_span` — not a flat mark set.
+            // Portable Markdown keeps them separate so the tree round-trips.
+            &[md::STRIKETHROUGH, md::STRONG, md::EM]
+        };
+        for name in style {
             if self.rng.one_in(4) {
                 picked.push(self.mark(name, Attrs::empty()));
+            }
+        }
+        if !self.allow_underline {
+            let has_strong = picked.iter().any(|m| {
+                self.schema.mark_type(m.ty).name() == md::STRONG
+            });
+            let has_em = picked.iter().any(|m| {
+                self.schema.mark_type(m.ty).name() == md::EM
+            });
+            if has_strong && has_em {
+                let drop = if self.rng.one_in(2) {
+                    md::STRONG
+                } else {
+                    md::EM
+                };
+                picked.retain(|m| self.schema.mark_type(m.ty).name() != drop);
             }
         }
         if self.rng.one_in(5) {
@@ -481,6 +508,7 @@ fn random_documents_survive_a_round_trip() {
         let mut generator = Gen {
             schema: &codec.schema,
             rng: Rng::new(seed),
+            allow_underline: false,
         };
         let blocks = generator.blocks(2, false, 1, 4);
         let doc = codec.schema.doc(blocks).expect("a document");
@@ -550,6 +578,7 @@ fn random_documents_survive_an_html_round_trip() {
         let mut generator = Gen {
             schema: &codec.schema,
             rng: Rng::new(seed),
+            allow_underline: true,
         };
         let blocks = generator.blocks(2, false, 1, 4);
         let doc = codec.schema.doc(blocks).expect("a document");

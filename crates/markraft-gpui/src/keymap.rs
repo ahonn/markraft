@@ -651,11 +651,12 @@ mod tests {
         let split = after(&state, &enter(&types_of(&state))).expect("the split applies");
         assert_eq!(split, "- one\n- ");
         // Enter again, in the now empty item, leaves the list: the empty block
-        // becomes a paragraph, which the codec writes as a `<br>` line.
+        // becomes a paragraph. CommonMark has no empty-paragraph spelling, so
+        // the file just ends after the list's blank separator.
         let state = state_of("- one\n-\n");
         let state = at(&state, projection_of(&state).lines()[1].to);
         let lifted = after(&state, &enter(&types_of(&state))).expect("the lift applies");
-        assert_eq!(lifted, "- one\n\n<br>");
+        assert_eq!(lifted, "- one");
     }
 
     #[test]
@@ -870,13 +871,13 @@ mod tests {
             Some("- [x] text")
         );
         // Outside a task item the same key leaves a code block: a new, empty
-        // block after it, which the codec writes as a `<br>` line.
+        // block after it. Empty paragraphs have no Markdown spelling.
         let state = state_of("```\ncode\n```");
         let end = projection_of(&state).lines()[0].to;
         let state = at(&state, end);
         assert_eq!(
             after(&state, &toggle_task(&types_of(&state))).as_deref(),
-            Some("```\ncode\n```\n\n<br>")
+            Some("```\ncode\n```")
         );
     }
 

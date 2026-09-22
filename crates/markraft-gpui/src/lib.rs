@@ -89,7 +89,6 @@ actions!(
         Italic,
         Code,
         Strikethrough,
-        Underline,
         Paragraph,
         Heading,
         Heading2,
@@ -167,7 +166,7 @@ pub fn bind_keys(cx: &mut App) {
         "tab" => Indent, "shift-tab" => Outdent,
         "cmd-z" => Undo, "cmd-shift-z" => Redo, "cmd-b" => Bold,
         "cmd-i" => Italic, "cmd-e" => Code,
-        "cmd-shift-s" => Strikethrough, "cmd-u" => Underline, "cmd-alt-0" => Paragraph,
+        "cmd-shift-s" => Strikethrough, "cmd-alt-0" => Paragraph,
         "cmd-alt-1" => Heading, "cmd-alt-2" => Heading2,
         "cmd-alt-3" => Heading3, "cmd-alt-4" => Heading4,
         "cmd-alt-5" => Heading5, "cmd-alt-6" => Heading6,
@@ -1749,7 +1748,6 @@ impl EditorView {
         rich!(Strikethrough, |types: &DocTypes| keymap::mark(
             types.strikethrough
         ));
-        rich!(Underline, |types: &DocTypes| keymap::mark(types.underline));
         rich!(Paragraph, |types: &DocTypes| block(
             types,
             types.paragraph,

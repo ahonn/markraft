@@ -322,6 +322,8 @@ pub enum Inline {
     Italic,
     Code,
     Strikethrough,
+    /// Present when HTML paste carries underline; Markdown write drops it.
+    #[allow(dead_code)]
     Underline,
 }
 

@@ -104,19 +104,21 @@ fn the_spec_can_be_extended_before_it_is_compiled() {
 // -- empty paragraphs -----------------------------------------------------
 
 #[test]
-fn an_empty_paragraph_is_a_line_holding_only_a_break_tag() {
-    assert_eq!(round("a\n\n<br>\n\nb"), "a\n\n<br>\n\nb");
+fn a_break_tag_line_still_reads_as_an_empty_paragraph() {
+    // Older Markraft files spelled empty paragraphs as a lone `<br>` HTML block.
+    // Keep reading that, but write CommonMark blank separators instead.
     assert_eq!(
         shape("a\n\n<br>\n\nb"),
         r#"doc(paragraph("a"), paragraph(), paragraph("b"))"#
     );
-    // Either spelling of the tag imports.
+    assert_eq!(round("a\n\n<br>\n\nb"), "a\n\nb");
     for tag in ["<br>", "<br/>", "<br />"] {
         assert_eq!(
             shape(&format!("a\n\n{tag}\n\nb")),
             r#"doc(paragraph("a"), paragraph(), paragraph("b"))"#,
             "{tag}"
         );
+        assert_eq!(round(&format!("a\n\n{tag}\n\nb")), "a\n\nb", "{tag}");
     }
 }
 
@@ -260,9 +262,11 @@ fn a_cell_holds_the_marks_links_and_images_a_paragraph_holds() {
             r#"table_row(table_cell("u"{underline}))))"#
         )
     );
-    let codec = Codec::new();
-    assert!(judge(&codec, source).is_ok());
-    assert_eq!(round(source), round(&round(source)));
+    // Underline drops on write; the rest settles.
+    let once = round(source);
+    assert!(!once.contains("<u>"), "{once}");
+    assert!(once.contains("| u"), "{once}");
+    assert_eq!(once, round(&once));
 }
 
 #[test]
@@ -544,12 +548,13 @@ fn an_empty_link_keeps_its_semantic_container() {
 // -- marks ----------------------------------------------------------------
 
 #[test]
-fn underline_uses_the_tag_convention_in_both_directions() {
-    assert_eq!(round("<u>**kept**</u>"), "<u>**kept**</u>");
+fn underline_reads_from_html_but_writes_plain() {
+    // Kept on read for HTML paste / older files; no portable Markdown spelling.
     assert_eq!(shape("<u>x</u>"), r#"doc(paragraph("x"{underline}))"#);
+    assert_eq!(round("<u>**kept**</u>"), "**kept**");
     assert_eq!(
         round("~~gone~~ and <u>**kept**</u>"),
-        "~~gone~~ and <u>**kept**</u>"
+        "~~gone~~ and **kept**"
     );
 }
 
@@ -802,24 +807,20 @@ fn a_code_span_carries_the_marks_around_it() {
     assert_eq!(shape("**`x`**"), r#"doc(paragraph("x"{strong,code}))"#);
     assert_eq!(shape("*`x`*"), r#"doc(paragraph("x"{em,code}))"#);
     assert_eq!(shape("[`x`](/u)"), r#"doc(paragraph("x"{link,code}))"#);
-    for source in ["**`x`**", "*`x`*", "[`x`](/u)", "<u>~~`x`~~</u>"] {
+    for source in ["**`x`**", "*`x`*", "[`x`](/u)"] {
         assert_eq!(round(source), source, "{source:?}");
     }
+    // Underline has no Markdown spelling — tags drop on write.
+    assert_eq!(round("<u>~~`x`~~</u>"), "~~`x`~~");
 }
 
-/// Every combination of the marks that can surround a code span, next to plain
-/// text on both sides so the delimiters have to decide whether they can flank.
+/// Combinations that CommonMark can flank around a code span round-trip;
+/// others write delimiters without an HTML fallback and may lose marks.
 #[test]
-fn every_mark_combination_round_trips_on_a_code_span() {
+fn mark_combinations_on_a_code_span_prefer_delimiters() {
     let codec = Codec::new();
     let schema = &codec.schema;
-    let outer = [
-        md::LINK,
-        md::UNDERLINE,
-        md::STRIKETHROUGH,
-        md::STRONG,
-        md::EM,
-    ];
+    let outer = [md::LINK, md::STRIKETHROUGH, md::STRONG, md::EM];
     for bits in 0..(1u32 << outer.len()) {
         let mut marks = vec![schema.mark(md::CODE, Attrs::empty()).expect("code")];
         for (index, name) in outer.iter().enumerate() {
@@ -839,7 +840,7 @@ fn every_mark_combination_round_trips_on_a_code_span() {
             bits.count_ones() as usize + 1,
             "a mark was dropped"
         );
-        for (before, after) in [("a", "b"), ("a ", " b"), ("", ""), ("!", "!")] {
+        for (before, after) in [("a", "b"), ("a ", " b"), ("", "")] {
             let mut content = Vec::new();
             if !before.is_empty() {
                 content.push(schema.text(before));
@@ -852,18 +853,18 @@ fn every_mark_combination_round_trips_on_a_code_span() {
                 .doc([schema.node(md::PARAGRAPH, content).expect("a paragraph")])
                 .expect("a document");
             let written = codec.write(&doc);
-            assert_eq!(
-                codec.parse(&written),
-                doc,
-                "{bits:05b} between {before:?} and {after:?} wrote {written:?}"
+            assert!(
+                !written.contains('<'),
+                "{bits:04b} between {before:?} and {after:?} used HTML: {written:?}"
             );
         }
     }
 }
 
 #[test]
-fn a_mark_whose_delimiter_cannot_flank_is_written_as_a_tag() {
-    // A run that would sit next to punctuation cannot open or close emphasis.
+fn a_mark_whose_delimiter_cannot_flank_is_still_written_as_delimiters() {
+    // Portable Markdown has no HTML fallback. `a*!*` will not re-read as
+    // emphasis — that loss is preferred over `<em>` tags other editors keep.
     let codec = Codec::new();
     let schema = &codec.schema;
     let em = schema.mark(md::EM, Attrs::empty()).expect("em");
@@ -878,10 +879,7 @@ fn a_mark_whose_delimiter_cannot_flank_is_written_as_a_tag() {
             )
             .expect("a paragraph")])
         .expect("a document");
-    // `a*!*` would not be emphasis: the run touches a word on one side and
-    // punctuation on the other.
-    assert_eq!(codec.write(&doc), "a<em>!</em>");
-    assert_eq!(codec.parse(&codec.write(&doc)), doc);
+    assert_eq!(codec.write(&doc), "a*!*");
 }
 
 // -- lists ----------------------------------------------------------------
@@ -937,8 +935,7 @@ fn ordered_lists_keep_their_start_and_delimiter_and_line_up() {
         shape("3) a"),
         r#"doc(ordered_list[delimiter=Str(")"),start=Int(3),tight=Bool(true)](list_item(paragraph("a"))))"#
     );
-    // Wider ordinals pad on the right, so every item's content starts in the
-    // same column and no marker begins with a space.
+    // Wider ordinals pad on the right so nested blocks share one content column.
     assert_eq!(round("9. a\n10. b"), "9.  a\n10. b");
     assert_eq!(round("- x\n- y"), "- x\n- y");
     assert_eq!(round("* x"), "* x");
@@ -946,7 +943,8 @@ fn ordered_lists_keep_their_start_and_delimiter_and_line_up() {
 }
 
 #[test]
-fn two_lists_of_the_same_kind_are_kept_apart_by_their_markers() {
+fn two_lists_of_the_same_kind_merge_when_markers_match() {
+    // CommonMark has no portable way to keep two adjacent `-` lists apart.
     let codec = Codec::new();
     let schema = &codec.schema;
     let list = |bullet: &str| {
@@ -968,11 +966,11 @@ fn two_lists_of_the_same_kind_are_kept_apart_by_their_markers() {
     };
     let doc = schema.doc([list("-"), list("-")]).expect("a document");
     let written = codec.write(&doc);
-    assert_eq!(written, "- x\n\n\n* x");
-    // Two lists, not one: the second took a different bullet.
+    assert_eq!(written, "- x\n\n\n- x");
+    // Extra blank lines make the merged list loose.
     assert_eq!(
         codec.describe(&codec.parse(&written)),
-        r#"doc(bullet_list[bullet_char=Str("-"),tight=Bool(true)](list_item(paragraph("x"))), bullet_list[bullet_char=Str("*"),tight=Bool(true)](list_item(paragraph("x"))))"#
+        r#"doc(bullet_list[bullet_char=Str("-"),tight=Bool(false)](list_item(paragraph("x")), list_item(paragraph("x"))))"#
     );
 }
 
@@ -1200,7 +1198,7 @@ fn punctuation_after_a_bare_url_stays_outside_the_link() {
 fn a_url_under_another_mark_is_not_a_link_of_its_own() {
     // Emphasis around a link nests the other way round from the mark ranks, so
     // it keeps a container of its own; the URL inside it is still written bare.
-    assert_eq!(round("*https://a.example*"), "<em>https://a.example</em>");
+    assert_eq!(round("*https://a.example*"), "*https://a.example*");
     assert_eq!(
         shape("*https://a.example*"),
         r#"doc(paragraph(inline_span{em}("https://a.example"{link})))"#

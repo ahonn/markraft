@@ -13,7 +13,10 @@
 //!   line of text they are that line's setext underline, and after a `-` marker
 //!   `- ---` is a run of four dashes and so a thematic break in its own right.
 //!   `***` is used in both of those places.
-//! * An empty paragraph is a line holding only `<br>`.
+//! * An empty paragraph has no CommonMark spelling: consecutive blanks are only
+//!   separators, so empty paragraphs write as nothing (like Obsidian / Typora)
+//!   and may collapse on the next read. A lone `<br>` HTML block still *reads*
+//!   as an empty paragraph so older Markraft files open cleanly.
 //! * A link whose text is its own URL is the bare URL — what an author typed
 //!   and what GFM's autolink extension reads back — rather than `[url](url)`
 //!   or `<url>`, wherever a reader would still give that link back. Where it
@@ -21,8 +24,10 @@
 //!   dialect that has no autolink extension at all.
 //! * A code block is always fenced, with a fence longer than any run of the
 //!   fence character inside it.
-//! * Two lists of the same type in a row would be read as one list, so the
-//!   second one takes a different bullet character or ordered delimiter.
+//! * Emphasis, strong and strikethrough always use Markdown delimiters
+//!   (`*` / `**` / `~~`), never HTML tags — even when flanking fails and the
+//!   mark will not survive a re-read. Underline has no CommonMark spelling and
+//!   writes as plain text.
 //! * A table is a pipe table whose columns are padded to a uniform display
 //!   width, so the source lines up in a fixed-width editor. Re-padding on the
 //!   way out is a cosmetic change, which is all this codec promises about
@@ -33,8 +38,7 @@ use std::sync::Arc;
 use markraft_core::{Mark, Node, Schema};
 
 use crate::escape::{
-    code_span_delimiters, escape_label, escape_pipes, escape_text, flanks, link_destination,
-    link_title,
+    code_span_delimiters, escape_label, escape_pipes, escape_text, link_destination, link_title,
 };
 use crate::schema as md;
 use crate::serialize::{
@@ -85,20 +89,12 @@ pub fn commonmark_node_rules() -> NodeRules {
     );
     rules.insert(
         md::PARAGRAPH.to_string(),
-        rule(|state, node, parent, _| {
-            if node.content_size() == 0 {
-                // An empty paragraph has no CommonMark spelling; a `<br>` on a
-                // line of its own is an HTML block that every renderer shows as
-                // a blank line, and this codec reads back as an empty paragraph.
-                //
-                // Unless it is all its parent holds: then it *is* the empty
-                // container — an empty list item, an empty quote, an empty
-                // document — which CommonMark writes as nothing at all, and
-                // which the importer fills back in.
-                if parent.is_none_or(|parent| parent.child_count() > 1) {
-                    state.write("<br>");
-                }
-            } else {
+        rule(|state, node, _, _| {
+            // Empty paragraphs have no CommonMark spelling. Writing a `<br>` HTML
+            // block would be a Markraft-only encoding; leave them blank like
+            // Obsidian and Typora. A sole empty container (empty list item, empty
+            // quote, empty document) already writes as nothing via close_block.
+            if node.content_size() > 0 {
                 state.render_inline(node);
             }
             state.close_block(node);
@@ -189,9 +185,9 @@ pub fn commonmark_node_rules() -> NodeRules {
     rules.insert(
         md::INLINE_SPAN.to_string(),
         rule(|state, node, _, _| {
-            // HTML tags cannot merge into the neighbouring Markdown delimiter run.
-            // Links retain Markdown spelling so an empty label remains a link node.
-            let rules = crate::html::commonmark_html_mark_rules();
+            // Nested / empty mark structures use a container. Write portable
+            // Markdown delimiters (never HTML tags) so other editors can read
+            // the file. Underline has no spelling and is skipped.
             let mut closing = Vec::new();
             for mark in node.marks().iter() {
                 let name = state.schema().mark_type(mark.ty).name();
@@ -205,13 +201,23 @@ pub fn commonmark_node_rules() -> NodeRules {
                             link_title(value("title"))
                         ),
                     )
-                } else if let Some(rule) = rules.get(name) {
-                    rule(mark)
+                } else if name == md::STRONG {
+                    ("**".to_string(), "**".to_string())
+                } else if name == md::EM {
+                    ("*".to_string(), "*".to_string())
+                } else if name == md::STRIKETHROUGH {
+                    ("~~".to_string(), "~~".to_string())
+                } else if name == md::CODE {
+                    let (open, close) = code_span_delimiters("");
+                    (open, close)
                 } else {
+                    // Underline and unknown marks — no portable spelling.
                     continue;
                 };
-                state.text(&open, false);
-                closing.push(close);
+                if !open.is_empty() {
+                    state.text(&open, false);
+                    closing.push(close);
+                }
             }
             state.render_inline(node);
             for close in closing.iter().rev() {
@@ -458,27 +464,9 @@ fn hard_break(state: &mut SerializerState<'_>, node: &Node, parent: Option<&Node
     state.text("\\\n", false);
 }
 
-/// The marker character a list uses, changed when the list before it used the
-/// same one and a reader would join the two.
-fn distinct_marker(
-    state: &SerializerState<'_>,
-    node: &Node,
-    attr: &str,
-    default: &str,
-    choices: &[&str],
-) -> String {
-    let current = attr_str(node, attr, default).to_string();
-    let joined = state.closed().is_some_and(|previous| {
-        previous.type_id() == node.type_id() && attr_str(previous, attr, default) == current
-    });
-    if !joined {
-        return current;
-    }
-    choices
-        .iter()
-        .find(|choice| **choice != current)
-        .unwrap_or(&default)
-        .to_string()
+/// The marker character a list uses, taken from its attributes.
+fn list_marker_char(node: &Node, attr: &str, default: &str) -> String {
+    attr_str(node, attr, default).to_string()
 }
 
 /// A list item's marker, with the check box of a task item after it. The box is
@@ -500,7 +488,7 @@ fn item_marker(node: &Node, index: usize, marker: &str) -> String {
 }
 
 fn bullet_list(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: usize) {
-    let bullet = distinct_marker(state, node, "bullet_char", "-", &["-", "*", "+"]);
+    let bullet = list_marker_char(node, "bullet_char", "-");
     let marker = format!("{bullet} ");
     let delim = " ".repeat(marker.chars().count());
     let tight = tight_attr(node) && writable_tight(state, node);
@@ -511,16 +499,16 @@ fn bullet_list(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _
 
 fn ordered_list(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: usize) {
     let start = attr_int(node, "start", 1).max(0);
-    let delimiter = distinct_marker(state, node, "delimiter", ".", &[".", ")"]);
+    let delimiter = list_marker_char(node, "delimiter", ".");
+    // Pad ordinals so every item shares one content column. Without that, a
+    // list that crosses a digit boundary (`9.` → `10.`) under-indents later
+    // items' nested blocks and CommonMark reads them as outside the list.
     let last = start + node.child_count().max(1) as i64 - 1;
     let width = last.to_string().len();
-    let delim = " ".repeat(width + 2);
+    let delim = " ".repeat(width + delimiter.chars().count() + 1);
     let tight = tight_attr(node) && writable_tight(state, node);
     state.render_list(node, &delim, tight, &|index| {
         let ordinal = (start + index as i64).to_string();
-        // Pad on the right, never on the left: a marker that begins with a
-        // space would push the enclosing item's content column along with it,
-        // and the lines below would no longer line up with this list.
         let marker = format!(
             "{ordinal}{delimiter}{}",
             " ".repeat(1 + width.saturating_sub(ordinal.len()))
@@ -620,16 +608,12 @@ fn escape_trailing_hashes(state: &mut SerializerState<'_>) {
 pub fn commonmark_mark_rules() -> MarkRules {
     let mut rules = MarkRules::new();
     rules.insert(md::LINK.to_string(), autolink_link_rule());
-    rules.insert(md::STRONG.to_string(), emphasis_rule("**", '*', "strong"));
-    rules.insert(md::EM.to_string(), emphasis_rule("*", '*', "em"));
-    rules.insert(
-        md::STRIKETHROUGH.to_string(),
-        emphasis_rule("~~", '~', "del"),
-    );
-    let mut underline = MarkRule::fixed("<u>", "</u>");
-    underline.lead = Some('<');
-    underline.trail = Some('>');
-    rules.insert(md::UNDERLINE.to_string(), underline);
+    rules.insert(md::STRONG.to_string(), emphasis_rule("**", '*'));
+    rules.insert(md::EM.to_string(), emphasis_rule("*", '*'));
+    rules.insert(md::STRIKETHROUGH.to_string(), emphasis_rule("~~", '~'));
+    // No CommonMark/Obsidian spelling exists. Keep the mark in the tree for HTML
+    // paste, but write plain text so `.md` files stay portable.
+    rules.insert(md::UNDERLINE.to_string(), MarkRule::fixed("", ""));
     rules.insert(md::CODE.to_string(), code_rule());
     rules
 }
@@ -782,142 +766,18 @@ fn code_rule() -> MarkRule {
     }
 }
 
-/// A mark written as a delimiter run where the run can flank, and as an HTML
-/// tag where CommonMark would refuse to read the run as emphasis.
-fn emphasis_rule(run: &'static str, delimiter: char, tag: &'static str) -> MarkRule {
+/// A mark written as a delimiter run. When flanking fails, the delimiters are
+/// still written — CommonMark will read them as plain text — rather than falling
+/// back to HTML tags other Markdown editors do not expect in portable files.
+fn emphasis_rule(run: &'static str, delimiter: char) -> MarkRule {
     MarkRule {
-        open: Arc::new(
-            move |state: &mut SerializerState<'_>, target: &MarkTarget<'_>| {
-                let merges = state.after_mark_close() && state.out().ends_with(delimiter);
-                // A simultaneous ** + * opening is parsed as em outside strong.
-                // Use a tag when the model requires the opposite nesting.
-                let reversed = tag == "strong"
-                    && target.parent.maybe_child(target.index).is_some_and(|node| {
-                        state
-                            .schema()
-                            .mark_id(md::EM)
-                            .is_some_and(|ty| node.marks().contains_type(ty))
-                    });
-                let plain = !merges && !reversed && emphasis_flanks(state, target, delimiter);
-                state.set_tagged(target.mark.ty, !plain);
-                if plain {
-                    run.to_string()
-                } else {
-                    format!("<{tag}>")
-                }
-            },
-        ),
-        close: Arc::new(
-            move |state: &mut SerializerState<'_>, target: &MarkTarget<'_>| {
-                if state.tagged(target.mark.ty) {
-                    format!("</{tag}>")
-                } else {
-                    run.to_string()
-                }
-            },
-        ),
+        open: Arc::new(move |_, _| run.to_string()),
+        close: Arc::new(move |_, _| run.to_string()),
         mixable: true,
         expel_enclosing_whitespace: true,
         escape: true,
         lead: Some(delimiter),
         trail: Some(delimiter),
-    }
-}
-
-/// Whether a delimiter run around the marked stretch starting at
-/// `target.index` would both open and close emphasis where it sits.
-fn emphasis_flanks(state: &SerializerState<'_>, target: &MarkTarget<'_>, delimiter: char) -> bool {
-    let parent = target.parent;
-    let start = target.index;
-    let mut end = start;
-    while parent
-        .maybe_child(end)
-        .is_some_and(|child| child.marks().contains(target.mark))
-    {
-        end += 1;
-    }
-    if end == start {
-        return false;
-    }
-    // Whitespace at the edges of the run is expelled before the delimiter is
-    // written, so what decides the flanking is the first and last node that
-    // contributes a character at all.
-    let first = (start..end).find_map(|i| {
-        parent
-            .maybe_child(i)
-            .and_then(|n| edge_char(state, n, target.mark, true))
-    });
-    let last = (start..end).rev().find_map(|i| {
-        parent
-            .maybe_child(i)
-            .and_then(|n| edge_char(state, n, target.mark, false))
-    });
-    let before = state.char_before_run(delimiter);
-    let after = lead_after(state, parent, end, target, delimiter);
-    flanks(first, last, before, after, delimiter)
-}
-
-/// The first or last character the node contributes to the output, as the
-/// escaper would write it.
-///
-/// A mark written *inside* `outer` puts its own delimiter at the edge instead
-/// of the node's text: the run around `` `code` `` touches a backtick, not the
-/// `c`.
-fn edge_char(
-    state: &SerializerState<'_>,
-    node: &Node,
-    outer: &Mark,
-    leading: bool,
-) -> Option<char> {
-    if let Some(edge) = state.edge_inside(node, outer, leading) {
-        return Some(edge);
-    }
-    match node.text() {
-        Some(text) => {
-            let trimmed = text.trim_matches([' ', '\t']);
-            if leading {
-                let first = trimmed.chars().next()?;
-                escape_text(&first.to_string(), false).chars().next()
-            } else {
-                trimmed.chars().next_back()
-            }
-        }
-        // Every inline atom this preset writes starts with `!` and ends with
-        // `)`; both are punctuation, which is all the flanking rule asks.
-        None => Some(if leading { '!' } else { ')' }),
-    }
-}
-
-/// The first character written after the marked stretch ends.
-fn lead_after(
-    state: &SerializerState<'_>,
-    parent: &Node,
-    end: usize,
-    target: &MarkTarget<'_>,
-    delimiter: char,
-) -> Option<char> {
-    let last = parent.maybe_child(end.checked_sub(1)?)?;
-    match parent.maybe_child(end) {
-        // The next node opens whatever marks it has that this one did not.
-        Some(next) => next
-            .marks()
-            .iter()
-            .find(|mark| !last.marks().contains(mark))
-            .and_then(|mark| state.mark_lead(mark.ty))
-            .or_else(|| edge_char(state, next, target.mark, true)),
-        // Nothing follows, so what comes next is the closing delimiter of the
-        // mark this one sits inside — skipping the ones spelled with the same
-        // character, which merge with this one into a single longer run that a
-        // reader gives back as both marks.
-        None => last
-            .marks()
-            .as_slice()
-            .iter()
-            .rev()
-            .skip_while(|mark| *mark != target.mark)
-            .skip(1)
-            .filter_map(|mark| state.mark_trail(mark.ty))
-            .find(|character| *character != delimiter),
     }
 }
 

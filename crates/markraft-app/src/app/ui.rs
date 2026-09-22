@@ -217,9 +217,7 @@ fn intent_icon(intent: &Intent) -> Icon {
         | Intent::RevealNote
         | Intent::NewNoteLocation
         | Intent::ChooseFolder
-        | Intent::UseDefaultFolder => {
-            Icon::Open
-        }
+        | Intent::UseDefaultFolder => Icon::Open,
         Intent::FileStatus => Icon::Conflict,
         Intent::ImageLocation => Icon::Image,
         Intent::ResetImageLocation | Intent::ResetNewNoteLocation => Icon::Reset,
@@ -419,17 +417,15 @@ impl NotesApp {
                 cx.notify();
             }
             Intent::ChooseFolder => self.choose_folder(window, cx),
-            Intent::UseDefaultFolder => {
-                match crate::storage::default_notes_folder() {
-                    Some(path) => self.open_folder(path, window, cx),
-                    None => {
-                        self.feedback.set_error(
-                            "HOME is unavailable; choose a folder or pass --dir PATH.".to_owned(),
-                        );
-                        cx.notify();
-                    }
+            Intent::UseDefaultFolder => match crate::storage::default_notes_folder() {
+                Some(path) => self.open_folder(path, window, cx),
+                None => {
+                    self.feedback.set_error(
+                        "HOME is unavailable; choose a folder or pass --dir PATH.".to_owned(),
+                    );
+                    cx.notify();
                 }
-            }
+            },
             Intent::Retry => self.recover(window, cx),
             Intent::SaveAs => self.save_as(window, cx),
             Intent::Reload => self.reload(window, cx),
@@ -1584,12 +1580,6 @@ impl NotesApp {
                 "Strikethrough",
                 "⇧⌘S",
                 Intent::Mark(doc::Inline::Strikethrough),
-            ),
-            Command::new(
-                "format-underline",
-                "Underline",
-                "⌘U",
-                Intent::Mark(doc::Inline::Underline),
             ),
             Command::new(
                 "format-code",

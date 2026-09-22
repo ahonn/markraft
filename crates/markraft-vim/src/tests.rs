@@ -1006,7 +1006,8 @@ fn dd_on_the_only_line_leaves_an_empty_document_and_undoes() {
     assert_eq!(keys.text(), "");
     assert_eq!(keys.lines(), 1);
     keys.keys("p");
-    assert_eq!(keys.markdown(), "<br>\n\n# only");
+    // Paste after an emptied document leaves a blank separator before the heading.
+    assert_eq!(keys.markdown(), "\n# only");
     keys.keys("u");
     assert_eq!(keys.text(), "");
     keys.keys("u");

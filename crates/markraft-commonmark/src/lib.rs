@@ -83,8 +83,8 @@
 //! * A line ending inside a **code span** becomes a space: CommonMark says so.
 //!   Everywhere else in inline content it travels as `&#10;` and comes back.
 //! * Cosmetic attributes are advisory: `fence_char` and `fence_length` grow to
-//!   clear the content, and `bullet_char`/`delimiter` change when the list
-//!   before would otherwise merge with this one.
+//!   clear the content. Adjacent lists that share a marker may merge on the
+//!   next read — CommonMark has no portable way to keep them apart.
 //! * `tight` is honoured where the shape allows it. A list whose items hold
 //!   blocks that need a blank line between them is written loose, and a list
 //!   with nowhere to put a blank line — one item holding one block — always

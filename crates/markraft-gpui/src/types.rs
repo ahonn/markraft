@@ -114,7 +114,7 @@ pub struct DocTypes {
     pub code: Option<MarkTypeId>,
     /// Strikethrough. Without it ⌘⇧S does nothing.
     pub strikethrough: Option<MarkTypeId>,
-    /// Underline. Without it ⌘U does nothing.
+    /// Underline. Present for HTML paste; Markdown write strips it.
     pub underline: Option<MarkTypeId>,
     /// A link, carrying an `href` attribute. Without it links cannot be set,
     /// followed or pasted as links.

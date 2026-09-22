@@ -9,9 +9,10 @@
 //! * A **soft line break** stays a primitive, displayed as a space. Its source
 //!   newline is retained because raw HTML can make whitespace significant.
 //! * A **hard line break** becomes a `hard_break` atom.
-//! * An **HTML block holding only `<br>`** becomes an empty paragraph, which is
-//!   how this codec spells "a blank line the author meant to keep". Runs of
-//!   blank lines in the source are separators, as CommonMark says, and produce
+//! * An **HTML block holding only `<br>`** becomes an empty paragraph, so older
+//!   Markraft files that used that spelling still open. Empty paragraphs have
+//!   no CommonMark write-back; they become blank separators. Runs of blank
+//!   lines in the source are separators, as CommonMark says, and produce
 //!   nothing.
 //! * **Inline HTML** that pairs up as `<u>`, `<em>`, `<strong>`, `<del>` or
 //!   `<a href="…">` becomes the matching mark or nested span, and `<img src="…">`
@@ -393,8 +394,9 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// Whether the node is an HTML block holding nothing but a `<br>` tag,
-    /// which is how this codec writes an empty paragraph.
+    /// Whether the node is an HTML block holding nothing but a `<br>` tag.
+    /// Older Markraft files used that spelling for empty paragraphs; we still
+    /// read it, but no longer write it.
     fn is_empty_paragraph_html(&self, node: &'a AstNode<'a>) -> bool {
         matches!(&*self.value(node), NodeValue::HtmlBlock(html) if inline::is_break_tag(&html.literal))
     }

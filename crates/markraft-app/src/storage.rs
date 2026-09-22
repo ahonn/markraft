@@ -533,8 +533,7 @@ mod tests {
         assert_eq!(resolved, fs::canonicalize(&override_dir).unwrap());
         assert!(override_dir.is_dir());
 
-        let resolved =
-            resolve_notes_folder(None, Some(settings_dir.clone()), Some(&home)).unwrap();
+        let resolved = resolve_notes_folder(None, Some(settings_dir.clone()), Some(&home)).unwrap();
         assert_eq!(resolved, settings_dir);
 
         let resolved = resolve_notes_folder(None, None, Some(&home)).unwrap();

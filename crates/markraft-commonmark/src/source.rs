@@ -412,14 +412,6 @@ fn text_changes<'a>(old: &'a Node, new: &'a Node, changes: &mut Vec<(&'a str, &'
 fn block_markdown(schema: &Schema, document: &Node, nodes: &[Node]) -> String {
     if nodes.is_empty() {
         String::new()
-    } else if nodes.len() == 1
-        && schema.node_id(crate::schema::PARAGRAPH) == Some(nodes[0].type_id())
-        && nodes[0].content_size() == 0
-    {
-        // An isolated empty paragraph serializes as an empty *document*. Here
-        // it is a block within an existing document: keep its explicit marker
-        // so Enter, list exit, and subsequent typing remain representable.
-        "<br>".into()
     } else {
         to_markdown(
             schema,

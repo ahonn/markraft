@@ -4,7 +4,7 @@
 //! were written for a model where one source line was one block and do not
 //! carry over, but the inputs still exercise everything that was hard-won:
 //! escaping, entities, link destinations, code fences, emphasis flanking, the
-//! `<u>` convention, CJK and emoji.
+//! underline HTML import, CJK and emoji.
 
 mod common;
 
@@ -124,10 +124,15 @@ const CORPUS: &[&str] = &[
 /// Corpus entries whose HTML this codec deliberately does not reproduce, for
 /// the same reasons the spec suite lists.
 const ALLOWED: &[(&str, &str)] = &[
-    // `<br>` alone is the spelling this codec gives an empty paragraph, and an
-    // empty paragraph that is a document's only block writes as nothing at all
-    // — which is how CommonMark spells an empty document.
+    // A lone `<br>` HTML block still *reads* as an empty paragraph (older
+    // Markraft files), but an empty document writes as nothing — which is how
+    // CommonMark spells an empty document.
     ("<br>", "an empty document writes as nothing"),
+    // Underline has no portable Markdown spelling; write strips `<u>`.
+    (
+        "~~gone~~ and <u>**kept**</u>",
+        "underline writes as plain text",
+    ),
 ];
 
 #[test]

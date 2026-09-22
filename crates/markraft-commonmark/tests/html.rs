@@ -282,7 +282,9 @@ fn a_document_writes_as_the_html_another_application_expects() {
         html_of("```rust\nlet x = 1;\n```"),
         "<pre><code class=\"language-rust\">let x = 1;\n</code></pre>"
     );
-    // An empty paragraph is a line holding only a break, in both directions.
+    // Markdown empty paragraphs collapse; HTML still needs a break so an empty
+    // `<p>` stays clickable. A lone `<br>` line in Markdown still *reads* as an
+    // empty paragraph for older files.
     assert_eq!(html_of("a\n\n<br>\n\nb"), "<p>a</p>\n<p><br></p>\n<p>b</p>");
     assert_eq!(
         shape("<p>a</p><p><br></p><p>b</p>"),
