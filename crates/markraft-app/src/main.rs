@@ -12,7 +12,7 @@ use gpui::*;
 use instance::{Instance, Launch, Request};
 use platform::Platform;
 use std::{env, path::PathBuf};
-use storage::{Library, Settings};
+use storage::{Library, Settings, notes_folder_matches, resolve_notes_folder};
 use vault::Store;
 
 const HELP: &str = "\
@@ -21,16 +21,16 @@ Markraft — a floating, local-first notepad.
 Usage: markraft-app [--dir PATH] [--settings PATH] [--] [FILE.md ...]
 
   --dir PATH        Keep notes as Markdown files in this folder for this run,
-                    instead of the one chosen in the app.
+                    instead of the default or the one chosen in the app.
   --settings PATH   Use this settings file instead of the default:
                     ~/Library/Application Support/Markraft/settings.json
 
-Positional files open into the notes folder session. A folder is required
-(--dir, or the one chosen in the app). Use -- before filenames beginning with -.
+Positional files open into the notes folder session. Use -- before filenames
+beginning with -.
 
-Notes are stored as Markdown under a folder you choose. The app stays in the
-menu bar while its window is hidden. ⌥N toggles the window and ⌘K lists every
-action with its shortcut.
+Notes default to ~/Documents/Markraft. Change the folder in Settings (for
+example to an Obsidian vault). The app stays in the menu bar while its window
+is hidden. ⌥N toggles the window and ⌘K lists every action with its shortcut.
 ";
 
 fn main() {
@@ -90,11 +90,6 @@ fn main() {
     // aside — a second launch that is only passing a request along must not move
     // the file this one is using, and its notice would have nowhere to be shown.
     let settings = Settings::read(&settings_path).unwrap_or_default();
-    if !restore_files && directory.is_none() && settings.notes_folder.is_none() {
-        fail(
-            "A notes folder is required to open files. Pass --dir PATH, or choose a folder in the app first.",
-        );
-    }
     if restore_files {
         // Only the primary process restores the previous session. A second
         // ordinary launch just raises the current one. Queue individual paths
@@ -106,28 +101,30 @@ fn main() {
             }
         }
     }
-    // An absent folder stays absent: the app asks the user to choose one.
-    let directory = directory.or_else(|| settings.notes_folder.clone());
-    let opened = directory
-        .clone()
-        .map(|directory| Store::open(directory, settings_path.clone()));
-    let (store, library, error) = match opened {
-        Some(Ok((mut store, library))) => {
+    let home = env::var_os("HOME").map(PathBuf::from);
+    let directory = resolve_notes_folder(
+        directory,
+        settings.notes_folder.clone(),
+        home.as_deref(),
+    )
+    .unwrap_or_else(|error| fail(&error));
+    let (store, library, error) = match Store::open(directory.clone(), settings_path.clone()) {
+        Ok((mut store, library)) => {
             if let Some(notice) = settings.recovery_notice() {
                 store.notices().raise(notice);
             }
-            // Remember the folder when it came from --dir.
-            if let Some(directory) = &directory
-                && settings.notes_folder.as_ref() != Some(directory)
+            // Remember --dir, the default folder, or a path that only matched
+            // after canonicalization.
+            let folder = store.directory().to_owned();
+            if !notes_folder_matches(settings.notes_folder.as_deref(), &folder)
                 && let Err(error) =
-                    store.update_settings(|s| s.notes_folder = Some(directory.clone()))
+                    store.update_settings(|settings| settings.notes_folder = Some(folder))
             {
                 eprintln!("Markraft: could not remember the notes folder: {error}");
             }
             (Some(store), library, None)
         }
-        Some(Err(error)) => (None, Library::default(), Some(error)),
-        None => (None, Library::default(), None),
+        Err(error) => (None, Library::default(), Some(error)),
     };
     let sender = instance.sender();
     let application = gpui_platform::application();
@@ -188,7 +185,7 @@ fn main() {
             move |window, cx| {
                 let app = cx.new(|cx| {
                     NotesApp::new(
-                        directory,
+                        Some(directory),
                         settings_path,
                         store,
                         library,

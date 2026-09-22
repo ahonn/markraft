@@ -14,7 +14,7 @@ pub(super) const QUERY: &str = "query-field";
 pub(super) enum Surface {
     /// Nothing is open; Tab belongs to the note.
     Editor,
-    /// The first-run and folder-missing screen.
+    /// Recovery when the notes folder could not be opened.
     Chooser,
     Format,
     CodeLanguage,
@@ -121,13 +121,20 @@ impl NotesApp {
         match surface {
             Surface::Editor => {}
             Surface::Chooser => {
-                let first_launch = self.path.is_none();
-                if !first_launch {
-                    stops.push(Stop::run("retry-open", Intent::Retry));
-                }
+                stops.push(Stop::run("retry-open", Intent::Retry));
                 stops.push(Stop::run("choose-folder", Intent::ChooseFolder));
+                if crate::storage::default_notes_folder()
+                    .as_ref()
+                    .is_some_and(|default| {
+                        self.path.as_ref().is_none_or(|current| {
+                            !crate::storage::notes_folder_matches(Some(current), default)
+                        })
+                    })
+                {
+                    stops.push(Stop::run("use-default-folder", Intent::UseDefaultFolder));
+                }
                 stops.push(Stop::run("open-markdown", Intent::OpenMarkdown));
-                if !first_launch {
+                if self.path.is_some() {
                     stops.push(Stop::run("reveal-library", Intent::Reveal));
                 }
             }

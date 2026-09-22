@@ -66,6 +66,8 @@ enum Intent {
     Shortcut,
     Reveal,
     ChooseFolder,
+    /// Error-recovery shortcut back to Documents/Markraft when another folder failed.
+    UseDefaultFolder,
     Retry,
     RevealNote,
     SaveAs,
@@ -122,7 +124,9 @@ impl Intent {
             | Self::RevealNote
             | Self::SaveAs
             | Self::OpenExternally => ActionGroup::Files,
-            Self::Delete | Self::TrashNote(_) | Self::ChooseFolder => ActionGroup::Recovery,
+            Self::Delete | Self::TrashNote(_) | Self::ChooseFolder | Self::UseDefaultFolder => {
+                ActionGroup::Recovery
+            }
             _ => ActionGroup::View,
         }
     }
@@ -209,7 +213,11 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::ToggleCount => Icon::Count,
         // Anything that hands the note to something outside Markraft.
         Intent::OpenLink | Intent::OpenExternally => Icon::External,
-        Intent::Reveal | Intent::RevealNote | Intent::NewNoteLocation | Intent::ChooseFolder => {
+        Intent::Reveal
+        | Intent::RevealNote
+        | Intent::NewNoteLocation
+        | Intent::ChooseFolder
+        | Intent::UseDefaultFolder => {
             Icon::Open
         }
         Intent::FileStatus => Icon::Conflict,
@@ -411,6 +419,17 @@ impl NotesApp {
                 cx.notify();
             }
             Intent::ChooseFolder => self.choose_folder(window, cx),
+            Intent::UseDefaultFolder => {
+                match crate::storage::default_notes_folder() {
+                    Some(path) => self.open_folder(path, window, cx),
+                    None => {
+                        self.feedback.set_error(
+                            "HOME is unavailable; choose a folder or pass --dir PATH.".to_owned(),
+                        );
+                        cx.notify();
+                    }
+                }
+            }
             Intent::Retry => self.recover(window, cx),
             Intent::SaveAs => self.save_as(window, cx),
             Intent::Reload => self.reload(window, cx),
@@ -1303,6 +1322,16 @@ impl NotesApp {
                         Intent::ChooseFolder,
                         cx,
                     )),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .text_size(px(11.))
+                    .text_color(self.muted())
+                    .child(
+                        "Default is Documents/Markraft. Change to use an Obsidian vault or any \
+                         Markdown folder.",
+                    ),
             )
             // Both of these place files inside the folder, so neither has anything to
             // say while individual files are being edited. They are the same kind of
@@ -2300,23 +2329,20 @@ impl Render for NotesApp {
                     ),
             );
         if self.persistence.is_none() {
-            // Either no folder has been chosen yet, or the chosen one could not be opened.
-            let first_launch = self.path.is_none();
-            let (title, explanation) = if first_launch {
-                (
-                    "Open a folder of Markdown files",
-                    "Markraft edits the files already in it, in place — nothing is imported, \
-                     moved or renamed. Its own settings stay outside the folder.",
-                )
-            } else {
-                (
-                    "Your notes could not be opened",
-                    "Nothing in the folder was changed. Check that it exists and that no \
-                     other Markraft is using it, then retry or choose another folder.",
-                )
-            };
-            // Choosing a folder is the way forward on both screens, so it is the one
-            // filled button and the one Enter takes.
+            // The notes folder could not be opened. First launch normally creates
+            // Documents/Markraft, so this screen is recovery — not a cold-start gate.
+            let default_folder = crate::storage::default_notes_folder();
+            let offer_default = default_folder.as_ref().is_some_and(|default| {
+                self.path.as_ref().is_none_or(|current| {
+                    !crate::storage::notes_folder_matches(Some(current), default)
+                })
+            });
+            let (title, explanation) = (
+                "Your notes could not be opened",
+                "Nothing in the folder was changed. Check that it exists and that no \
+                 other Markraft is using it, then retry or choose another folder.",
+            );
+            // Choose Folder is the filled action; Enter takes it.
             let accent = notes_style(self.dark).marker;
             let primary = self
                 .button_with_hover(
@@ -2335,12 +2361,18 @@ impl Render for NotesApp {
                 .flex()
                 .flex_wrap()
                 .gap_2()
-                .when(!first_launch, |s| {
-                    s.child(self.button("retry-open", "Retry", Intent::Retry, cx))
-                })
+                .child(self.button("retry-open", "Retry", Intent::Retry, cx))
                 .child(primary)
+                .when(offer_default, |s| {
+                    s.child(self.button(
+                        "use-default-folder",
+                        "Use Documents/Markraft",
+                        Intent::UseDefaultFolder,
+                        cx,
+                    ))
+                })
                 .child(self.button("open-markdown", "Open Markdown…", Intent::OpenMarkdown, cx))
-                .when(!first_launch, |s| {
+                .when(self.path.is_some(), |s| {
                     s.child(self.button("reveal-library", "Show Folder", Intent::Reveal, cx))
                 });
             let detail = div()

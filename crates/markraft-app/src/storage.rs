@@ -4,13 +4,66 @@ use markraft_core::Node;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
-    fs, io,
+    env, fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
+
+/// Folder name under `Documents` used when Settings has no notes folder yet.
+pub const DEFAULT_NOTES_FOLDER_NAME: &str = "Markraft";
+
+/// `~/Documents/Markraft` for the current user, when `HOME` is available.
+pub fn default_notes_folder() -> Option<PathBuf> {
+    Some(default_notes_folder_in(Path::new(&env::var_os("HOME")?)))
+}
+
+/// Notes folder used for a fresh install under `home`.
+pub fn default_notes_folder_in(home: &Path) -> PathBuf {
+    home.join("Documents").join(DEFAULT_NOTES_FOLDER_NAME)
+}
+
+/// Create `directory` if needed and return its canonical path.
+pub fn ensure_notes_folder(directory: &Path) -> Result<PathBuf, String> {
+    fs::create_dir_all(directory).map_err(|error| crate::vault::describe(directory, &error))?;
+    fs::canonicalize(directory).map_err(|error| crate::vault::describe(directory, &error))
+}
+
+/// Pick the notes folder for this launch: `--dir`, then Settings, then the default.
+///
+/// `--dir` and the default are created when missing. A path already stored in
+/// Settings is left alone so a missing vault surfaces as an error instead of
+/// silently falling back to Documents/Markraft.
+pub fn resolve_notes_folder(
+    override_dir: Option<PathBuf>,
+    settings_folder: Option<PathBuf>,
+    home: Option<&Path>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = override_dir {
+        return ensure_notes_folder(&path);
+    }
+    if let Some(path) = settings_folder {
+        return Ok(path);
+    }
+    let home = home.ok_or_else(|| "HOME is unavailable; use --dir PATH".to_owned())?;
+    ensure_notes_folder(&default_notes_folder_in(home))
+}
+
+/// Whether `settings` already records `folder` (same path, allowing non-canonical forms).
+pub fn notes_folder_matches(settings: Option<&Path>, folder: &Path) -> bool {
+    let Some(settings) = settings else {
+        return false;
+    };
+    if settings == folder {
+        return true;
+    }
+    match (fs::canonicalize(settings), fs::canonicalize(folder)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
 
 const LIBRARY_VERSION: u32 = 2;
 
@@ -288,7 +341,8 @@ pub struct WorkspaceSettings {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// The folder holding the notes. Always set after a normal launch.
+    /// The folder holding the notes. Set on a normal launch to the chosen path
+    /// or to `~/Documents/Markraft` when none was stored yet.
     pub notes_folder: Option<PathBuf>,
     pub open_files: Vec<PathBuf>,
     pub active_id: String,
@@ -451,6 +505,72 @@ mod tests {
         assert_eq!(library.note(&html).unwrap().title(), "Real title");
         let markup = library.new_note(doc::from_markdown("<hr/>"));
         assert_eq!(library.note(&markup).unwrap().title(), "Untitled");
+    }
+
+    #[test]
+    fn default_notes_folder_lives_under_documents() {
+        let home = Path::new("/Users/someone");
+        assert_eq!(
+            default_notes_folder_in(home),
+            PathBuf::from("/Users/someone/Documents/Markraft")
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_override_then_settings_then_default() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let override_dir = root.path().join("override");
+        let settings_dir = root.path().join("settings-vault");
+        fs::create_dir_all(&settings_dir).unwrap();
+
+        let resolved = resolve_notes_folder(
+            Some(override_dir.clone()),
+            Some(settings_dir.clone()),
+            Some(&home),
+        )
+        .unwrap();
+        assert_eq!(resolved, fs::canonicalize(&override_dir).unwrap());
+        assert!(override_dir.is_dir());
+
+        let resolved =
+            resolve_notes_folder(None, Some(settings_dir.clone()), Some(&home)).unwrap();
+        assert_eq!(resolved, settings_dir);
+
+        let resolved = resolve_notes_folder(None, None, Some(&home)).unwrap();
+        let expected = default_notes_folder_in(&home);
+        assert_eq!(resolved, fs::canonicalize(&expected).unwrap());
+        assert!(expected.is_dir());
+    }
+
+    #[test]
+    fn resolve_does_not_create_a_missing_settings_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("gone");
+        let resolved = resolve_notes_folder(None, Some(missing.clone()), None).unwrap();
+        assert_eq!(resolved, missing);
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn resolve_requires_home_when_falling_back_to_the_default() {
+        let error = resolve_notes_folder(None, None, None).unwrap_err();
+        assert!(error.contains("HOME"), "{error}");
+    }
+
+    #[test]
+    fn notes_folder_matches_canonical_and_literal_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("notes");
+        fs::create_dir_all(&folder).unwrap();
+        let canonical = fs::canonicalize(&folder).unwrap();
+        assert!(notes_folder_matches(Some(&folder), &canonical));
+        assert!(notes_folder_matches(Some(&canonical), &folder));
+        assert!(!notes_folder_matches(None, &folder));
+        assert!(!notes_folder_matches(
+            Some(&root.path().join("other")),
+            &folder
+        ));
     }
 
     #[test]

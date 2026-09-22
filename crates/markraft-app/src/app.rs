@@ -1059,7 +1059,8 @@ impl NotesApp {
         .detach();
     }
     /// Open `directory` as the notes folder and remember the choice. The folder in use
-    /// stays open when the new one cannot be.
+    /// stays open when the new one cannot be. Missing folders are created so Change…
+    /// and Retry can recover an empty path.
     fn open_folder(&mut self, directory: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let reopening = self.persistence.is_none();
         if !reopening
@@ -1069,6 +1070,14 @@ impl NotesApp {
         {
             return;
         }
+        let directory = match crate::storage::ensure_notes_folder(&directory) {
+            Ok(directory) => directory,
+            Err(error) => {
+                self.feedback.set_error(error);
+                cx.notify();
+                return;
+            }
+        };
         let opened = Store::open(directory.clone(), self.settings_path.clone()).and_then(
             |(mut store, library)| {
                 store
