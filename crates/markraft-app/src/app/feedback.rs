@@ -15,6 +15,7 @@
 use gpui::SharedString;
 use std::{
     collections::VecDeque,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -22,15 +23,32 @@ use std::{
 const READING_NOTICE: Duration = Duration::from_secs(8);
 /// An acknowledgment of what the user just did, which they are already looking at.
 const ACKNOWLEDGMENT: Duration = Duration::from_secs(3);
+/// A notice with a button, which takes a moment to reach.
+const WITH_ACTION: Duration = Duration::from_secs(8);
 /// How long the file status indicator stays lit after a keystroke the file refused.
 /// Long enough to be seen without following the typing that provoked it.
 const FILE_STATUS_FLASH: Duration = Duration::from_millis(900);
 
-/// A transient message over the note.
+/// A clickable follow-up on a notice — reveal a path in Finder.
+#[derive(Clone)]
+pub(super) struct NoticeAction {
+    pub(super) label: SharedString,
+    pub(super) path: PathBuf,
+}
+
+/// A transient message over the note. One that carries an action shows it as a
+/// button and stays longer, because reaching that button takes a moment.
 #[derive(Clone)]
 pub(super) struct Notice {
     pub(super) text: SharedString,
     until: Instant,
+    pub(super) action: Option<NoticeAction>,
+}
+
+impl Notice {
+    pub(super) fn action(&self) -> Option<&NoticeAction> {
+        self.action.as_ref()
+    }
 }
 
 #[derive(Default)]
@@ -78,6 +96,19 @@ impl Feedback {
         self.notice = Some(Notice {
             text: text.as_ref().to_owned().into(),
             until: Instant::now() + ACKNOWLEDGMENT,
+            action: None,
+        });
+    }
+
+    /// An acknowledgment with a path the user can reveal — stays long enough to click.
+    pub(super) fn inform_with_reveal(&mut self, text: impl AsRef<str>, path: PathBuf) {
+        self.notice = Some(Notice {
+            text: text.as_ref().to_owned().into(),
+            until: Instant::now() + WITH_ACTION,
+            action: Some(NoticeAction {
+                label: "Show in Finder".into(),
+                path,
+            }),
         });
     }
 
@@ -90,8 +121,13 @@ impl Feedback {
         }
     }
 
-    /// Notices no longer carry actions; Escape keeps calling this for the cascade.
+    /// Dismiss a notice that carries an action, and say whether there was one.
+    /// A notice with nothing to press is left alone: it goes by itself.
     pub(super) fn dismiss_action(&mut self) -> bool {
+        if self.notice.as_ref().is_some_and(|n| n.action.is_some()) {
+            self.notice = None;
+            return true;
+        }
         false
     }
 
@@ -128,6 +164,7 @@ impl Feedback {
             self.notice = Some(Notice {
                 text: text.into(),
                 until: now + READING_NOTICE,
+                action: None,
             });
             changed = true;
         }
@@ -194,13 +231,18 @@ mod tests {
         );
     }
 
-    /// Notices no longer carry actions, so Escape does not dismiss them.
+    /// Escape dismisses a notice that offers a button, because that one waits
+    /// for an answer. One that offers nothing is left to go on its own.
     #[test]
-    fn notices_are_left_to_expire() {
+    fn only_a_notice_with_a_button_is_dismissed() {
         let mut feedback = Feedback::default();
         feedback.inform("just so you know");
         assert!(!feedback.dismiss_action());
         assert!(feedback.notice().is_some(), "left to expire");
+
+        feedback.inform_with_reveal("Moved to Trash", PathBuf::from("/notes"));
+        assert!(feedback.dismiss_action());
+        assert!(feedback.notice().is_none());
     }
 
     /// The indicator is attention, not a message: it goes out by itself.

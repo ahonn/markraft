@@ -27,7 +27,6 @@ enum Intent {
     EditHtml(usize),
     New,
     Browse,
-    Drafts,
     Actions,
     ToggleFormatToolbar,
     ToggleCount,
@@ -41,8 +40,6 @@ enum Intent {
     OpenLink,
     Back,
     Save,
-    Undo,
-    Redo,
     Delete,
     Pin,
     PinNote(String),
@@ -71,7 +68,7 @@ enum Intent {
     ChooseFolder,
     Retry,
     RevealNote,
-    SaveCopy,
+    SaveAs,
     Reload,
     /// The lower-left file status indicator: the card of ways out for a read-only file.
     FileStatus,
@@ -104,9 +101,7 @@ impl Intent {
     fn action_group(&self) -> ActionGroup {
         match self {
             Self::New | Self::Browse | Self::Pin => ActionGroup::Notes,
-            Self::Undo | Self::Redo | Self::Copy | Self::PastePlain | Self::PasteMarkdown => {
-                ActionGroup::Editing
-            }
+            Self::Copy | Self::PastePlain | Self::PasteMarkdown => ActionGroup::Editing,
             Self::Mark(_) | Self::Block(_) | Self::Link | Self::InsertTable => {
                 ActionGroup::Formatting
             }
@@ -125,9 +120,9 @@ impl Intent {
             | Self::OpenMarkdown
             | Self::Reveal
             | Self::RevealNote
-            | Self::SaveCopy
+            | Self::SaveAs
             | Self::OpenExternally => ActionGroup::Files,
-            Self::Delete | Self::TrashNote(_) => ActionGroup::Recovery,
+            Self::Delete | Self::TrashNote(_) | Self::ChooseFolder => ActionGroup::Recovery,
             _ => ActionGroup::View,
         }
     }
@@ -200,14 +195,12 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::Browse => Icon::Notes,
         Intent::Pin => Icon::Pin,
         Intent::Delete | Intent::TrashNote(_) => Icon::Trash,
-        Intent::Drafts => Icon::Drafts,
-        Intent::Copy | Intent::SaveCopy | Intent::CopyLink => Icon::Copy,
+        Intent::Copy | Intent::CopyLink => Icon::Copy,
         Intent::Export => Icon::Export,
         Intent::Rename => Icon::Edit,
         Intent::OpenMarkdown => Icon::Document,
         Intent::Settings => Icon::Settings,
-        Intent::Save => Icon::Save,
-        Intent::Undo | Intent::Redo => Icon::Restore,
+        Intent::Save | Intent::SaveAs => Icon::Save,
         Intent::ToggleTask => Icon::Task,
         Intent::ChooseCodeLanguage => Icon::CodeBlock,
         Intent::CopyCodeBlock => Icon::Copy,
@@ -259,7 +252,6 @@ impl NotesApp {
             Intent::EditHtml(pos) => self.open_html_source(pos, window, cx),
             Intent::New => self.new_note(window, cx),
             Intent::Browse => self.open_panel(Panel::Browse, window, cx),
-            Intent::Drafts => self.open_panel(Panel::Drafts, window, cx),
             Intent::Actions => self.open_panel(Panel::Actions, window, cx),
             Intent::ToggleFormatToolbar => {
                 self.close_popover(cx);
@@ -306,16 +298,6 @@ impl NotesApp {
             Intent::Save => {
                 self.intent(Intent::Back, window, cx);
                 self.save_now(window, cx);
-            }
-            // The editor owns the note's history, so these reach it as its own actions.
-            Intent::Undo | Intent::Redo => {
-                self.intent(Intent::Back, window, cx);
-                let action: Box<dyn Action> = if matches!(intent, Intent::Undo) {
-                    Box::new(markraft_gpui::Undo)
-                } else {
-                    Box::new(markraft_gpui::Redo)
-                };
-                window.dispatch_action(action, cx);
             }
             // The caret is already where these act, so the panel closes and the
             // editor's own action does the work.
@@ -430,7 +412,7 @@ impl NotesApp {
             }
             Intent::ChooseFolder => self.choose_folder(window, cx),
             Intent::Retry => self.recover(window, cx),
-            Intent::SaveCopy => self.save_copy(cx),
+            Intent::SaveAs => self.save_as(window, cx),
             Intent::Reload => self.reload(window, cx),
             Intent::Mark(mark) => {
                 self.close_popover(cx);
@@ -629,10 +611,7 @@ impl NotesApp {
     ) -> Stateful<Div> {
         let id: SharedString = id.into();
         let expanded = match intent {
-            Intent::Browse => Some(matches!(
-                self.interaction.panel(),
-                Panel::Browse | Panel::Drafts
-            )),
+            Intent::Browse => Some(self.interaction.panel() == Panel::Browse),
             Intent::Actions => Some(self.interaction.panel() == Panel::Actions),
             _ => None,
         };
@@ -910,9 +889,8 @@ impl NotesApp {
         )
     }
     fn picker(&self, heading: bool, cx: &mut Context<Self>) -> Div {
-        let scope = self.scope();
         let query = self.query().read(cx).text().to_owned();
-        let notes = self.matching_notes(query.trim(), scope);
+        let notes = self.matching_notes(query.trim());
         let total = notes.len();
         let now = crate::storage::timestamp();
         let home = std::env::var("HOME").ok();
@@ -940,11 +918,7 @@ impl NotesApp {
             let id = note.id.clone();
             let current = note.id == self.library.active_id;
             let selected = index == self.picker.row();
-            let status = if scope == Scope::Drafts {
-                // In this scope every row is a draft, so the useful thing to say is
-                // that it has no file yet.
-                "No file yet".to_owned()
-            } else if current {
+            let status = if current {
                 "Current".to_owned()
             } else {
                 let date = relative_day(note.updated_at, now);
@@ -954,31 +928,20 @@ impl NotesApp {
                 };
                 format!("Edited {date}")
             };
-            // In this scope the status above already says whether the note has a
-            // file, so a location beside it can only repeat itself or crowd the
-            // line until neither half is legible.
-            let drafts = scope == Scope::Drafts;
-            let location = (scope != Scope::Drafts)
-                .then_some(note.path.as_ref())
-                .flatten()
-                .map(|path| {
-                    shorten_location(
-                        &note_location(path, self.path.as_deref(), home.as_deref()),
-                        location_budget(&status, current),
-                    )
-                });
-            // A draft has nowhere on disk yet, which the accent says without adding
-            // a badge of its own: the row already speaks in dots and muted text.
+            let location = note.path.as_ref().map(|path| {
+                shorten_location(
+                    &note_location(path, self.path.as_deref(), home.as_deref()),
+                    location_budget(&status, current),
+                )
+            });
+            // A pathless note has nowhere on disk yet, which the accent says without
+            // adding a badge of its own: the row already speaks in dots and muted text.
             let location_color = match &location {
                 Some(_) => self.muted(),
                 None => notes_style(self.dark).marker,
             };
-            let location = location.unwrap_or_else(|| "Unsaved draft".to_owned());
-            let meta = if drafts {
-                status.clone()
-            } else {
-                format!("{status} · {location}")
-            };
+            let location = location.unwrap_or_else(|| "No file yet".to_owned());
+            let meta = format!("{status} · {location}");
             let mut controls = div()
                 .absolute()
                 .right(px(6.))
@@ -1106,23 +1069,17 @@ impl NotesApp {
                                                 .text_size(px(12.))
                                                 .line_height(px(18.))
                                                 .text_color(self.muted())
-                                                .child(if drafts {
-                                                    status.clone()
-                                                } else {
-                                                    format!("{status} ·")
-                                                }),
+                                                .child(format!("{status} ·")),
                                         )
-                                        .when(!drafts, |s| {
-                                            s.child(
-                                                div()
-                                                    .min_w_0()
-                                                    .text_size(px(12.))
-                                                    .line_height(px(18.))
-                                                    .text_color(location_color)
-                                                    .truncate()
-                                                    .child(location),
-                                            )
-                                        }),
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .text_size(px(12.))
+                                                .line_height(px(18.))
+                                                .text_color(location_color)
+                                                .truncate()
+                                                .child(location),
+                                        ),
                                 ),
                         )
                         .child(controls),
@@ -1146,18 +1103,7 @@ impl NotesApp {
                         .justify_between()
                         .text_size(px(11.))
                         .text_color(self.muted())
-                        .child(match scope {
-                            Scope::Drafts => "Drafts",
-                            Scope::Notes => "Notes",
-                        })
-                        // The scopes are one list read two ways, so the way back to
-                        // the others sits in the heading rather than behind a command.
-                        .when(scope != Scope::Notes, |s| {
-                            s.child(self.button("trash-back", "All Notes", Intent::Browse, cx))
-                        })
-                        .when(scope != Scope::Drafts && self.draft_count() > 0, |s| {
-                            s.child(self.button("drafts-scope", "Drafts", Intent::Drafts, cx))
-                        }),
+                        .child("Notes"),
                 )
             })
             .child(self.scroll_area(list, self.picker.browse_scroll(), cx))
@@ -1452,13 +1398,6 @@ impl NotesApp {
                         Intent::OpenMarkdown,
                         cx,
                     ))
-                    .child(self.row(
-                        "export-library",
-                        "Export Library Backup…",
-                        "",
-                        Intent::SaveCopy,
-                        cx,
-                    ))
                     .when(folder.is_some(), |s| {
                         s.child(self.row(
                             "show-storage",
@@ -1546,7 +1485,7 @@ impl NotesApp {
             }
         } else {
             let query = self.query().read(cx).text().to_owned();
-            let notes = self.matching_notes(query.trim(), self.scope());
+            let notes = self.matching_notes(query.trim());
             match key {
                 "up" => self.select_row(self.picker.row().saturating_sub(1)),
                 "down" => {
@@ -1582,8 +1521,6 @@ impl NotesApp {
                 Intent::Pin,
             ),
             Command::new("browse-action", "Browse Notes", "⌘P", Intent::Browse),
-            Command::new("undo-edit", "Undo", "⌘Z", Intent::Undo),
-            Command::new("redo-edit", "Redo", "⇧⌘Z", Intent::Redo),
             Command::new("save-now", "Save Now", "⌘S", Intent::Save),
             Command::new("copy-markdown", "Copy as Markdown", "⇧⌘C", Intent::Copy),
             Command::new(
@@ -1605,17 +1542,6 @@ impl NotesApp {
                 "Open Markdown…",
                 "⌘O",
                 Intent::OpenMarkdown,
-            ),
-            // Choosing a folder puts the open one away, which the label has to say.
-            Command::new(
-                "folder-action",
-                if self.path.is_some() {
-                    "Switch Folder…"
-                } else {
-                    "Open Folder…"
-                },
-                "",
-                Intent::ChooseFolder,
             ),
             Command::new("format-bold", "Bold", "⌘B", Intent::Mark(doc::Inline::Bold)),
             Command::new(
@@ -1749,45 +1675,12 @@ impl NotesApp {
                     .slash(14, SlashEffect::Host),
             );
         }
-        items.extend([
-            Command::new("delete-note", "Move to Trash", "", Intent::Delete),
-            Command::new(
-                "toggle-format-toolbar",
-                if self.toolbar.shown() {
-                    "Hide Formatting Toolbar"
-                } else {
-                    "Show Formatting Toolbar"
-                },
-                "",
-                Intent::ToggleFormatToolbar,
-            ),
-            Command::new(
-                "toggle-count",
-                if self.toolbar.counts_words() {
-                    "Show Character Count"
-                } else {
-                    "Show Word Count"
-                },
-                "",
-                Intent::ToggleCount,
-            ),
-            Command::new(
-                "vim-mode",
-                if self.library.preferences.vim_mode {
-                    "Disable Vim Mode"
-                } else {
-                    "Enable Vim Mode"
-                },
-                "",
-                Intent::VimMode,
-            ),
-            Command::new(
-                "open-settings",
-                "Open Markraft Settings",
-                "⌘,",
-                Intent::Settings,
-            ),
-        ]);
+        items.extend([Command::new(
+            "delete-note",
+            "Move to Trash",
+            "",
+            Intent::Delete,
+        )]);
         // Each of these reveals a different thing, and only while there is one.
         if self.library.active_note().path.is_some() {
             items.push(Command::new(
@@ -1913,6 +1806,17 @@ impl NotesApp {
                 Intent::Table(TableEdit::DeleteTable),
             ));
         }
+        // Low-frequency, high-stakes: last so it is not hit by accident.
+        items.push(Command::new(
+            "folder-action",
+            if self.path.is_some() {
+                "Switch Folder…"
+            } else {
+                "Open Folder…"
+            },
+            "",
+            Intent::ChooseFolder,
+        ));
         items
     }
     fn count_units(&self, text: &str) -> usize {
@@ -2089,9 +1993,9 @@ impl NotesApp {
         .min(viewport.width - px(32.));
         let available = (viewport.height - top - px(16.)).max(px(0.));
         let desired = match self.interaction.panel() {
-            Panel::Browse | Panel::Drafts => {
+            Panel::Browse => {
                 let n = self
-                    .matching_notes(self.query().read(cx).text().trim(), self.scope())
+                    .matching_notes(self.query().read(cx).text().trim())
                     .len();
                 let heading = 26.;
                 let rows = if n == 0 { 72. } else { 58. * n as f32 };
@@ -2126,7 +2030,7 @@ impl NotesApp {
             .min(available);
         let contents = match self.interaction.panel() {
             // A short card gives what room it has to the rows rather than to a heading.
-            Panel::Browse | Panel::Drafts => self.picker(height >= px(136.), cx),
+            Panel::Browse => self.picker(height >= px(136.), cx),
             Panel::Actions => self.actions_panel(cx),
             _ => div()
                 .flex()
@@ -2402,7 +2306,7 @@ impl Render for NotesApp {
                 (
                     "Open a folder of Markdown files",
                     "Markraft edits the files already in it, in place — nothing is imported, \
-                     moved or renamed. Its own settings and drafts stay outside the folder.",
+                     moved or renamed. Its own settings stay outside the folder.",
                 )
             } else {
                 (
@@ -2527,10 +2431,14 @@ impl Render for NotesApp {
                 )
             })
             .when_some(self.feedback.notice().cloned(), |s, notice| {
+                let announced = match notice.action() {
+                    Some(action) => format!("{} · {}", notice.text, action.label),
+                    None => notice.text.to_string(),
+                };
                 let toast = div()
                     .id("notice")
                     .role(Role::Status)
-                    .aria_label(notice.text.clone())
+                    .aria_label(announced)
                     // A folder's notices are sentences rather than acknowledgments,
                     // so the toast wraps instead of running off the window.
                     .max_w(window.bounds().size.width - px(24.))
@@ -2547,7 +2455,24 @@ impl Render for NotesApp {
                     .shadow(popover_shadow())
                     .text_size(px(12.))
                     .text_color(self.control_text())
-                    .child(div().flex_1().min_w_0().child(notice.text.clone()));
+                    .child(div().flex_1().min_w_0().child(notice.text.clone()))
+                    .when_some(notice.action().cloned(), |s, action| {
+                        let path = action.path.clone();
+                        s.child(div().text_color(self.muted()).child("·")).child(
+                            div()
+                                .id("notice-reveal")
+                                .role(Role::Button)
+                                .aria_label(action.label.clone())
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.7))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.reveal_path(&path);
+                                }))
+                                .child(action.label.clone()),
+                        )
+                    });
                 s.child(
                     // Centred above the footer, so it never sits on the count or the
                     // buttons there. The row itself takes no clicks from the note.

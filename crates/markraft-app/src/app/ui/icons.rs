@@ -56,8 +56,6 @@ define_icons! {
     Alert => "exclamationmark.triangle",
     // Two versions of one file that have to be told apart.
     Conflict => "arrow.triangle.branch",
-    // Notes waiting in the tray because no file holds them the way they are.
-    Drafts => "tray.full",
     Save => "arrow.down.doc",
     Reset => "arrow.counterclockwise",
     Count => "number",
@@ -69,7 +67,6 @@ define_icons! {
     Bullet => "list.bullet",
     Task => "checklist",
     Divider => "minus",
-    Restore => "arrow.uturn.backward",
     Table => "tablecells",
     RowAbove => "arrow.up.to.line",
     RowBelow => "arrow.down.to.line",

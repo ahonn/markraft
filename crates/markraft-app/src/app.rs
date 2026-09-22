@@ -59,21 +59,10 @@ actions!(
     ]
 );
 
-/// Which of the library's notes a panel lists.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Scope {
-    Notes,
-    /// Work that is not in a file the way it was left; see [`is_draft`].
-    Drafts,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Panel {
     Editor,
     Browse,
-    /// Work that is not in a file the way the user left it: a note with no file yet.
-    /// The same list Browse draws, filtered.
-    Drafts,
     Actions,
     Settings,
 }
@@ -115,15 +104,15 @@ pub struct NotesApp {
     /// Whether the quit question is already on screen, so a second ⌘Q cannot stack
     /// another one behind it.
     quitting: QuitState,
+    /// Where the last save's deletions landed in the Trash, so the note that just
+    /// went can be revealed where it actually is.
+    trashed: Vec<PathBuf>,
     /// The formatting toolbar over the note, and what the footer counts.
     toolbar: Toolbar,
     /// The format menu's list.
     format: Cursor,
     dark: bool,
 
-    /// Whether the notes folder had to be made on open because the one the settings
-    /// named was gone.
-    folder_was_created: bool,
     /// What the `[[` menu offers and what the editor asks about each link it
     /// draws, and whether either is out of date.
     links: ui::wiki::Links,
@@ -151,7 +140,6 @@ impl NotesApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let path = path.map(|path| path.canonicalize().unwrap_or(path));
-        let folder_was_created = store.as_ref().is_some_and(Store::created_folder);
         let dark = library.preferences.dark_mode.unwrap_or(matches!(
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
@@ -200,10 +188,10 @@ impl NotesApp {
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.presence.set_window_active(window.is_window_active());
-            if this.presence.window_active() {
-                if let Some(persistence) = &this.persistence {
-                    persistence.refresh();
-                }
+            if this.presence.window_active()
+                && let Some(persistence) = &this.persistence
+            {
+                persistence.refresh();
             }
             cx.notify();
         });
@@ -253,7 +241,7 @@ impl NotesApp {
             save: SaveState::default(),
             feedback,
             quitting: QuitState::default(),
-            folder_was_created,
+            trashed: Vec::new(),
             links: Default::default(),
             toolbar: Toolbar::default(),
             format: Cursor::default(),
@@ -272,7 +260,7 @@ impl NotesApp {
         } else {
             window.focus(app.ring.panel(), cx);
         }
-        // Application preferences and drafts live outside the document folder.
+        // Application preferences live outside the document folder.
         app.schedule_save(cx);
         if let Some(error) = app.updater.take_startup_error() {
             app.feedback.queue(error);
@@ -314,12 +302,13 @@ impl NotesApp {
                             continue;
                         }
                         if previous.is_none_or(|previous| previous.document != local.document) {
-                            if let Some(persistence) = &self.persistence
-                                && let Err(error) = persistence.recover(local.clone())
-                            {
-                                self.feedback.set_error(error);
+                            // Only a copy that was actually written is counted: the
+                            // sentence below promises one, and a failure has its own.
+                            match self.persistence.as_ref().map(|p| p.recover(local.clone())) {
+                                Some(Ok(())) => archived += 1,
+                                Some(Err(error)) => self.feedback.set_error(error),
+                                None => {}
                             }
-                            archived += 1;
                         }
                     }
                     self.library.adopt(note);
@@ -334,15 +323,14 @@ impl NotesApp {
                         }
                         self.library.remove(&id);
                     } else if let Some(local) = local {
-                        // Local edits exist for a file that vanished: archive them
-                        // and remove the note; the file is gone from disk.
-                        if let Some(persistence) = &self.persistence
-                            && let Err(error) = persistence.recover(local)
-                        {
-                            self.feedback.set_error(error);
+                        // Local edits exist for a file that vanished: keep them
+                        // beside where it was; the file is gone from disk.
+                        match self.persistence.as_ref().map(|p| p.recover(local)) {
+                            Some(Ok(())) => archived += 1,
+                            Some(Err(error)) => self.feedback.set_error(error),
+                            None => {}
                         }
                         self.library.remove(&id);
-                        archived += 1;
                         vanished += 1;
                     }
                 }
@@ -360,9 +348,11 @@ impl NotesApp {
         }
         if archived > 0 {
             self.feedback.queue(if archived == 1 {
-                "A note changed on disk; your edits were kept in history.".to_owned()
+                "A note changed on disk; your edits were kept as a conflicted copy.".to_owned()
             } else {
-                format!("{archived} notes changed on disk; your edits were kept in history.")
+                format!(
+                    "{archived} notes changed on disk; your edits were kept as conflicted copies."
+                )
             });
         }
         if vanished > 0 {
@@ -376,10 +366,6 @@ impl NotesApp {
             });
         }
         cx.notify();
-    }
-    /// How many notes are not yet in a file: non-blank pathless notes.
-    pub(crate) fn draft_count(&self) -> usize {
-        self.library.notes.iter().filter(|n| is_draft(n)).count()
     }
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
         self.save.schedule(Instant::now());
@@ -440,13 +426,16 @@ impl NotesApp {
             return;
         }
         self.update_paths(saved.paths, cx);
+        if completion == SaveCompletion::Current {
+            self.trashed = saved.trashed;
+        }
         if !saved.conflicts.is_empty() && completion == SaveCompletion::Current {
             // Disk won mid-save: toast and refresh so the editor adopts disk content.
             self.feedback.queue(if saved.conflicts.len() == 1 {
-                "Disk version kept; your edits were archived.".to_owned()
+                "Disk version kept; your edits were kept as a conflicted copy.".to_owned()
             } else {
                 format!(
-                    "{} notes kept the disk version; your edits were archived.",
+                    "{} notes kept the disk version; your edits were kept as conflicted copies.",
                     saved.conflicts.len()
                 )
             });
@@ -877,18 +866,8 @@ impl NotesApp {
         }
         cx.notify();
     }
-    /// Which of the library's notes the open panel is looking at.
-    pub(crate) fn scope(&self) -> Scope {
-        match self.interaction.panel() {
-            Panel::Drafts => Scope::Drafts,
-            _ => Scope::Notes,
-        }
-    }
-    fn matching_notes(&self, query: &str, scope: Scope) -> Vec<&crate::storage::Note> {
+    fn matching_notes(&self, query: &str) -> Vec<&crate::storage::Note> {
         let mut notes = self.library.search(query, self.path.as_deref());
-        if scope == Scope::Drafts {
-            notes.retain(|note| is_draft(note));
-        }
         notes.sort_by_key(|note| note.id != self.library.active_id);
         notes
     }
@@ -899,7 +878,7 @@ impl NotesApp {
         }
         // Pinning reorders results; keep the same note selected.
         let row = self
-            .matching_notes(self.search_text(cx).trim(), self.scope())
+            .matching_notes(self.search_text(cx).trim())
             .iter()
             .position(|note| note.id == id)
             .unwrap_or(0);
@@ -907,6 +886,11 @@ impl NotesApp {
     }
     fn trash_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_documents(cx);
+        let folder = self
+            .library
+            .note(id)
+            .and_then(|note| note.path.as_ref())
+            .and_then(|path| path.parent().map(ToOwned::to_owned));
         if self.library.delete(id) {
             self.sessions.remove(id);
             self.ensure_session(window, cx);
@@ -916,21 +900,45 @@ impl NotesApp {
                 .clamp_to(self.library.search(query.trim(), root.as_deref()).len());
             self.ring.release();
             window.focus(&self.query().focus_handle(cx), cx);
-            self.notes_changed(cx);
-            self.inform("Moved to Trash", cx);
+            self.links.invalidate();
+            let moved = self.flush(cx);
+            self.moved_to_trash(moved, folder, cx);
         }
     }
     fn delete_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.library.active_id.clone();
         self.sync_documents(cx);
+        let folder = self
+            .library
+            .note(&id)
+            .and_then(|note| note.path.as_ref())
+            .and_then(|path| path.parent().map(ToOwned::to_owned));
         if self.library.delete(&id) {
             self.sessions.remove(&id);
             self.ensure_session(window, cx);
             self.set_panel(Panel::Editor, cx);
             self.focus_editor(window, cx);
-            self.notes_changed(cx);
-            self.inform("Moved to Trash", cx);
+            self.links.invalidate();
+            let moved = self.flush(cx);
+            self.moved_to_trash(moved, folder, cx);
         }
+    }
+    /// Say where the note went. The Trash holds the file itself, so that is what the
+    /// button reveals; without an address from the platform the folder it left is the
+    /// nearest thing to show. A save that did not go through took the note off the
+    /// list without taking the file anywhere, and has to say so — the file status
+    /// carries the reason.
+    fn moved_to_trash(&mut self, moved: bool, folder: Option<PathBuf>, cx: &mut Context<Self>) {
+        if !moved {
+            self.feedback.inform("Could not move it to the Trash.");
+            cx.notify();
+            return;
+        }
+        match self.trashed.first().cloned().or(folder) {
+            Some(path) => self.feedback.inform_with_reveal("Moved to Trash", path),
+            None => self.feedback.inform("Moved to Trash"),
+        }
+        cx.notify();
     }
     fn inform(&mut self, text: impl AsRef<str>, cx: &mut Context<Self>) {
         self.feedback.inform(text);
@@ -1094,45 +1102,84 @@ impl NotesApp {
             }
         }
     }
-    fn save_copy(&mut self, cx: &mut Context<Self>) {
+    fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_documents(cx);
-        let bytes = match crate::vault::backup(&self.library) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                self.feedback.set_error(e);
+        let Some(persistence) = &self.persistence else {
+            self.inform("Open a notes folder before saving.", cx);
+            return;
+        };
+        let note = self.library.active_note();
+        let filename = format!("{}.md", note.title().replace(['/', ':'], "-"));
+        let mut snapshot = note.clone();
+        snapshot.document = self.editor().read(cx).committed_document().clone();
+        let document = match persistence.markdown(snapshot) {
+            Ok(document) => document,
+            Err(error) => {
+                self.feedback.set_error(error);
+                cx.notify();
                 return;
             }
         };
-        let Some(folder) = self.path.clone() else {
-            return;
-        };
-        let prompt = cx.prompt_for_new_path(&folder, Some("Markraft Backup.json"));
-        let original = folder;
-        cx.spawn(async move |this, cx| {
+        let directory = self.path.clone().unwrap_or_default();
+        let prompt = cx.prompt_for_new_path(&directory, Some(&filename));
+        cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(path))) = prompt.await {
-                let result = cx
+                let written = cx
                     .background_executor()
                     .spawn(async move {
-                        if path == original
-                            || path
-                                .canonicalize()
-                                .ok()
-                                .zip(original.canonicalize().ok())
-                                .is_some_and(|(a, b)| a == b)
-                        {
-                            return Err(
-                                "Choose a different path to preserve the existing library.".into(),
-                            );
-                        }
-                        std::fs::write(path, bytes).map_err(|e| e.to_string())
+                        use std::io::Write;
+                        let mut file = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&path)
+                            .map_err(|e| e.to_string())?;
+                        file.write_all(document.as_bytes())
+                            .and_then(|_| file.sync_all())
+                            .map_err(|e| e.to_string())?;
+                        Ok::<_, String>(path.canonicalize().unwrap_or(path))
                     })
                     .await;
-                let _ = this.update(cx, |this, cx| match result {
-                    Ok(()) => this.inform("Saved library copy", cx),
-                    Err(e) => {
-                        this.feedback.set_error(e);
-                        cx.notify();
-                    }
+                let _ = cx.update(|window, cx| {
+                    this.update(cx, |this, cx| match written {
+                        Ok(path) => {
+                            let old_id = this.library.active_id.clone();
+                            let old_pathless = this
+                                .library
+                                .note(&old_id)
+                                .is_some_and(|note| note.path.is_none());
+                            let opened = this
+                                .persistence
+                                .as_ref()
+                                .ok_or_else(|| "Open a notes folder before saving.".to_owned())
+                                .and_then(|p| p.open_file(path));
+                            match opened {
+                                Ok(note) => {
+                                    let id = note.id.clone();
+                                    if this.library.note(&id).is_none() {
+                                        this.library.adopt(note);
+                                    }
+                                    this.library.select(&id);
+                                    if old_pathless && old_id != id {
+                                        this.library.remove(&old_id);
+                                        this.sessions.remove(&old_id);
+                                    }
+                                    this.feedback.clear_error();
+                                    this.ensure_session(window, cx);
+                                    this.focus_editor(window, cx);
+                                    this.notes_changed(cx);
+                                    this.inform("Saved", cx);
+                                }
+                                Err(e) => {
+                                    this.feedback.set_error(e);
+                                    cx.notify();
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            this.feedback.set_error(e);
+                            cx.notify();
+                        }
+                    })
                 });
             }
         })
@@ -1341,12 +1388,7 @@ impl NotesApp {
                     self.library.select(&id);
                 })
             } else {
-                Store::open_file(path, self.settings_path.clone()).map(|(store, mut library)| {
-                    library.preferences = self.library.preferences.clone();
-                    self.persistence = Some(Persistence::new(store));
-                    self.path = None;
-                    self.replace_library(library, window, cx);
-                })
+                Err("Open a notes folder before opening files.".to_owned())
             };
             // Failing to open a file says nothing about saving, so it is a sentence
             // rather than the save banner — and each file gets its own.
@@ -1610,9 +1652,8 @@ fn without_markdown(name: &str) -> &str {
 /// same directory first, then the shortest path relative to `root`, then that
 /// path itself — so the answer never depends on the order the notes arrived in.
 ///
-/// With no folder — the standalone window, where the open files have no root in
-/// common — every target is matched by stem, because a path relative to nothing
-/// names nothing.
+/// When there is no notes folder yet, every target is matched by stem alone —
+/// a path relative to nothing names nothing.
 /// The file a wiki link names, where the folder really holds one. A target is written
 /// relative to the note or to the folder, the two places an image source is looked up,
 /// and it may not climb out of either.
@@ -1775,12 +1816,6 @@ fn folder_label(root: &std::path::Path, relative: &std::path::Path) -> String {
     }
 }
 
-/// Whether a note is not yet filed: non-blank and still without a path. Blank pages
-/// are not drafts — the store never writes them, and the library keeps one open to type into.
-pub(crate) fn is_draft(note: &crate::storage::Note) -> bool {
-    note.path.is_none() && !note.document_is_empty()
-}
-
 /// Heights of the toolbar and footer, which float over the top and bottom of the note.
 const TOOLBAR_HEIGHT: Pixels = px(52.);
 const FOOTER_HEIGHT: Pixels = px(48.);
@@ -1873,7 +1908,6 @@ mod tests {
         classify_drop, folder_label, linked_file, location_budget, note_location,
         rejection_message, resolve_wiki_link, shorten_location, wiki_link_page,
     };
-    use crate::{doc, storage::Library};
     use std::{
         collections::HashSet,
         fs,
@@ -2037,7 +2071,7 @@ mod tests {
     }
 
     #[test]
-    fn standalone_files_resolve_by_stem_alone() {
+    fn files_without_a_folder_resolve_by_stem() {
         let notes = [
             ("a", PathBuf::from("/tmp/one/Note.md")),
             ("b", PathBuf::from("/var/two/Plan.md")),
@@ -2188,23 +2222,5 @@ mod tests {
             folder_label(root, Path::new("Inbox/Daily")),
             "Notes/Inbox/Daily"
         );
-    }
-
-    #[test]
-    fn a_draft_is_a_non_blank_note_with_no_file() {
-        let mut library = Library::default();
-        let id = library.new_note(doc::from_markdown("Unfiled"));
-        let note = |library: &Library, id: &str| {
-            library.notes.iter().find(|n| n.id == id).unwrap().clone()
-        };
-        // Nothing has been written for it yet, so it lives only in the app.
-        assert!(super::is_draft(&note(&library, &id)));
-        // The blank page an empty library opens on has nothing in it to file.
-        let blank = library.new_note(doc::empty());
-        assert!(!super::is_draft(&note(&library, &blank)));
-        // Given a file, it is an ordinary note.
-        let filed = library.notes.iter_mut().find(|n| n.id == id).unwrap();
-        filed.path = Some(PathBuf::from("/notes/Unfiled.md"));
-        assert!(!super::is_draft(&note(&library, &id)));
     }
 }

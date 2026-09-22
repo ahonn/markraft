@@ -23,8 +23,10 @@ pub struct Saved {
     pub revision: u64,
     pub result: Result<(), String>,
     pub paths: Vec<(String, std::path::PathBuf)>,
-    /// Notes whose local edits were archived because the on-disk version was kept.
+    /// Notes whose local edits were kept as a conflicted copy because disk won.
     pub conflicts: Vec<String>,
+    /// Where this save's deletions landed in the Trash, when the platform said.
+    pub trashed: Vec<std::path::PathBuf>,
 }
 pub enum Event {
     Saved(Saved),
@@ -256,6 +258,7 @@ fn save_snapshot(store: &mut Store, revision: u64, library: &Library) -> Saved {
         result,
         paths: store.paths(),
         conflicts: store.conflicts(),
+        trashed: store.trashed(),
     }
 }
 
@@ -373,7 +376,9 @@ mod tests {
     }
 
     fn open(directory: &std::path::Path) -> (Store, Library) {
-        Store::open(directory.join("notes"), directory.join("settings.json")).unwrap()
+        let notes = directory.join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        Store::open(notes, directory.join("settings.json")).unwrap()
     }
 
     /// The only Markdown file in the notes folder, and its text.
@@ -481,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn a_note_changed_by_another_program_keeps_disk_and_archives_local() {
+    fn a_note_changed_by_another_program_keeps_disk_and_a_conflicted_copy() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());
         let persistence = Persistence::start(store, false);
@@ -508,19 +513,24 @@ mod tests {
             .filter_map(|entry| std::fs::read_to_string(entry.unwrap().path()).ok())
             .any(|text| text.ends_with("Keep this local work\n"));
         assert!(saved);
-        // Local edits for the conflicted note landed in recovery history, not on disk.
-        let history = std::fs::read_dir(
-            std::fs::read_dir(directory.path().join("workspaces"))
+        // Local edits for the conflicted note landed beside the file, not on disk.
+        // A queued save and the flush behind it both see this conflict, and it is
+        // still one copy: the second would say exactly what the first does.
+        let copies: Vec<_> = std::fs::read_dir(directory.path().join("notes"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().contains("conflicted copy"))
+            })
+            .collect();
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        assert!(copies.iter().any(|copy| {
+            std::fs::read_to_string(copy)
                 .unwrap()
-                .next()
-                .unwrap()
-                .unwrap()
-                .path()
-                .join("recovery-history"),
-        )
-        .unwrap()
-        .count();
-        assert!(history >= 1);
+                .contains("Shared, edited here")
+        }));
     }
 
     #[test]
@@ -607,9 +617,20 @@ mod tests {
         persistence.flush(0, reloaded).unwrap().result.unwrap();
         assert!(saves(&persistence)[0].result.is_ok());
         assert!(
-            only_note(directory.path())
-                .1
+            std::fs::read_to_string(&path)
+                .unwrap()
                 .ends_with("External text, continued\n")
+        );
+        assert!(
+            std::fs::read_dir(directory.path().join("notes"))
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .contains("conflicted copy")
+                })
         );
     }
 
@@ -656,13 +677,23 @@ mod tests {
         assert!(texts.contains(&"Dropped in".to_owned()), "{texts:?}");
 
         // A snapshot taken before acknowledging must neither undo the disk version
-        // nor claim a successful save of the stale local edit.
+        // nor claim a successful save of the stale local edit — that edit is kept
+        // as a conflicted copy beside the file.
         library.set_document(&id, doc::from_markdown("Stale local edit"));
         let failed = persistence.flush(2, library.clone()).unwrap();
         assert!(failed.result.is_err());
         assert!(failed.conflicts.contains(&id));
-        assert!(folder_text(directory.path()).contains("From another editor"));
-        assert!(!folder_text(directory.path()).contains("Stale local edit"));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("From another editor")
+        );
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("Stale local edit")
+        );
+        assert!(folder_text(directory.path()).contains("Stale local edit"));
         persistence.acknowledge(vec![id.clone()]);
         // After acknowledging, adopt the disk note and continue editing.
         library
@@ -673,8 +704,16 @@ mod tests {
             .document = doc::from_markdown("From another editor");
         library.set_document(&id, doc::from_markdown("From another editor, continued"));
         persistence.flush(0, library).unwrap().result.unwrap();
-        assert!(folder_text(directory.path()).contains("From another editor, continued"));
-        assert!(!folder_text(directory.path()).contains("Stale local edit"));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("From another editor, continued")
+        );
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("Stale local edit")
+        );
     }
 
     /// Every note in the folder, concatenated.

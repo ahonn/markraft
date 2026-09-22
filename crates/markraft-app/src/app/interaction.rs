@@ -4,7 +4,6 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum InputKind {
     Notes,
-    Drafts,
     Actions,
     Shortcut,
     Link,
@@ -61,7 +60,6 @@ impl Interaction {
         match self.panel {
             Panel::Editor => None,
             Panel::Browse => Some(InputKind::Notes),
-            Panel::Drafts => Some(InputKind::Drafts),
             Panel::Actions => Some(InputKind::Actions),
             Panel::Settings => Some(InputKind::Shortcut),
         }
@@ -169,7 +167,7 @@ impl NotesApp {
     pub(super) fn search_text(&self, cx: &App) -> String {
         self.input
             .as_ref()
-            .filter(|input| matches!(input.kind, InputKind::Notes | InputKind::Drafts))
+            .filter(|input| matches!(input.kind, InputKind::Notes))
             .map(|input| input.editor.read(cx).text().to_owned())
             .unwrap_or_default()
     }
@@ -286,7 +284,7 @@ impl NotesApp {
             input.text = text;
             match kind {
                 InputKind::Language => this.code_language.reopen(),
-                InputKind::Notes | InputKind::Drafts => this.picker.reopen_browse(),
+                InputKind::Notes => this.picker.reopen_browse(),
                 InputKind::Actions => this.picker.reopen_actions(),
                 _ => {}
             }

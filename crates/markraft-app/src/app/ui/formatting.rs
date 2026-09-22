@@ -576,7 +576,7 @@ impl NotesApp {
                 urgent: true,
                 actions: vec![
                     ("Retry", Intent::Retry),
-                    ("Save a Copy…", Intent::SaveCopy),
+                    ("Save As…", Intent::SaveAs),
                     ("Reload from Disk…", Intent::Reload),
                 ],
             });
@@ -596,38 +596,6 @@ impl NotesApp {
                 } else {
                     Vec::new()
                 },
-            });
-        }
-        // The capsule is a pointer to work that is not on screen. When the only note
-        // that is not in a file is the one being written, it points at itself.
-        let drafts = self.draft_count();
-        let elsewhere = drafts - usize::from(crate::app::is_draft(note));
-        if elsewhere > 0 {
-            states.push(FileState {
-                id: "state-drafts",
-                icon: Icon::Drafts,
-                label: format!("{drafts} draft{}", if drafts == 1 { "" } else { "s" }),
-                detail: format!(
-                    "{drafts} note{} not yet saved to a file.",
-                    if drafts == 1 { " is" } else { "s are" },
-                ),
-                urgent: false,
-                actions: vec![("Show Drafts…", Intent::Drafts)],
-            });
-        }
-        if self.folder_was_created {
-            states.push(FileState {
-                id: "state-new-folder",
-                icon: Icon::Open,
-                label: "New folder".into(),
-                detail: "The notes folder in your settings was not there, so an empty \
-                         one was made. Choose another folder if the old one moved."
-                    .into(),
-                urgent: false,
-                actions: vec![
-                    ("Choose Folder…", Intent::ChooseFolder),
-                    ("Show Folder", Intent::Reveal),
-                ],
             });
         }
         states

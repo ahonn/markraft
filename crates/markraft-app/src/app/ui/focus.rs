@@ -103,7 +103,7 @@ impl NotesApp {
         }
         match self.interaction.panel() {
             Panel::Editor => Surface::Editor,
-            Panel::Browse | Panel::Drafts => Surface::Picker,
+            Panel::Browse => Surface::Picker,
             Panel::Actions => Surface::Actions,
             Panel::Settings => Surface::Settings,
         }
@@ -186,11 +186,7 @@ impl NotesApp {
             Surface::Picker => {
                 stops.push(Stop::query());
                 let query = self.query().read(cx).text().to_owned();
-                for (index, note) in self
-                    .matching_notes(query.trim(), self.scope())
-                    .iter()
-                    .enumerate()
-                {
+                for (index, note) in self.matching_notes(query.trim()).iter().enumerate() {
                     let id = note.id.clone();
                     stops.push(Stop::run(id.clone(), Intent::Select(id.clone())).in_row(index));
                     stops.push(
@@ -251,7 +247,6 @@ impl NotesApp {
                 stops.push(Stop::query());
                 stops.push(Stop::run("apply-shortcut", Intent::Shortcut));
                 stops.push(Stop::run("open-markdown-setting", Intent::OpenMarkdown));
-                stops.push(Stop::run("export-library", Intent::SaveCopy));
                 if self.path.is_some() {
                     stops.push(Stop::run("show-storage", Intent::Reveal));
                 }

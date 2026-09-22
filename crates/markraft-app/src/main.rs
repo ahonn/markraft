@@ -25,7 +25,8 @@ Usage: markraft-app [--dir PATH] [--settings PATH] [--] [FILE.md ...]
   --settings PATH   Use this settings file instead of the default:
                     ~/Library/Application Support/Markraft/settings.json
 
-Positional files are opened in place. Use -- before filenames beginning with -.
+Positional files open into the notes folder session. A folder is required
+(--dir, or the one chosen in the app). Use -- before filenames beginning with -.
 
 Notes are stored as Markdown under a folder you choose. The app stays in the
 menu bar while its window is hidden. ⌥N toggles the window and ⌘K lists every
@@ -85,9 +86,15 @@ fn main() {
             Launch::Forwarded => return,
             Launch::Primary(instance) => instance,
         };
-    // This read is what sets a damaged settings file aside, so its notice travels
-    // from here: the store's own read then finds no file at all.
+    // After the handover, because this read is what sets a damaged settings file
+    // aside — a second launch that is only passing a request along must not move
+    // the file this one is using, and its notice would have nowhere to be shown.
     let settings = Settings::read(&settings_path).unwrap_or_default();
+    if !restore_files && directory.is_none() && settings.notes_folder.is_none() {
+        fail(
+            "A notes folder is required to open files. Pass --dir PATH, or choose a folder in the app first.",
+        );
+    }
     if restore_files {
         // Only the primary process restores the previous session. A second
         // ordinary launch just raises the current one. Queue individual paths

@@ -47,7 +47,10 @@ struct Manifest {
     active_id: String,
     loose: Vec<PathBuf>,
 }
-#[derive(Serialize, Deserialize)]
+/// A leftover draft from a version that kept them. Only read now, and read
+/// forgivingly: a field this version does not know is not worth losing the text over.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
 struct Recovery {
     id: String,
     path: Option<PathBuf>,
@@ -65,46 +68,26 @@ pub struct Store {
     files: HashMap<String, Saved>,
     pending: HashSet<String>,
     previous: HashMap<String, Saved>,
-    /// Notes whose local edits were archived because disk won on a mid-save conflict.
+    /// Notes whose local edits were kept as a conflicted copy because disk won.
     disk_won: HashSet<String>,
+    /// Where the last save's deletions landed in the Trash, for the window to reveal.
+    trashed: Vec<PathBuf>,
     manifest: Manifest,
     settings: Settings,
     notices: Notices,
     loose: HashSet<PathBuf>,
-    standalone: bool,
-    /// Whether the notes folder had to be made because the one the settings named
-    /// was no longer there.
-    created: bool,
 }
 impl Store {
     pub fn open(directory: PathBuf, settings_path: PathBuf) -> Result<(Self, Library), String> {
-        Self::open_mode(directory, settings_path, None)
-    }
-    pub fn open_file(path: PathBuf, settings_path: PathBuf) -> Result<(Self, Library), String> {
-        let parent = path
-            .parent()
-            .ok_or("The file has no parent folder")?
-            .to_owned();
-        Self::open_mode(parent, settings_path, Some(path))
-    }
-    fn open_mode(
-        directory: PathBuf,
-        settings_path: PathBuf,
-        file: Option<PathBuf>,
-    ) -> Result<(Self, Library), String> {
-        // A folder the settings still name but the disk no longer has is made
-        // again rather than refused, so the app keeps working; that it was made is
-        // worth saying, because the notes that were in it are not coming back.
-        let created = !directory.exists();
-        fs::create_dir_all(&directory).map_err(|e| describe(&directory, &e))?;
+        if !directory.exists() {
+            return Err(describe(
+                &directory,
+                &io::Error::new(io::ErrorKind::NotFound, "not found"),
+            ));
+        }
         let directory = fs::canonicalize(&directory).map_err(|e| describe(&directory, &e))?;
         let mut hash = 0xcbf29ce484222325u64;
-        let key = if file.is_some() {
-            b"standalone-files-v1".as_slice()
-        } else {
-            directory.as_os_str().as_encoded_bytes()
-        };
-        for byte in key {
+        for byte in directory.as_os_str().as_encoded_bytes() {
             hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
         }
         let settings_directory = settings_path.parent().unwrap_or(Path::new("."));
@@ -135,11 +118,7 @@ impl Store {
                 None => Manifest::default(),
             };
         let settings = Settings::read(&settings_path)?;
-        let mut loose: HashSet<PathBuf> = manifest.loose.iter().cloned().collect();
-        let standalone = file.is_some();
-        if let Some(file) = file {
-            loose.insert(absolute_file(&file)?);
-        }
+        let loose: HashSet<PathBuf> = manifest.loose.iter().cloned().collect();
         let mut store = Self {
             directory,
             state,
@@ -149,21 +128,15 @@ impl Store {
             pending: HashSet::new(),
             previous: HashMap::new(),
             disk_won: HashSet::new(),
+            trashed: Vec::new(),
             manifest,
             settings,
             notices: Notices::default(),
             loose,
-            created,
-            standalone,
         };
         let mut library = store.scan_library()?;
-        store.restore_recovery(&mut library)?;
+        store.restore_recovery(&mut library);
         Ok((store, library))
-    }
-    /// Whether the notes folder was made on open because the one the settings named
-    /// was gone. What was in the old one is not coming back, so the app says so.
-    pub fn created_folder(&self) -> bool {
-        self.created
     }
     pub fn notices(&self) -> Notices {
         self.notices.clone()
@@ -180,9 +153,14 @@ impl Store {
             .into_iter()
             .collect()
     }
-    /// Notes whose local edits were archived because the on-disk version was kept.
+    /// Notes whose local edits were kept as a conflicted copy because disk won.
     pub fn conflicts(&self) -> Vec<String> {
         self.disk_won.iter().cloned().collect()
+    }
+    /// Where the last save's deletions landed in the Trash. Empty when the platform
+    /// did not say, which is not a failure: the file is still gone.
+    pub fn trashed(&self) -> Vec<PathBuf> {
+        self.trashed.clone()
     }
     pub fn paths(&self) -> Vec<(String, PathBuf)> {
         self.files
@@ -262,9 +240,7 @@ impl Store {
     }
     fn read_folder(&self) -> Result<HashMap<String, Saved>, String> {
         let mut paths = self.loose.iter().cloned().collect::<Vec<_>>();
-        if !self.standalone {
-            collect_markdown(&self.directory, &mut paths)?;
-        }
+        collect_markdown(&self.directory, &mut paths)?;
         paths.sort();
         paths.dedup();
         let known: HashMap<_, _> = self.files.values().map(|s| (&s.path, s)).collect();
@@ -282,10 +258,8 @@ impl Store {
         if folder.exists() {
             for entry in fs::read_dir(&folder).map_err(|e| describe(&folder, &e))? {
                 let path = entry.map_err(|e| e.to_string())?.path();
-                if path.extension().is_some_and(|e| e == "json")
-                    && let Some(id) = path.file_stem().and_then(|s| s.to_str())
-                {
-                    self.archive_recovery(id)?;
+                if path.extension().is_some_and(|e| e == "json") {
+                    let _ = fs::remove_file(&path);
                 }
             }
         }
@@ -320,13 +294,8 @@ impl Store {
     }
     /// A file that left while Markraft was not watching has no note to vanish from
     /// the window, so the list would simply be shorter with nothing said. Name what
-    /// went, once, and stop expecting it. A folder that was missing altogether has
-    /// already been reported, and may only be a drive that is not mounted: its notes
-    /// keep their identities for when it returns.
+    /// went, once, and stop expecting it.
     fn forget_missing(&mut self) {
-        if self.created {
-            return;
-        }
         let known: HashSet<_> = self.files.values().map(|saved| &saved.path).collect();
         let mut missing: Vec<_> = self
             .manifest
@@ -494,7 +463,7 @@ impl Store {
                 continue;
             }
             let relative = path.strip_prefix(&self.directory).ok();
-            if !self.loose.contains(&path) && (self.standalone || relative.is_none() || relative.is_some_and(|p|p.components().any(|c| matches!(c,Component::Normal(name) if matches!(name.to_str(),Some(".git"|".obsidian"|".markraft"|".trash"|"node_modules")))))) { continue; }
+            if !self.loose.contains(&path) && (relative.is_none() || relative.is_some_and(|p|p.components().any(|c| matches!(c,Component::Normal(name) if matches!(name.to_str(),Some(".git"|".obsidian"|".markraft"|".trash"|"node_modules")))))) { continue; }
             let old = self.files.values().find(|s| s.path == path).cloned();
             if old.is_none()
                 && !self.loose.contains(&path)
@@ -560,12 +529,8 @@ impl Store {
             note,
         )
     }
-    /// Archive the note's local text into recovery history. Used when disk wins.
+    /// Keep the note's local text as a conflicted copy beside the file. Used when disk wins.
     pub fn recover(&mut self, note: &Note) -> Result<(), String> {
-        self.write_recovery(note)?;
-        self.archive_recovery(&note.id)
-    }
-    fn write_recovery(&mut self, note: &Note) -> Result<(), String> {
         let original = self
             .previous
             .get(&note.id)
@@ -573,63 +538,102 @@ impl Store {
         let path = original
             .map(|s| s.path.clone())
             .or_else(|| note.path.clone());
-        let disk = path
-            .as_deref()
-            .map(read_optional)
-            .transpose()
-            .map_err(|e| e.to_string())?
-            .flatten();
-        let base = original.map(|s| s.bytes.clone()).unwrap_or_default();
-        let source = original.map(|s| s.source.clone()).unwrap_or_default();
-        let local = render(original, note).unwrap_or_else(|_| doc::to_markdown(&note.document));
-        let record = Recovery {
-            id: note.id.clone(),
-            path,
-            base,
-            source,
-            local,
-            conflict: false,
-            disk,
+        let Some(path) = path else {
+            // Nothing to stand beside. Saying so is what keeps the caller from
+            // reporting a copy that was never written.
+            return Err("This note has no file to keep a copy beside.".into());
         };
-        atomic_write(
-            &self
-                .state
-                .join("recovery")
-                .join(format!("{}.json", note.id)),
-            &serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?,
-        )
-    }
-    /// On open: pathless leftovers are discarded; when a path still exists, disk
-    /// wins and the recovery local text goes to history; when the path is gone,
-    /// the local text is written back once.
-    fn restore_recovery(&mut self, library: &mut Library) -> Result<(), String> {
-        let dir = self.state.join("recovery");
-        if !dir.exists() {
-            return Ok(());
+        let parent = path.parent().ok_or("The file has no parent")?;
+        if !parent.exists() {
+            return Err(describe(
+                parent,
+                &io::Error::new(io::ErrorKind::NotFound, "not found"),
+            ));
         }
-        let mut archived = 0;
-        for entry in fs::read_dir(&dir).map_err(|e| describe(&dir, &e))? {
-            let path = entry.map_err(|e| e.to_string())?.path();
+        // Whichever way the text was rendered, the copy is a text file and ends in a
+        // newline. It also makes two sightings of one conflict compare equal, which
+        // is what keeps the second from becoming a second file.
+        let local = ends_with_newline(
+            render(original, note).unwrap_or_else(|_| doc::to_markdown(&note.document)),
+        );
+        if !already_kept_beside(&path, local.as_bytes()) {
+            let target = conflicted_copy_path(&path);
+            write_document(&target, local.as_bytes(), None)?;
+        }
+        self.clear_recovery(&note.id);
+        Ok(())
+    }
+    /// On open: migrate leftover recovery JSON from the versions that kept it.
+    /// When the file is still there the local text is kept beside it as a conflicted
+    /// copy; when the file is gone it is written back once.
+    ///
+    /// Best effort throughout. A draft nobody can read is discarded, because there is
+    /// no text left in it to keep; one that cannot be written yet is left where it is
+    /// for the next launch. Neither is worth refusing to open the whole folder over,
+    /// which is what a leftover file that always fails would otherwise do forever.
+    fn restore_recovery(&mut self, library: &mut Library) {
+        let history = self.state.join("recovery-history");
+        if history.exists() {
+            let _ = fs::remove_dir_all(&history);
+        }
+        let dir = self.state.join("recovery");
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return;
+        };
+        let (mut conflicted, mut held) = (0, 0);
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
             let record: Recovery =
-                serde_json::from_slice(&fs::read(&path).map_err(|e| describe(&path, &e))?)
-                    .map_err(|e| format!("Cannot read recovery draft: {e}"))?;
+                match fs::read(&path)
+                    .map_err(|e| describe(&path, &e))
+                    .and_then(|bytes| {
+                        serde_json::from_slice(&bytes).map_err(|e| format!("unreadable draft: {e}"))
+                    }) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        eprintln!("Markraft: {} was discarded: {error}", path.display());
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                };
             let Some(file_path) = record.path.clone() else {
-                // Intentional drafts from older versions have no file to restore to.
-                self.archive_recovery(&record.id)?;
+                let _ = fs::remove_file(&path);
                 continue;
             };
+            let record = Recovery {
+                local: ends_with_newline(record.local),
+                ..record
+            };
             if file_path.exists() {
-                // Disk wins: keep the file, retire the recovery local text to history.
-                self.archive_recovery(&record.id)?;
-                archived += 1;
+                if already_kept_beside(&file_path, record.local.as_bytes()) {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                let target = conflicted_copy_path(&file_path);
+                match write_document(&target, record.local.as_bytes(), None) {
+                    Ok(()) => {
+                        conflicted += 1;
+                        let _ = fs::remove_file(&path);
+                    }
+                    Err(error) => {
+                        eprintln!("Markraft: {error}");
+                        held += 1;
+                    }
+                }
                 continue;
             }
             // Path missing: recreate the file from the recovery local text once.
-            let source =
-                SourceDocument::parse(doc::schema(), &record.local).map_err(|e| e.to_string())?;
+            let Ok(source) = SourceDocument::parse(doc::schema(), &record.local) else {
+                eprintln!(
+                    "Markraft: {} holds text no document can be made of",
+                    path.display()
+                );
+                let _ = fs::remove_file(&path);
+                continue;
+            };
             let mut note = Note {
                 id: record.id.clone(),
                 document: source.document().clone(),
@@ -645,11 +649,19 @@ impl Store {
                 note.created_at = existing.created_at;
                 note.pinned = existing.pinned;
             }
-            let bytes = record.local.into_bytes();
-            if let Some(parent) = file_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| describe(parent, &e))?;
+            let bytes = record.local.clone().into_bytes();
+            if let Some(parent) = file_path.parent()
+                && let Err(error) = fs::create_dir_all(parent)
+            {
+                eprintln!("Markraft: {}", describe(parent, &error));
+                held += 1;
+                continue;
             }
-            write_document(&file_path, &bytes, None)?;
+            if let Err(error) = write_document(&file_path, &bytes, None) {
+                eprintln!("Markraft: {error}");
+                held += 1;
+                continue;
+            }
             note.path = Some(file_path.clone());
             self.manifest
                 .paths
@@ -668,33 +680,33 @@ impl Store {
                 },
             );
             library.adopt(note);
-            self.archive_recovery(&record.id)?;
+            let _ = fs::remove_file(&path);
         }
-        if archived > 0 {
-            eprintln!("Markraft: recovery history is in {}", dir.display());
-            self.notices
-                .raise("A note changed on disk; your edits were kept in history.".to_owned());
+        if conflicted > 0 {
+            self.notices.raise(
+                "A note changed on disk; your edits were kept as a conflicted copy.".to_owned(),
+            );
         }
-        Ok(())
+        if held > 0 {
+            self.notices.raise(
+                "Some unsaved changes could not be written yet; Markraft will try again next time."
+                    .to_owned(),
+            );
+        }
     }
-    fn archive_recovery(&self, id: &str) -> Result<(), String> {
+    fn clear_recovery(&self, id: &str) {
         let current = self.state.join("recovery").join(format!("{id}.json"));
-        if !current.exists() {
-            return Ok(());
-        }
-        let history = self.state.join("recovery-history");
-        fs::create_dir_all(&history).map_err(|e| describe(&history, &e))?;
-        let target = history.join(format!("{id}-{}.json", Uuid::new_v4()));
-        fs::rename(&current, &target).map_err(|e| describe(&current, &e))
+        let _ = fs::remove_file(current);
     }
     /// Write the library out. New non-blank notes are filed under their title
-    /// immediately. Mid-write disk conflicts archive local edits and keep the
-    /// disk version. After a note has a file, renaming is explicit — not driven
-    /// by later title edits.
+    /// immediately. Mid-write disk conflicts keep a conflicted copy of local edits
+    /// and keep the disk version. After a note has a file, renaming is explicit —
+    /// not driven by later title edits.
     pub fn save(&mut self, library: &Library) -> Result<(), String> {
         library.validate()?;
         self.manifest.workspace = library.workspace.clone();
         self.disk_won.clear();
+        self.trashed.clear();
         let mut errors = Vec::new();
         let live_ids: HashSet<_> = library.notes.iter().map(|n| n.id.clone()).collect();
         // Notes the library no longer holds were deleted: trash their files.
@@ -705,10 +717,10 @@ impl Store {
             .cloned()
             .collect();
         for id in to_trash {
-            if let Some(saved) = self.files.get(&id).cloned() {
-                if let Err(error) = self.trash_note(&saved) {
-                    errors.push(error);
-                }
+            if let Some(saved) = self.files.get(&id).cloned()
+                && let Err(error) = self.trash_note(&saved)
+            {
+                errors.push(error);
             }
         }
         for note in &library.notes {
@@ -728,13 +740,13 @@ impl Store {
                     .or_else(|| self.files.get(&note.id))
                     .is_none_or(|base| base.note.document != note.document);
                 if locally_changed {
-                    // Disk already won via refresh; archive local edits and skip write.
+                    // Disk already won via refresh; keep local edits as a conflicted copy.
                     if let Err(error) = self.recover(note) {
                         errors.push(error);
                     } else {
                         self.disk_won.insert(note.id.clone());
                         errors.push(format!(
-                            "Disk version kept for “{}”; your edits were archived.",
+                            "Disk version kept for “{}”; your edits were kept as a conflicted copy.",
                             note.title()
                         ));
                     }
@@ -752,14 +764,7 @@ impl Store {
                 continue;
             }
             if saved.is_none() && doc::is_blank(&note.document) {
-                self.archive_recovery(&note.id)?;
-                continue;
-            }
-            if saved.is_none() && note.path.is_none() && self.standalone {
-                errors.push(
-                    "Choose a notes folder before saving this draft. Open Settings and pick a folder."
-                        .into(),
-                );
+                self.clear_recovery(&note.id);
                 continue;
             }
             let result = self.save_note(note, saved.as_ref(), library);
@@ -768,7 +773,7 @@ impl Store {
                     read_optional(&s.path).is_ok_and(|disk| disk.as_ref() != Some(&s.bytes))
                 });
                 if external {
-                    // Disk wins mid-save: archive local, adopt disk bytes, skip write.
+                    // Disk wins mid-save: keep local as conflicted copy, adopt disk bytes.
                     let recovery = self.recover(note);
                     if let Some(saved) = &saved
                         && let Ok(Some(mut disk)) = self.read_path(&saved.path, Some(saved))
@@ -780,17 +785,13 @@ impl Store {
                     self.pending.insert(note.id.clone());
                     errors.push(match recovery {
                         Ok(()) => format!(
-                            "Disk version kept for “{}”; your edits were archived.",
+                            "Disk version kept for “{}”; your edits were kept as a conflicted copy.",
                             note.title()
                         ),
-                        Err(e) => format!("{error}; recovery failed: {e}"),
+                        Err(e) => format!("{error}; conflicted copy failed: {e}"),
                     });
                 } else {
-                    let recovery = self.write_recovery(note);
-                    errors.push(match recovery {
-                        Ok(()) => error,
-                        Err(e) => format!("{error}; recovery failed: {e}"),
-                    });
+                    errors.push(error);
                 }
             }
         }
@@ -816,28 +817,6 @@ impl Store {
             Err(errors.join("\n"))
         }
     }
-    /// When a note inside the notes folder has a stem that no longer matches its
-    /// title, rename the file. Custom absolute paths outside the folder are left
-    /// alone; collisions skip the rename rather than overwrite.
-    fn sync_title_filename(&mut self, note: &Note, saved: &Saved) -> Result<(), String> {
-        if !saved.path.starts_with(&self.directory) {
-            return Ok(());
-        }
-        let current_stem = saved
-            .path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let wanted = file_name(note);
-        if current_stem == wanted {
-            return Ok(());
-        }
-        match self.rename(&note.id, &wanted) {
-            Ok(_) => Ok(()),
-            Err(error) if error.contains("already exists") => Ok(()),
-            Err(error) => Err(error),
-        }
-    }
     fn save_note(
         &mut self,
         note: &Note,
@@ -848,7 +827,7 @@ impl Store {
             let current = read_optional(&saved.path).map_err(|e| describe(&saved.path, &e))?;
             if current.as_ref() != Some(&saved.bytes) {
                 return Err(format!(
-                    "“{}” changed on disk. Your changes are preserved in recovery.",
+                    "“{}” changed on disk, so it was not overwritten.",
                     note.title()
                 ));
             }
@@ -864,12 +843,6 @@ impl Store {
                 absolute_file(path)?
             }
             None => {
-                if self.standalone {
-                    return Err(
-                        "Choose a notes folder before saving this draft. Open Settings and pick a folder."
-                            .into(),
-                    );
-                }
                 let relative = &library.workspace.new_note_directory;
                 if !safe_relative(relative) {
                     return Err("The new-note location must stay inside the notes folder.".into());
@@ -905,14 +878,14 @@ impl Store {
         stored.conflicted = false;
         stored.deleted_at = None;
         self.manifest.paths.insert(path.clone(), identity(&stored));
-        if self.standalone || !path.starts_with(&self.directory) {
+        if !path.starts_with(&self.directory) {
             self.loose.insert(path.clone());
         }
-        self.archive_recovery(&note.id)?;
+        self.clear_recovery(&note.id);
         self.files.insert(
             note.id.clone(),
             Saved {
-                path: path.clone(),
+                path,
                 source: saved
                     .map(|s| s.source.clone())
                     .unwrap_or_else(|| bytes.clone()),
@@ -920,22 +893,20 @@ impl Store {
                 note: stored,
             },
         );
-        // After writing content, sync the filename to the title when filed by Markraft.
-        if let Some(saved) = self.files.get(&note.id).cloned() {
-            let _ = self.sync_title_filename(note, &saved);
-        }
         Ok(())
     }
     /// Move the file to the system trash and drop it from the store. No in-app
     /// restore tombstone is kept.
     fn trash_note(&mut self, saved: &Saved) -> Result<(), String> {
-        move_to_trash(&saved.path)?;
+        if let Some(landed) = move_to_trash(&saved.path)? {
+            self.trashed.push(landed);
+        }
         self.files.remove(&saved.note.id);
         self.manifest.paths.remove(&saved.path);
         self.loose.remove(&saved.path);
         self.pending.remove(&saved.note.id);
         self.previous.remove(&saved.note.id);
-        self.archive_recovery(&saved.note.id)?;
+        self.clear_recovery(&saved.note.id);
         Ok(())
     }
     pub fn update_settings(&mut self, update: impl FnOnce(&mut Settings)) -> Result<(), String> {
@@ -1203,7 +1174,7 @@ fn move_without_replacing(from: &Path, to: &Path) -> Result<(), String> {
 /// Moves a file into the system Trash. Returns the Trash location when the platform
 /// reports one; callers do not restore from it.
 #[cfg(target_os = "macos")]
-fn move_to_trash(path: &Path) -> Result<(), String> {
+fn move_to_trash(path: &Path) -> Result<Option<PathBuf>, String> {
     use objc2::rc::Retained;
     use objc2_foundation::{NSFileManager, NSURL};
     let url = NSURL::fileURLWithPath(&objc2_foundation::NSString::from_str(
@@ -1214,10 +1185,14 @@ fn move_to_trash(path: &Path) -> Result<(), String> {
     manager
         .trashItemAtURL_resultingItemURL_error(&url, Some(&mut result))
         .map_err(|e| e.to_string())?;
-    Ok(())
+    // Where it landed, for the window to reveal. The platform does not always say,
+    // and a file that went without an address went all the same.
+    Ok(result
+        .and_then(|url| url.path())
+        .map(|path| PathBuf::from(path.to_string())))
 }
 #[cfg(not(target_os = "macos"))]
-fn move_to_trash(_path: &Path) -> Result<(), String> {
+fn move_to_trash(_path: &Path) -> Result<Option<PathBuf>, String> {
     Err("System Trash is not available on this platform.".into())
 }
 /// The permissions a new file in `folder` should have: the folder's own, without the
@@ -1264,9 +1239,6 @@ fn copy_metadata(from: &Path, to: &Path) -> Result<(), String> {
             .permissions(),
     )
     .map_err(|e| describe(to, &e))
-}
-pub fn backup(library: &Library) -> Result<Vec<u8>, String> {
-    serde_json::to_vec_pretty(&serde_json::json!({"format":"markraft-recovery-v1","notes":library.notes.iter().map(|n|serde_json::json!({"id":n.id,"path":n.path,"markdown":doc::to_markdown(&n.document)})).collect::<Vec<_>>()})).map_err(|e|e.to_string())
 }
 /// Milliseconds since the epoch as (year, month, day, hour, minute, second, millisecond).
 pub(crate) fn civil(milliseconds: u64) -> (i64, u32, u32, u32, u32, u32, u32) {
@@ -1352,6 +1324,74 @@ pub(crate) fn file_label(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// `text` with the newline a text file ends in.
+fn ends_with_newline(mut text: String) -> String {
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
+/// What every sibling copy of `original` is called before the date: the part that
+/// finds the ones already standing there, whatever day they were written on.
+fn conflicted_copy_prefix(original: &Path) -> String {
+    let stem = original
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Untitled".into());
+    format!("{stem} (conflicted copy")
+}
+
+/// The conflicted copies already beside `original`.
+fn conflicted_copies(original: &Path) -> Vec<PathBuf> {
+    let parent = original.parent().unwrap_or(Path::new("."));
+    let prefix = conflicted_copy_prefix(original);
+    let Ok(entries) = fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+        })
+        .collect()
+}
+
+/// Whether this exact text is already kept beside the file. One conflict can be seen
+/// by a queued save and by the flush behind it, and a second identical copy says
+/// nothing the first does not — it only leaves another file to clean up.
+fn already_kept_beside(original: &Path, bytes: &[u8]) -> bool {
+    conflicted_copies(original)
+        .into_iter()
+        .any(|path| fs::read(&path).is_ok_and(|existing| existing == bytes))
+}
+
+/// Dropbox-style sibling for local edits when disk wins:
+/// `{stem} (conflicted copy YYYY-MM-DD).md`, with ` 2`, ` 3`, … on collision.
+fn conflicted_copy_path(original: &Path) -> PathBuf {
+    let parent = original.parent().unwrap_or(Path::new("."));
+    let extension = original
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "md".into());
+    let (year, month, day, ..) = civil(crate::storage::timestamp());
+    let base = format!(
+        "{} {year:04}-{month:02}-{day:02})",
+        conflicted_copy_prefix(original)
+    );
+    (1..)
+        .map(|n| {
+            parent.join(if n == 1 {
+                format!("{base}.{extension}")
+            } else {
+                format!("{base} {n}.{extension}")
+            })
+        })
+        .find(|p| !p.exists())
+        .unwrap()
+}
+
 fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
     match fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
@@ -1383,7 +1423,9 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 mod tests {
     use super::*;
     fn open(root: &Path) -> (Store, Library) {
-        Store::open(root.join("notes"), root.join("settings.json")).unwrap()
+        let notes = root.join("notes");
+        fs::create_dir_all(&notes).unwrap();
+        Store::open(notes, root.join("settings.json")).unwrap()
     }
     fn fixture(root: &Path, name: &str, text: &[u8]) -> PathBuf {
         let path = root.join("notes").join(name);
@@ -1444,22 +1486,14 @@ mod tests {
         assert!(store.manifest.paths.is_empty());
     }
     #[test]
-    fn a_missing_folder_keeps_its_notes_identities() {
+    fn a_missing_folder_is_refused() {
         let root = tempfile::tempdir().unwrap();
-        fixture(root.path(), "Note.md", b"text");
-        let (store, library) = open(root.path());
-        let id = library.active_id.clone();
-        drop(store);
-        let away = root.path().join("unmounted");
-        fs::rename(root.path().join("notes"), &away).unwrap();
-        let (store, _) = open(root.path());
-        assert!(store.created_folder());
-        assert!(store.notices().take().is_empty());
-        drop(store);
-        fs::remove_dir_all(root.path().join("notes")).unwrap();
-        fs::rename(&away, root.path().join("notes")).unwrap();
-        let (_, library) = open(root.path());
-        assert_eq!(library.active_id, id);
+        let missing = root.path().join("notes");
+        let error = match Store::open(missing, root.path().join("settings.json")) {
+            Err(error) => error,
+            Ok(_) => panic!("expected missing folder to be refused"),
+        };
+        assert!(error.contains("no longer there"), "{error}");
     }
     #[test]
     fn opening_and_pinning_do_not_touch_user_files() {
@@ -1539,12 +1573,9 @@ mod tests {
         assert!(store.save(&library).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"External\n");
         assert!(store.conflicts().contains(&id));
-        assert!(
-            fs::read_dir(store.state.join("recovery-history"))
-                .unwrap()
-                .count()
-                >= 1
-        );
+        let copies = conflicted_copies_beside(&path);
+        assert_eq!(copies.len(), 1);
+        assert_eq!(fs::read_to_string(&copies[0]).unwrap(), "Local\n");
         drop(store);
         let (_, again) = open(root.path());
         assert_eq!(again.active_note().id, id);
@@ -1560,10 +1591,11 @@ mod tests {
         library.set_document(&id, doc::from_markdown("Local"));
         fs::remove_file(&path).unwrap();
         store.refresh().unwrap();
-        store.recover(library.active_note()).unwrap();
         assert!(store.save(&library).is_err());
         assert!(!path.exists());
-        assert_eq!(fs::read_dir(root.path().join("notes")).unwrap().count(), 0);
+        let copies = conflicted_copies_beside(&path);
+        assert_eq!(copies.len(), 1);
+        assert_eq!(fs::read_to_string(&copies[0]).unwrap().trim_end(), "Local");
     }
     #[test]
     fn read_only_encoding_and_links_are_protected() {
@@ -1588,7 +1620,7 @@ mod tests {
         assert!(note.read_only.is_some());
     }
     #[test]
-    fn new_files_are_filed_under_their_title_and_rename_when_it_changes() {
+    fn new_files_are_filed_under_their_title_once() {
         let root = tempfile::tempdir().unwrap();
         let (mut store, mut library) = open(root.path());
         let id = library.active_id.clone();
@@ -1600,10 +1632,8 @@ mod tests {
         assert!(path.ends_with("inbox/Title.md"));
         library.set_document(&id, doc::from_markdown("Changed"));
         store.save(&library).unwrap();
-        let renamed = store.paths()[0].1.clone();
-        assert!(renamed.ends_with("inbox/Changed.md"), "{renamed:?}");
-        assert_eq!(fs::read_to_string(&renamed).unwrap(), "Changed\n");
-        assert!(!path.exists());
+        assert_eq!(store.paths()[0].1, path);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "Changed\n");
     }
     #[test]
     fn no_clobber_write_and_permissions_are_preserved() {
@@ -1619,12 +1649,12 @@ mod tests {
         );
     }
     #[test]
-    fn standalone_opens_only_requested_file() {
+    fn opening_a_folder_loads_every_markdown_file() {
         let root = tempfile::tempdir().unwrap();
-        let path = fixture(root.path(), "note.md", b"Open me");
+        fixture(root.path(), "note.md", b"Open me");
         fixture(root.path(), "other.md", b"Other");
-        let (_, library) = Store::open_file(path, root.path().join("settings.json")).unwrap();
-        assert_eq!(library.notes.len(), 1);
+        let (_, library) = open(root.path());
+        assert_eq!(library.notes.len(), 2);
     }
     #[test]
     fn a_renamed_file_is_the_same_note_under_another_name() {
@@ -1653,18 +1683,13 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        // An edit afterwards renames the file to match the new title.
+        // An edit afterwards keeps the filename; renaming is explicit.
         library.notes[0].path = Some(renamed.clone());
         library.set_document(&id, doc::from_markdown("Meeting notes, revised"));
         store.save(&library).unwrap();
-        let revised = store.paths()[0].1.clone();
-        assert!(
-            revised.ends_with("Meeting notes, revised.md"),
-            "{revised:?}"
-        );
-        assert!(!renamed.exists());
+        assert_eq!(store.paths()[0].1, renamed);
         assert_eq!(
-            fs::read_to_string(&revised).unwrap().trim_end(),
+            fs::read_to_string(&renamed).unwrap().trim_end(),
             "---\nid: x\n---\n\nMeeting notes, revised"
         );
         drop(store);
@@ -1748,7 +1773,7 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"Title\n=====\n\noriginal\n\n");
     }
     #[test]
-    fn disk_wins_archives_local_work_and_keeps_the_file() {
+    fn disk_wins_keeps_local_work_as_a_conflicted_copy() {
         let root = tempfile::tempdir().unwrap();
         let path = fixture(root.path(), "note.md", b"Original");
         let (mut store, mut library) = open(root.path());
@@ -1758,12 +1783,9 @@ mod tests {
         assert!(store.save(&library).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"External");
         assert!(store.conflicts().contains(&id));
-        assert!(
-            fs::read_dir(store.state.join("recovery-history"))
-                .unwrap()
-                .count()
-                >= 1
-        );
+        let copies = conflicted_copies_beside(&path);
+        assert_eq!(copies.len(), 1);
+        assert_eq!(fs::read_to_string(&copies[0]).unwrap().trim_end(), "Local");
         assert!(
             !store
                 .state
@@ -1775,6 +1797,44 @@ mod tests {
         library.set_document(&id, doc::from_markdown("External"));
         store.save(&library).unwrap();
         assert!(store.conflicts().is_empty());
+    }
+    /// A queued save and the flush behind it can both see one conflict. The second
+    /// copy would hold exactly what the first does, so it is not written: what the
+    /// user finds beside the file is one copy per conflict, not one per attempt.
+    #[test]
+    fn seeing_one_conflict_twice_leaves_one_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "note.md", b"Original");
+        let (mut store, mut library) = open(root.path());
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown("Local"));
+        fs::write(&path, b"External").unwrap();
+        assert!(store.save(&library).is_err());
+        assert!(store.save(&library).is_err());
+        let copies = conflicted_copies_beside(&path);
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        assert_eq!(fs::read_to_string(&copies[0]).unwrap().trim_end(), "Local");
+        // Different text is a different conflict, and gets its own copy.
+        library.set_document(&id, doc::from_markdown("Local, revised"));
+        assert!(store.save(&library).is_err());
+        assert_eq!(conflicted_copies_beside(&path).len(), 2);
+    }
+    /// A leftover draft nobody can read is discarded rather than kept forever as a
+    /// folder that will not open: refusing here would refuse every later launch too.
+    #[test]
+    fn an_unreadable_recovery_draft_does_not_shut_the_folder() {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), "Note.md", b"text");
+        let (store, _) = open(root.path());
+        let recovery = store.state.join("recovery");
+        fs::create_dir_all(&recovery).unwrap();
+        let damaged = recovery.join("broken.json");
+        fs::write(&damaged, b"{ not json at all").unwrap();
+        drop(store);
+        let (store, library) = open(root.path());
+        assert_eq!(library.notes.len(), 1);
+        assert!(!damaged.exists());
+        drop(store);
     }
     #[test]
     fn explicit_new_file_location_is_used_without_overwriting() {
@@ -1888,17 +1948,16 @@ mod tests {
         assert_eq!(store.refresh().unwrap().len(), 1);
     }
     #[test]
-    fn standalone_identity_does_not_depend_on_first_file_parent() {
+    fn a_file_added_outside_the_folder_keeps_its_identity_after_restart() {
         let root = tempfile::tempdir().unwrap();
-        let first = fixture(root.path(), "z/Z.md", b"Z");
-        let second = fixture(root.path(), "a/A.md", b"A");
-        let settings = root.path().join("settings.json");
-        let (mut store, _) = Store::open_file(first.clone(), settings.clone()).unwrap();
-        let note = store.add_file(second.clone()).unwrap();
+        fixture(root.path(), "inside.md", b"Inside");
+        let outside = root.path().join("outside.md");
+        fs::write(&outside, b"Outside").unwrap();
+        let (mut store, _) = open(root.path());
+        let note = store.add_file(outside.clone()).unwrap();
         let paths = store.paths();
         drop(store);
-        let (store, library) = Store::open_file(second, settings).unwrap();
-        assert_eq!(library.notes.len(), 2);
+        let (store, library) = open(root.path());
         assert!(library.note(&note.id).is_some());
         let restored: HashSet<_> = store.paths().into_iter().collect();
         assert_eq!(restored, paths.into_iter().collect());
@@ -1948,29 +2007,23 @@ mod tests {
         );
     }
     #[test]
-    fn a_standalone_draft_needs_a_file_before_it_can_be_saved() {
+    fn an_explicit_path_is_used_without_renaming_to_the_title() {
         let root = tempfile::tempdir().unwrap();
-        let first = fixture(root.path(), "one.md", b"One");
-        let settings = root.path().join("settings.json");
-        let (mut store, mut library) = Store::open_file(first.clone(), settings.clone()).unwrap();
+        let (mut store, mut library) = open(root.path());
         let id = library.new_note(doc::from_markdown("Draft text"));
-        assert!(store.save(&library).is_err());
-        // Explicit path under the notes folder is filed, then renamed to the title.
         let target = root.path().join("notes/draft.md");
-        library.notes.iter_mut().find(|n| n.id == id).unwrap().path = Some(target);
+        library.notes.iter_mut().find(|n| n.id == id).unwrap().path = Some(target.clone());
         store.save(&library).unwrap();
         let path = store.files.get(&id).unwrap().path.clone();
-        assert!(path.ends_with("Draft text.md"), "{path:?}");
+        assert_eq!(path, fs::canonicalize(&target).unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap(), "Draft text\n");
     }
     #[test]
-    fn a_discarded_standalone_draft_does_not_come_back() {
+    fn a_discarded_draft_does_not_come_back() {
         for discard in ["trash", "remove"] {
             let root = tempfile::tempdir().unwrap();
-            let first = fixture(root.path(), "one.md", b"One");
-            let settings = root.path().join("settings.json");
-            let (mut store, mut library) =
-                Store::open_file(first.clone(), settings.clone()).unwrap();
+            fixture(root.path(), "one.md", b"One");
+            let (mut store, mut library) = open(root.path());
             let id = library.new_note(doc::from_markdown("Draft text"));
             let target = root.path().join("notes/Draft text.md");
             library.notes.iter_mut().find(|n| n.id == id).unwrap().path = Some(target.clone());
@@ -1981,7 +2034,7 @@ mod tests {
             }
             store.save(&library).unwrap();
             drop(store);
-            let (_, library) = Store::open_file(first, settings).unwrap();
+            let (_, library) = open(root.path());
             assert!(library.note(&id).is_none(), "a {discard}ed draft came back");
             assert!(!target.exists(), "the filed draft was left on disk");
         }
@@ -2005,20 +2058,20 @@ mod tests {
         assert!(!gone.exists());
         assert!(path.exists());
         assert_eq!(library.notes.len(), 1);
-        assert!(store.files.get(&id).is_none());
+        assert!(!store.files.contains_key(&id));
     }
     #[test]
-    fn standalone_new_file_is_remembered_after_restart() {
+    fn a_new_file_outside_the_folder_is_remembered_after_restart() {
         let root = tempfile::tempdir().unwrap();
-        let first = fixture(root.path(), "one.md", b"One");
-        let settings = root.path().join("settings.json");
-        let (mut store, mut library) = Store::open_file(first.clone(), settings.clone()).unwrap();
+        fixture(root.path(), "one.md", b"One");
+        let (mut store, mut library) = open(root.path());
         let id = library.new_note(doc::from_markdown("New note"));
-        let target = root.path().join("notes/New note.md");
+        let target = root.path().join("elsewhere/New note.md");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
         library.notes.iter_mut().find(|n| n.id == id).unwrap().path = Some(target.clone());
         store.save(&library).unwrap();
         drop(store);
-        let (_, library) = Store::open_file(first, settings).unwrap();
+        let (_, library) = open(root.path());
         assert!(library.note(&id).is_some());
         assert_eq!(fs::read_to_string(target).unwrap(), "New note\n");
     }
@@ -2090,18 +2143,37 @@ mod tests {
         }
     }
     #[test]
-    fn explicit_reload_archives_the_recovery_instead_of_reopening_it_later() {
+    fn explicit_reload_drops_leftover_recovery_json() {
         let root = tempfile::tempdir().unwrap();
         let path = fixture(root.path(), "note.md", b"Original");
         let (mut store, mut library) = open(root.path());
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Local"));
-        fs::write(path, b"Disk").unwrap();
+        fs::write(&path, b"Disk").unwrap();
         assert!(store.save(&library).is_err());
+        let copies = conflicted_copies_beside(&path);
+        assert_eq!(copies.len(), 1);
         store.reload().unwrap();
         drop(store);
         let (_, again) = open(root.path());
         assert!(!again.active_note().conflicted);
         assert_eq!(doc::plain_text(&again.active_note().document), "Disk");
+    }
+
+    /// Markdown files beside `path` whose name contains "conflicted copy".
+    fn conflicted_copies_beside(path: &Path) -> Vec<PathBuf> {
+        let parent = path.parent().unwrap();
+        let mut copies: Vec<_> = fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|p| {
+                p.extension().is_some_and(|e| e.eq_ignore_ascii_case("md"))
+                    && p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().contains("conflicted copy"))
+            })
+            .collect();
+        copies.sort();
+        copies
     }
 }
