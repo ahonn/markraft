@@ -578,6 +578,30 @@ impl NotesApp {
             this.focus_editor(window, cx);
         });
     }
+    /// Hand the latest snapshot to the notes folder without waiting for it.
+    ///
+    /// Hiding the window is the one save the user must never wait on: it happens
+    /// many times an hour, the note stays open behind the window, and a folder on
+    /// a network drive would otherwise freeze ⌥N for as long as the folder takes
+    /// to answer — with the window still up, which is the opposite of what the
+    /// key asked for. The receipt comes back through `poll` like any other, so a
+    /// failure still reaches `Not saved` and is there when the window returns.
+    fn flush_in_background(&mut self, cx: &mut Context<Self>) {
+        self.release_title(cx);
+        self.sync_documents(cx);
+        let revision = self.save.barrier();
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
+        // No held drafts, exactly as the waiting flush passes none: this is the
+        // user asking for everything to be written, so a draft whose title is
+        // still being typed is filed under what it has rather than kept back.
+        if let Err(error) = persistence.save(revision, self.library.clone(), Vec::new()) {
+            self.save.apply_completion(revision, false);
+            self.feedback.set_error(error);
+            cx.notify();
+        }
+    }
     fn flush(&mut self, cx: &mut Context<Self>) -> bool {
         self.release_title(cx);
         self.sync_documents(cx);
@@ -846,13 +870,7 @@ impl NotesApp {
         self.cancel_input(cx);
         self.editor()
             .update(cx, |editor, cx| editor.cancel_composition(cx));
-        if !self.flush(cx) {
-            // The window staying put is the only sign the key landed at all, and a
-            // 24px capsule is a thin place to keep the reason.
-            self.show_popover(Popover::FileStatus, cx);
-            cx.notify();
-            return;
-        }
+        self.flush_in_background(cx);
         if let Some(p) = &mut self.platform {
             if let Err(e) = p.hide(window) {
                 self.feedback.set_error(e);
