@@ -111,7 +111,6 @@ impl NotesApp {
         self.library
             .notes
             .iter()
-            .filter(|note| note.deleted_at.is_none())
             .filter_map(|note| Some((note.id.clone(), note.path.clone()?)))
             .collect()
     }
@@ -131,9 +130,7 @@ impl NotesApp {
         self.library
             .notes
             .iter()
-            .filter(|note| {
-                note.deleted_at.is_none() && note.read_only.is_none() && !note.conflicted
-            })
+            .filter(|note| note.read_only.is_none())
             .filter_map(|note| {
                 let from = note.path.as_deref()?;
                 let to = moved(from);
@@ -171,19 +168,16 @@ impl NotesApp {
         self.set_panel(Panel::Editor, cx);
         self.ring.release();
         let note = self.library.active_note();
-        // A note with no file yet has nothing to rename: naming it is saving it.
+        // A note with no file yet has nothing to rename; the next autosave files it.
         let Some(path) = note.path.clone() else {
             if !note.document_is_empty() {
-                self.save_as(window, cx);
+                self.flush(cx);
+                self.inform("Saving the note first…", cx);
             }
             return;
         };
         if let Some(reason) = note.read_only.clone() {
             self.inform(reason, cx);
-            return;
-        }
-        if note.conflicted {
-            self.inform("Resolve the conflict before renaming this note.", cx);
             return;
         }
         let id = note.id.clone();
@@ -415,7 +409,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let notes = root.path().join("notes");
         std::fs::create_dir_all(&notes).unwrap();
-        let source = "---\r\ntags: [a]\r\n---\r\n\r\nSee   [[Old#H|the old one]] and *this*.\r\n\r\n* item ![[Old]]\r\n";
+        // Title line matches the stem so respelling links does not rename the file.
+        let source = "---\r\ntags: [a]\r\n---\r\n\r\nIndex\r\n\r\nSee   [[Old#H|the old one]] and *this*.\r\n\r\n* item ![[Old]]\r\n";
         std::fs::write(notes.join("Index.md"), source).unwrap();
         let (mut store, mut library) =
             crate::vault::Store::open(notes.clone(), root.path().join("settings.json")).unwrap();
@@ -427,7 +422,7 @@ mod tests {
         )
         .unwrap();
         assert!(library.set_document(&id, document));
-        store.save(&library, &[]).unwrap();
+        store.save(&library).unwrap();
         assert_eq!(
             std::fs::read_to_string(notes.join("Index.md")).unwrap(),
             source.replace("Old", "New")

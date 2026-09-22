@@ -22,26 +22,15 @@ use std::{
 const READING_NOTICE: Duration = Duration::from_secs(8);
 /// An acknowledgment of what the user just did, which they are already looking at.
 const ACKNOWLEDGMENT: Duration = Duration::from_secs(3);
-/// A notice with a button, which takes a moment to reach.
-const WITH_ACTION: Duration = Duration::from_secs(8);
 /// How long the file status indicator stays lit after a keystroke the file refused.
 /// Long enough to be seen without following the typing that provoked it.
 const FILE_STATUS_FLASH: Duration = Duration::from_millis(900);
 
-/// A transient message over the note. One that carries an action shows it as a
-/// button and stays longer, because reaching that button takes a moment.
+/// A transient message over the note.
 #[derive(Clone)]
 pub(super) struct Notice {
     pub(super) text: SharedString,
     until: Instant,
-    /// The note an "Undo" button puts back; a plain notice carries none.
-    undo: Option<String>,
-}
-
-impl Notice {
-    pub(super) fn undo(&self) -> Option<&str> {
-        self.undo.as_deref()
-    }
 }
 
 #[derive(Default)]
@@ -89,16 +78,6 @@ impl Feedback {
         self.notice = Some(Notice {
             text: text.as_ref().to_owned().into(),
             until: Instant::now() + ACKNOWLEDGMENT,
-            undo: None,
-        });
-    }
-
-    /// An acknowledgment whose deletion can still be taken back.
-    pub(super) fn inform_undo(&mut self, text: &str, note: String) {
-        self.notice = Some(Notice {
-            text: text.into(),
-            until: Instant::now() + WITH_ACTION,
-            undo: Some(note),
         });
     }
 
@@ -111,19 +90,8 @@ impl Feedback {
         }
     }
 
-    /// Take the note the notice on screen still offers to put back, and with it
-    /// the notice.
-    pub(super) fn take_undo(&mut self) -> Option<String> {
-        self.notice.take().and_then(|notice| notice.undo)
-    }
-
-    /// Dismiss a notice that carries an action, and say whether there was one.
-    /// A notice with nothing to press is left alone: it goes by itself.
+    /// Notices no longer carry actions; Escape keeps calling this for the cascade.
     pub(super) fn dismiss_action(&mut self) -> bool {
-        if self.notice.as_ref().is_some_and(|n| n.undo.is_some()) {
-            self.notice = None;
-            return true;
-        }
         false
     }
 
@@ -160,7 +128,6 @@ impl Feedback {
             self.notice = Some(Notice {
                 text: text.into(),
                 until: now + READING_NOTICE,
-                undo: None,
             });
             changed = true;
         }
@@ -227,30 +194,13 @@ mod tests {
         );
     }
 
-    /// Taking the undo takes the notice with it: the button is gone either way,
-    /// and a notice left behind would offer an action that no longer exists.
+    /// Notices no longer carry actions, so Escape does not dismiss them.
     #[test]
-    fn taking_the_undo_takes_the_notice() {
-        let mut feedback = Feedback::default();
-        feedback.inform_undo("Deleted", "note-1".into());
-        assert_eq!(feedback.notice().and_then(|n| n.undo()), Some("note-1"));
-        assert_eq!(feedback.take_undo().as_deref(), Some("note-1"));
-        assert!(feedback.notice().is_none());
-        assert_eq!(feedback.take_undo(), None);
-    }
-
-    /// Escape dismisses a notice that offers a button, because that one waits
-    /// for an answer. One that offers nothing is left to go on its own.
-    #[test]
-    fn only_a_notice_with_a_button_is_dismissed() {
+    fn notices_are_left_to_expire() {
         let mut feedback = Feedback::default();
         feedback.inform("just so you know");
         assert!(!feedback.dismiss_action());
         assert!(feedback.notice().is_some(), "left to expire");
-
-        feedback.inform_undo("Deleted", "note-1".into());
-        assert!(feedback.dismiss_action());
-        assert!(feedback.notice().is_none());
     }
 
     /// The indicator is attention, not a message: it goes out by itself.

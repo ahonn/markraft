@@ -90,14 +90,6 @@ pub fn title_line(doc: &Node) -> Option<String> {
     doc.children().find_map(title_of)
 }
 
-/// Which of the document's blocks [`title_line`] reads the title from.
-///
-/// A new note's file is named after that line, so the application watches whether
-/// the selection still reaches it before letting a name be settled.
-pub fn title_block(doc: &Node) -> Option<usize> {
-    doc.children().position(|block| title_of(block).is_some())
-}
-
 fn title_of(block: &Node) -> Option<String> {
     let text = if schema().node_type(block.type_id()).name() == md::RAW_BLOCK {
         strip_tags(&plain_text(block))

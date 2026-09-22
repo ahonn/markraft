@@ -5,8 +5,7 @@ pub(super) struct Session {
     editor: Entity<EditorView>,
     _changes: Subscription,
     /// Everything else the editor's state does, a selection that moved without an edit
-    /// included: the format toolbar reads it, and so does the line a new note's file
-    /// would be named after.
+    /// included: the format toolbar reads it.
     _state_changes: Subscription,
     /// Unregisters the note's editor extensions when the session is evicted.
     _extensions: [ExtensionHandle; 4],
@@ -103,15 +102,6 @@ impl NotesApp {
             .clone()
     }
     pub(super) fn ensure_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Nobody is typing a held draft's name any more once its editor is not the one
-        // in front: another note became active, or its session was evicted below.
-        if self
-            .naming
-            .held_id()
-            .is_some_and(|held| held != self.library.active_id)
-        {
-            self.release_title(cx);
-        }
         let id = self.library.active_id.clone();
         let restore_focus = self.interaction.note_changed(&id);
         if restore_focus {
@@ -287,7 +277,6 @@ impl NotesApp {
                 let document = editor.read(cx).committed_document().clone();
                 let title = this.library.note(&note_id).map(|note| note.title());
                 if this.library.set_document(&note_id, document) {
-                    this.naming.committed_edit(&note_id, Instant::now());
                     this.links.invalidate_if(
                         title != this.library.note(&note_id).map(|note| note.title()),
                     );
@@ -301,7 +290,6 @@ impl NotesApp {
             if this.library.active_id != state_note_id {
                 return;
             }
-            this.follow_title(cx);
             if this.toolbar.formats_changed(|| {
                 let editor = editor.read(cx);
                 (
@@ -332,7 +320,6 @@ impl NotesApp {
             let document = session.editor().read(cx).committed_document().clone();
             let title = self.library.note(id).map(|note| note.title());
             if self.library.set_document(id, document) {
-                self.naming.committed_edit(id, Instant::now());
                 self.links
                     .invalidate_if(title != self.library.note(id).map(|note| note.title()));
                 self.save.schedule(Instant::now());
@@ -350,8 +337,6 @@ impl NotesApp {
         self.library = library;
         self.sessions.clear();
         self.save.reset();
-        self.naming.reset();
-        self.conflicts.reset();
         self.links.invalidate();
         self.ensure_session(window, cx);
     }

@@ -16,13 +16,14 @@ use std::{
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A completed snapshot attempt. Recovery can succeed without a Markdown file or
-/// without resolving a conflict, so the result and file metadata travel together.
+/// A completed snapshot attempt. Recovery can succeed without a Markdown file, so
+/// the result and file metadata travel together.
 #[derive(Debug)]
 pub struct Saved {
     pub revision: u64,
     pub result: Result<(), String>,
     pub paths: Vec<(String, std::path::PathBuf)>,
+    /// Notes whose local edits were archived because the on-disk version was kept.
     pub conflicts: Vec<String>,
 }
 pub enum Event {
@@ -31,16 +32,10 @@ pub enum Event {
     /// the application calls [`Persistence::acknowledge`].
     External(Vec<External>),
 }
-type Purged = (Vec<String>, Result<(), String>);
 enum Request {
-    /// A snapshot, and the never-filed notes whose title is still being typed. Only
-    /// this request can hold one back; a flush carries no such list, so ⌘S, a quit and
-    /// an update relaunch always file what they are given.
-    Save(u64, Library, Vec<String>),
+    Save(u64, Library),
     Recover(Note, Sender<Result<(), String>>),
     Markdown(Note, Sender<Result<String, String>>),
-    Review(Note, Sender<Result<Option<String>, String>>),
-    Resolve(Note, Sender<Result<Option<Note>, String>>),
     OpenFile(std::path::PathBuf, Sender<Result<Note, String>>),
     Rename(String, String, Sender<Result<std::path::PathBuf, String>>),
     Flush(u64, Library, Sender<Saved>),
@@ -48,7 +43,6 @@ enum Request {
     Refresh,
     RefreshPaths(Vec<std::path::PathBuf>),
     Acknowledge(Vec<String>),
-    Purge(Vec<String>, Sender<Purged>),
 }
 pub struct Persistence {
     requests: Sender<Request>,
@@ -76,17 +70,11 @@ impl Persistence {
         std::thread::spawn(move || {
             for request in incoming {
                 match request {
-                    Request::Review(note, response) => {
-                        let _ = response.send(store.review_conflict(&note));
-                    }
                     Request::Markdown(note, response) => {
                         let _ = response.send(store.markdown(&note));
                     }
                     Request::Recover(note, response) => {
                         let _ = response.send(store.recover(&note));
-                    }
-                    Request::Resolve(note, response) => {
-                        let _ = response.send(store.resolve_conflict(&note));
                     }
                     Request::OpenFile(path, response) => {
                         let _ = response.send(store.add_file(path));
@@ -94,13 +82,12 @@ impl Persistence {
                     Request::Rename(id, name, response) => {
                         let _ = response.send(store.rename(&id, &name));
                     }
-                    Request::Save(revision, library, held) => {
-                        let _ = outgoing.send(Event::Saved(save_snapshot(
-                            &mut store, revision, &library, &held,
-                        )));
+                    Request::Save(revision, library) => {
+                        let _ = outgoing
+                            .send(Event::Saved(save_snapshot(&mut store, revision, &library)));
                     }
                     Request::Flush(revision, library, response) => {
-                        let _ = response.send(save_snapshot(&mut store, revision, &library, &[]));
+                        let _ = response.send(save_snapshot(&mut store, revision, &library));
                     }
                     Request::Reload(response) => {
                         let _ = response.send(store.reload());
@@ -120,9 +107,6 @@ impl Persistence {
                         _ => {}
                     },
                     Request::Acknowledge(ids) => store.acknowledge(&ids),
-                    Request::Purge(ids, response) => {
-                        let _ = response.send(store.purge(&ids));
-                    }
                 }
             }
         });
@@ -188,26 +172,10 @@ impl Persistence {
             .map_err(|_| "The save worker stopped")?;
         rx.recv().map_err(|_| "The save worker stopped")?
     }
-    pub fn review_conflict(&self, note: Note) -> Result<Option<String>, String> {
-        let (tx, rx) = mpsc::channel();
+    /// Queue a snapshot.
+    pub fn save(&self, revision: u64, library: Library) -> Result<(), String> {
         self.requests
-            .send(Request::Review(note, tx))
-            .map_err(|_| "The save worker stopped")?;
-        rx.recv().map_err(|_| "The save worker stopped")?
-    }
-    pub fn resolve_conflict(&self, note: Note) -> Result<Option<Note>, String> {
-        let (tx, rx) = mpsc::channel();
-        self.requests
-            .send(Request::Resolve(note, tx))
-            .map_err(|_| "The save worker stopped")?;
-        rx.recv().map_err(|_| "The save worker stopped")?
-    }
-    /// Queue a snapshot. `held` names the never-filed notes whose title is still being
-    /// typed; the store keeps those in recovery instead of naming a file after part of
-    /// a first line.
-    pub fn save(&self, revision: u64, library: Library, held: Vec<String>) -> Result<(), String> {
-        self.requests
-            .send(Request::Save(revision, library, held))
+            .send(Request::Save(revision, library))
             .map_err(|_| {
                 "Saving stopped working. Copy your note (⇧⌘C), then quit and reopen Markraft."
                     .into()
@@ -217,37 +185,6 @@ impl Persistence {
     /// to show it. Empty after it has been taken.
     pub fn notices(&self) -> Vec<String> {
         self.notices.take()
-    }
-    /// Delete these notes' files for good, after all earlier requests have run. Returns
-    /// the ids that are gone, which the caller drops from its library, and the reason a
-    /// purge stopped short. A timeout leaves the request queued and reports it, so the
-    /// notes stay in the trash rather than disappearing from a folder that still has
-    /// them; the next refresh reconciles whatever the worker did get to.
-    pub fn purge(&self, ids: Vec<String>) -> Purged {
-        let (response, result) = mpsc::channel();
-        let disconnected = || {
-            "Markraft can no longer reach your notes folder, so nothing was deleted. \
-             Quit and reopen Markraft, then try again."
-                .to_string()
-        };
-        if self.requests.send(Request::Purge(ids, response)).is_err() {
-            return (Vec::new(), Err(disconnected()));
-        }
-        result
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap_or_else(|error| {
-                (
-                    Vec::new(),
-                    Err(match error {
-                        RecvTimeoutError::Timeout => {
-                            "Deleting is taking too long. The notes are still in \
-                             Recently Deleted; try again."
-                                .to_string()
-                        }
-                        RecvTimeoutError::Disconnected => disconnected(),
-                    }),
-                )
-            })
     }
     /// The caller compares save revisions with its current document revision. Old
     /// successful acknowledgments must not clear a newer pending change or its error.
@@ -284,7 +221,7 @@ impl Persistence {
     }
     /// A queue barrier: all earlier requests finish before this latest snapshot is saved.
     /// The outer result confirms receipt, not whether writing succeeded; callers must
-    /// apply paths and conflicts even when `Saved::result` reports a partial failure.
+    /// apply paths even when `Saved::result` reports a partial failure.
     /// A timeout leaves the request queued; callers retain unsaved state until a later
     /// snapshot confirms it. No result queries are needed after this call.
     pub fn flush(&self, revision: u64, library: Library) -> Result<Saved, String> {
@@ -312,8 +249,8 @@ impl Persistence {
 }
 
 /// Capture metadata after every attempt, including errors after some notes were written.
-fn save_snapshot(store: &mut Store, revision: u64, library: &Library, held: &[String]) -> Saved {
-    let result = store.save(library, held);
+fn save_snapshot(store: &mut Store, revision: u64, library: &Library) -> Saved {
+    let result = store.save(library);
     Saved {
         revision,
         result,
@@ -500,9 +437,9 @@ mod tests {
         let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Title\n\nFirst 中文"));
-        persistence.save(1, library.clone(), Vec::new()).unwrap();
+        persistence.save(1, library.clone()).unwrap();
         library.set_document(&id, doc::from_markdown("Title\n\nSecond 👩🏽‍💻"));
-        persistence.save(2, library.clone(), Vec::new()).unwrap();
+        persistence.save(2, library.clone()).unwrap();
         library.set_document(&id, doc::from_markdown("Title\n\nFinal é"));
         let receipt = persistence.flush(3, library.clone()).unwrap();
         assert_eq!(receipt.revision, 3);
@@ -527,40 +464,14 @@ mod tests {
     }
 
     #[test]
-    fn a_flush_files_a_draft_autosave_was_still_holding() {
+    fn a_new_note_is_filed_under_its_title_immediately() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());
         let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
-        library.set_document(&id, doc::from_markdown("Meeting no"));
-        persistence
-            .save(1, library.clone(), vec![id.clone()])
-            .unwrap();
-        // Await the save receipt itself: a successful recovery write must not claim
-        // that the held title has already become a Markdown file.
-        let Event::Saved(held) = persistence.events.recv_timeout(REPLY_TIMEOUT).unwrap() else {
-            panic!("a held draft must return a save receipt");
-        };
-        assert_eq!(held.revision, 1);
-        held.result.unwrap();
-        assert!(held.paths.is_empty());
-        assert!(held.conflicts.is_empty());
-        let workspace = std::fs::read_dir(directory.path().join("workspaces"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        let recovery: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(workspace.join("recovery").join(format!("{id}.json"))).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(recovery["local"], "Meeting no\n");
-        // ⌘S, a quit and an update relaunch all come through here, and none of them can
-        // hold: what the first line says now is what the file is called.
         library.set_document(&id, doc::from_markdown("Meeting notes for Q3"));
-        let filed = persistence.flush(2, library).unwrap();
-        assert_eq!(filed.revision, 2);
+        let filed = persistence.flush(1, library).unwrap();
+        assert_eq!(filed.revision, 1);
         filed.result.unwrap();
         assert!(filed.conflicts.is_empty());
         let (path, text) = only_note(directory.path());
@@ -570,13 +481,13 @@ mod tests {
     }
 
     #[test]
-    fn a_note_changed_by_another_program_is_not_overwritten_but_others_are_saved() {
+    fn a_note_changed_by_another_program_keeps_disk_and_archives_local() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());
         let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Shared"));
-        persistence.save(10, library.clone(), Vec::new()).unwrap();
+        persistence.save(10, library.clone()).unwrap();
         persistence
             .flush(0, library.clone())
             .unwrap()
@@ -586,30 +497,30 @@ mod tests {
         std::fs::write(&path, b"external content").unwrap();
         library.set_document(&id, doc::from_markdown("Shared, edited here"));
         library.new_note(doc::from_markdown("Keep this local work"));
-        persistence.save(11, library.clone(), Vec::new()).unwrap();
+        persistence.save(11, library.clone()).unwrap();
         let receipt = persistence.flush(12, library).unwrap();
         assert_eq!(receipt.revision, 12);
         assert!(receipt.result.is_err());
-        assert_eq!(receipt.conflicts, vec![id.clone()]);
-        assert_eq!(receipt.paths.len(), 2);
-        assert!(receipt.paths.contains(&(id, path.clone())));
-        assert!(
-            receipt
-                .paths
-                .iter()
-                .any(|(_, path)| path.ends_with("Keep this local work.md"))
-        );
-        let acknowledgments = saves(&persistence);
-        assert_eq!(acknowledgments.len(), 2);
-        assert!(acknowledgments[0].result.is_ok());
-        assert_eq!(acknowledgments[1].revision, 11);
-        assert!(acknowledgments[1].result.is_err());
+        assert!(receipt.conflicts.contains(&id));
         assert_eq!(std::fs::read(&path).unwrap(), b"external content");
         let saved = std::fs::read_dir(directory.path().join("notes"))
             .unwrap()
             .filter_map(|entry| std::fs::read_to_string(entry.unwrap().path()).ok())
             .any(|text| text.ends_with("Keep this local work\n"));
         assert!(saved);
+        // Local edits for the conflicted note landed in recovery history, not on disk.
+        let history = std::fs::read_dir(
+            std::fs::read_dir(directory.path().join("workspaces"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path()
+                .join("recovery-history"),
+        )
+        .unwrap()
+        .count();
+        assert!(history >= 1);
     }
 
     #[test]
@@ -626,7 +537,7 @@ mod tests {
             watch_root: Default::default(),
             extra_watches: Default::default(),
         };
-        assert!(persistence.save(1, Library::default(), Vec::new()).is_err());
+        assert!(persistence.save(1, Library::default()).is_err());
         assert!(persistence.flush(0, Library::default()).is_err());
         assert!(persistence.reload().is_err());
     }
@@ -654,7 +565,7 @@ mod tests {
         let Request::Flush(revision, library, response) = incoming.try_recv().unwrap() else {
             panic!("the timed-out flush must remain queued");
         };
-        let saved = save_snapshot(&mut store, revision, &library, &[]);
+        let saved = save_snapshot(&mut store, revision, &library);
         assert_eq!(saved.revision, 42);
         assert!(saved.result.is_ok());
         assert!(response.send(saved).is_err());
@@ -671,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn reload_is_a_barrier_after_conflicts_and_new_edits_can_be_saved() {
+    fn reload_is_a_barrier_after_disk_wins_and_new_edits_can_be_saved() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut local) = open(directory.path());
         let persistence = Persistence::start(store, false);
@@ -681,7 +592,7 @@ mod tests {
         let (path, text) = only_note(directory.path());
         std::fs::write(&path, text.replace("Original", "External text")).unwrap();
         local.set_document(&id, doc::from_markdown("Discard this after confirmation"));
-        persistence.save(1, local, Vec::new()).unwrap();
+        persistence.save(1, local).unwrap();
         let mut reloaded = persistence.reload().unwrap();
         assert_eq!(
             doc::plain_text(&reloaded.note(&id).unwrap().document),
@@ -692,7 +603,7 @@ mod tests {
         assert_eq!(acknowledgments[0].revision, 1);
         assert!(acknowledgments[0].result.is_err());
         reloaded.set_document(&id, doc::from_markdown("External text, continued"));
-        persistence.save(2, reloaded.clone(), Vec::new()).unwrap();
+        persistence.save(2, reloaded.clone()).unwrap();
         persistence.flush(0, reloaded).unwrap().result.unwrap();
         assert!(saves(&persistence)[0].result.is_ok());
         assert!(
@@ -744,29 +655,22 @@ mod tests {
         );
         assert!(texts.contains(&"Dropped in".to_owned()), "{texts:?}");
 
-        // A snapshot taken before the change must neither undo it nor claim a successful save.
+        // A snapshot taken before acknowledging must neither undo the disk version
+        // nor claim a successful save of the stale local edit.
         library.set_document(&id, doc::from_markdown("Stale local edit"));
         let failed = persistence.flush(2, library.clone()).unwrap();
         assert!(failed.result.is_err());
-        assert_eq!(failed.conflicts, vec![id.clone()]);
+        assert!(failed.conflicts.contains(&id));
         assert!(folder_text(directory.path()).contains("From another editor"));
         assert!(!folder_text(directory.path()).contains("Stale local edit"));
+        persistence.acknowledge(vec![id.clone()]);
+        // After acknowledging, adopt the disk note and continue editing.
         library
             .notes
             .iter_mut()
             .find(|n| n.id == id)
             .unwrap()
-            .conflicted = true;
-        let recovered = persistence.flush(3, library.clone()).unwrap();
-        recovered.result.unwrap();
-        assert_eq!(recovered.conflicts, vec![id.clone()]);
-        assert!(recovered.paths.contains(&(id.clone(), path.clone())));
-        assert!(folder_text(directory.path()).contains("From another editor"));
-        assert!(!folder_text(directory.path()).contains("Stale local edit"));
-        let local = library.note(&id).unwrap().clone();
-        persistence.review_conflict(local.clone()).unwrap();
-        let disk = persistence.resolve_conflict(local).unwrap().unwrap();
-        library.adopt(disk);
+            .document = doc::from_markdown("From another editor");
         library.set_document(&id, doc::from_markdown("From another editor, continued"));
         persistence.flush(0, library).unwrap().result.unwrap();
         assert!(folder_text(directory.path()).contains("From another editor, continued"));

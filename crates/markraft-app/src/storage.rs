@@ -148,20 +148,13 @@ impl Library {
         self.ensure_active();
     }
 
-    /// The active note must exist outside the trash; otherwise open the most recent
-    /// one, or a new one when none is left.
+    /// The active note must exist; otherwise open the most recent one, or a new one
+    /// when none is left.
     fn ensure_active(&mut self) {
-        if self
-            .note(&self.active_id)
-            .is_some_and(|note| note.deleted_at.is_none())
-        {
+        if self.note(&self.active_id).is_some() {
             return;
         }
-        match self
-            .search("", false, None)
-            .first()
-            .map(|note| note.id.clone())
-        {
+        match self.search("", None).first().map(|note| note.id.clone()) {
             Some(id) => self.active_id = id,
             None => {
                 self.new_note(doc::empty());
@@ -170,7 +163,7 @@ impl Library {
     }
 
     pub fn select(&mut self, id: &str) -> bool {
-        if self.note(id).is_some_and(|note| note.deleted_at.is_none()) {
+        if self.note(id).is_some() {
             self.active_id = id.to_owned();
             true
         } else {
@@ -178,33 +171,13 @@ impl Library {
         }
     }
 
+    /// Remove the note from the library. The file is trashed by the store on save.
     pub fn delete(&mut self, id: &str) -> bool {
-        let Some(note) = self.notes.iter_mut().find(|note| note.id == id) else {
-            return false;
-        };
-        if note.deleted_at.is_some() {
+        if !self.notes.iter().any(|note| note.id == id) {
             return false;
         }
-        note.deleted_at = Some(timestamp());
-        if self.active_id == id {
-            if let Some(next) = self.search("", false, None).first() {
-                self.active_id = next.id.clone();
-            } else {
-                self.new_note(doc::empty());
-            }
-        }
-        true
-    }
-
-    pub fn restore(&mut self, id: &str) -> bool {
-        let Some(note) = self.notes.iter_mut().find(|note| note.id == id) else {
-            return false;
-        };
-        if note.deleted_at.take().is_none() {
-            return false;
-        }
-        note.updated_at = timestamp();
-        self.active_id = id.to_owned();
+        self.notes.retain(|note| note.id != id);
+        self.ensure_active();
         true
     }
 
@@ -212,7 +185,7 @@ impl Library {
         let Some(note) = self.notes.iter_mut().find(|note| note.id == id) else {
             return false;
         };
-        if note.deleted_at.is_some() || note.read_only.is_some() || note.document == document {
+        if note.read_only.is_some() || note.document == document {
             return false;
         }
         note.document = document;
@@ -223,20 +196,19 @@ impl Library {
     /// Notes matching `query`, by what they say or by where their file is. Names are
     /// independent of titles now, so a search has to reach them; `root` is the notes
     /// folder, which is what makes a match read like the path the Browse row shows.
-    pub fn search(&self, query: &str, deleted: bool, root: Option<&Path>) -> Vec<&Note> {
+    pub fn search(&self, query: &str, root: Option<&Path>) -> Vec<&Note> {
         let query = query.trim().to_lowercase();
         let mut notes: Vec<_> = self
             .notes
             .iter()
             .filter(|note| {
-                note.deleted_at.is_some() == deleted
-                    && (query.is_empty()
-                        || doc::plain_text(&note.document)
-                            .to_lowercase()
-                            .contains(&query)
-                        || note
-                            .location(root)
-                            .is_some_and(|location| location.to_lowercase().contains(&query)))
+                query.is_empty()
+                    || doc::plain_text(&note.document)
+                        .to_lowercase()
+                        .contains(&query)
+                    || note
+                        .location(root)
+                        .is_some_and(|location| location.to_lowercase().contains(&query))
             })
             .collect();
         notes.sort_by(|a, b| {
@@ -268,10 +240,7 @@ impl Library {
                     .into(),
             );
         }
-        if self
-            .note(&self.active_id)
-            .is_none_or(|note| note.deleted_at.is_some())
-        {
+        if self.note(&self.active_id).is_none() {
             return Err(
                 "Markraft lost track of which note is open, so it stopped before saving. \
                  Open a note from the list, then try again."
@@ -319,7 +288,7 @@ pub struct WorkspaceSettings {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// The folder holding the notes; unset until the user has chosen one.
+    /// The folder holding the notes. Always set after a normal launch.
     pub notes_folder: Option<PathBuf>,
     pub open_files: Vec<PathBuf>,
     pub active_id: String,
@@ -406,23 +375,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn notes_can_be_created_searched_deleted_and_restored_without_losing_unicode() {
+    fn notes_can_be_created_searched_and_deleted_without_losing_unicode() {
         let mut library = Library::default();
         let initial = library.active_id.clone();
         let document = doc::from_markdown("# 中文 👩🏽‍💻\n\n- [x] **Idea** é");
         let id = library.new_note(document.clone());
         assert_eq!(library.active_note().title(), "中文 👩🏽‍💻");
-        assert_eq!(library.search("IDEA", false, None)[0].document, document);
+        assert_eq!(library.search("IDEA", None)[0].document, document);
         assert!(library.delete(&id));
         assert!(!library.select(&id));
         assert_eq!(library.active_id, initial);
-        assert_eq!(library.search("👩🏽‍💻", true, None)[0].id, id);
-        assert!(library.restore(&id));
-        assert_eq!(library.active_note().document, document);
+        assert!(library.search("👩🏽‍💻", None).is_empty());
         assert!(library.delete(&initial));
-        assert!(library.delete(&id));
-        assert_eq!(library.search("", false, None).len(), 1);
-        assert_eq!(library.search("", true, None).len(), 2);
+        assert_eq!(library.search("", None).len(), 1);
         assert_eq!(library.active_note().document, doc::empty());
     }
 
@@ -447,7 +412,7 @@ mod tests {
 
         fn live(library: &Library, root: &Path, query: &str) -> Vec<String> {
             library
-                .search(query, false, Some(root))
+                .search(query, Some(root))
                 .iter()
                 .map(|note| note.id.clone())
                 .collect()
@@ -471,15 +436,12 @@ mod tests {
             std::slice::from_ref(&loose)
         );
         assert!(live(&library, &root, "tmp").is_empty());
-        // Body text still matches, and the trash is still a separate list.
         assert_eq!(
             live(&library, &root, "agenda"),
             std::slice::from_ref(&filed)
         );
-        assert!(library.search("quarterly", true, Some(&root)).is_empty());
         assert!(library.delete(&filed));
         assert!(live(&library, &root, "quarterly").is_empty());
-        assert_eq!(library.search("quarterly", true, Some(&root))[0].id, filed);
     }
 
     #[test]

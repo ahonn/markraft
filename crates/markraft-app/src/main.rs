@@ -27,8 +27,9 @@ Usage: markraft-app [--dir PATH] [--settings PATH] [--] [FILE.md ...]
 
 Positional files are opened in place. Use -- before filenames beginning with -.
 
-The app stays in the menu bar while its window is hidden. ⌥N toggles the
-window and ⌘K lists every action with its shortcut.
+Notes are stored as Markdown under a folder you choose. The app stays in the
+menu bar while its window is hidden. ⌥N toggles the window and ⌘K lists every
+action with its shortcut.
 ";
 
 fn main() {
@@ -98,15 +99,23 @@ fn main() {
             }
         }
     }
-    // An absent folder stays absent: queued paths create a standalone session.
+    // An absent folder stays absent: the app asks the user to choose one.
     let directory = directory.or_else(|| settings.notes_folder.clone());
     let opened = directory
         .clone()
         .map(|directory| Store::open(directory, settings_path.clone()));
     let (store, library, error) = match opened {
-        Some(Ok((store, library))) => {
+        Some(Ok((mut store, library))) => {
             if let Some(notice) = settings.recovery_notice() {
                 store.notices().raise(notice);
+            }
+            // Remember the folder when it came from --dir.
+            if let Some(directory) = &directory
+                && settings.notes_folder.as_ref() != Some(directory)
+                && let Err(error) =
+                    store.update_settings(|s| s.notes_folder = Some(directory.clone()))
+            {
+                eprintln!("Markraft: could not remember the notes folder: {error}");
             }
             (Some(store), library, None)
         }

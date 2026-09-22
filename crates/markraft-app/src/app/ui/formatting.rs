@@ -537,8 +537,7 @@ impl NotesApp {
     /// most pressing first.
     ///
     /// A save failure comes first because it is the only one losing work for as long
-    /// as it holds; a conflict next, because autosave is stopped until it is settled.
-    /// The rest are true but not urgent.
+    /// as it holds. The rest are true but not urgent.
     pub(in crate::app) fn has_file_status(&self) -> bool {
         !self.file_states().is_empty()
     }
@@ -563,18 +562,6 @@ impl NotesApp {
                 ],
             });
         }
-        if note.conflicted {
-            states.push(FileState {
-                id: "state-conflict",
-                icon: Icon::Conflict,
-                label: "Conflict".into(),
-                detail: "Another app changed this file. Autosave is paused until you \
-                         choose which version to keep."
-                    .into(),
-                urgent: true,
-                actions: vec![("Resolve…", Intent::ReviewConflict)],
-            });
-        }
         if let Some(reason) = &note.read_only {
             states.push(FileState {
                 id: "state-read-only",
@@ -592,28 +579,8 @@ impl NotesApp {
                 },
             });
         }
-        // Without a folder there is nowhere to file a new note, so it waits in
-        // recovery for as long as it takes. A draft whose name is still settling files
-        // itself in a moment and needs nothing said about it; this one is waiting for
-        // the user, and nothing else on the window says so.
-        if self.unfiled_draft() && crate::app::is_draft(note) {
-            states.push(FileState {
-                id: "state-unfiled",
-                icon: Icon::Drafts,
-                // Not urgent: nothing is being lost while it holds. The note comes
-                // back from recovery on the next launch, so this is about the file
-                // the writer may be expecting to find, not about the words.
-                label: "Unsaved".into(),
-                detail: "This note has never been saved to a file. It is kept inside \
-                         Markraft until you choose where it goes."
-                    .into(),
-                urgent: false,
-                actions: vec![("Save As…", Intent::Save)],
-            });
-        }
         // The capsule is a pointer to work that is not on screen. When the only note
-        // that is not in a file is the one being written, it points at itself, and the
-        // note already says what it is — the card above, where it has no file to go to.
+        // that is not in a file is the one being written, it points at itself.
         let drafts = self.draft_count();
         let elsewhere = drafts - usize::from(crate::app::is_draft(note));
         if elsewhere > 0 {
@@ -622,9 +589,8 @@ impl NotesApp {
                 icon: Icon::Drafts,
                 label: format!("{drafts} draft{}", if drafts == 1 { "" } else { "s" }),
                 detail: format!(
-                    "{drafts} note{} not in a file the way you left {}.",
+                    "{drafts} note{} not yet saved to a file.",
                     if drafts == 1 { " is" } else { "s are" },
-                    if drafts == 1 { "it" } else { "them" }
                 ),
                 urgent: false,
                 actions: vec![("Show Drafts…", Intent::Drafts)],

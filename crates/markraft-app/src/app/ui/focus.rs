@@ -37,8 +37,6 @@ pub(super) enum Surface {
 enum Act {
     /// Hand the keyboard back to the query editor.
     Query,
-    /// Only move the list selection; the row's own controls carry the actions.
-    Select,
     Run(Intent),
 }
 
@@ -56,13 +54,6 @@ impl Stop {
         Self {
             id: id.into(),
             act: Act::Run(intent),
-            row: None,
-        }
-    }
-    fn select(id: impl Into<SharedString>) -> Self {
-        Self {
-            id: id.into(),
-            act: Act::Select,
             row: None,
         }
     }
@@ -112,7 +103,7 @@ impl NotesApp {
         }
         match self.interaction.panel() {
             Panel::Editor => Surface::Editor,
-            Panel::Browse | Panel::Drafts | Panel::Trash => Surface::Picker,
+            Panel::Browse | Panel::Drafts => Surface::Picker,
             Panel::Actions => Surface::Actions,
             Panel::Settings => Surface::Settings,
         }
@@ -127,14 +118,6 @@ impl NotesApp {
             return Vec::new();
         }
         let mut stops = Vec::new();
-        // A notice offering an action is reachable from whatever else is open.
-        if self
-            .feedback
-            .notice()
-            .is_some_and(|notice| notice.undo().is_some())
-        {
-            stops.push(Stop::run("notice-undo", Intent::UndoDelete));
-        }
         match surface {
             Surface::Editor => {}
             Surface::Chooser => {
@@ -144,9 +127,6 @@ impl NotesApp {
                 }
                 stops.push(Stop::run("choose-folder", Intent::ChooseFolder));
                 stops.push(Stop::run("open-markdown", Intent::OpenMarkdown));
-                if first_launch && Self::default_folder().is_some() {
-                    stops.push(Stop::run("default-folder", Intent::DefaultFolder));
-                }
                 if !first_launch {
                     stops.push(Stop::run("reveal-library", Intent::Reveal));
                 }
@@ -197,9 +177,6 @@ impl NotesApp {
                     stops.push(Stop::run("file-status-open", Intent::OpenExternally));
                 }
                 stops.push(Stop::run("file-status-reveal", Intent::RevealNote));
-                if self.library.active_note().conflicted {
-                    stops.push(Stop::run("file-status-conflict", Intent::ReviewConflict));
-                }
             }
             Surface::Table => {
                 for (id, intent) in self.table_stops() {
@@ -207,11 +184,7 @@ impl NotesApp {
                 }
             }
             Surface::Picker => {
-                let deleted = self.interaction.panel() == Panel::Trash;
                 stops.push(Stop::query());
-                if deleted {
-                    stops.push(Stop::run("trash-back", Intent::Browse));
-                }
                 let query = self.query().read(cx).text().to_owned();
                 for (index, note) in self
                     .matching_notes(query.trim(), self.scope())
@@ -219,27 +192,13 @@ impl NotesApp {
                     .enumerate()
                 {
                     let id = note.id.clone();
-                    if deleted {
-                        // Selecting a deleted note reveals its buttons rather than
-                        // putting the note back, or throwing it away, on the spot.
-                        stops.push(Stop::select(id.clone()).in_row(index));
-                        stops.push(
-                            Stop::run(format!("purge-{id}"), Intent::PurgeNote(id.clone()))
-                                .in_row(index),
-                        );
-                        stops.push(
-                            Stop::run(format!("restore-{id}"), Intent::Restore(id)).in_row(index),
-                        );
-                    } else {
-                        stops.push(Stop::run(id.clone(), Intent::Select(id.clone())).in_row(index));
-                        stops.push(
-                            Stop::run(format!("pin-{id}"), Intent::PinNote(id.clone()))
-                                .in_row(index),
-                        );
-                        stops.push(
-                            Stop::run(format!("trash-{id}"), Intent::TrashNote(id)).in_row(index),
-                        );
-                    }
+                    stops.push(Stop::run(id.clone(), Intent::Select(id.clone())).in_row(index));
+                    stops.push(
+                        Stop::run(format!("pin-{id}"), Intent::PinNote(id.clone())).in_row(index),
+                    );
+                    stops.push(
+                        Stop::run(format!("trash-{id}"), Intent::TrashNote(id)).in_row(index),
+                    );
                 }
             }
             Surface::Actions => {
@@ -428,7 +387,7 @@ impl NotesApp {
             .find(|stop| stop.id == id)
             .and_then(|stop| match stop.act {
                 Act::Run(intent) => Some(intent),
-                Act::Query | Act::Select => None,
+                Act::Query => None,
             });
         let Some(intent) = intent else {
             return false;

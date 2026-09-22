@@ -15,7 +15,7 @@ use lists::{Cursor, Picker};
 use presence::{Presence, WindowSize};
 use ring::FocusRing;
 use toolbar::Toolbar;
-use workspace::{Conflicts, DraftNaming, QuitState, SaveCompletion, SaveState};
+use workspace::{QuitState, SaveCompletion, SaveState};
 mod rename;
 mod ui;
 
@@ -29,7 +29,7 @@ use crate::{
     vault::{External, Store},
 };
 use gpui::{prelude::*, *};
-use markraft_core::{Node, Selection};
+use markraft_core::Node;
 use markraft_gpui::{
     ColumnAlignment, EditRejection, EditorEvent, EditorStyle, EditorView, ExtensionHandle, Setup,
     TableInfo,
@@ -65,17 +65,15 @@ pub(crate) enum Scope {
     Notes,
     /// Work that is not in a file the way it was left; see [`is_draft`].
     Drafts,
-    Deleted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Panel {
     Editor,
     Browse,
-    /// Work that is not in a file the way the user left it: a note with no file yet,
-    /// and one whose file says something else. The same list Browse draws, filtered.
+    /// Work that is not in a file the way the user left it: a note with no file yet.
+    /// The same list Browse draws, filtered.
     Drafts,
-    Trash,
     Actions,
     Settings,
 }
@@ -111,13 +109,9 @@ pub struct NotesApp {
     /// The code block's language list.
     code_language: Cursor,
     save: SaveState,
-    naming: DraftNaming,
     /// Everything the window has to tell the user: the errors that stand, the
     /// notices that pass, and whose turn it is.
     feedback: Feedback,
-    /// Which notes have been asked about their conflict, and whether that
-    /// question is on screen.
-    conflicts: Conflicts,
     /// Whether the quit question is already on screen, so a second ⌘Q cannot stack
     /// another one behind it.
     quitting: QuitState,
@@ -210,10 +204,6 @@ impl NotesApp {
                 if let Some(persistence) = &this.persistence {
                     persistence.refresh();
                 }
-            } else {
-                // Nobody is typing here now, so a held draft's name is as settled as it
-                // is going to get; it is filed rather than left waiting in recovery.
-                this.release_title(cx);
             }
             cx.notify();
         });
@@ -261,9 +251,7 @@ impl NotesApp {
             picker: Picker::default(),
             code_language: Cursor::default(),
             save: SaveState::default(),
-            naming: DraftNaming::default(),
             feedback,
-            conflicts: Conflicts::default(),
             quitting: QuitState::default(),
             folder_was_created,
             links: Default::default(),
@@ -291,7 +279,8 @@ impl NotesApp {
         }
         app
     }
-    /// Reconcile external changes without creating files or reviving deleted paths.
+    /// Reconcile external changes without creating files. When local edits differ
+    /// from disk, archive them to history and adopt the disk version.
     fn apply_external(
         &mut self,
         changes: Vec<External>,
@@ -301,24 +290,21 @@ impl NotesApp {
         let editor_was_focused = self.editor().focus_handle(cx).is_focused(window);
         self.sync_documents(cx);
         let mut ids = Vec::new();
-        let mut kept = 0;
+        let mut archived = 0;
         let mut vanished = 0;
         for change in changes {
             let (External::Updated { note, .. } | External::Removed(note)) = &change;
             let id = note.id.clone();
-            self.conflicts.ask_again(&id);
             let local = self.library.note(&id).cloned();
             match change {
                 External::Updated { previous, note } => {
                     // The bytes on disk still say what they said: only the file's
-                    // permissions moved. There is nothing to choose between, so keep
-                    // the document the user is looking at and take the new state,
-                    // rather than calling it a change by another app.
+                    // permissions moved. Keep the document the user is looking at
+                    // and take the new read-only state.
                     let permissions_only = previous
                         .as_ref()
                         .is_some_and(|previous| previous.document == note.document);
                     if let Some(mut local) = local
-                        && local.deleted_at.is_none()
                         && local.document != note.document
                     {
                         if permissions_only {
@@ -333,10 +319,7 @@ impl NotesApp {
                             {
                                 self.feedback.set_error(error);
                             }
-                            local.conflicted = true;
-                            self.library.adopt(local);
-                            kept += 1;
-                            continue;
+                            archived += 1;
                         }
                     }
                     self.library.adopt(note);
@@ -346,46 +329,41 @@ impl NotesApp {
                         .as_ref()
                         .is_none_or(|local| local.document == note.document)
                     {
-                        // A note the user still had is going without their asking, so
-                        // say so. One already in Recently Deleted is being tidied up.
-                        if local
-                            .as_ref()
-                            .is_some_and(|local| local.deleted_at.is_none())
-                        {
+                        if local.is_some() {
                             vanished += 1;
                         }
                         self.library.remove(&id);
-                    } else if let Some(mut local) = local {
+                    } else if let Some(local) = local {
+                        // Local edits exist for a file that vanished: archive them
+                        // and remove the note; the file is gone from disk.
                         if let Some(persistence) = &self.persistence
-                            && let Err(error) = persistence.recover(local.clone())
+                            && let Err(error) = persistence.recover(local)
                         {
                             self.feedback.set_error(error);
                         }
-                        local.conflicted = true;
-                        self.library.adopt(local);
-                        kept += 1;
-                        continue;
+                        self.library.remove(&id);
+                        archived += 1;
+                        vanished += 1;
                     }
                 }
             }
             self.sessions.remove(&id);
-
             ids.push(id);
         }
         self.ensure_session(window, cx);
-        // A file appearing or leaving changes what `[[` can link to, and arrives
-        // independently of autosave scheduling.
         self.refresh_link_targets();
-        // Replacing an editor session drops its focus handle. Restore editing
-        // focus without taking it away from a picker or settings input.
         if editor_was_focused {
             self.focus_editor(window, cx);
         }
         if let Some(persistence) = &self.persistence {
             persistence.acknowledge(ids);
         }
-        if kept > 0 {
-            self.schedule_save(cx);
+        if archived > 0 {
+            self.feedback.queue(if archived == 1 {
+                "A note changed on disk; your edits were kept in history.".to_owned()
+            } else {
+                format!("{archived} notes changed on disk; your edits were kept in history.")
+            });
         }
         if vanished > 0 {
             self.feedback.queue(if vanished == 1 {
@@ -397,12 +375,9 @@ impl NotesApp {
                 )
             });
         }
-        self.prompt_conflict(window, cx);
         cx.notify();
     }
-    /// How many notes are not in a file the way the user left them: one with no file
-    /// yet, and one whose file says something else. Both come back from recovery as
-    /// ordinary notes, so this is a filter rather than a second list.
+    /// How many notes are not yet in a file: non-blank pathless notes.
     pub(crate) fn draft_count(&self) -> usize {
         self.library.notes.iter().filter(|n| is_draft(n)).count()
     }
@@ -412,171 +387,11 @@ impl NotesApp {
     }
     fn notes_changed(&mut self, cx: &mut Context<Self>) {
         self.links.invalidate();
-        let library = &self.library;
-        self.naming.retain(|id| {
-            library
-                .note(id)
-                .is_some_and(|note| note.path.is_none() && note.deleted_at.is_none())
-        });
         self.schedule_save(cx);
     }
-
-    /// Keep autosave from naming a new note's file after a half-typed first line.
-    ///
-    /// Autosave names a note's file once and never again on its own, so a note filed
-    /// on its first keystroke would stay `M.md` while its first line went on to read
-    /// "Meeting notes for Q3"; only [`Self::open_rename`] moves it afterwards. While
-    /// the caret is still in the line the name would come from, the store holds the
-    /// note in recovery instead. The name has settled once the caret leaves that line
-    /// or the typing stops for [`workspace::NAME_SETTLES`], and the next save files the note
-    /// under what the line says then — a note that is only a first line is filed like
-    /// any other.
-    ///
-    /// Called wherever the editor's state moved, a selection with no edit included.
-    fn follow_title(&mut self, cx: &mut Context<Self>) {
-        let naming = self.naming_title(cx);
-        let composing = self.composing(cx);
-        let library = &self.library;
-        if self.naming.observe(
-            &library.active_id,
-            naming,
-            composing,
-            Instant::now(),
-            |id| {
-                library
-                    .note(id)
-                    .is_some_and(|note| !note.document_is_empty())
-            },
-        ) {
-            self.schedule_save(cx);
-        }
-    }
-    /// Whether the active note's editor holds an input method's uncommitted candidate.
-    fn composing(&self, cx: &App) -> bool {
-        self.sessions
-            .get(&self.library.active_id)
-            .is_some_and(|session| session.editor().read(cx).is_composing())
-    }
-    /// Whether the active note is one the store would file under its first line, with
-    /// the selection still working on that line.
-    ///
-    /// The editor's live document answers where the selection is; an input method's
-    /// uncommitted candidate sits at the caret, so composing a title counts as still
-    /// typing it, which is what holds the note back.
-    fn naming_title(&self, cx: &App) -> bool {
-        if self.persistence.is_none() || self.path.is_none() {
-            return false;
-        }
-        let note = self.library.active_note();
-        if note.path.is_some()
-            || note.conflicted
-            || note.deleted_at.is_some()
-            || note.document_is_empty()
-        {
-            return false;
-        }
-        self.sessions
-            .get(&self.library.active_id)
-            .map(|session| session.editor().read(cx))
-            .is_some_and(|editor| naming_title(editor.doc(), editor.state().selection()))
-    }
-    /// Let go of the held draft: its name has settled, the next save files it, and it is
-    /// never held again. A caret leaving the first line and a window losing focus are
-    /// not edits, so the save this needs is scheduled here.
-    ///
-    /// A note emptied while it was held is the exception. It has no name for anything
-    /// to have settled on, and the page was cleared to begin again, so it is not shut
-    /// out of being held: what is typed next deserves the wait a new note gets.
-    fn release_title(&mut self, cx: &mut Context<Self>) {
-        let library = &self.library;
-        if self.naming.release(|id| {
-            library
-                .note(id)
-                .is_some_and(|note| !note.document_is_empty())
-        }) {
-            self.schedule_save(cx);
-        }
-    }
-    /// Whether the active note is a draft the store has nowhere to file: without a
-    /// folder a new note is held privately until the user names a file for it.
-    fn unfiled_draft(&self) -> bool {
-        self.persistence.is_some()
-            && self.path.is_none()
-            && self.library.active_note().path.is_none()
-    }
-    /// ⌘S. A draft with no folder behind it asks where to go before it is written;
-    /// everywhere else the note already knows its file.
-    fn save_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.unfiled_draft() {
-            self.save_as(window, cx);
-        } else {
-            self.flush(cx);
-        }
-    }
-    /// Ask where the active note should live, then carry on with `next`. Everything
-    /// that needs a draft to have a file comes through here, so the rules are the
-    /// same each time: only a name nothing else holds, and the editor's image base
-    /// follows the note into its folder.
-    fn prompt_for_note_path(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        next: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>, bool) + 'static,
-    ) {
-        let id = self.library.active_id.clone();
-        let directory = self
-            .path
-            .as_ref()
-            .map(|root| root.join(&self.library.workspace.new_note_directory))
-            .or_else(|| {
-                self.library
-                    .notes
-                    .iter()
-                    .find_map(|note| note.path.as_ref()?.parent().map(ToOwned::to_owned))
-            })
-            .unwrap_or_default();
-        let prompt = cx.prompt_for_new_path(&directory, Some("Untitled.md"));
-        cx.spawn_in(window, async move |this, cx| {
-            let result = prompt.await;
-            let _ = cx.update(|window, cx| {
-                this.update(cx, |this, cx| {
-                    let selected = match result {
-                        Ok(Ok(Some(path))) if this.library.active_id == id => {
-                            if path.exists() {
-                                this.feedback.queue(
-                                    "Choose a new filename; the existing file was not changed."
-                                        .to_owned(),
-                                );
-                                false
-                            } else {
-                                let parent = path.parent().map(ToOwned::to_owned);
-                                if let Some(note) =
-                                    this.library.notes.iter_mut().find(|n| n.id == id)
-                                {
-                                    note.path = Some(path);
-                                }
-                                this.editor()
-                                    .update(cx, |editor, cx| editor.set_image_base(parent, cx));
-                                this.notes_changed(cx);
-                                true
-                            }
-                        }
-                        _ => false,
-                    };
-                    next(this, window, cx, selected);
-                })
-            });
-        })
-        .detach();
-    }
-    /// Give the active draft a file, then write it there.
-    fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.prompt_for_note_path(window, cx, |this, window, cx, selected| {
-            if selected {
-                this.flush(cx);
-            }
-            this.focus_editor(window, cx);
-        });
+    /// ⌘S writes the current snapshot.
+    fn save_now(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.flush(cx);
     }
     /// Hand the latest snapshot to the notes folder without waiting for it.
     ///
@@ -587,23 +402,18 @@ impl NotesApp {
     /// key asked for. The receipt comes back through `poll` like any other, so a
     /// failure still reaches `Not saved` and is there when the window returns.
     fn flush_in_background(&mut self, cx: &mut Context<Self>) {
-        self.release_title(cx);
         self.sync_documents(cx);
         let revision = self.save.barrier();
         let Some(persistence) = &self.persistence else {
             return;
         };
-        // No held drafts, exactly as the waiting flush passes none: this is the
-        // user asking for everything to be written, so a draft whose title is
-        // still being typed is filed under what it has rather than kept back.
-        if let Err(error) = persistence.save(revision, self.library.clone(), Vec::new()) {
+        if let Err(error) = persistence.save(revision, self.library.clone()) {
             self.save.apply_completion(revision, false);
             self.feedback.set_error(error);
             cx.notify();
         }
     }
     fn flush(&mut self, cx: &mut Context<Self>) -> bool {
-        self.release_title(cx);
         self.sync_documents(cx);
         let revision = self.save.barrier();
         let result = self
@@ -630,11 +440,25 @@ impl NotesApp {
             return;
         }
         self.update_paths(saved.paths, cx);
-        self.update_conflicts(saved.conflicts, cx);
+        if !saved.conflicts.is_empty() && completion == SaveCompletion::Current {
+            // Disk won mid-save: toast and refresh so the editor adopts disk content.
+            self.feedback.queue(if saved.conflicts.len() == 1 {
+                "Disk version kept; your edits were archived.".to_owned()
+            } else {
+                format!(
+                    "{} notes kept the disk version; your edits were archived.",
+                    saved.conflicts.len()
+                )
+            });
+            if let Some(persistence) = &self.persistence {
+                persistence.refresh();
+            }
+        }
         if completion == SaveCompletion::Current {
             match saved.result {
                 Ok(()) => self.feedback.clear_error(),
-                Err(error) => self.feedback.set_error(error),
+                Err(error) if saved.conflicts.is_empty() => self.feedback.set_error(error),
+                Err(_) => {}
             }
         }
         cx.notify();
@@ -666,7 +490,6 @@ impl NotesApp {
     }
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reconcile_interaction(window, cx);
-        self.prompt_conflict(window, cx);
         if let Some(rejection) = self
             .editor()
             .update(cx, |editor, _| editor.take_edit_error())
@@ -779,22 +602,9 @@ impl NotesApp {
                 self.inform("Update paused. Resolve the save error, then choose Check for Updates to retry.", cx);
             }
         }
-        // Nobody has touched the name for a while, so it is as settled as it is going
-        // to get; the note is filed rather than left waiting for the caret to move.
-        if self.naming.due(Instant::now()) {
-            self.release_title(cx);
-        }
         if let Some(revision) = self.save.take_due(Instant::now())
             && let Some(p) = &self.persistence
-            && let Err(e) = p.save(
-                revision,
-                self.library.clone(),
-                self.naming
-                    .held_id()
-                    .map(str::to_owned)
-                    .into_iter()
-                    .collect(),
-            )
+            && let Err(e) = p.save(revision, self.library.clone())
         {
             self.feedback.set_error(e);
         }
@@ -895,50 +705,9 @@ impl NotesApp {
             .update(cx, |editor, cx| editor.cancel_composition(cx));
         self.flush(cx)
     }
-    /// ⌘Q. A note with no file of its own is never written to one by autosave, so
-    /// this is the last moment to offer it a file. Hiding the window asks nothing:
-    /// the note is still open behind it, and that happens many times an hour.
-    fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// ⌘Q. Flush and quit; stay and say why if that fails.
+    fn quit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.quitting.begin() {
-            return;
-        }
-        if self.unfiled_draft() && is_draft(self.library.active_note()) {
-            let answer = window.prompt(
-                PromptLevel::Warning,
-                "This note has not been saved to a file",
-                // The words are not at stake — recovery has them and the next launch
-                // opens them again — so the question is only about the file.
-                Some("It is kept inside Markraft and will be here when you come back."),
-                &["Save As…", "Cancel", "Quit"],
-                cx,
-            );
-            cx.spawn_in(window, async move |this, cx| {
-                let choice = answer.await;
-                let _ = cx.update(|window, cx| {
-                    this.update(cx, |this, cx| {
-                        match choice {
-                            // Giving it a file is what the question was about, so
-                            // leaving is what follows once it has one.
-                            Ok(0) => {
-                                this.prompt_for_note_path(window, cx, |this, _, cx, selected| {
-                                    if selected {
-                                        this.quit_now(cx);
-                                    } else {
-                                        this.quitting.cancel();
-                                        cx.notify();
-                                    }
-                                })
-                            }
-                            Ok(2) => this.quit_now(cx),
-                            _ => {
-                                this.quitting.cancel();
-                                cx.notify();
-                            }
-                        }
-                    })
-                });
-            })
-            .detach();
             return;
         }
         self.quit_now(cx);
@@ -1058,7 +827,6 @@ impl NotesApp {
             self.library
                 .notes
                 .iter()
-                .filter(|note| note.deleted_at.is_none())
                 .filter_map(|note| Some((note.id.as_str(), note.path.as_deref()?))),
         );
         match found {
@@ -1098,11 +866,6 @@ impl NotesApp {
                 "Global shortcut",
             ),
             Panel::Actions => (String::new(), "Search for actions…", "Search actions"),
-            Panel::Trash => (
-                String::new(),
-                "Search deleted notes…",
-                "Search deleted notes",
-            ),
             _ => (String::new(), "Search for notes…", "Search notes"),
         };
         self.close_popover(cx);
@@ -1114,33 +877,23 @@ impl NotesApp {
         }
         cx.notify();
     }
-    /// Which of the library's notes the open panel is looking at. Drafts and the
-    /// trash are the same list the Browse panel draws, filtered two ways.
+    /// Which of the library's notes the open panel is looking at.
     pub(crate) fn scope(&self) -> Scope {
         match self.interaction.panel() {
             Panel::Drafts => Scope::Drafts,
-            Panel::Trash => Scope::Deleted,
             _ => Scope::Notes,
         }
     }
     fn matching_notes(&self, query: &str, scope: Scope) -> Vec<&crate::storage::Note> {
-        let deleted = scope == Scope::Deleted;
-        let mut notes = self.library.search(query, deleted, self.path.as_deref());
+        let mut notes = self.library.search(query, self.path.as_deref());
         if scope == Scope::Drafts {
             notes.retain(|note| is_draft(note));
         }
-        if !deleted {
-            notes.sort_by_key(|note| note.id != self.library.active_id);
-        }
+        notes.sort_by_key(|note| note.id != self.library.active_id);
         notes
     }
     fn toggle_pin(&mut self, id: &str, cx: &mut Context<Self>) {
-        if let Some(note) = self
-            .library
-            .notes
-            .iter_mut()
-            .find(|note| note.id == id && note.deleted_at.is_none())
-        {
+        if let Some(note) = self.library.notes.iter_mut().find(|note| note.id == id) {
             note.pinned = !note.pinned;
             self.notes_changed(cx);
         }
@@ -1159,15 +912,12 @@ impl NotesApp {
             self.ensure_session(window, cx);
             let query = self.search_text(cx);
             let root = self.path.clone();
-            self.picker.clamp_to(
-                self.library
-                    .search(query.trim(), false, root.as_deref())
-                    .len(),
-            );
+            self.picker
+                .clamp_to(self.library.search(query.trim(), root.as_deref()).len());
             self.ring.release();
             window.focus(&self.query().focus_handle(cx), cx);
             self.notes_changed(cx);
-            self.inform_undo("Moved to Recently Deleted", id.to_owned(), cx);
+            self.inform("Moved to Trash", cx);
         }
     }
     fn delete_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1179,108 +929,11 @@ impl NotesApp {
             self.set_panel(Panel::Editor, cx);
             self.focus_editor(window, cx);
             self.notes_changed(cx);
-            self.inform_undo("Moved to Recently Deleted", id, cx);
-        }
-    }
-    /// Take back the deletion the notice still offers, and open that note again.
-    fn undo_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.feedback.take_undo() else {
-            return;
-        };
-        if self.library.restore(&id) {
-            self.ensure_session(window, cx);
-            self.set_panel(Panel::Editor, cx);
-            self.focus_editor(window, cx);
-            self.notes_changed(cx);
-            self.inform("Restored note", cx);
-        } else {
-            cx.notify();
-        }
-    }
-    /// Delete deleted notes for good. The trash is the undo, so this one is asked twice
-    /// before it runs; what the folder actually gave up is what leaves the library.
-    fn purge_notes(&mut self, ids: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(persistence) = &self.persistence else {
-            return;
-        };
-        let count = ids.len();
-        let (purged, result) = persistence.purge(ids);
-        for id in &purged {
-            self.library.remove(id);
-            self.sessions.remove(id);
-        }
-        self.picker.forget_question();
-        self.ring.release();
-        self.ensure_session(window, cx);
-        self.picker.clamp_to(
-            self.library
-                .search(self.search_text(cx).trim(), true, self.path.as_deref())
-                .len(),
-        );
-        self.notes_changed(cx);
-        match result {
-            Ok(()) if count == 1 => self.inform("Deleted permanently", cx),
-            Ok(()) => self.inform("Emptied Recently Deleted", cx),
-            Err(error) => {
-                self.feedback.set_error(error);
-                cx.notify();
-            }
-        }
-    }
-    /// ⌘K's bulk purge. It reaches past what the list shows, so it is confirmed in a
-    /// dialog rather than by a second click.
-    fn empty_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ids: Vec<String> = self
-            .library
-            .search("", true, None)
-            .iter()
-            .map(|note| note.id.clone())
-            .collect();
-        if ids.is_empty() {
-            return;
-        }
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            &format!(
-                "Delete {} {} for good?",
-                ids.len(),
-                if ids.len() == 1 { "note" } else { "notes" }
-            ),
-            Some("This cannot be undone."),
-            &["Cancel", "Delete"],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            if answer.await == Ok(1) {
-                let _ = cx.update(|window, cx| {
-                    this.update(cx, |this, cx| this.purge_notes(ids, window, cx))
-                });
-            }
-        })
-        .detach();
-    }
-    fn restore_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.library.restore(id) {
-            // The row and its buttons leave the list with the note.
-            self.ring.release();
-            self.picker.forget_question();
-            self.ensure_session(window, cx);
-            self.notes_changed(cx);
-            self.picker.clamp_to(
-                self.library
-                    .search(&self.search_text(cx), true, self.path.as_deref())
-                    .len(),
-            );
-            self.inform("Restored note", cx);
+            self.inform("Moved to Trash", cx);
         }
     }
     fn inform(&mut self, text: impl AsRef<str>, cx: &mut Context<Self>) {
         self.feedback.inform(text);
-        cx.notify();
-    }
-    /// A notice whose deletion can still be taken back.
-    fn inform_undo(&mut self, text: &str, note: String, cx: &mut Context<Self>) {
-        self.feedback.inform_undo(text, note);
         cx.notify();
     }
     fn apply_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1378,9 +1031,6 @@ impl NotesApp {
         if let Some(directory) = self.path.clone() {
             self.open_folder(directory, window, cx);
         }
-    }
-    pub(super) fn default_folder() -> Option<PathBuf> {
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Documents/Markraft"))
     }
     fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = cx.prompt_for_paths(PathPromptOptions {
@@ -1728,87 +1378,6 @@ impl NotesApp {
         }
     }
 
-    fn update_conflicts(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
-        for id in ids {
-            if let Some(note) = self.library.notes.iter_mut().find(|note| note.id == id) {
-                note.conflicted = true;
-            }
-        }
-        cx.notify();
-    }
-
-    /// Bring the conflict dialog back for the active note. ⌘S, the footer indicator
-    /// and the command all arrive here, so a note that was answered "Keep Mine" can be
-    /// asked again from wherever the user looks for it.
-    fn reopen_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let id = self.library.active_id.clone();
-        self.conflicts.ask_again(&id);
-        self.prompt_conflict(window, cx);
-    }
-
-    fn prompt_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let note = self.library.active_note();
-        if !note.conflicted || !self.conflicts.would_ask(&note.id) {
-            return;
-        }
-        let id = note.id.clone();
-        let subject = conflict_subject(note);
-        if !self.conflicts.ask(&id) {
-            return;
-        }
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            &format!("“{subject}” changed on disk"),
-            Some("Your edits are kept either way."),
-            &["Keep Mine", "Use Disk Version"],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            let load = answer.await == Ok(1);
-            let _ = cx.update(|window, cx| {
-                this.update(cx, |this, cx| {
-                    this.conflicts.answered();
-                    if load && this.library.active_id == id {
-                        this.resolve_conflict(window, cx);
-                    }
-                    cx.notify();
-                })
-            });
-        })
-        .detach();
-    }
-
-    fn resolve_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sync_documents(cx);
-        let note = self.library.active_note().clone();
-        let Some(persistence) = &self.persistence else {
-            return;
-        };
-        let result = persistence
-            .review_conflict(note.clone())
-            .and_then(|_| persistence.resolve_conflict(note.clone()));
-        match result {
-            Ok(result) => {
-                match result {
-                    Some(note) => self.library.adopt(note),
-                    None => self.library.remove(&note.id),
-                }
-                self.sessions.remove(&note.id);
-                self.ensure_session(window, cx);
-                self.feedback.clear_error();
-                self.notes_changed(cx);
-                self.focus_editor(window, cx);
-            }
-            // The note stays conflicted and its indicator keeps saying so, so this is
-            // one sentence about a failed load rather than a standing save banner.
-            Err(error) => {
-                self.feedback
-                    .queue(format!("Could not load the version on disk: {error}"));
-                cx.notify();
-            }
-        }
-    }
-
     fn configure_new_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.path.clone() else {
             self.inform("Open a folder to set a default location for new notes.", cx);
@@ -1897,11 +1466,9 @@ impl NotesApp {
         if assets.is_empty() {
             return;
         }
-        if self.library.active_note().read_only.is_some() || self.library.active_note().conflicted {
-            self.feedback.queue(
-                "Resolve the file's read-only or conflict state before inserting images."
-                    .to_owned(),
-            );
+        if self.library.active_note().read_only.is_some() {
+            self.feedback
+                .queue("Resolve the file's read-only state before inserting images.".to_owned());
             return;
         }
         // The note must be on disk before an image can be placed beside it.
@@ -1910,15 +1477,11 @@ impl NotesApp {
             return;
         }
         let Some(path) = self.library.active_note().path.clone() else {
-            // The save panel has no room to say why it opened, so the reason goes
-            // before it rather than into it.
-            self.feedback
-                .queue("Save this note first — images are stored next to its file.".to_owned());
-            self.prompt_for_note_path(window, cx, move |this, window, cx, selected| {
-                if selected {
-                    this.insert_assets(assets, window, cx);
-                }
-            });
+            self.feedback.queue(
+                "Save this note first — images are stored next to its file. Keep writing; \
+                 the note will be filed automatically."
+                    .to_owned(),
+            );
             return;
         };
         let root = self
@@ -1963,7 +1526,7 @@ impl NotesApp {
                 let kept =
                     |what: &str| format!("{what} The images are in {}.", inserted.urls.join(", "));
                 let note = this.library.active_note();
-                if this.library.active_id != id || note.read_only.is_some() || note.conflicted {
+                if this.library.active_id != id || note.read_only.is_some() {
                     this.feedback.queue(format!(
                         "The note changed before the images could be added. They are in {}, beside “{beside}”.",
                         inserted.urls.join(", ")
@@ -2192,15 +1755,10 @@ fn shorten_location(location: &str, budget: usize) -> String {
 /// status in front of it has been written. The status varies from "Current" to
 /// "Edited yesterday", so a fixed share would cut the file name on the long ones and
 /// waste room on the short ones.
-fn location_budget(status: &str, current: bool, deleted: bool, selected: bool) -> usize {
-    let line = match (deleted, selected) {
-        (false, _) => LIVE_META_CHARS,
-        (true, false) => DELETED_META_CHARS,
-        (true, true) => DELETED_SELECTED_META_CHARS,
-    };
+fn location_budget(status: &str, current: bool) -> usize {
     // " ·" and the gap after it, and the dot that marks the current note.
     let taken = status.chars().count() + 3 + usize::from(current);
-    line.saturating_sub(taken)
+    LIVE_META_CHARS.saturating_sub(taken)
 }
 
 /// Where inside the notes folder a setting points, written the way the user reads
@@ -2217,56 +1775,19 @@ fn folder_label(root: &std::path::Path, relative: &std::path::Path) -> String {
     }
 }
 
-/// Whether a note is work that is not in a file the way it was left: it has no file
-/// yet, or the file says something else. A blank page with no file is not work: the
-/// store never writes one, and the library always keeps one open to type into.
+/// Whether a note is not yet filed: non-blank and still without a path. Blank pages
+/// are not drafts — the store never writes them, and the library keeps one open to type into.
 pub(crate) fn is_draft(note: &crate::storage::Note) -> bool {
-    note.deleted_at.is_none()
-        && (note.conflicted || (note.path.is_none() && !note.document_is_empty()))
-}
-
-/// Whether `selection` still reaches the block the note's title — and so the name of
-/// the file it would be filed under — is read from.
-///
-/// A selection covers the blocks between its ends, and touching that one anywhere is
-/// enough. Select All reaches from the start of the document to past its last block,
-/// and a drag out of the first line leaves the other end behind; neither is someone
-/// moving on from the title, and filing the note on one of them would name its file
-/// after however much of the title had been typed. Letting go a moment late costs
-/// nothing, because the name settles on its own after [`workspace::NAME_SETTLES`].
-///
-/// A document with nothing to read has no such block for a selection to reach.
-fn naming_title(doc: &Node, selection: &Selection) -> bool {
-    let block_at = |pos: usize| Some(doc.resolve(pos).ok()?.index(0));
-    doc::title_block(doc)
-        .zip(block_at(selection.from(doc)).zip(block_at(selection.to(doc))))
-        .is_some_and(|(title, (first, last))| (first..=last).contains(&title))
-}
-
-/// What the conflict dialog calls the note: the file another app changed, or the
-/// note's own title while it has no file yet.
-fn conflict_subject(note: &crate::storage::Note) -> String {
-    note.path
-        .as_ref()
-        .and_then(|path| path.file_name())
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| note.title())
+    note.path.is_none() && !note.document_is_empty()
 }
 
 /// Heights of the toolbar and footer, which float over the top and bottom of the note.
 const TOOLBAR_HEIGHT: Pixels = px(52.);
 const FOOTER_HEIGHT: Pixels = px(48.);
-/// How long a new note's first line has to stand still before it names the file. Long
-/// enough that a pause for thought mid-title does not name the file after half of it,
-/// and short enough that a note which is only that line still reaches the folder.
 /// Characters a live Browse row's second line holds at 12px. The card is a fixed
 /// width and every live row keeps 60px clear for its buttons, which leaves about
 /// 226px; measured on a real run the line averages 6px a character.
 const LIVE_META_CHARS: usize = 38;
-/// The same line in Recently Deleted, whose buttons sit beside it only while the row
-/// is selected and then take 202px of it.
-const DELETED_META_CHARS: usize = 46;
-const DELETED_SELECTED_META_CHARS: usize = 12;
 /// The shortest the window is allowed to become while it follows its content. Below
 /// this the chrome has nowhere to sit, so a window with less room than this keeps the
 /// height and lets the editor scroll instead.
@@ -2349,7 +1870,7 @@ mod tests {
     // Not a glob: `gpui::prelude` carries a `test` attribute of its own, and these
     // are ordinary unit tests.
     use super::{
-        classify_drop, conflict_subject, folder_label, linked_file, location_budget, note_location,
+        classify_drop, folder_label, linked_file, location_budget, note_location,
         rejection_message, resolve_wiki_link, shorten_location, wiki_link_page,
     };
     use crate::{doc, storage::Library};
@@ -2358,12 +1879,6 @@ mod tests {
         fs,
         path::{Path, PathBuf},
     };
-
-    fn note(markdown: &str) -> crate::storage::Note {
-        let mut library = Library::default();
-        let id = library.new_note(doc::from_markdown(markdown));
-        library.note(&id).unwrap().clone()
-    }
 
     /// The folder a wiki link is followed in: ids paired with the paths of the
     /// notes it holds.
@@ -2543,14 +2058,6 @@ mod tests {
     }
 
     #[test]
-    fn a_conflict_names_the_file_and_falls_back_to_the_title() {
-        let mut note = note("# Meeting\n\nnotes");
-        assert_eq!(conflict_subject(&note), "Meeting");
-        note.path = Some(PathBuf::from("/tmp/notes/2024-05 Meeting.md"));
-        assert_eq!(conflict_subject(&note), "2024-05 Meeting.md");
-    }
-
-    #[test]
     fn every_refusal_says_which_syntax_stood_in_the_way() {
         use markraft_commonmark::SourceError;
         let messages: Vec<_> = [
@@ -2606,18 +2113,14 @@ mod tests {
 
     #[test]
     fn a_longer_status_leaves_the_location_less_room() {
-        let current = location_budget("Current", true, false, false);
-        let today = location_budget("Edited today", false, false, true);
-        let yesterday = location_budget("Edited yesterday", false, false, false);
+        let current = location_budget("Current", true);
+        let today = location_budget("Edited today", false);
+        let yesterday = location_budget("Edited yesterday", false);
         assert!(
             current > today && today > yesterday,
             "{current} {today} {yesterday}"
         );
-        // Selection does not move a live row's text: its buttons' room is always kept.
-        assert_eq!(today, location_budget("Edited today", false, false, false));
-        // A selected deleted row gives the line to its buttons, and never underflows.
-        assert_eq!(location_budget("Deleted yesterday", false, true, true), 0);
-        assert!(location_budget("Deleted today", false, true, false) > today);
+        assert_eq!(today, location_budget("Edited today", false));
     }
 
     #[test]
@@ -2688,7 +2191,7 @@ mod tests {
     }
 
     #[test]
-    fn a_draft_is_a_note_with_no_file_or_one_its_file_disagrees_with() {
+    fn a_draft_is_a_non_blank_note_with_no_file() {
         let mut library = Library::default();
         let id = library.new_note(doc::from_markdown("Unfiled"));
         let note = |library: &Library, id: &str| {
@@ -2699,84 +2202,9 @@ mod tests {
         // The blank page an empty library opens on has nothing in it to file.
         let blank = library.new_note(doc::empty());
         assert!(!super::is_draft(&note(&library, &blank)));
-        // Given a file it agrees with, it is an ordinary note.
+        // Given a file, it is an ordinary note.
         let filed = library.notes.iter_mut().find(|n| n.id == id).unwrap();
         filed.path = Some(PathBuf::from("/notes/Unfiled.md"));
         assert!(!super::is_draft(&note(&library, &id)));
-        // Until the file says something else.
-        library
-            .notes
-            .iter_mut()
-            .find(|n| n.id == id)
-            .unwrap()
-            .conflicted = true;
-        assert!(super::is_draft(&note(&library, &id)));
-        // Something thrown away is not waiting to be filed.
-        let gone = library.notes.iter_mut().find(|n| n.id == id).unwrap();
-        gone.deleted_at = Some(1);
-        assert!(!super::is_draft(&note(&library, &id)));
-    }
-
-    #[test]
-    fn the_caret_is_naming_the_file_until_it_leaves_the_title_line() {
-        let inside = |source: &str| {
-            let document = doc::from_markdown(source);
-            (0..=document.content_size())
-                .filter(|pos| {
-                    super::naming_title(&document, &markraft_core::Selection::cursor(*pos))
-                })
-                .collect::<Vec<_>>()
-        };
-        // "Meet" is the line the file would be named after, so the caret is still
-        // naming it anywhere in that paragraph; the body below it is not.
-        assert_eq!(inside("Meet\n\nbody"), (0..=5).collect::<Vec<_>>());
-        // A block with nothing to read is not the title line: the name comes from the
-        // first line that says something.
-        assert_eq!(inside("***\n\nMeet\n\nbody"), (1..=6).collect::<Vec<_>>());
-        // A note with nothing to read has no title line for the caret to be in.
-        assert!(inside("***").is_empty());
-    }
-
-    #[test]
-    fn a_selection_reaching_out_of_the_title_line_is_still_naming_it() {
-        use markraft_core::Selection;
-        let document = doc::from_markdown("Meet\n\nbody");
-        let naming = |selection: Selection| super::naming_title(&document, &selection);
-        // Select All runs past the last block, to a position in no block at all.
-        // Copying a half-typed note must not be what files it.
-        assert!(naming(Selection::All));
-        // Nor does dragging out of the title into the body, either way round.
-        assert!(naming(Selection::text(2, 8)));
-        assert!(naming(Selection::text(8, 2)));
-        // Having moved on to the body is.
-        assert!(!naming(Selection::cursor(8)));
-        assert!(!naming(Selection::text(7, 10)));
-        // A note whose title is not its first block is reached all the same: the
-        // anchor Select All leaves at the start of the document is in the rule above
-        // it, not in the line being named.
-        let ruled = doc::from_markdown("***\n\nMeet\n\nbody");
-        assert!(super::naming_title(&ruled, &Selection::All));
-        assert!(!super::naming_title(&ruled, &Selection::cursor(9)));
-    }
-}
-
-#[cfg(test)]
-mod scratch_probe {
-    use crate::{doc, storage::Library};
-    #[test]
-    fn probe_blank_and_names() {
-        for source in [
-            " ", "   ", "\t", "\u{00a0}", ".", "...", "[[Link]]", "#", "- ",
-        ] {
-            let d = doc::from_markdown(source);
-            let mut lib = Library::default();
-            let id = lib.new_note(d.clone());
-            println!(
-                "{source:?} blank={} title={:?} draft={}",
-                doc::is_blank(&d),
-                lib.note(&id).unwrap().title(),
-                crate::app::is_draft(lib.note(&id).unwrap()),
-            );
-        }
     }
 }

@@ -28,7 +28,6 @@ enum Intent {
     New,
     Browse,
     Drafts,
-    Trash,
     Actions,
     ToggleFormatToolbar,
     ToggleCount,
@@ -45,7 +44,6 @@ enum Intent {
     Undo,
     Redo,
     Delete,
-    UndoDelete,
     Pin,
     PinNote(String),
     TrashNote(String),
@@ -63,10 +61,6 @@ enum Intent {
     ResetImageLocation,
     ResetNewNoteLocation,
     Select(String),
-    Restore(String),
-    /// Asked twice: the first one turns the row's button into the question.
-    PurgeNote(String),
-    EmptyTrash,
     CodeLanguage(&'static str),
     Theme(Option<bool>),
     Login,
@@ -75,15 +69,12 @@ enum Intent {
     Shortcut,
     Reveal,
     ChooseFolder,
-    DefaultFolder,
     Retry,
     RevealNote,
     SaveCopy,
     Reload,
-    /// The lower-left file status indicator: the conflict dialog for a note waiting
-    /// on one, and the card of ways out for a read-only file.
+    /// The lower-left file status indicator: the card of ways out for a read-only file.
     FileStatus,
-    ReviewConflict,
     OpenExternally,
     /// Commands the editor owns and the panel only forwards, because each one
     /// acts on the thing the caret is already in.
@@ -135,9 +126,8 @@ impl Intent {
             | Self::Reveal
             | Self::RevealNote
             | Self::SaveCopy
-            | Self::ReviewConflict
             | Self::OpenExternally => ActionGroup::Files,
-            Self::Trash | Self::Delete | Self::EmptyTrash => ActionGroup::Recovery,
+            Self::Delete | Self::TrashNote(_) => ActionGroup::Recovery,
             _ => ActionGroup::View,
         }
     }
@@ -206,7 +196,7 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::New => Icon::Plus,
         Intent::Browse => Icon::Notes,
         Intent::Pin => Icon::Pin,
-        Intent::Trash | Intent::Delete | Intent::PurgeNote(_) | Intent::EmptyTrash => Icon::Trash,
+        Intent::Delete | Intent::TrashNote(_) => Icon::Trash,
         Intent::Drafts => Icon::Drafts,
         Intent::Copy | Intent::SaveCopy | Intent::CopyLink => Icon::Copy,
         Intent::Export => Icon::Export,
@@ -214,7 +204,7 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::OpenMarkdown => Icon::Document,
         Intent::Settings => Icon::Settings,
         Intent::Save => Icon::Save,
-        Intent::Undo | Intent::Redo | Intent::UndoDelete | Intent::Restore(_) => Icon::Restore,
+        Intent::Undo | Intent::Redo => Icon::Restore,
         Intent::ToggleTask => Icon::Task,
         Intent::ChooseCodeLanguage => Icon::CodeBlock,
         Intent::CopyCodeBlock => Icon::Copy,
@@ -223,12 +213,10 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::ToggleCount => Icon::Count,
         // Anything that hands the note to something outside Markraft.
         Intent::OpenLink | Intent::OpenExternally => Icon::External,
-        Intent::Reveal
-        | Intent::RevealNote
-        | Intent::NewNoteLocation
-        | Intent::ChooseFolder
-        | Intent::DefaultFolder => Icon::Open,
-        Intent::ReviewConflict | Intent::FileStatus => Icon::Conflict,
+        Intent::Reveal | Intent::RevealNote | Intent::NewNoteLocation | Intent::ChooseFolder => {
+            Icon::Open
+        }
+        Intent::FileStatus => Icon::Conflict,
         Intent::ImageLocation => Icon::Image,
         Intent::ResetImageLocation | Intent::ResetNewNoteLocation => Icon::Reset,
         Intent::Retry | Intent::Reload => Icon::Reset,
@@ -269,7 +257,6 @@ impl NotesApp {
             Intent::New => self.new_note(window, cx),
             Intent::Browse => self.open_panel(Panel::Browse, window, cx),
             Intent::Drafts => self.open_panel(Panel::Drafts, window, cx),
-            Intent::Trash => self.open_panel(Panel::Trash, window, cx),
             Intent::Actions => self.open_panel(Panel::Actions, window, cx),
             Intent::ToggleFormatToolbar => {
                 self.close_popover(cx);
@@ -343,7 +330,6 @@ impl NotesApp {
                 window.dispatch_action(action, cx);
             }
             Intent::Delete => self.delete_note(window, cx),
-            Intent::UndoDelete => self.undo_delete(window, cx),
             Intent::Pin => {
                 let id = self.library.active_id.clone();
                 self.toggle_pin(&id, cx);
@@ -352,19 +338,6 @@ impl NotesApp {
             Intent::PinNote(id) => self.toggle_pin(&id, cx),
             Intent::TrashNote(id) => self.trash_note(&id, window, cx),
             Intent::Select(id) => self.select_note(&id, window, cx),
-            Intent::Restore(id) => self.restore_note(&id, window, cx),
-            Intent::PurgeNote(id) => {
-                if self.picker.confirming(&id) {
-                    self.purge_notes(vec![id], window, cx);
-                } else {
-                    self.picker.ask_about(id);
-                    cx.notify();
-                }
-            }
-            Intent::EmptyTrash => {
-                self.intent(Intent::Back, window, cx);
-                self.empty_trash(window, cx);
-            }
             Intent::CodeLanguage(language) => self.apply_code_language(language, window, cx),
             Intent::Copy => {
                 self.copy_markdown(cx);
@@ -436,10 +409,7 @@ impl NotesApp {
                 self.close_popover(cx);
                 cx.notify();
             }
-            // The indicator answers for whichever state it is showing: a conflict has
-            // its dialog, and a read-only file has the card of ways around it.
-            // Every capsule opens the one card, which lists all of them: the lock no
-            // longer owns it and the pause no longer skips it for its dialog.
+            // Every capsule opens the one card of file states (read-only, not saved).
             Intent::FileStatus => {
                 if self.interaction.file_status() {
                     self.close_popover(cx);
@@ -447,10 +417,6 @@ impl NotesApp {
                     self.show_popover(Popover::FileStatus, cx);
                 }
                 cx.notify();
-            }
-            Intent::ReviewConflict => {
-                self.intent(Intent::Back, window, cx);
-                self.reopen_conflict(window, cx);
             }
             Intent::OpenExternally => {
                 if let Some(path) = self.library.active_note().path.clone() {
@@ -460,11 +426,6 @@ impl NotesApp {
                 cx.notify();
             }
             Intent::ChooseFolder => self.choose_folder(window, cx),
-            Intent::DefaultFolder => {
-                if let Some(directory) = Self::default_folder() {
-                    self.open_folder(directory, window, cx);
-                }
-            }
             Intent::Retry => self.recover(window, cx),
             Intent::SaveCopy => self.save_copy(cx),
             Intent::Reload => self.reload(window, cx),
@@ -667,7 +628,7 @@ impl NotesApp {
         let expanded = match intent {
             Intent::Browse => Some(matches!(
                 self.interaction.panel(),
-                Panel::Browse | Panel::Drafts | Panel::Trash
+                Panel::Browse | Panel::Drafts
             )),
             Intent::Actions => Some(self.interaction.panel() == Panel::Actions),
             _ => None,
@@ -771,7 +732,7 @@ impl NotesApp {
         let destructive = matches!(
             intent,
             Intent::Delete
-                | Intent::EmptyTrash
+                | Intent::TrashNote(_)
                 | Intent::Table(
                     TableEdit::DeleteTable | TableEdit::DeleteRow | TableEdit::DeleteColumn
                 )
@@ -904,7 +865,6 @@ impl NotesApp {
     }
     fn picker(&self, heading: bool, cx: &mut Context<Self>) -> Div {
         let scope = self.scope();
-        let deleted = scope == Scope::Deleted;
         let query = self.query().read(cx).text().to_owned();
         let notes = self.matching_notes(query.trim(), scope);
         let total = notes.len();
@@ -915,7 +875,7 @@ impl NotesApp {
             // Rows keep `Role::Button` inside the list: a `ListBoxOption` reaches VoiceOver as
             // static text and its AXPress lands outside the row, closing the panel instead.
             .role(Role::ListBox)
-            .aria_label(if deleted { "Deleted notes" } else { "Notes" })
+            .aria_label("Notes")
             .track_scroll(self.picker.browse_scroll())
             .overflow_y_scroll()
             .px_2()
@@ -927,11 +887,7 @@ impl NotesApp {
                     .text_center()
                     .text_size(px(13.))
                     .text_color(self.muted())
-                    .child(if deleted {
-                        "No deleted notes"
-                    } else {
-                        "No matching notes"
-                    }),
+                    .child("No matching notes"),
             );
         }
         for (index, note) in notes.iter().enumerate() {
@@ -940,25 +896,17 @@ impl NotesApp {
             let selected = index == self.picker.row();
             let status = if scope == Scope::Drafts {
                 // In this scope every row is a draft, so the useful thing to say is
-                // which kind: one with no file yet, or one its file disagrees with.
-                match &note.path {
-                    None => "No file yet".to_owned(),
-                    Some(path) => format!(
-                        "Differs from {}",
-                        path.file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_default()
-                    ),
-                }
-            } else if current && !deleted {
+                // that it has no file yet.
+                "No file yet".to_owned()
+            } else if current {
                 "Current".to_owned()
             } else {
-                let date = relative_day(note.deleted_at.unwrap_or(note.updated_at), now);
+                let date = relative_day(note.updated_at, now);
                 let date = match date.as_str() {
                     "Today" | "Yesterday" => date.to_lowercase(),
                     _ => date,
                 };
-                format!("{} {date}", if deleted { "Deleted" } else { "Edited" })
+                format!("Edited {date}")
             };
             // In this scope the status above already says whether the note has a
             // file, so a location beside it can only repeat itself or crowd the
@@ -970,7 +918,7 @@ impl NotesApp {
                 .map(|path| {
                     shorten_location(
                         &note_location(path, self.path.as_deref(), home.as_deref()),
-                        location_budget(&status, current && !deleted, deleted, selected),
+                        location_budget(&status, current),
                     )
                 });
             // A draft has nowhere on disk yet, which the accent says without adding
@@ -985,15 +933,13 @@ impl NotesApp {
             } else {
                 format!("{status} · {location}")
             };
-            // A deleted note's buttons are spelled out, so they sit on the row's second
-            // line and leave its title the full width.
             let mut controls = div()
                 .absolute()
                 .right(px(6.))
-                .top(px(if deleted { 27. } else { 15. }))
+                .top(px(15.))
                 .flex()
                 .gap(px(4.));
-            if !deleted && selected {
+            if selected {
                 controls = controls
                     .child(
                         self.icon_button(
@@ -1019,46 +965,14 @@ impl NotesApp {
                     .child(
                         self.icon_button(
                             SharedString::from(format!("trash-{id}")),
-                            "Move to Recently Deleted",
+                            "Move to Trash",
                             Icon::Trash,
                             Intent::TrashNote(id.clone()),
                             cx,
                         )
                         .size(px(24.)),
                     );
-            } else if deleted && selected {
-                // Putting a note back is spelled out; the row itself only selects.
-                // Deleting for good is asked twice: the button becomes its own
-                // confirmation, and Escape puts the question away.
-                let confirming = self.picker.confirming(&id);
-                let danger = self.danger();
-                controls = controls
-                    .child(
-                        self.button(
-                            SharedString::from(format!("purge-{id}")),
-                            if confirming {
-                                "Delete permanently?"
-                            } else {
-                                "Delete Permanently"
-                            },
-                            Intent::PurgeNote(id.clone()),
-                            cx,
-                        )
-                        .h(px(24.))
-                        .text_color(danger)
-                        .when(confirming, |s| s.bg(danger.opacity(0.14))),
-                    )
-                    .child(
-                        self.button(
-                            SharedString::from(format!("restore-{id}")),
-                            "Restore",
-                            Intent::Restore(id.clone()),
-                            cx,
-                        )
-                        .h(px(24.))
-                        .text_color(self.control_text()),
-                    );
-            } else if note.pinned && !deleted {
+            } else if note.pinned {
                 controls = controls.child(
                     div()
                         .size(px(24.))
@@ -1109,25 +1023,13 @@ impl NotesApp {
                             }
                         }))
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            if deleted {
-                                // Clicking the row the question stands on keeps it:
-                                // the answer is the second click on the button.
-                                if this.picker.row() == index {
-                                    this.picker.point_at_keeping_question(index);
-                                } else {
-                                    this.picker.point_at(index);
-                                }
-                                this.ring.release();
-                                cx.notify();
-                            } else {
-                                this.intent(Intent::Select(select.clone()), window, cx);
-                            }
+                            this.intent(Intent::Select(select.clone()), window, cx);
                         }))
                         .child(
                             div()
                                 .w_full()
                                 // Clear of the row's controls.
-                                .pr(px(if deleted { 8. } else { 60. }))
+                                .pr(px(60.))
                                 .child(
                                     div()
                                         .text_size(px(13.))
@@ -1139,13 +1041,10 @@ impl NotesApp {
                                 .child(
                                     div()
                                         .mt(px(2.))
-                                        // The two labelled buttons of a selected
-                                        // deleted note share this line.
-                                        .pr(px(if deleted && selected { 202. } else { 0. }))
                                         .flex()
                                         .items_center()
                                         .gap(px(4.))
-                                        .when(current && !deleted, |s| {
+                                        .when(current, |s| {
                                             s.child(
                                                 div()
                                                     .size(px(4.))
@@ -1194,7 +1093,7 @@ impl NotesApp {
                 s.child(
                     div()
                         .flex_shrink_0()
-                        .h(px(if deleted { 32. } else { 26. }))
+                        .h(px(26.))
                         .px_3()
                         .flex()
                         .items_center()
@@ -1202,13 +1101,11 @@ impl NotesApp {
                         .text_size(px(11.))
                         .text_color(self.muted())
                         .child(match scope {
-                            Scope::Deleted => "Recently Deleted",
                             Scope::Drafts => "Drafts",
                             Scope::Notes => "Notes",
                         })
-                        // The three scopes are one list read three ways, so the way
-                        // back to the others sits in the heading rather than behind a
-                        // command each.
+                        // The scopes are one list read two ways, so the way back to
+                        // the others sits in the heading rather than behind a command.
                         .when(scope != Scope::Notes, |s| {
                             s.child(self.button("trash-back", "All Notes", Intent::Browse, cx))
                         })
@@ -1219,6 +1116,7 @@ impl NotesApp {
             })
             .child(self.scroll_area(list, self.picker.browse_scroll(), cx))
     }
+
     /// One "where do these files go" setting: what it is, where it points now, and
     /// the buttons that move it. `id` names the Change… control, so it is also the
     /// keyboard stop; a reset is only offered while there is something to undo.
@@ -1611,11 +1509,7 @@ impl NotesApp {
                 "enter" => {
                     if let Some(note) = notes.get(self.picker.row()) {
                         let id = note.id.clone();
-                        if self.interaction.panel() == Panel::Trash {
-                            self.restore_note(&id, window, cx);
-                        } else {
-                            self.select_note(&id, window, cx);
-                        }
+                        self.select_note(&id, window, cx);
                     }
                 }
                 _ => return false,
@@ -1644,18 +1538,7 @@ impl NotesApp {
             Command::new("browse-action", "Browse Notes", "⌘P", Intent::Browse),
             Command::new("undo-edit", "Undo", "⌘Z", Intent::Undo),
             Command::new("redo-edit", "Redo", "⇧⌘Z", Intent::Redo),
-            // A draft with no folder behind it has to be given a file before it can
-            // be written, so ⌘S asks for one and the command says as much.
-            Command::new(
-                "save-now",
-                if self.unfiled_draft() {
-                    "Save As…"
-                } else {
-                    "Save Now"
-                },
-                "⌘S",
-                Intent::Save,
-            ),
+            Command::new("save-now", "Save Now", "⌘S", Intent::Save),
             Command::new("copy-markdown", "Copy as Markdown", "⇧⌘C", Intent::Copy),
             Command::new(
                 "paste-plain",
@@ -1821,18 +1704,7 @@ impl NotesApp {
             );
         }
         items.extend([
-            Command::new(
-                "show-trash",
-                "Show Recently Deleted Notes",
-                "",
-                Intent::Trash,
-            ),
-            Command::new(
-                "delete-note",
-                "Move to Recently Deleted",
-                "",
-                Intent::Delete,
-            ),
+            Command::new("delete-note", "Move to Trash", "", Intent::Delete),
             Command::new(
                 "toggle-format-toolbar",
                 if self.toolbar.shown() {
@@ -1885,25 +1757,6 @@ impl NotesApp {
                 "Show Folder in Finder",
                 "",
                 Intent::Reveal,
-            ));
-        }
-        // A conflict outlives the dialog that announced it, so the way back to that
-        // dialog is a command as well as the footer indicator.
-        if self.library.active_note().conflicted {
-            items.push(Command::new(
-                "review-conflict",
-                "Resolve Conflict…",
-                "⌘S",
-                Intent::ReviewConflict,
-            ));
-        }
-        // Only offered while there is something to empty.
-        if !self.library.search("", true, None).is_empty() {
-            items.push(Command::new(
-                "empty-trash",
-                "Empty Recently Deleted",
-                "",
-                Intent::EmptyTrash,
             ));
         }
         if caret.in_task {
@@ -2190,15 +2043,11 @@ impl NotesApp {
         .min(viewport.width - px(32.));
         let available = (viewport.height - top - px(16.)).max(px(0.));
         let desired = match self.interaction.panel() {
-            Panel::Browse | Panel::Drafts | Panel::Trash => {
+            Panel::Browse | Panel::Drafts => {
                 let n = self
                     .matching_notes(self.query().read(cx).text().trim(), self.scope())
                     .len();
-                let heading = if self.interaction.panel() == Panel::Editor {
-                    26.
-                } else {
-                    32.
-                };
+                let heading = 26.;
                 let rows = if n == 0 { 72. } else { 58. * n as f32 };
                 px(44. + heading + rows + 8.)
             }
@@ -2231,7 +2080,7 @@ impl NotesApp {
             .min(available);
         let contents = match self.interaction.panel() {
             // A short card gives what room it has to the rows rather than to a heading.
-            Panel::Browse | Panel::Drafts | Panel::Trash => self.picker(height >= px(136.), cx),
+            Panel::Browse | Panel::Drafts => self.picker(height >= px(136.), cx),
             Panel::Actions => self.actions_panel(cx),
             _ => div()
                 .flex()
@@ -2395,8 +2244,6 @@ impl Render for NotesApp {
             .on_action(cx.listener(|this, _: &Save, w, cx| {
                 if this.interaction.html().is_some() {
                     this.save_html_source(w, cx);
-                } else if this.library.active_note().conflicted {
-                    this.reopen_conflict(w, cx);
                 } else {
                     this.save_now(w, cx);
                 }
@@ -2544,14 +2391,6 @@ impl Render for NotesApp {
                 })
                 .child(primary)
                 .child(self.button("open-markdown", "Open Markdown…", Intent::OpenMarkdown, cx))
-                .when(first_launch && Self::default_folder().is_some(), |s| {
-                    s.child(self.button(
-                        "default-folder",
-                        "Use Documents/Markraft",
-                        Intent::DefaultFolder,
-                        cx,
-                    ))
-                })
                 .when(!first_launch, |s| {
                     s.child(self.button("reveal-library", "Show Folder", Intent::Reveal, cx))
                 });
@@ -2643,14 +2482,10 @@ impl Render for NotesApp {
                 )
             })
             .when_some(self.feedback.notice().cloned(), |s, notice| {
-                let announced = match notice.undo() {
-                    Some(_) => format!("{} · Undo available", notice.text),
-                    None => notice.text.to_string(),
-                };
                 let toast = div()
                     .id("notice")
                     .role(Role::Status)
-                    .aria_label(announced)
+                    .aria_label(notice.text.clone())
                     // A folder's notices are sentences rather than acknowledgments,
                     // so the toast wraps instead of running off the window.
                     .max_w(window.bounds().size.width - px(24.))
@@ -2667,14 +2502,7 @@ impl Render for NotesApp {
                     .shadow(popover_shadow())
                     .text_size(px(12.))
                     .text_color(self.control_text())
-                    .child(div().flex_1().min_w_0().child(notice.text.clone()))
-                    .when_some(notice.undo(), |s, _| {
-                        s.child(div().text_color(self.muted()).child("·")).child(
-                            self.button("notice-undo", "Undo", Intent::UndoDelete, cx)
-                                .h(px(22.))
-                                .text_color(self.control_text()),
-                        )
-                    });
+                    .child(div().flex_1().min_w_0().child(notice.text.clone()));
                 s.child(
                     // Centred above the footer, so it never sits on the count or the
                     // buttons there. The row itself takes no clicks from the note.

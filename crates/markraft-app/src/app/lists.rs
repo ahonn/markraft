@@ -4,11 +4,6 @@
 //! selected off-screen that the list never scrolled to is a row the user cannot
 //! see they selected. Every list here moves both together, so a new caller
 //! cannot move one and forget the other.
-//!
-//! Browse keeps a second rule of its own. "Delete Permanently" asks before it
-//! acts, and the question stands on one row; moving off that row takes the
-//! question back, because an answer meant for one note must never land on
-//! another.
 
 use gpui::ScrollHandle;
 
@@ -87,9 +82,6 @@ pub(super) struct Picker {
     browse_scroll: ScrollHandle,
     actions_scroll: ScrollHandle,
     settings_scroll: ScrollHandle,
-    /// The deleted note whose "Delete Permanently" button has been asked once
-    /// and is waiting for the confirming second click.
-    confirming: Option<String>,
 }
 
 impl Picker {
@@ -113,27 +105,17 @@ impl Picker {
     pub(super) fn select_in_browse(&mut self, row: usize) {
         self.row = row;
         self.browse_scroll.scroll_to_item(row);
-        self.forget_question();
     }
 
     /// Select `row` in the command list, keeping it in view.
     pub(super) fn select_in_actions(&mut self, row: usize) {
         self.row = row;
         self.actions_scroll.scroll_to_item(row);
-        self.forget_question();
     }
 
     /// Select `row` without scrolling: the caller is following the list rather
     /// than moving through it — the pointer is already on the row it names.
     pub(super) fn point_at(&mut self, row: usize) {
-        self.row = row;
-        self.forget_question();
-    }
-
-    /// Select the row the question already stands on. Clicking that row is not
-    /// moving off it, so the question stays: the answer is the second click on
-    /// the button itself.
-    pub(super) fn point_at_keeping_question(&mut self, row: usize) {
         self.row = row;
     }
 
@@ -143,7 +125,7 @@ impl Picker {
         self.browse_scroll.scroll_to_item(self.row);
     }
 
-    /// Open Browse at the top, with no question standing.
+    /// Open Browse at the top.
     pub(super) fn reopen_browse(&mut self) {
         self.select_in_browse(0);
     }
@@ -153,19 +135,8 @@ impl Picker {
         self.select_in_actions(0);
     }
 
-    /// Whether `id` is the note whose deletion has been asked about.
-    pub(super) fn confirming(&self, id: &str) -> bool {
-        self.confirming.as_deref() == Some(id)
-    }
-
-    /// Ask about `id`: the next click on that button is the answer.
-    pub(super) fn ask_about(&mut self, id: String) {
-        self.confirming = Some(id);
-    }
-
-    /// Take the question back, and say whether one was standing — which is what
-    /// Escape needs to know, since a question is the first thing it dismisses.
+    /// No confirmation questions remain; kept so Escape's cascade stays uniform.
     pub(super) fn forget_question(&mut self) -> bool {
-        self.confirming.take().is_some()
+        false
     }
 }
