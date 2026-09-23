@@ -92,6 +92,12 @@ pub fn split_wrap() -> SplitWrap {
     Arc::new(markraft_commonmark::keeping_styles)
 }
 
+/// What Enter makes of a line that spells a whole block's opening: a fence, a
+/// table's header row.
+pub fn enter_rule() -> Command {
+    markraft_commonmark::block_from_line()
+}
+
 /// A kind's formatting command, its refusal put in the application's words.
 fn worded(
     command: markraft_commonmark::FormatCommand,

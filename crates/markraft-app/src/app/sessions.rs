@@ -147,6 +147,7 @@ impl NotesApp {
                     .mark_toggle(doc::mark_toggle(refusal_message))
                     .link_setter(doc::link_setter(refusal_message))
                     .split_wrap(doc::split_wrap())
+                    .enter_rule(doc::enter_rule())
                     .extensions(doc::extensions())
                     .doc(document),
                 cx,

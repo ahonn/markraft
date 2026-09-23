@@ -166,12 +166,17 @@ impl DocTypes {
 
 /// Enter.
 pub(crate) fn enter(types: &DocTypes) -> Command {
-    enter_with(types, None)
+    enter_with(types, None, None)
 }
 
 /// Enter, with each command that splits a textblock at the caret wrapped by
-/// the document kind's [`SplitWrap`](crate::SplitWrap).
-pub(crate) fn enter_with(types: &DocTypes, wrap: Option<&crate::SplitWrap>) -> Command {
+/// the document kind's [`SplitWrap`](crate::SplitWrap), and the kind's
+/// [`enter_rule`](crate::Setup::enter_rule) tried before any of them.
+pub(crate) fn enter_with(
+    types: &DocTypes,
+    wrap: Option<&crate::SplitWrap>,
+    rule: Option<&Command>,
+) -> Command {
     let splits = |command: Command| match wrap {
         Some(wrap) => wrap(command),
         None => command,
@@ -182,6 +187,7 @@ pub(crate) fn enter_with(types: &DocTypes, wrap: Option<&crate::SplitWrap>) -> C
         // would leave its row one cell wider than the rest.
         types.table_types().map(goto_cell_below),
         types.table_types().map(guard_cell_split),
+        rule.cloned(),
         types.list_item.map(split_list_item).map(splits),
         types
             .task_item
@@ -771,7 +777,7 @@ mod tests {
         ] {
             let state = state_of(source);
             let state = at(&state, caret_in(&state, line) + 4);
-            let enter = enter_with(&types_of(&state), Some(&wrap));
+            let enter = enter_with(&types_of(&state), Some(&wrap), None);
             assert_eq!(after(&state, &enter).as_deref(), Some(expected), "{source}");
         }
     }

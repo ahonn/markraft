@@ -106,6 +106,7 @@ mod autolink;
 pub mod callout;
 mod commands;
 pub mod derive;
+mod enter;
 pub mod escape;
 mod extensions;
 mod fit;
@@ -131,6 +132,7 @@ pub mod wiki;
 pub use comrak;
 
 pub use callout::{Callout, read_callout};
+pub use enter::block_from_line;
 pub use extensions::{commonmark_corrections, commonmark_extensions, commonmark_input_rules};
 pub use fragment::open_fragment;
 pub use html::{

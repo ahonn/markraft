@@ -522,3 +522,59 @@ fn text_a_list_marker_would_complete_is_escaped_once_the_caret_leaves() {
         assert_eq!(reread, *left.doc(), "{typed:?}");
     }
 }
+
+/// Type `line` into an empty document, as a writer would, and press the
+/// Enter rule at its end.
+fn entered(line: &str) -> Option<EditorState> {
+    let (_, state) = empty();
+    let state = type_all(&state, line);
+    run_command(&state, &markraft_commonmark::block_from_line())
+        .map(|result| result.expect("the transaction resolves").state().clone())
+}
+
+#[test]
+fn enter_after_a_fence_opens_a_code_block_in_its_language() {
+    let schema = commonmark_schema();
+    for (line, markdown) in [
+        ("```", "```\n```"),
+        ("```rust", "```rust\n```"),
+        ("~~~~", "~~~~\n~~~~"),
+        ("- ```py", "- ```py\n  ```"),
+    ] {
+        let state = entered(line).unwrap_or_else(|| panic!("{line:?} makes a block"));
+        assert_eq!(
+            markraft_commonmark::to_markdown(&schema, state.doc()),
+            markdown,
+            "{line:?}"
+        );
+        let typed = markraft_commonmark::to_markdown(&schema, type_all(&state, "x").doc());
+        assert_eq!(
+            typed,
+            markdown
+                .replacen('\n', "\nx\n", 1)
+                .replace("\nx\n  ", "\n  x\n  "),
+            "{line:?}: the caret is in the code"
+        );
+    }
+    for line in ["``", "```a`b", "text```", "- [ ]```"] {
+        assert!(entered(line).is_none(), "{line:?}");
+    }
+}
+
+#[test]
+fn enter_after_a_header_row_makes_a_table_with_a_row_to_type_in() {
+    let schema = commonmark_schema();
+    let state = entered("|a|**b**|").expect("a table");
+    assert_eq!(
+        schema.describe(state.doc()),
+        r#"doc(table[alignments=Str("none,none")](table_row(table_cell("a"), table_cell("**"{strong,syntax}, "b"{strong}, "**"{strong,syntax})), table_row(table_cell(), table_cell())))"#
+    );
+    let typed = type_all(&state, "c");
+    assert_eq!(
+        markraft_commonmark::to_markdown(&schema, typed.doc()),
+        "| a   | **b** |\n| --- | ----- |\n| c   |       |"
+    );
+    for line in ["|a", "a|b|", "|", r"|a\|"] {
+        assert!(entered(line).is_none(), "{line:?}");
+    }
+}

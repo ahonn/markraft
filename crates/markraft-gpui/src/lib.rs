@@ -289,6 +289,11 @@ pub struct Setup {
     /// the view's own splitting commands that Enter runs. A kind that spells
     /// styles in the text closes and reopens them around the cut here.
     pub split_wrap: Option<SplitWrap>,
+    /// What Enter does before it splits anything: a document kind in which a
+    /// whole line can spell a block — a Markdown fence, a table's header row —
+    /// turns that line into the block here. Enter carries on as usual where
+    /// it does not apply.
+    pub enter_rule: Option<markraft_core::commands::Command>,
     /// The document to open with. The schema's smallest valid document
     /// otherwise.
     pub doc: Option<Node>,
@@ -305,6 +310,7 @@ impl Setup {
             mark_toggle: None,
             link_setter: None,
             split_wrap: None,
+            enter_rule: None,
             doc: None,
         }
     }
@@ -334,6 +340,10 @@ impl Setup {
     }
     pub fn split_wrap(mut self, wrap: SplitWrap) -> Setup {
         self.split_wrap = Some(wrap);
+        self
+    }
+    pub fn enter_rule(mut self, rule: markraft_core::commands::Command) -> Setup {
+        self.enter_rule = Some(rule);
         self
     }
     pub fn doc(mut self, doc: Node) -> Setup {
@@ -446,6 +456,8 @@ pub struct EditorView {
     link_setter: Option<LinkSetter>,
     /// How the host's document kind splits; see [`Setup::split_wrap`].
     split_wrap: Option<SplitWrap>,
+    /// What Enter tries first; see [`Setup::enter_rule`].
+    enter_rule: Option<markraft_core::commands::Command>,
     /// The host's extensions, kept so the state can be rebuilt on a replacement.
     host_extensions: markraft_core::Extension,
     pub(crate) extensions: Vec<extension::Registration>,
@@ -536,6 +548,7 @@ impl EditorView {
             mark_toggle,
             link_setter,
             split_wrap,
+            enter_rule,
             doc,
         } = setup;
         let state = build_state(&schema, &extensions, doc);
@@ -550,6 +563,7 @@ impl EditorView {
             mark_toggle,
             link_setter,
             split_wrap,
+            enter_rule,
             extension_selection: state.selection().clone(),
             overlay_open: false,
             state,
@@ -1846,7 +1860,11 @@ impl EditorView {
                 cx.propagate();
                 return;
             }
-            let command = keymap::enter_with(&this.types, this.split_wrap.as_ref());
+            let command = keymap::enter_with(
+                &this.types,
+                this.split_wrap.as_ref(),
+                this.enter_rule.as_ref(),
+            );
             if !this.run_command(&command, cx) {
                 cx.propagate();
             }
