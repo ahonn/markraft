@@ -2,8 +2,10 @@
 //!
 //! The chains mirror ProseMirror's base and list keymaps, with the three
 //! departures the editor's own tests describe: Backspace at the start of a list
-//! item outdents before it lifts or joins, Enter in an empty list item leaves
-//! the list, and Backspace in an empty verbatim block turns it into a
+//! item joins it to the item before, or, in a list's first item, outdents
+//! before it lifts — except in an empty item between two others, which it
+//! deletes — Enter in an empty list item leaves the
+//! list, and Backspace in an empty verbatim block turns it into a
 //! paragraph — or, for a raw block after another block, deletes it.
 
 use crate::types::DocTypes;
@@ -233,6 +235,68 @@ fn clear_empty_verbatim(types: &DocTypes) -> Command {
     })
 }
 
+/// Backspace at the start of an empty list item that has items before and
+/// after it: delete the item and put the caret at the end of the one before.
+///
+/// Lifting it out, as Backspace does elsewhere at an item's start, would
+/// leave an empty paragraph between two halves of the list, which Markdown
+/// cannot spell: the file has only a blank line there, and reads the halves
+/// back as one loose list. The last item and the first keep the lift — the
+/// paragraph then stands after or before the list.
+fn delete_empty_middle_item(types: &DocTypes) -> Command {
+    let types = types.clone();
+    command(move |state| {
+        if !types.at_item_start(state) {
+            return None;
+        }
+        let doc = state.doc();
+        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        let depth = resolved.depth();
+        if depth < 2 || resolved.parent().content_size() != 0 {
+            return None;
+        }
+        let item = resolved.node(depth - 1);
+        let list = resolved.node(depth - 2);
+        let index = resolved.index(depth - 2);
+        if !types.is_item(item.type_id())
+            || item.child_count() != 1
+            || index == 0
+            || index + 1 >= list.child_count()
+        {
+            return None;
+        }
+        let (from, to) = (resolved.before(depth - 1), resolved.after(depth - 1));
+        // Everything before the item keeps its position.
+        let end = Selection::find_from(state.schema(), doc, from, -1, true)?;
+        let spec = changes_spec(state, vec![Change::delete(from, to)], "delete.backward")?;
+        Some(spec.selection(end))
+    })
+}
+
+/// Backspace at the start of a list item that has an item before it: join the
+/// item to that one, its blocks carrying on the item before as Typora does,
+/// rather than lifting it out of the list. The first item still outdents or
+/// leaves the list, and an empty item is left to the commands for those.
+fn join_item_backward(types: &DocTypes) -> Command {
+    let types = types.clone();
+    command(move |state| {
+        if !types.at_item_start(state) {
+            return None;
+        }
+        let doc = state.doc();
+        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        let depth = resolved.depth();
+        if depth < 2 || resolved.parent().content_size() == 0 {
+            return None;
+        }
+        let item = resolved.node(depth - 1);
+        if !types.is_item(item.type_id()) || resolved.index(depth - 2) == 0 {
+            return None;
+        }
+        join_backward()(state)
+    })
+}
+
 /// Backspace.
 pub(crate) fn backspace(types: &DocTypes) -> Command {
     let outdent = {
@@ -246,11 +310,13 @@ pub(crate) fn backspace(types: &DocTypes) -> Command {
         types.table_types().map(guard_cell_range),
         Some(undo_input_rule()),
         Some(delete_selection()),
-        Some(demote_heading_at_start(types)),
+        Some(clear_heading_at_start(types)),
         Some(lift_quote_at_start(types)),
         Some(delete_by_grapheme(Direction::Backward)),
         types.table_types().map(delete_empty_table),
         types.table_types().map(guard_cell_boundary),
+        Some(delete_empty_middle_item(types)),
+        Some(join_item_backward(types)),
         Some(outdent),
         Some(clear_empty_verbatim(types)),
         Some(join_backward()),
@@ -279,9 +345,9 @@ fn at_textblock_start(state: &EditorState) -> bool {
     resolved.pos().checked_sub(hidden) == Some(start)
 }
 
-/// At the start of a heading, Backspace lowers the level or turns it into a
-/// paragraph — the editable ATX-prefix behaviour.
-fn demote_heading_at_start(types: &DocTypes) -> Command {
+/// At the start of a heading, Backspace turns it into a paragraph, whatever
+/// its level, as Typora does. Typing `#` there raises the level again.
+fn clear_heading_at_start(types: &DocTypes) -> Command {
     let types = types.clone();
     command(move |state| {
         if !at_textblock_start(state) {
@@ -289,15 +355,11 @@ fn demote_heading_at_start(types: &DocTypes) -> Command {
         }
         let heading = types.heading?;
         let paragraph = types.paragraph?;
-        let (ty, attrs) = types.block_at_cursor(state)?;
+        let (ty, _) = types.block_at_cursor(state)?;
         if ty != heading {
             return None;
         }
-        let level = attrs.get("level").and_then(|v| v.as_int()).unwrap_or(1);
-        if level <= 1 {
-            return set_block_type(paragraph, Attrs::empty())(state);
-        }
-        set_block_type(heading, Attrs::from_pairs([("level", level - 1)]))(state)
+        set_block_type(paragraph, Attrs::empty())(state)
     })
 }
 
@@ -784,16 +846,31 @@ mod tests {
 
     #[test]
     fn backspace_at_a_list_items_start_outdents_before_it_leaves_the_list() {
-        // A nested item outdents one level first.
+        // A nested first item outdents one level first.
         let state = state_of("- one\n  - two");
         let state = at(&state, caret_in(&state, "two"));
         let outdented = after(&state, &backspace(&types_of(&state))).expect("the outdent applies");
         assert_eq!(outdented, "- one\n- two");
-        // A top-level item then leaves the list altogether.
+        // A top-level first item then leaves the list altogether.
         let state = state_of("- one\n- two");
-        let state = at(&state, caret_in(&state, "two"));
+        let state = at(&state, caret_in(&state, "one"));
         let lifted = after(&state, &backspace(&types_of(&state))).expect("the lift applies");
-        assert_eq!(lifted, "- one\n\ntwo");
+        assert_eq!(lifted, "one\n\n- two");
+    }
+
+    #[test]
+    fn backspace_at_a_later_items_start_joins_it_to_the_item_before() {
+        for (source, line, expected) in [
+            ("- one\n- two", "two", "- one\n\n  two"),
+            ("- one\n- two\n- three", "two", "- one\n\n  two\n\n- three"),
+            ("1. one\n2. two", "two", "1. one\n\n   two"),
+            ("- one\n  - a\n  - b", "b", "- one\n  - a\n\n    b"),
+        ] {
+            let state = state_of(source);
+            let state = at(&state, caret_in(&state, line));
+            let joined = after(&state, &backspace(&types_of(&state))).expect("the join applies");
+            assert_eq!(joined, expected, "{source:?}");
+        }
     }
 
     #[test]
@@ -943,22 +1020,19 @@ mod tests {
     }
 
     #[test]
-    fn backspace_at_heading_start_demotes_and_hash_promotes() {
-        let state = state_of("## title");
+    fn backspace_at_heading_start_makes_a_paragraph_and_hash_promotes() {
+        for heading in ["# title", "## title", "###### title"] {
+            let state = state_of(heading);
+            let types = types_of(&state);
+            let start = projection_of(&state).lines()[0].from();
+            let cleared = applied(&at(&state, start), &backspace(&types)).expect("clears");
+            assert_eq!(to_markdown(state.schema(), cleared.doc()), "title", "{heading:?}");
+        }
+        let state = state_of("# title");
         let types = types_of(&state);
         let start = projection_of(&state).lines()[0].from();
-        let demoted = applied(&at(&state, start), &backspace(&types)).expect("demotes");
-        assert_eq!(to_markdown(state.schema(), demoted.doc()), "# title");
-        let head = demoted.selection().head(demoted.doc());
-        let promoted = applied(&at(&demoted, head), &insert_plain(&types, "#")).expect("promotes");
+        let promoted = applied(&at(&state, start), &insert_plain(&types, "#")).expect("promotes");
         assert_eq!(to_markdown(state.schema(), promoted.doc()), "## title");
-        let h1 = state_of("# title");
-        let cleared = applied(
-            &at(&h1, projection_of(&h1).lines()[0].from()),
-            &backspace(&types_of(&h1)),
-        )
-        .expect("clears to paragraph");
-        assert_eq!(to_markdown(state.schema(), cleared.doc()), "title");
     }
 
     #[test]
@@ -1134,5 +1208,148 @@ mod tests {
             after(&state, &insert_plain(&types_of(&state), "a\nb")).as_deref(),
             Some("```\na\nb\n```")
         );
+    }
+
+    /// Return in the last item of a list, then Backspace twice: the first
+    /// lifts the empty item out as a paragraph, the second deletes that
+    /// paragraph and leaves the caret where it started — not in the list that
+    /// follows.
+    #[test]
+    fn backspace_twice_from_a_new_last_item_returns_to_the_item_before() {
+        let state = state_of("1. eight\n9. nine\n\n- bullet a");
+        let types = types_of(&state);
+        let end_of_nine = caret_in(&state, "nine") + 4;
+        let state = applied(&at(&state, end_of_nine), &enter(&types)).expect("Return applies");
+        let lifted = applied(&state, &backspace(&types)).expect("Backspace lifts the item");
+        assert_eq!(
+            lifted.doc().child_count(),
+            3,
+            "an empty paragraph between the lists"
+        );
+        let joined = applied(&lifted, &backspace(&types)).expect("Backspace deletes it");
+        assert_eq!(joined.doc().child_count(), 2);
+        assert_eq!(joined.selection().head(joined.doc()), end_of_nine);
+        let typed = applied(&joined, &markraft_core::commands::insert_text("5")).expect("typing");
+        assert_eq!(
+            to_markdown(typed.schema(), typed.doc()),
+            "1. eight\n2. nine5\n\n- bullet a"
+        );
+    }
+
+    /// Return at the end of `eight` in the middle of an ordered list, then
+    /// Backspace: the new empty item goes and the caret is back at the end of
+    /// `eight`. Lifting it out instead would leave a paragraph between two
+    /// halves of one list, which Markdown cannot spell, so nothing happened.
+    #[test]
+    fn backspace_in_an_empty_middle_item_returns_to_the_item_before() {
+        let state = state_of("7. seven\n8. eight\n9. nine");
+        let types = types_of(&state);
+        let end_of_eight = caret_in(&state, "eight") + 5;
+        let state = applied(&at(&state, end_of_eight), &enter(&types)).expect("Return applies");
+        assert_eq!(
+            state.doc().child(0).child_count(),
+            4,
+            "an empty item after eight"
+        );
+        let deleted = applied(&state, &backspace(&types)).expect("Backspace deletes the item");
+        assert_eq!(deleted.selection().head(deleted.doc()), end_of_eight);
+        let typed = applied(&deleted, &markraft_core::commands::insert_text("5")).expect("typing");
+        assert_eq!(
+            to_markdown(typed.schema(), typed.doc()),
+            "7. seven\n8. eight5\n9. nine"
+        );
+    }
+
+    #[test]
+    fn backspace_in_an_empty_middle_bullet_or_task_item_returns_to_the_item_before() {
+        for (source, line, expected) in [
+            ("- one\n- two\n- three", "two", "- one\n- two5\n- three"),
+            (
+                "- [ ] one\n- [ ] two\n- [ ] three",
+                "two",
+                "- [ ] one\n- [ ] two5\n- [ ] three",
+            ),
+        ] {
+            let state = state_of(source);
+            let types = types_of(&state);
+            let end = caret_in(&state, line) + line.len();
+            let state = applied(&at(&state, end), &enter(&types)).expect("Return applies");
+            let deleted = applied(&state, &backspace(&types)).expect("Backspace deletes the item");
+            assert_eq!(deleted.selection().head(deleted.doc()), end, "{source}");
+            let typed =
+                applied(&deleted, &markraft_core::commands::insert_text("5")).expect("typing");
+            assert_eq!(
+                to_markdown(typed.schema(), typed.doc()),
+                expected,
+                "{source}"
+            );
+        }
+    }
+
+    /// The first item of a list has nothing before it to return to: an empty
+    /// one leaves the list as before.
+    #[test]
+    fn backspace_in_an_empty_first_item_still_leaves_the_list() {
+        let state = state_of("- \n- two");
+        let types = types_of(&state);
+        let state = at(&state, projection_of(&state).lines()[0].from());
+        let lifted = applied(&state, &backspace(&types)).expect("Backspace lifts the item");
+        assert_eq!(lifted.doc().child_count(), 2, "a paragraph before the list");
+    }
+
+    /// Return at the start of a list's first item, ↑ into the empty item it
+    /// leaves, Backspace to lift it out, then type: the file saved from the
+    /// original source has one blank line either side of the new paragraph,
+    /// for an ordered list and a bullet list alike. Lifting the last item the
+    /// same way writes the paragraph one blank line after the list.
+    #[test]
+    fn typing_into_a_lifted_first_item_saves_one_blank_line_either_side() {
+        use markraft_commonmark::SourceDocument;
+        for (source, line, at_start, expected) in [
+            (
+                "# Lists\n\n1. one\n2. two\n",
+                "one",
+                true,
+                "# Lists\n\n5\n\n1. one\n2. two\n",
+            ),
+            (
+                "# Lists\n\n- one\n- two\n",
+                "one",
+                true,
+                "# Lists\n\n5\n\n- one\n- two\n",
+            ),
+            (
+                "# Lists\n\n1. eight\n9. nine\n",
+                "nine",
+                false,
+                "# Lists\n\n1. eight\n9. nine\n\n5\n",
+            ),
+        ] {
+            let state = state_of(source);
+            let types = types_of(&state);
+            let caret = caret_in(&state, line) + if at_start { 0 } else { line.len() };
+            let state = applied(&at(&state, caret), &enter(&types)).expect("Return applies");
+            let empty = projection_of(&state)
+                .lines()
+                .iter()
+                .find(|line| line.is_empty())
+                .expect("an empty item")
+                .from();
+            let lifted =
+                applied(&at(&state, empty), &backspace(&types)).expect("Backspace lifts the item");
+            let typed =
+                applied(&lifted, &markraft_core::commands::insert_text("5")).expect("typing");
+            let saved = SourceDocument::parse(typed.schema(), source).expect("the source parses");
+            assert_eq!(
+                saved.render(typed.schema(), lifted.doc()).as_deref(),
+                Ok(source),
+                "the empty paragraph alone changes nothing on disk: {source:?}"
+            );
+            assert_eq!(
+                saved.render(typed.schema(), typed.doc()).as_deref(),
+                Ok(expected),
+                "{source:?}"
+            );
+        }
     }
 }

@@ -200,27 +200,67 @@ impl SourceDocument {
             let before = block_markdown(schema, &self.document, &old[prefix..end]);
             let after = block_markdown(schema, document, &new[prefix..new.len() - suffix]);
             if prefix == end {
-                let at = self.blocks.get(prefix).map_or_else(
-                    || {
-                        self.blocks
-                            .last()
-                            .map_or(self.body_start, |range| range.end)
-                    },
-                    |range| range.start,
-                );
-                let mut insertion = self.with_newlines(&after);
-                if prefix > 0 {
-                    insertion.insert_str(0, &self.newline.repeat(2));
-                }
-                if suffix > 0 {
-                    insertion.push_str(&self.newline.repeat(2));
-                }
-                result.insert_str(at, &insertion);
+                return self.insert_blocks(schema, document, result, prefix, suffix, &after);
             } else {
                 let range = self.blocks[prefix].start..self.blocks[end - 1].end;
                 result = self.patch(schema, document, result, range, &before, &after)?;
             }
         }
+        self.validate(schema, document, result)
+    }
+
+    /// Insert the Markdown of new top-level blocks between the untouched ones
+    /// before `prefix` and the `suffix` untouched ones after it.
+    ///
+    /// The source already separates the blocks on either side, so new blocks go
+    /// directly after the block before them with a separator of their own, and
+    /// the existing gap is left to part them from the block after — adding a
+    /// separator on both sides would double the gap that was already there.
+    /// Blocks that spell nothing, such as an empty paragraph, add nothing.
+    fn insert_blocks(
+        &self,
+        schema: &Schema,
+        document: &Node,
+        mut result: String,
+        prefix: usize,
+        suffix: usize,
+        after: &str,
+    ) -> Result<String, SourceError> {
+        if after.is_empty() {
+            return self.validate(schema, document, result);
+        }
+        let separator = self.newline.repeat(2);
+        let blocks = self.with_newlines(after);
+        let Some(before) = prefix.checked_sub(1).map(|index| &self.blocks[index]) else {
+            let at = self
+                .blocks
+                .first()
+                .map_or(self.body_start, |range| range.start);
+            let mut insertion = blocks;
+            if suffix > 0 {
+                insertion.push_str(&separator);
+            }
+            result.insert_str(at, &insertion);
+            return self.validate(schema, document, result);
+        };
+        let mut candidate = result.clone();
+        candidate.insert_str(before.end, &format!("{separator}{blocks}"));
+        let placed = self.validate(schema, document, candidate);
+        if placed.is_ok() || suffix == 0 {
+            return placed;
+        }
+        // The blocks either side of the insertion were not parted by a blank
+        // line — a heading directly above a paragraph — so the new blocks take
+        // the place of that gap with a separator of their own on both sides.
+        // Anything but whitespace between them stays, with the new blocks
+        // parted from it on both sides.
+        let gap = before.end..self.blocks[prefix].start;
+        let range = if result[gap.clone()].trim().is_empty() {
+            gap
+        } else {
+            gap.end..gap.end
+        };
+        result.replace_range(range, &format!("{separator}{blocks}{separator}"));
         self.validate(schema, document, result)
     }
 

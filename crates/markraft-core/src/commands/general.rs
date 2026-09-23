@@ -213,10 +213,16 @@ fn delete_barrier(
         {
             return Some(spec);
         }
-        if can_join(schema, doc, cut)
-            && let Some(spec) = changes_spec(state, join_changes(cut, 1), event)
-        {
-            return Some(spec);
+        if can_join(schema, doc, cut) {
+            if dir < 0
+                && after.content_size() == 0
+                && let Some(spec) = delete_emptied_block(state, cut, event)
+            {
+                return Some(spec);
+            }
+            if let Some(spec) = changes_spec(state, join_changes(cut, 1), event) {
+                return Some(spec);
+            }
         }
     }
 
@@ -240,6 +246,28 @@ fn delete_barrier(
         return join_textblocks_around(state, cut, event);
     }
     None
+}
+
+/// Join the empty block after the cut — the one the caret is in — onto the
+/// node before it, and put the caret at the end of that node's content.
+///
+/// Appending nothing to a container is a join only in name: it deletes the
+/// block. Left to be mapped, a caret inside the deleted block would land on
+/// the next text position forwards, in whatever follows — past a list's end
+/// and into the list after it. Backspace belongs at the end of what came
+/// before instead.
+fn delete_emptied_block(state: &EditorState, cut: usize, event: &str) -> Option<TransactionSpec> {
+    let (set, doc) = resolve_changes(state, join_changes(cut, 1))?;
+    // The join deletes the tokens around the cut, so `cut - 1` is still the
+    // end of the node before it.
+    let end = Selection::find_from(state.schema(), &doc, cut - 1, -1, true)?;
+    Some(
+        TransactionSpec::new()
+            .change_set(set)
+            .selection(end)
+            .user_event(event)
+            .scroll_into_view(),
+    )
 }
 
 /// Move the node after the cut inside the node before it, wrapping it in

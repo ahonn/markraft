@@ -139,6 +139,64 @@ fn join_backward_pulls_a_paragraph_into_the_blockquote_before_it() {
     );
 }
 
+/// An empty block after a container joins it by being deleted, and the caret
+/// goes to the end of the container's content — not on to the next text,
+/// which here is in the list after the paragraph.
+#[test]
+fn join_backward_from_an_empty_block_after_a_container_ends_up_before_the_cut() {
+    let schema = shared_schema();
+    let list = |kind: &str, text: &str| {
+        n(
+            &schema,
+            kind,
+            [n(
+                &schema,
+                "list_item",
+                [n(&schema, "paragraph", [t(&schema, text)])],
+            )],
+        )
+    };
+    let start = state(
+        doc(
+            &schema,
+            [
+                list("ordered_list", "ab"),
+                n(&schema, "paragraph", []),
+                list("bullet_list", "cd"),
+            ],
+        ),
+        Extension::none(),
+    );
+    let after = run(&at(&start, 9), &join_backward());
+    assert_eq!(
+        schema.describe(after.doc()),
+        r#"doc(ordered_list(list_item(paragraph("ab"))), bullet_list(list_item(paragraph("cd"))))"#
+    );
+    assert_eq!(after.selection(), &Selection::cursor(5));
+
+    let start = state(
+        doc(
+            &schema,
+            [
+                n(
+                    &schema,
+                    "blockquote",
+                    [n(&schema, "paragraph", [t(&schema, "ab")])],
+                ),
+                n(&schema, "paragraph", []),
+                n(&schema, "paragraph", [t(&schema, "cd")]),
+            ],
+        ),
+        Extension::none(),
+    );
+    let after = run(&at(&start, 7), &join_backward());
+    assert_eq!(
+        schema.describe(after.doc()),
+        r#"doc(blockquote(paragraph("ab")), paragraph("cd"))"#
+    );
+    assert_eq!(after.selection(), &Selection::cursor(4));
+}
+
 #[test]
 fn join_forward_merges_with_the_next_paragraph() {
     let schema = shared_schema();

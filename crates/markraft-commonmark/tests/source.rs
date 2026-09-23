@@ -324,6 +324,50 @@ fn structural_edits_preserve_outside_source() {
     }
 }
 
+/// A block inserted between two untouched ones goes in with one blank line
+/// either side: the gap the source already had parts it from the block after,
+/// so it is not doubled. This is what lifting a list's empty first item and
+/// typing into it leaves.
+#[test]
+fn a_block_inserted_between_two_keeps_one_blank_line_either_side() {
+    for (original, edited) in [
+        (
+            "# Lists\n\n1. one\n2. two\n",
+            "# Lists\n\n5\n\n1. one\n2. two\n",
+        ),
+        (
+            "# Lists\n\n- one\n- two\n",
+            "# Lists\n\n5\n\n- one\n- two\n",
+        ),
+        ("First\n\nLast\n", "First\n\nMiddle\n\nLast\n"),
+        // An extra blank line the author left stays where it was.
+        ("First\n\n\nLast\n", "First\n\nMiddle\n\n\nLast\n"),
+        // Nothing parts a heading from the paragraph under it, so the new block
+        // brings a separator for both sides.
+        ("# Title\npara\n", "# Title\n\nnew\n\npara\n"),
+        // At either end of the note, one separator.
+        ("1. eight\n9. nine\n", "1. eight\n9. nine\n\n5\n"),
+        ("Last\n", "First\n\nLast\n"),
+    ] {
+        assert_eq!(edit(original, edited).unwrap(), edited, "{original:?}");
+    }
+}
+
+/// A block that spells nothing — the empty paragraph a lifted list item leaves
+/// until something is typed in it — adds no blank lines to the file.
+#[test]
+fn an_empty_paragraph_inserted_between_blocks_adds_nothing() {
+    use markraft_commonmark::schema as md;
+    let schema = commonmark_schema();
+    let original = "# Lists\n\n1. one\n";
+    let source = SourceDocument::parse(&schema, original).unwrap();
+    let document = source.document();
+    let mut children: Vec<_> = document.children().cloned().collect();
+    children.insert(1, schema.node(md::PARAGRAPH, []).unwrap());
+    let lifted = schema.doc(children).unwrap();
+    assert_eq!(source.render(&schema, &lifted).unwrap(), original);
+}
+
 /// A link reference definition is a block of the document, kept verbatim, so
 /// an edit that removes it removes it on purpose.
 #[test]
