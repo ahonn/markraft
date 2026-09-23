@@ -105,6 +105,7 @@
 mod autolink;
 pub mod callout;
 mod commands;
+mod definition;
 pub mod derive;
 mod enter;
 pub mod escape;

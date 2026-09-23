@@ -13,7 +13,7 @@ use markraft_core::kind::SYNTAX_DISPLAY_ATTR;
 use markraft_core::projection::{Line, OBJECT_REPLACEMENT, RunContent};
 use markraft_core::{
     Attrs, Fragment, MarkSet, Node, NodeTypeId, Schema, Slice,
-    kind::{Codecs, DocTypeNames, SourceSpelling},
+    kind::{Codecs, DocTypeNames, SourceHighlight, SourceSpelling},
 };
 
 pub use crate::commands::{
@@ -455,5 +455,22 @@ impl SourceSpelling for CommonMarkSpelling {
                 Some((atom.range, node))
             })
             .collect()
+    }
+
+    fn source_highlights(&self, line: &Line) -> Vec<(Range<usize>, SourceHighlight)> {
+        if line.node_type() != self.schema.node_id(schema::RAW_BLOCK) {
+            return Vec::new();
+        }
+        // A raw block holds only text, its line endings included.
+        let mut text = String::new();
+        for run in line.runs() {
+            if let RunContent::Text(run) = &run.content {
+                text.push_str(run);
+            }
+        }
+        if !crate::textblock::reads_as_definitions(&text) {
+            return Vec::new();
+        }
+        crate::definition::highlights(&text)
     }
 }

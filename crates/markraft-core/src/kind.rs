@@ -216,4 +216,28 @@ pub trait SourceSpelling: Send + Sync {
     /// text, each with the atom it spells. A view uses them to show what the
     /// source stands for beside it, as it shows the atom itself once folded.
     fn spelled_atoms(&self, line: &Line) -> Vec<(Range<usize>, Node)>;
+
+    /// What the parts of a verbatim line's source are, where the kind reads
+    /// more in it than markup to keep — a link definition's label and
+    /// destination — as `char` ranges of the line's text. A view draws such a
+    /// line as the prose it describes rather than as quiet source. The
+    /// default reads nothing, and the line stays source.
+    fn source_highlights(&self, line: &Line) -> Vec<(Range<usize>, SourceHighlight)> {
+        let _ = line;
+        Vec::new()
+    }
+}
+
+/// A part of a verbatim line's source; see
+/// [`SourceSpelling::source_highlights`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceHighlight {
+    /// Characters that only delimit: brackets, a colon.
+    Punctuation,
+    /// What names the rest, such as the label a link definition defines.
+    Label,
+    /// Where it leads: a URL or a path.
+    Destination,
+    /// A title, quotes included.
+    Title,
 }

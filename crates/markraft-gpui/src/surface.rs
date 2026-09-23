@@ -18,6 +18,7 @@ use crate::types::DocTypes;
 use crate::{CaretShape, EditorView};
 use gpui::{prelude::*, *};
 use markraft_core::commands::ColumnAlignment;
+use markraft_core::kind::SourceHighlight;
 use markraft_core::projection::{Line, LineKind, Projection, Run, RunContent};
 use markraft_core::{MarkSet, Node};
 use std::collections::HashMap;
@@ -2757,6 +2758,15 @@ fn text_runs(
             runs = highlight_runs(&highlighted, font_size);
         }
     }
+    // A raw block the kind reads more in — a run of link definitions — is drawn
+    // as the prose it describes, as Typora draws it; every character stays.
+    if raw && let Some(spelling) = input.spelling {
+        let highlights = spelling.source_highlights(line);
+        let chars = text.text.chars().count();
+        if !highlights.is_empty() && highlights.iter().all(|(range, _)| range.end <= chars) {
+            runs = source_highlight_runs(&text.text, &highlights, style);
+        }
+    }
     // A revealed syntax run is a run of its own, in the quieter markup ink;
     // without merging, each backtick would paint a separate pill.
     Runs {
@@ -2793,6 +2803,55 @@ fn merge_adjacent_code(code: Vec<Repaint>) -> Vec<Repaint> {
         }
     }
     merged
+}
+
+/// The runs of a verbatim line drawn by the parts its kind reads in it: the
+/// label bold, the destination underlined, the rest quiet. `highlights` are
+/// `char` ranges of `text`.
+fn source_highlight_runs(
+    text: &str,
+    highlights: &[(Range<usize>, SourceHighlight)],
+    style: &EditorStyle,
+) -> Vec<TextRun> {
+    let part_at = |index: usize| {
+        highlights
+            .iter()
+            .find(|(range, _)| range.contains(&index))
+            .map(|(_, part)| *part)
+    };
+    let run = |len: usize, part: Option<SourceHighlight>| {
+        let mut face = font(".SystemUIFont");
+        let (color, underline) = match part {
+            Some(SourceHighlight::Label) => {
+                face.weight = FontWeight::BOLD;
+                (style.text, false)
+            }
+            Some(SourceHighlight::Destination) => (style.muted_text, true),
+            Some(SourceHighlight::Punctuation) => (style.muted_text.opacity(0.6), false),
+            Some(SourceHighlight::Title) | None => (style.muted_text, false),
+        };
+        TextRun {
+            len,
+            font: face,
+            color,
+            background_color: None,
+            underline: underline.then_some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(color),
+                wavy: false,
+            }),
+            strikethrough: None,
+        }
+    };
+    let mut runs: Vec<(usize, Option<SourceHighlight>)> = Vec::new();
+    for (index, c) in text.chars().enumerate() {
+        let part = part_at(index);
+        match runs.last_mut() {
+            Some((len, last)) if *last == part => *len += c.len_utf8(),
+            _ => runs.push((c.len_utf8(), part)),
+        }
+    }
+    runs.into_iter().map(|(len, part)| run(len, part)).collect()
 }
 
 fn highlight_runs(
@@ -4859,6 +4918,26 @@ mod tests {
                 at < byte
             })
             .expect("a run covers every byte")
+    }
+
+    /// Link definitions are drawn as Typora draws them: in the prose face, the
+    /// label bold and the destination underlined. Other raw source stays
+    /// monospaced.
+    #[test]
+    fn link_definitions_read_as_prose_and_other_raw_source_as_code() {
+        let (text, runs, style) = runs_of("[ref]: https://e.com \"T\"\n[b]: /u\n\nafter");
+        assert_eq!(text, "[ref]: https://e.com \"T\"\n[b]: /u");
+        let label = run_over(&text, &runs, 'r');
+        assert_eq!(label.font.family.as_ref(), ".SystemUIFont");
+        assert_eq!(label.font.weight, gpui::FontWeight::BOLD);
+        assert_eq!(label.color, style.text);
+        let destination = run_over(&text, &runs, 'h');
+        assert!(destination.underline.is_some());
+        assert_eq!(destination.font.weight, gpui::FontWeight::default());
+        assert!(run_over(&text, &runs, '[').underline.is_none());
+
+        let (text, runs, _) = runs_of("<div>\nx\n</div>");
+        assert_eq!(run_over(&text, &runs, 'x').font.family.as_ref(), CODE_FONT);
     }
 
     #[test]
