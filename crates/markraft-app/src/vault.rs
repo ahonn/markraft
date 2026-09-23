@@ -522,9 +522,17 @@ impl Store {
         }
     }
     pub fn markdown(&self, note: &Note) -> Result<String, String> {
+        // A note that already says what the file on disk says — the disk version
+        // an external change was just adopted as — takes those bytes as its
+        // baseline. The pre-change copy is kept only for edits made against it
+        // until the change is acknowledged.
+        let current = self
+            .files
+            .get(&note.id)
+            .filter(|saved| saved.note.document == note.document);
         render(
-            self.previous
-                .get(&note.id)
+            current
+                .or_else(|| self.previous.get(&note.id))
                 .or_else(|| self.files.get(&note.id)),
             note,
         )
@@ -1563,6 +1571,33 @@ mod tests {
         let (mut store, _) = open(root.path());
         fs::write(path, b"Heading\n=======\n").unwrap();
         assert_eq!(store.refresh().unwrap().len(), 1);
+    }
+    #[test]
+    fn an_adopted_external_change_is_the_baseline_for_the_next_edit() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(
+            root.path(),
+            "note.md",
+            b"Edit area\n\n| a | b |\n| - | - |\n| 1 | 2 |\n",
+        );
+        let (mut store, library) = open(root.path());
+        let id = library.active_id.clone();
+        fs::write(&path, b"Edit area\n").unwrap();
+        let changes = store.refresh().unwrap();
+        let External::Updated { note, .. } = &changes[0] else {
+            panic!("the rewrite is an update");
+        };
+        // The editor opens the disk version before the change is acknowledged,
+        // so its source baseline must already be the bytes now on disk.
+        let source = store.markdown(note).unwrap();
+        assert_eq!(source, "Edit area\n");
+        let baseline = SourceDocument::parse(doc::schema(), &source).unwrap();
+        let edited = doc::from_markdown("Edit area\n\ny");
+        assert_eq!(
+            baseline.render(doc::schema(), &edited).unwrap(),
+            "Edit area\n\ny\n"
+        );
+        store.acknowledge(&[id]);
     }
     #[test]
     fn concurrent_edits_keep_base_local_disk_outside_workspace() {
