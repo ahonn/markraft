@@ -1586,3 +1586,89 @@ fn x_and_shift_d_keep_to_the_cell_they_are_in() {
         "| one   | b   |\n| ----- | --- |\n| three | d   |"
     );
 }
+
+// ---------------------------------------------------------- concealed runs
+
+#[test]
+fn h_and_l_step_over_a_concealed_run_as_one_grapheme() {
+    // `x **a** y` shows `x a y` with the cursor away from the bold span.
+    let mut keys = Keys::new("x **a** y").at(0, 0);
+    // One step lands on the run's start, which reveals it; the next count
+    // never stops between its two `*`.
+    assert_eq!(keys.keys("2l").line_col(), (0, 2));
+    let mut keys = Keys::new("x **a** y").at(0, 0);
+    assert_eq!(keys.keys("3l").line_col(), (0, 4));
+    // Back from `y`: the space, then the whole closing run, then `a`.
+    let mut keys = Keys::new("x **a** y").at(0, 8);
+    assert_eq!(keys.keys("2h").line_col(), (0, 5));
+    let mut keys = Keys::new("x **a** y").at(0, 8);
+    assert_eq!(keys.keys("3h").line_col(), (0, 4));
+    // A revealed span is source a reader sees, walked one grapheme at a time.
+    let mut keys = Keys::new("x **a** y").at(0, 2);
+    assert_eq!(keys.keys("l").line_col(), (0, 3));
+}
+
+#[test]
+fn word_motions_never_stop_inside_a_concealed_run() {
+    // Every `*` is a word of its own, so `w` from `x` would stop between the
+    // two of the opening run.
+    let mut keys = Keys::new("x **a** y").at(0, 0);
+    assert_eq!(keys.keys("2w").line_col(), (0, 4));
+    let mut keys = Keys::new("x **a** y").at(0, 8);
+    assert_eq!(keys.keys("2b").line_col(), (0, 4));
+    // An escape's backslash is a run of its own.
+    let mut keys = Keys::new(r"a \*b").at(0, 0);
+    assert_eq!(keys.keys("w").line_col(), (0, 2));
+}
+
+#[test]
+fn a_run_of_punctuation_is_one_word() {
+    // As in vim, `**` is one word, not one per `*`.
+    let mut keys = Keys::new("**11** *22*").at(0, 0);
+    assert_eq!(keys.keys("w").line_col(), (0, 2));
+    assert_eq!(keys.keys("w").line_col(), (0, 4));
+    assert_eq!(keys.keys("w").line_col(), (0, 7));
+    assert_eq!(keys.keys("w").line_col(), (0, 8));
+    assert_eq!(keys.keys("w").line_col(), (0, 10));
+    let mut keys = Keys::new("**11** *22*").at(0, 0);
+    assert_eq!(keys.keys("e").line_col(), (0, 1));
+    assert_eq!(keys.keys("e").line_col(), (0, 3));
+    assert_eq!(keys.keys("e").line_col(), (0, 5));
+    assert_eq!(keys.keys("e").line_col(), (0, 7));
+    assert_eq!(keys.keys("e").line_col(), (0, 9));
+    assert_eq!(keys.keys("e").line_col(), (0, 10));
+    let mut keys = Keys::new("**11** *22*").at(0, 10);
+    assert_eq!(keys.keys("b").line_col(), (0, 8));
+    assert_eq!(keys.keys("b").line_col(), (0, 7));
+    assert_eq!(keys.keys("b").line_col(), (0, 4));
+    assert_eq!(keys.keys("b").line_col(), (0, 2));
+    assert_eq!(keys.keys("b").line_col(), (0, 0));
+}
+
+#[test]
+fn x_takes_a_concealed_run_whole() {
+    // `2x` on the space takes it and the whole opening run, never one `*`.
+    let mut keys = Keys::new("x **a** y").at(0, 1);
+    keys.keys("2x");
+    assert_eq!(keys.markdown(), "xa** y");
+    // On a revealed run it takes the grapheme under the cursor, as ever.
+    let mut keys = Keys::new("x **a** y").at(0, 2);
+    keys.keys("x");
+    assert_eq!(keys.markdown(), "x *a** y");
+}
+
+#[test]
+fn a_yank_over_concealed_runs_keeps_their_source() {
+    let mut keys = Keys::new("x **a** y").at(0, 0);
+    keys.keys("y5l");
+    let slice = keys
+        .host
+        .clipboard
+        .clone()
+        .expect("the yank reached the clipboard");
+    let schema = keys.host.state.schema().clone();
+    assert_eq!(slice_to_plain_text(&schema, &slice), "x **a**");
+    assert_eq!(keys.host.plain_text(&slice), "x a");
+    keys.keys("$p");
+    assert_eq!(keys.markdown(), "x **a** yx **a**");
+}

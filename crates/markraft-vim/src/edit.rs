@@ -353,12 +353,13 @@ fn linewise_paste_position(
 /// paragraph — yields an empty range, which makes the command a no-op.
 pub(crate) fn delete_chars_range(
     projection: &Projection,
+    hidden: &motion::Hidden,
     cursor: usize,
     count: usize,
 ) -> Range<usize> {
     let mut end = cursor;
     for _ in 0..count.clamp(1, motion::MAX_COUNT) {
-        let next = motion::next_in_line(projection, end);
+        let next = motion::next_step(projection, hidden, end);
         if next == end {
             break;
         }
@@ -376,7 +377,13 @@ pub(crate) fn to_line_end(projection: &Projection, cursor: usize) -> Range<usize
 /// The inclusive charwise range a Visual selection covers: from the anchor grapheme to
 /// the cursor's, whichever way round they are.
 pub(crate) fn visual_range(projection: &Projection, anchor: usize, cursor: usize) -> Range<usize> {
-    motion::charwise_range(projection, anchor, cursor, Span::Inclusive)
+    motion::charwise_range(
+        projection,
+        &motion::Hidden::none(),
+        anchor,
+        cursor,
+        Span::Inclusive,
+    )
 }
 
 #[cfg(test)]
@@ -488,12 +495,18 @@ mod tests {
     fn deleting_characters_stops_at_the_end_of_the_line() {
         let state = state_of("ab\n\ncd");
         let projection = projection_of(&state);
-        assert_eq!(delete_chars_range(&projection, 2, 9), 2..3);
+        assert_eq!(
+            delete_chars_range(&projection, &motion::Hidden::none(), 2, 9),
+            2..3
+        );
         // A horizontal rule holds no text, so `x` finds nothing to remove.
         let state = state_of("***");
         let projection = projection_of(&state);
         let rule = projection.lines()[0].from;
-        assert_eq!(delete_chars_range(&projection, rule, 1), rule..rule);
+        assert_eq!(
+            delete_chars_range(&projection, &motion::Hidden::none(), rule, 1),
+            rule..rule
+        );
     }
 
     #[test]

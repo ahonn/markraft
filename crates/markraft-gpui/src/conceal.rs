@@ -144,6 +144,37 @@ pub(crate) fn shown<'l>(
         .collect()
 }
 
+/// The concealed runs of `line` a caret at `caret` leaves concealed, as
+/// document ranges in order: what a caret moving over what a reader sees
+/// takes as one step each, and never stops inside.
+///
+/// Neighbouring runs that show nothing are one step — `***` closing two spans
+/// is not two invisible stops. A run that shows its display in place of its
+/// characters is a step of its own. A caret that lands on the start of one
+/// touches its span, which reveals it.
+pub fn concealed_steps(syntax: Option<MarkTypeId>, line: &Line, caret: usize) -> Vec<Range<usize>> {
+    let shown = shown(syntax, line, &Reveal::at(caret..caret, None));
+    let mut out: Vec<Range<usize>> = Vec::new();
+    let mut joinable = false;
+    for (run, shown) in line.runs.iter().zip(shown) {
+        match shown {
+            Shown::Hidden => {
+                match out.last_mut() {
+                    Some(last) if joinable && last.end == run.from => last.end = run.to,
+                    _ => out.push(run.from..run.to),
+                }
+                joinable = true;
+            }
+            Shown::Display(_) => {
+                out.push(run.from..run.to);
+                joinable = false;
+            }
+            Shown::Source | Shown::Revealed => joinable = false,
+        }
+    }
+    out
+}
+
 /// One stretch of what a line shows, and the stretch of the line's text it
 /// stands for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -348,6 +379,33 @@ mod tests {
             Reveal::at(line.from..line.from, Some(pos..pos + 1))
         };
         assert_eq!(showing("x **ab** y", reveal), "x **ab** y");
+    }
+
+    /// What `concealed_steps` finds on the first line of `source` for a caret
+    /// at `offset`, as `char` offsets into the line.
+    fn steps(source: &str, offset: usize) -> Vec<Range<usize>> {
+        let state = state_of(source);
+        let projection = projection_of(&state);
+        let line = &projection.lines()[0];
+        let caret = line.offset_to_pos(offset).expect("a position");
+        concealed_steps(syntax(), line, caret)
+            .into_iter()
+            .map(|range| {
+                let offset = |pos| line.pos_to_offset(pos).expect("an offset");
+                offset(range.start)..offset(range.end)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_caret_steps_over_what_it_leaves_concealed() {
+        // Away from the span both delimiter runs are steps; beside it neither.
+        assert_eq!(steps("x **a** y", 0), [2..4, 5..7]);
+        assert!(steps("x **a** y", 2).is_empty());
+        // Two runs that close two spans at once are one step.
+        assert_eq!(steps("x ***a*** y", 0), [2..5, 6..9]);
+        // An entity shows its character: a step of its own.
+        assert_eq!(steps("x &amp;*a* y", 0), [2..7, 7..8, 9..10]);
     }
 
     #[test]

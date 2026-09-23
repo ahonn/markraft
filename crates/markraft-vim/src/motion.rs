@@ -8,7 +8,10 @@
 //! offsets throughout: the projection answers every question about graphemes and words,
 //! so nothing here holds a line's text or converts an offset itself.
 
-use markraft_core::projection::Projection;
+use markraft_core::MarkTypeId;
+use markraft_core::projection::{OBJECT_REPLACEMENT, Projection};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 
 /// A count large enough for any document; it only bounds a runaway `9999999999j`.
@@ -61,6 +64,78 @@ impl Motion {
     }
 }
 
+/// The concealed runs a cursor leaves concealed where it stands: delimiters,
+/// escapes and the like that a reader does not see there.
+///
+/// A motion moves over what the reader sees. Each such run is one step for
+/// `h`, `l` and `x`, and no motion lands inside one: `l` from before `**b**`
+/// lands on the run's start — which reveals the span — rather than on its
+/// second `*`, and a `3x` never stops between the two. Once revealed, a span's
+/// characters are what the reader sees, and the cursor walks them one by one.
+/// Which runs these are is the view's to say; see
+/// [`markraft_gpui::concealed_steps`].
+pub(crate) struct Hidden {
+    syntax: Option<MarkTypeId>,
+    /// Where the cursor stood when the motion began.
+    caret: usize,
+    runs: RefCell<HashMap<usize, Vec<Range<usize>>>>,
+}
+
+impl Hidden {
+    /// The runs a cursor at `caret` leaves concealed, for a kind whose conceal
+    /// role is `syntax`.
+    pub(crate) fn at(syntax: Option<MarkTypeId>, caret: usize) -> Hidden {
+        Hidden {
+            syntax,
+            caret,
+            runs: RefCell::default(),
+        }
+    }
+
+    /// Nothing concealed: every grapheme is a step.
+    pub(crate) fn none() -> Hidden {
+        Hidden::at(None, 0)
+    }
+
+    /// The concealed run holding `pos`, as long as `pos` is past its start.
+    fn inside(&self, projection: &Projection, pos: usize) -> Option<Range<usize>> {
+        self.run(projection, pos, |run| run.start < pos && pos < run.end)
+    }
+
+    /// The concealed run starting at `pos`.
+    fn starting(&self, projection: &Projection, pos: usize) -> Option<Range<usize>> {
+        self.run(projection, pos, |run| run.start == pos)
+    }
+
+    fn run(
+        &self,
+        projection: &Projection,
+        pos: usize,
+        matches: impl Fn(&Range<usize>) -> bool,
+    ) -> Option<Range<usize>> {
+        self.syntax?;
+        let index = projection.line_at(pos)?;
+        let mut runs = self.runs.borrow_mut();
+        let line = runs.entry(index).or_insert_with(|| {
+            markraft_gpui::concealed_steps(self.syntax, &projection.lines()[index], self.caret)
+        });
+        line.iter().find(|run| matches(run)).cloned()
+    }
+
+    /// `pos`, or the start of the concealed run it stands inside: where a
+    /// motion going back stops.
+    fn snap_back(&self, projection: &Projection, pos: usize) -> usize {
+        self.inside(projection, pos).map_or(pos, |run| run.start)
+    }
+
+    /// `pos`, or the end of the concealed run it stands inside: where a
+    /// motion going forward stops, since it may have set out from the run's
+    /// start.
+    fn snap_forward(&self, projection: &Projection, pos: usize) -> usize {
+        self.inside(projection, pos).map_or(pos, |run| run.end)
+    }
+}
+
 /// The line `pos` falls in, clamped into the document.
 pub(crate) fn line_of(projection: &Projection, pos: usize) -> usize {
     projection
@@ -109,7 +184,39 @@ pub(crate) fn clamp(projection: &Projection, pos: usize) -> usize {
 /// The words of one whole line, as document position ranges.
 fn line_words(projection: &Projection, line: usize) -> Vec<Range<usize>> {
     let entry = &projection.lines()[line.min(last_line(projection))];
-    projection.word_ranges(entry.from, entry.to)
+    words(projection, entry.from, entry.to)
+}
+
+/// The words between `from` and `to` as vim sees them: a run of keyword
+/// characters, or a run of other non-blank characters.
+///
+/// The editor's word segmentation makes each punctuation character a word of
+/// its own, which suits option-arrow but not `w`: `**` is one word to vim, so
+/// adjacent punctuation segments are joined here.
+fn words(projection: &Projection, from: usize, to: usize) -> Vec<Range<usize>> {
+    let mut words: Vec<Range<usize>> = Vec::new();
+    let mut last_punctuation = false;
+    for word in projection.word_ranges(from, to) {
+        let punctuation = projection
+            .text_between(word.start, word.end)
+            .is_some_and(is_punctuation);
+        match words.last_mut() {
+            Some(last) if punctuation && last_punctuation && last.end == word.start => {
+                last.end = word.end;
+            }
+            _ => words.push(word),
+        }
+        last_punctuation = punctuation;
+    }
+    words
+}
+
+/// Whether a segment is non-keyword, non-blank text. An atom's placeholder
+/// stands for an object, not punctuation, and stays a word of its own.
+fn is_punctuation(segment: &str) -> bool {
+    segment
+        .chars()
+        .all(|c| !c.is_alphanumeric() && c != '_' && !c.is_whitespace() && c != OBJECT_REPLACEMENT)
 }
 
 /// The position of a word's last grapheme, where `e` rests.
@@ -122,7 +229,13 @@ fn word_end(projection: &Projection, word: &Range<usize>) -> usize {
 
 /// Where `motion` takes a cursor at `from`, repeated `count` times. A repetition that
 /// cannot move stops the walk, so an absurd count costs no more than a real one.
-pub(crate) fn target(projection: &Projection, from: usize, motion: Motion, count: usize) -> usize {
+pub(crate) fn target(
+    projection: &Projection,
+    hidden: &Hidden,
+    from: usize,
+    motion: Motion,
+    count: usize,
+) -> usize {
     let from = clamp(projection, from);
     let count = count.clamp(1, MAX_COUNT);
     match motion {
@@ -143,7 +256,7 @@ pub(crate) fn target(projection: &Projection, from: usize, motion: Motion, count
         _ => {
             let mut position = from;
             for _ in 0..count {
-                let next = step(projection, position, motion);
+                let next = step(projection, hidden, position, motion);
                 if next == position {
                     break;
                 }
@@ -154,15 +267,33 @@ pub(crate) fn target(projection: &Projection, from: usize, motion: Motion, count
     }
 }
 
-fn step(projection: &Projection, from: usize, motion: Motion) -> usize {
+fn step(projection: &Projection, hidden: &Hidden, from: usize, motion: Motion) -> usize {
     match motion {
-        Motion::Left => previous_in_line(projection, from),
-        Motion::Right => next_in_line(projection, from),
-        Motion::WordForward => next_word_start(projection, from),
-        Motion::WordBackward => previous_word_start(projection, from),
-        Motion::WordEnd => next_word_end(projection, from),
+        Motion::Left => previous_step(projection, hidden, from),
+        Motion::Right => next_step(projection, hidden, from),
+        // A word boundary inside a concealed run is not one a reader sees; the
+        // run's edge in the direction of travel is.
+        Motion::WordForward => hidden.snap_forward(projection, next_word_start(projection, from)),
+        Motion::WordBackward => hidden.snap_back(projection, previous_word_start(projection, from)),
+        Motion::WordEnd => hidden.snap_forward(projection, next_word_end(projection, from)),
         _ => from,
     }
+}
+
+/// One step after `pos`, never leaving its line: the next grapheme, or past
+/// the whole of a concealed run `pos` starts.
+pub(crate) fn next_step(projection: &Projection, hidden: &Hidden, pos: usize) -> usize {
+    let pos = clamp(projection, pos);
+    match hidden.starting(projection, pos) {
+        Some(run) => run.end,
+        None => next_in_line(projection, pos),
+    }
+}
+
+/// One step before `pos`, never leaving its line: the previous grapheme, or
+/// the start of the concealed run that grapheme ends.
+pub(crate) fn previous_step(projection: &Projection, hidden: &Hidden, pos: usize) -> usize {
+    hidden.snap_back(projection, previous_in_line(projection, pos))
 }
 
 /// Whether the grapheme at `pos` is whitespace, or `pos` is past the end of its line.
@@ -226,10 +357,7 @@ fn previous_word_start(projection: &Projection, from: usize) -> usize {
     let from = clamp(projection, from);
     // Only the text before the cursor is segmented, so a cursor inside a word finds
     // that word's own start rather than skipping to the one before it.
-    if let Some(word) = projection
-        .word_ranges(projection.lines()[index].from, from)
-        .last()
-    {
+    if let Some(word) = words(projection, projection.lines()[index].from, from).last() {
         return word.start;
     }
     if index == 0 {
@@ -263,6 +391,7 @@ fn next_word_end(projection: &Projection, from: usize) -> usize {
 /// The charwise range an operator covers between the cursor and a motion's target.
 pub(crate) fn charwise_range(
     projection: &Projection,
+    hidden: &Hidden,
     cursor: usize,
     target: usize,
     span: Span,
@@ -270,7 +399,7 @@ pub(crate) fn charwise_range(
     let start = cursor.min(target);
     let mut end = cursor.max(target);
     if span == Span::Inclusive {
-        end = next_in_line(projection, end);
+        end = next_step(projection, hidden, end);
     }
     start..end
 }

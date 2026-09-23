@@ -28,6 +28,7 @@ mod syntax;
 mod typeahead;
 mod types;
 mod wiki;
+pub use conceal::concealed_steps;
 pub use emoji::{EmojiShortcodes, emoji_menu};
 pub use extension::{
     ActionHandler, CaretShape, EXTENSION_ORIGIN_PREFIX, EditorCx, Extension, ExtensionHandle,

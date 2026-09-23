@@ -71,6 +71,15 @@
 //! `dw` on the last word of a line stops at the line's end rather than pulling the next
 //! line up, as it does in vim.
 //!
+//! # Concealed spelling
+//!
+//! A kind that keeps its markup in the text — Markdown's `**`, a backslash
+//! escape — conceals it until the cursor reaches its span. Motions move over
+//! what a reader sees: a run the cursor leaves concealed is one step for `h`,
+//! `l` and `x`, and no motion stops inside one. Landing on its start reveals
+//! it, and from there the cursor walks its characters like any others. A yank
+//! takes the characters themselves, so a paste writes the same source again.
+//!
 //! # Registers
 //!
 //! There is one register, the unnamed one, and it is the system clipboard: a yank or a

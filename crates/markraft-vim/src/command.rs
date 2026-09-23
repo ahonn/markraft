@@ -114,7 +114,8 @@ pub(crate) fn motion(state: &mut State, cx: &mut impl Host, motion: Motion) {
     } else {
         motion
     };
-    let mut target = motion::target(&projection, from, motion, count);
+    let hidden = motion::Hidden::at(cx.types().syntax, from);
+    let mut target = motion::target(&projection, &hidden, from, motion, count);
     // vim's `dw` on the last word of a line stops at the line's end instead of pulling
     // the next line up; the same rule keeps `cw` and `yw` inside one line.
     if operator.is_some()
@@ -146,7 +147,7 @@ pub(crate) fn motion(state: &mut State, cx: &mut impl Host, motion: Motion) {
             linewise(state, cx, operator, lines);
         }
         span => {
-            let range = motion::charwise_range(&projection, from, target, span);
+            let range = motion::charwise_range(&projection, &hidden, from, target, span);
             charwise(state, cx, operator, range);
         }
     }
@@ -167,8 +168,15 @@ pub(crate) fn vertical(state: &mut State, cx: &mut impl Host, delta: isize) {
     // inside a table means walking along one row's cells.
     let in_table = table::row_step(cx.types(), &projection, from, rows);
     if operator.is_some() || state.mode == Mode::VisualLine {
-        let target = in_table
-            .unwrap_or_else(|| motion::target(&projection, from, Motion::LineDelta(delta), count));
+        let target = in_table.unwrap_or_else(|| {
+            motion::target(
+                &projection,
+                &motion::Hidden::none(),
+                from,
+                Motion::LineDelta(delta),
+                count,
+            )
+        });
         match operator {
             Some(operator) => {
                 let lines = motion::line_range(&projection, from, target);
@@ -360,7 +368,8 @@ pub(crate) fn delete_chars(state: &mut State, cx: &mut impl Host) {
     let count = state.pending.take();
     let projection = cx.projection();
     let from = cursor(state, cx);
-    let range = edit::delete_chars_range(&projection, from, count);
+    let hidden = motion::Hidden::at(cx.types().syntax, from);
+    let range = edit::delete_chars_range(&projection, &hidden, from, count);
     if range.start == range.end {
         return;
     }
