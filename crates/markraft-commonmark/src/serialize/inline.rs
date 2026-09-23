@@ -34,7 +34,7 @@ impl SerializerState<'_> {
         let schema = self.schema();
         let kind = block_kind(schema, parent.type_id()).unwrap_or(BlockKind::Paragraph);
         let items = canonical_lines(Items::from_nodes(schema, parent.children()));
-        let insertions = items.guard_insertions(schema, kind);
+        let insertions = items.guard_insertions(schema, kind, self.item_marker(parent));
         let mut out = String::new();
         let mut next = insertions.iter().peekable();
         for (index, item) in items.0.iter().enumerate() {

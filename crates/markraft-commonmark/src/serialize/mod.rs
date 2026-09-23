@@ -185,6 +185,7 @@ impl MarkdownSerializer {
             line_break: " ",
             after_mark_close: false,
             tagged: vec![false; self.marks.len()],
+            item_lead: None,
         };
         state.render_content(doc);
         state.out
@@ -221,6 +222,7 @@ pub(crate) fn spell_run(
         line_break: " ",
         after_mark_close: false,
         tagged: vec![false; serializer.marks.len()],
+        item_lead: None,
     };
     state.line_start = at_line_start;
     let schema = serializer.schema();
@@ -273,12 +275,24 @@ pub struct SerializerState<'a> {
     line_break: &'static str,
     after_mark_close: bool,
     tagged: Vec<bool>,
+    /// The first paragraph of the list item being written and the marker
+    /// written before it, which some text reads differently after.
+    item_lead: Option<(Node, String)>,
 }
 
 impl<'a> SerializerState<'a> {
     /// The schema being written.
     pub fn schema(&self) -> &'a Schema {
         self.serializer.schema()
+    }
+
+    /// The marker `block` is written after when it is the first block of the
+    /// list item being written.
+    pub(crate) fn item_marker(&self, block: &Node) -> Option<&str> {
+        self.item_lead
+            .as_ref()
+            .filter(|(lead, _)| lead.ptr_eq(block))
+            .map(|(_, marker)| marker.as_str())
     }
 
     /// The serialiser, for a rule that needs to look up another rule.
@@ -672,11 +686,15 @@ impl<'a> SerializerState<'a> {
                 self.flush_close(1);
             }
             let marker = first_delim(index);
+            self.item_lead = child
+                .maybe_child(0)
+                .map(|lead| (lead.clone(), marker.clone()));
             // `delim` is the shared content column. Task check boxes append to
             // `marker` only — they are first-paragraph content in CommonMark.
             self.wrap_block(delim, Some(&marker), node, |state| {
                 state.render(child, Some(node), index)
             });
+            self.item_lead = None;
         }
         self.in_tight_list = previous;
     }

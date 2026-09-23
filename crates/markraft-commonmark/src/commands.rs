@@ -25,8 +25,35 @@
 //! and carets elsewhere in the block stay where they were. The selected
 //! characters stay selected.
 //!
-//! A cursor has nothing to style: [`toggle_style`] writes an empty delimiter
-//! pair and puts the caret between them, so what is typed next is styled.
+//! A cursor has nothing to style, so [`toggle_style`] works on the delimiters
+//! around it, reading the block with [`derive`] to find the spans the caret
+//! is in:
+//!
+//! * Outside every span of the style, it writes the style's empty pair and
+//!   puts the caret between the two runs — `**|**` — so what is typed next is
+//!   styled.
+//! * At the edge of a span's content — `**abc|**`, `**|abc**` — it steps the
+//!   caret over the delimiter, out of the span, so what is typed next is not.
+//!   Delimiters of spans nested inside it are stepped over with it:
+//!   `***abc|***` with emphasis outside strong leaves both for ⌘I.
+//! * Strictly inside a span — `**ab|c**` — it closes the span at the caret and
+//!   opens it again, the caret between: `**ab**|**c**`.
+//! * At the end of what was typed in a pair it wrote that a reader does not
+//!   take as the style — `**ni |**` — it steps out past the closing runs,
+//!   which leaving the pair moves before the whitespace: `**ni** |`.
+//! * Between the runs of a pair it wrote, it takes that style's runs off —
+//!   `**|**` goes — or, for another style, nests that style's pair inside.
+//!   An empty pair already in the text, which a reader sees as characters, is
+//!   taken off the same way.
+//!
+//! Each pair is read back with a letter typed between its runs, and the
+//! command refuses where the letter would not carry what was asked or another
+//! character would change: inside a code span, whose content is plain text
+//! to a reader, only the code toggle applies. Where a new pair is not read
+//! because it touches a span of the same style — `**abc**|` — the caret goes
+//! into that span instead. A pair the command writes stays pending until
+//! something is typed in it, and goes when the caret leaves it empty; see the
+//! `pending` module.
 //!
 //! [`keeping_styles`] wraps a command that splits a block — Enter — so that a
 //! split inside a style closes every span open at the cut and opens it again
@@ -44,6 +71,7 @@ use markraft_core::{
 
 use crate::derive::{BlockKind, Conceal, DeriveContext, Derived, Style, StyleSpan, derive};
 use crate::inline::style_delimiters;
+use crate::pending::{Layer, pending, pending_after, reads_back, runs};
 use crate::preset::commonmark_serializer;
 use crate::schema as md;
 use crate::serialize::spell_run;
@@ -110,8 +138,11 @@ pub type FormatCommand = Arc<dyn Fn(&EditorState) -> Formatted + Send + Sync>;
 /// starting in bold and running into plain text becomes one bold span, and one
 /// running from one bold span to another loses both.
 ///
-/// With a cursor the style's empty delimiter pair is written and the caret put
-/// between the two, where typing is styled.
+/// With a cursor the command works on the delimiters around the caret: it
+/// writes the style's empty pair to type into, steps out of a span at the
+/// edge of its content, splits one around a caret strictly inside it, and
+/// takes back a pair it wrote. The pair stays until something is typed in it
+/// and goes when the caret leaves it empty.
 ///
 /// Strong, emphasis, strikethrough, code and underline have delimiters; for
 /// any other mark type the command does not apply.
@@ -127,7 +158,7 @@ pub fn toggle_style(mark_type: MarkTypeId) -> FormatCommand {
             return Ok(None);
         }
         if state.selection().is_cursor() {
-            return Ok(insert_pair(state, &style));
+            return toggle_at_cursor(state, &style);
         }
         format(state, Op::Toggle(style), "format.mark")
     })
@@ -583,27 +614,37 @@ impl Rewrite {
     /// The change that makes the block's text the rewritten one, trimmed to
     /// the items that differ.
     fn change(&self, schema: &Schema, block: &Block) -> Option<Change> {
-        let old = &block.items.0[self.range.clone()];
-        let new = &self.items;
-        let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
-        let suffix = old[prefix..]
-            .iter()
-            .rev()
-            .zip(new[prefix..].iter().rev())
-            .take_while(|(a, b)| a == b)
-            .count();
-        let from = self.range.start + prefix;
-        let to = self.range.end - suffix;
-        let inserted = &new[prefix..new.len() - suffix];
-        if from == to && inserted.is_empty() {
-            return None;
-        }
-        Some(Change::replace(
-            block.start + from,
-            block.start + to,
-            Slice::from_fragment(Fragment::from_nodes(items_to_nodes(schema, inserted))),
-        ))
+        replace_items(schema, block, self.range.clone(), &self.items)
     }
+}
+
+/// The change that replaces the items `range` of `block` with `new`, trimmed
+/// to the items that differ.
+fn replace_items(
+    schema: &Schema,
+    block: &Block,
+    range: Range<usize>,
+    new: &[Item],
+) -> Option<Change> {
+    let old = &block.items.0[range.clone()];
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let from = range.start + prefix;
+    let to = range.end - suffix;
+    let inserted = &new[prefix..new.len() - suffix];
+    if from == to && inserted.is_empty() {
+        return None;
+    }
+    Some(Change::replace(
+        block.start + from,
+        block.start + to,
+        Slice::from_fragment(Fragment::from_nodes(items_to_nodes(schema, inserted))),
+    ))
 }
 
 /// Unmarked content for `items`: the correction derives its marks.
@@ -914,20 +955,268 @@ fn spell_units<'u>(
 
 // -- a cursor ---------------------------------------------------------------------
 
-/// The empty delimiter pair of `style` at the cursor, with the caret inside.
-fn insert_pair(state: &EditorState, style: &Style) -> Option<TransactionSpec> {
-    let (open, close) = style_delimiters(style.mark_name())
-        .or_else(|| (*style == Style::Code).then_some(("`", "`")))?;
-    let pos = state.selection().head(state.doc());
-    let text = Slice::from_fragment(Fragment::from_node(
-        state.schema().text(&format!("{open}{close}")),
-    ));
-    Some(
-        TransactionSpec::new()
-            .changes([Change::insert(pos, text)])
-            .selection(Selection::cursor(pos + open.chars().count()))
-            .user_event("format.mark"),
-    )
+/// The delimiters a cursor toggle writes for `style`.
+fn pair_of(style: &Style) -> Option<(&'static str, &'static str)> {
+    style_delimiters(style.mark_name()).or_else(|| (*style == Style::Code).then_some(("`", "`")))
+}
+
+/// [`toggle_style`] at a cursor. See the module documentation for the cases.
+fn toggle_at_cursor(state: &EditorState, style: &Style) -> Formatted {
+    let Some((open, close)) = pair_of(style) else {
+        return Ok(None);
+    };
+    let schema = state.schema();
+    let doc = state.doc();
+    let caret = state.selection().head(doc);
+    let resolved = doc.resolve(caret).map_err(|_| unreadable())?;
+    let start = resolved.start(resolved.depth());
+    let ctx = document_context(schema, doc);
+    let Some(block) = Block::read(schema, &ctx, resolved.parent(), start) else {
+        return Ok(None);
+    };
+    let offset = caret - start;
+    let refusal = || CommandRefusal::NotExpressible {
+        reason: Inexpressible::Delimiters {
+            mark: style.mark_name(),
+        },
+    };
+
+    // Between the runs of the pair a toggle left: take this style's layer
+    // off it, or add one inside the others.
+    if let Some(pending) = pending(state).filter(|pending| pending.caret() == Some(caret)) {
+        let region = pending.range().start - start..pending.range().end - start;
+        let mut layers = pending.layers.clone();
+        match layers.iter().position(|layer| layer.style == *style) {
+            Some(index) => {
+                layers.remove(index);
+            }
+            None => layers.push(Layer {
+                style: style.clone(),
+                adds: true,
+                open: open.to_string(),
+                close: close.to_string(),
+            }),
+        }
+        return write_pair(schema, &block, region, layers)
+            .map(Some)
+            .ok_or_else(refusal);
+    }
+
+    // At the end of what was typed in the pair, when a reader does not take
+    // it as the style — `**ni |**`, whose closing run follows a space — step
+    // out past the closing runs. Leaving the pair moves them inside the
+    // whitespace, `**ni** |`, as leaving it any other way does.
+    if let Some(pending) = pending(state).filter(|pending| {
+        !pending.is_empty()
+            && pending.close.start == caret
+            && pending.layers.iter().any(|layer| layer.style == *style)
+            && !reads_back(schema, doc, pending)
+    }) {
+        return Ok(Some(caret_moved(pending.close.end)));
+    }
+
+    // An empty pair a reader sees as characters: the toggle takes it off.
+    if let Some(region) = literal_pair(&block, offset, open, close) {
+        return write_pair(schema, &block, region, Vec::new())
+            .map(Some)
+            .ok_or_else(refusal);
+    }
+
+    // Inside a span of this style, the innermost one: leave it.
+    let span = block.derived.styles.iter().rfind(|span| {
+        let (open, close) = delimiters(&block.derived, span);
+        span.style == *style && !open.is_empty() && open.end <= offset && offset <= close.start
+    });
+    if let Some(span) = span {
+        let (open, close) = delimiters(&block.derived, span);
+        // Only delimiters — of the spans inside this one — between the caret
+        // and the edge of the span's content: step over the delimiters.
+        let only_delimiters = |range: Range<usize>| {
+            range.clone().all(|index| {
+                block
+                    .derived
+                    .conceal_at(index)
+                    .is_some_and(|conceal| is_delimiter(&block.derived, conceal))
+            })
+        };
+        let to = if only_delimiters(offset..close.start) {
+            Some(close.end)
+        } else if only_delimiters(open.end..offset) {
+            Some(open.start)
+        } else {
+            None
+        };
+        if let Some(to) = to {
+            return Ok(Some(caret_moved(start + to)));
+        }
+        // Strictly inside: close the span at the caret and open it again,
+        // with the caret between.
+        let text = block.items.text();
+        let run = |range: Range<usize>| -> String {
+            text.chars().skip(range.start).take(range.len()).collect()
+        };
+        let layer = Layer {
+            style: style.clone(),
+            adds: false,
+            open: run(close),
+            close: run(open),
+        };
+        return write_pair(schema, &block, offset..offset, vec![layer])
+            .map(Some)
+            .ok_or_else(refusal);
+    }
+
+    // Anywhere else: the empty pair, where typing takes the style on.
+    let layer = Layer {
+        style: style.clone(),
+        adds: true,
+        open: open.to_string(),
+        close: close.to_string(),
+    };
+    if let Some(spec) = write_pair(schema, &block, offset..offset, vec![layer]) {
+        return Ok(Some(spec));
+    }
+    // Where no pair would be read — right after a span of this style or right
+    // before one — go into that span instead.
+    let edge = block
+        .derived
+        .styles
+        .iter()
+        .filter(|span| span.style == *style)
+        .find_map(|span| {
+            let (open, close) = delimiters(&block.derived, span);
+            if open.is_empty() {
+                None
+            } else if close.end == offset {
+                Some(close.start)
+            } else if open.start == offset {
+                Some(open.end)
+            } else {
+                None
+            }
+        });
+    match edge {
+        Some(to) => Ok(Some(caret_moved(start + to))),
+        None => Err(refusal()),
+    }
+}
+
+/// The caret moved to `pos`, and nothing else.
+fn caret_moved(pos: usize) -> TransactionSpec {
+    TransactionSpec::new()
+        .selection(Selection::cursor(pos))
+        .user_event("format.mark")
+        .scroll_into_view()
+}
+
+/// The item range of `block` that spells `open` right before `offset` and
+/// `close` right after it, as characters a reader sees: an empty pair nobody
+/// is typing into. The runs have to be whole, so `***|***` is not an empty
+/// pair of `*`s.
+fn literal_pair(block: &Block, offset: usize, open: &str, close: &str) -> Option<Range<usize>> {
+    let text: Vec<char> = block.items.text().chars().collect();
+    let open: Vec<char> = open.chars().collect();
+    let close: Vec<char> = close.chars().collect();
+    let from = offset.checked_sub(open.len())?;
+    let to = offset + close.len();
+    let whole = text.get(from..offset)? == open.as_slice()
+        && text.get(offset..to)? == close.as_slice()
+        && (from == 0 || Some(&text[from - 1]) != open.first())
+        && text.get(to) != close.last();
+    let literal = (from..to).all(|index| block.derived.conceal_at(index).is_none());
+    (whole && literal).then_some(from..to)
+}
+
+/// Replace the items `region` of `block` with the runs of `layers`, the caret
+/// between them, and remember them as the pending pair — or, with no layers,
+/// delete the region and leave nothing pending.
+///
+/// The runs are read back first with a letter typed between them, against
+/// the block with `region` gone: every other character has to keep what it
+/// carries, and the letter has to carry what the layers ask for. `None` where
+/// it would not.
+fn write_pair(
+    schema: &Schema,
+    block: &Block,
+    region: Range<usize>,
+    layers: Vec<Layer>,
+) -> Option<TransactionSpec> {
+    let (left, right) = runs(&layers);
+    if !layers.is_empty() && !pair_reads(block, region.clone(), &left, &right, &layers) {
+        return None;
+    }
+    let items: Vec<Item> = left.chars().chain(right.chars()).map(Item::Char).collect();
+    let caret = block.start + region.start + left.chars().count();
+    let mut spec = TransactionSpec::new()
+        .selection(Selection::cursor(caret))
+        .user_event("format.mark")
+        .scroll_into_view()
+        .annotate(pending_after(layers));
+    if let Some(change) = replace_items(schema, block, region, &items) {
+        spec = spec.changes([change]);
+    }
+    Some(spec)
+}
+
+/// Whether `left` and `right` in place of the items `region` of `block`, with
+/// a letter typed between them, read as `layers` ask. See [`write_pair`].
+fn pair_reads(
+    block: &Block,
+    region: Range<usize>,
+    left: &str,
+    right: &str,
+    layers: &[Layer],
+) -> bool {
+    const PROBE: char = 'x';
+    let read = |items: &Items| {
+        let derived = derive(block.kind, &items.text(), &block.ctx);
+        let units = units_of(items, &derived);
+        (derived, units)
+    };
+    let mut base = block.items.0[..region.start].to_vec();
+    base.extend(block.items.0[region.end..].iter().cloned());
+    let base = Items(base);
+    let at = region.start;
+    let (derived, units) = read(&base);
+
+    // What the letter carries: the spans the caret is inside of, with each
+    // layer's style added or taken off.
+    let mut wanted: Vec<Style> = derived
+        .styles
+        .iter()
+        .filter(|span| {
+            let (open, close) = delimiters(&derived, span);
+            open.end <= at && at <= close.start
+        })
+        .map(|span| span.style.clone())
+        .collect();
+    for layer in layers {
+        if layer.adds {
+            wanted.push(layer.style.clone());
+        } else {
+            wanted.retain(|style| *style != layer.style);
+        }
+    }
+    let before = units.iter().filter(|unit| unit.src.end <= at).count();
+    let mut expected = units;
+    expected.insert(
+        before,
+        Unit {
+            content: Content::Char(PROBE),
+            styles: sorted(wanted),
+            src: 0..0,
+        },
+    );
+    let target: Vec<Vec<Style>> = expected.iter().map(|unit| unit.styles.clone()).collect();
+
+    let mut items = base.0[..at].to_vec();
+    items.extend(left.chars().map(Item::Char));
+    items.push(Item::Char(PROBE));
+    items.extend(right.chars().map(Item::Char));
+    items.extend(base.0[at..].iter().cloned());
+    let items = Items(items);
+    let (_, got) = read(&items);
+    check(&expected, &target, &got).is_ok()
 }
 
 /// `href` inserted at the cursor as its own linked text, inside whatever

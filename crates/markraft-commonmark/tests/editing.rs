@@ -491,3 +491,34 @@ fn one_edit_to_a_reference_and_its_definition_settles_both() {
         [("[a][ref]".to_string(), "/v".to_string())]
     );
 }
+
+/// A list item's first line holds what its marker would read as more of
+/// itself — a check box, the rest of a thematic break — as text while the
+/// caret is on it, and gets its backslash when the caret leaves.
+#[test]
+fn text_a_list_marker_would_complete_is_escaped_once_the_caret_leaves() {
+    let schema = commonmark_schema();
+    for (typed, kept) in [("- [ ]", r"\[ ]"), ("- --", r"\--")] {
+        let doc = markraft_commonmark::from_markdown(&schema, "x\n").expect("a document");
+        let state = start_from(doc, &schema, 2);
+        let state = run_command(&state, &markraft_core::commands::split_block())
+            .expect("Enter applies")
+            .expect("the transaction resolves")
+            .state()
+            .clone();
+        let state = type_all(&state, typed);
+        let left = state
+            .update([markraft_core::TransactionSpec::new().selection(Selection::cursor(1))])
+            .expect("the caret moves")
+            .state()
+            .clone();
+        assert_eq!(
+            markraft_commonmark::to_markdown(&schema, left.doc()),
+            format!("x\n\n- {kept}"),
+            "{typed:?}"
+        );
+        let reread = markraft_commonmark::from_markdown(&schema, &format!("x\n\n- {kept}\n"))
+            .expect("the file parses");
+        assert_eq!(reread, *left.doc(), "{typed:?}");
+    }
+}

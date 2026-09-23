@@ -554,6 +554,39 @@ fn guard_escapes_a_heading_closing_sequence() {
     assert_eq!(inserted(H, "a\n# b"), vec![2]);
 }
 
+/// The file ends every block with a line ending, and a marker with nothing
+/// after it opens a list there, though not at the very end of the input.
+#[test]
+fn guard_escapes_a_bare_ordered_marker_ending_the_block() {
+    use BlockKind::Paragraph as P;
+    assert_eq!(inserted(P, "1."), vec![1]);
+    assert_eq!(inserted(P, "12)"), vec![2]);
+    // An empty item cannot interrupt a paragraph, so a later line is left.
+    assert_eq!(inserted(P, "a\n1."), Vec::<usize>::new());
+}
+
+#[test]
+fn a_list_items_first_paragraph_escapes_what_its_marker_would_complete() {
+    use crate::guard::item_lead_insertion as lead;
+    assert_eq!(lead("- ", "[ ]"), Some(0));
+    assert_eq!(lead("- ", "[x] a"), Some(0));
+    assert_eq!(lead("1. ", "[ ] a"), Some(0));
+    assert_eq!(lead("- ", "--"), Some(0));
+    assert_eq!(lead("* ", "**"), Some(0));
+    // A task item's own box is expected; a second one is only text.
+    assert_eq!(lead("- [ ] ", "[ ] a"), None);
+    // What the marker leaves alone.
+    for (marker, text) in [
+        ("- ", "a"),
+        ("- ", "[ a"),
+        ("* ", "--"),
+        ("- ", r"\[ ]"),
+        ("- ", ""),
+    ] {
+        assert_eq!(lead(marker, text), None, "{marker:?} {text:?}");
+    }
+}
+
 #[test]
 fn guard_escapes_every_unescaped_pipe_in_a_cell() {
     use BlockKind::TableCell as C;

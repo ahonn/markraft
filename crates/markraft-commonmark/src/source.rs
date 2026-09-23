@@ -14,6 +14,7 @@ use std::ops::Range;
 use comrak::{Arena, parse_document};
 use markraft_core::{Fragment, Node, Schema};
 
+use crate::textblock::{Item, Items, block_kind};
 use crate::{ParseError, commonmark_options, from_markdown, to_markdown};
 
 /// A parsed document and its immutable, byte-preserving source baseline.
@@ -149,6 +150,28 @@ impl SourceDocument {
                         self.blocks[index].clone(),
                         before,
                         after,
+                    )
+                {
+                    result = patched;
+                    continue;
+                }
+                // The same, spelled as the writer spells the one textblock that
+                // changed: a character its guard escapes — a `|` in a table
+                // cell — goes in with its backslash.
+                if let Some((before, after)) = changed_textblock(schema, &old[index], &new[index])
+                    .and_then(|(before, after)| {
+                        Some((
+                            guarded_source(schema, before)?,
+                            guarded_source(schema, after)?,
+                        ))
+                    })
+                    && let Ok(patched) = self.patch(
+                        schema,
+                        &target,
+                        result.clone(),
+                        self.blocks[index].clone(),
+                        &before,
+                        &after,
                     )
                 {
                     result = patched;
@@ -377,9 +400,13 @@ fn without_trailing_spaces(schema: &Schema, node: &Node) -> Node {
         .children()
         .map(|child| without_trailing_spaces(schema, child))
         .collect();
-    if [crate::schema::PARAGRAPH, crate::schema::HEADING]
-        .iter()
-        .any(|name| schema.node_id(name) == Some(node.type_id()))
+    if [
+        crate::schema::PARAGRAPH,
+        crate::schema::HEADING,
+        crate::schema::TABLE_CELL,
+    ]
+    .iter()
+    .any(|name| schema.node_id(name) == Some(node.type_id()))
     {
         while let Some(last) = children.last() {
             let Some(text) = last.text() else { break };
@@ -416,6 +443,52 @@ fn text_changes<'a>(old: &'a Node, new: &'a Node, changes: &mut Vec<(&'a str, &'
             .all(|(a, b)| text_changes(a, b, changes)),
         _ => false,
     }
+}
+
+/// The one textblock `old` and `new` differ in, when they differ in nothing
+/// else.
+fn changed_textblock<'a>(
+    schema: &Schema,
+    old: &'a Node,
+    new: &'a Node,
+) -> Option<(&'a Node, &'a Node)> {
+    if old == new || !old.same_markup(new) {
+        return None;
+    }
+    if block_kind(schema, old.type_id()).is_some() {
+        return Some((old, new));
+    }
+    if old.child_count() != new.child_count() {
+        return None;
+    }
+    let mut changed = old.children().zip(new.children()).filter(|(a, b)| a != b);
+    let (a, b) = changed.next()?;
+    if changed.next().is_some() {
+        return None;
+    }
+    changed_textblock(schema, a, b)
+}
+
+/// A textblock's text as the writer puts it in the file, with its guard's
+/// backslashes, or `None` when it holds an atom, which has a spelling of its
+/// own.
+fn guarded_source(schema: &Schema, block: &Node) -> Option<String> {
+    let kind = block_kind(schema, block.type_id())?;
+    let items = Items::from_nodes(schema, block.children());
+    let insertions = items.guard_insertions(schema, kind, None);
+    let mut out = String::new();
+    let mut next = insertions.iter().peekable();
+    for (index, item) in items.0.iter().enumerate() {
+        while next.next_if(|at| **at == index).is_some() {
+            out.push('\\');
+        }
+        match item {
+            Item::Char(c) => out.push(*c),
+            Item::Break => out.push('\n'),
+            Item::Atom(_) => return None,
+        }
+    }
+    Some(out)
 }
 
 fn block_markdown(schema: &Schema, document: &Node, nodes: &[Node]) -> String {

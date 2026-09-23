@@ -109,6 +109,43 @@ pub fn guard(kind: BlockKind, text: &str) -> Guarded {
     Guarded::build(text, insertions)
 }
 
+/// The character offset in `text` a backslash has to go before so that, as the
+/// first paragraph of a list item written after `marker`, it is still that
+/// paragraph, or `None` when it already is or no escape would help.
+///
+/// [`guard`] reads a paragraph on its own, and after a list marker some text
+/// reads differently: `[ ] a` after `- ` is a check box, and `--` after `- `
+/// completes a thematic break. `text` is the paragraph's guarded text and
+/// `marker` everything the writer puts before its first line, a task item's
+/// check box included, so the check box a task item already has is expected
+/// and only a second one is not.
+pub fn item_lead_insertion(marker: &str, text: &str) -> Option<usize> {
+    let first = text.split('\n').next().unwrap_or_default();
+    let reads = |line: &str| {
+        let arena = Arena::new();
+        let root = parse_document(&arena, &format!("{marker}{line}\n"), &parse_options());
+        let list = root.first_child()?;
+        if !matches!(list.data.borrow().value, NodeValue::List(_)) {
+            return None;
+        }
+        let item = list.first_child()?;
+        let task = matches!(item.data.borrow().value, NodeValue::TaskItem(_));
+        let paragraph = item
+            .first_child()
+            .is_some_and(|child| matches!(child.data.borrow().value, NodeValue::Paragraph));
+        Some((task, paragraph || line.trim().is_empty()))
+    };
+    // What the marker alone makes of an ordinary line: a plain item, or a task.
+    let expected = reads("a");
+    if reads(first) == expected {
+        return None;
+    }
+    let lead = leading_whitespace(first);
+    let at = first[lead..].chars().next()?;
+    at.is_ascii_punctuation()
+        .then(|| first[..lead].chars().count())
+}
+
 /// The byte length of the whitespace a paragraph's first line starts with,
 /// which a reader strips and which no escape can protect.
 pub(crate) fn leading_whitespace(text: &str) -> usize {
@@ -162,7 +199,10 @@ fn paragraph_insertions(text: &str) -> Vec<usize> {
 /// underline, and a table, which is decided by its delimiter row.
 fn broken_lines(body: &str) -> Vec<usize> {
     let arena = Arena::new();
-    let root = parse_document(&arena, body, &parse_options());
+    // The file always ends the block with a line ending, and comrak reads the
+    // last line differently without one: `1.` at the very end of its input is
+    // a paragraph, but `1.\n` is an empty list item.
+    let root = parse_document(&arena, &format!("{body}\n"), &parse_options());
     let mut out = Vec::new();
     let mut blocks = root.children().peekable();
     if blocks.peek().is_none() && !body.trim().is_empty() {

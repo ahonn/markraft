@@ -115,6 +115,7 @@ pub mod html;
 mod inline;
 mod kind;
 pub mod parse;
+mod pending;
 mod preset;
 pub mod rules;
 pub mod schema;

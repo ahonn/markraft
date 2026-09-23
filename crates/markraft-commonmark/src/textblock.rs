@@ -18,6 +18,7 @@ use markraft_core::{
 };
 
 use crate::derive::{AtomSpan, BlockKind, DeriveContext, Derived, Style, derive, guard};
+use crate::guard::item_lead_insertion;
 use crate::schema as md;
 
 /// The kind of inline source a textblock of type `ty` holds, or `None` for a
@@ -29,6 +30,43 @@ pub(crate) fn block_kind(schema: &Schema, ty: NodeTypeId) -> Option<BlockKind> {
         md::TABLE_CELL => Some(BlockKind::TableCell),
         _ => None,
     }
+}
+
+/// The list marker the textblock whose content starts at `content_start` is
+/// written after, when it is the first block of a list item — as the writer
+/// spells it where that matters to how a line reads: the bullet character, an
+/// ordered marker's delimiter, a task item's check box.
+pub(crate) fn item_marker(schema: &Schema, doc: &Node, content_start: usize) -> Option<String> {
+    let resolved = doc.resolve(content_start).ok()?;
+    let depth = resolved.depth();
+    if depth < 3 || resolved.index(depth - 1) != 0 {
+        return None;
+    }
+    let item = resolved.node(depth - 1);
+    let list = resolved.node(depth - 2);
+    let attr = |name: &str, default: &str| -> String {
+        list.attrs()
+            .get(name)
+            .and_then(|value| value.as_str())
+            .unwrap_or(default)
+            .to_owned()
+    };
+    let marker = match schema.node_type(list.type_id()).name() {
+        md::BULLET_LIST => format!("{} ", attr("bullet_char", "-")),
+        md::ORDERED_LIST => format!("1{} ", attr("delimiter", ".")),
+        _ => return None,
+    };
+    Some(match schema.node_type(item.type_id()).name() {
+        md::TASK_ITEM => {
+            let checked = item
+                .attrs()
+                .get("checked")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            format!("{marker}[{}] ", if checked { 'x' } else { ' ' })
+        }
+        _ => marker,
+    })
 }
 
 /// One position of a textblock's content.
@@ -118,7 +156,7 @@ impl Items {
 
     /// Insert the backslashes [`guard`] asks for.
     pub(crate) fn guard(&mut self, schema: &Schema, kind: BlockKind) {
-        for at in self.guard_insertions(schema, kind).into_iter().rev() {
+        for at in self.guard_insertions(schema, kind, None).into_iter().rev() {
             self.0.insert(at, Item::Char('\\'));
         }
     }
@@ -130,7 +168,16 @@ impl Items {
     /// is no link reference definition, but with its tag as one placeholder
     /// character it would be. A backslash the guard would put inside an atom's
     /// spelling cannot go there, and is left out.
-    pub(crate) fn guard_insertions(&self, schema: &Schema, kind: BlockKind) -> Vec<usize> {
+    ///
+    /// `item_marker` is the list marker the block is written after when it is
+    /// the first paragraph of a list item, which some text reads differently
+    /// after: see [`item_lead_insertion`].
+    pub(crate) fn guard_insertions(
+        &self,
+        schema: &Schema,
+        kind: BlockKind,
+        item_marker: Option<&str>,
+    ) -> Vec<usize> {
         let mut spelled = String::new();
         let mut owner: Vec<Option<usize>> = Vec::new();
         for (index, item) in self.0.iter().enumerate() {
@@ -152,8 +199,17 @@ impl Items {
             }
         }
         owner.push(Some(self.len()));
-        guard(kind, &spelled)
-            .insertions
+        let guarded = guard(kind, &spelled);
+        let mut insertions = guarded.insertions.clone();
+        if let Some(marker) = item_marker.filter(|_| kind == BlockKind::Paragraph)
+            && let Some(at) = item_lead_insertion(marker, &guarded.text)
+        {
+            let at = guarded.to_original(at);
+            if let Err(index) = insertions.binary_search(&at) {
+                insertions.insert(index, at);
+            }
+        }
+        insertions
             .into_iter()
             .filter_map(|at| owner.get(at).copied().flatten())
             .collect()

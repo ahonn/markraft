@@ -1,6 +1,6 @@
 //! The editing behaviour that belongs to Markdown rather than to the model.
 //!
-//! [`commonmark_extensions`] bundles two things:
+//! [`commonmark_extensions`] bundles three things:
 //!
 //! * **Input rules** — the conversions a Markdown writer expects while typing:
 //!   `# ` through `###### `, `- `/`* `/`+ `, `1. `, `> `, `---`,
@@ -15,6 +15,9 @@
 //!   type and attributes sitting next to each other are one list as far as
 //!   CommonMark is concerned, so the model is brought in line rather than left
 //!   describing something the source cannot express.
+//! * **Pending pairs** — the empty delimiter pair a cursor toggle writes is
+//!   deleted again when the caret leaves it with nothing typed in it, so it
+//!   never reaches the file as literal `****`. See the `pending` module.
 //!
 //! # The canonicalising correction
 //!
@@ -67,14 +70,16 @@ use crate::derive::{BlockKind, Derived, derive};
 use crate::schema as md;
 use crate::textblock::{
     Item, Items, block_kind, definition_candidates, definitions_context, derived_mark_types,
-    derived_marks,
+    derived_marks, item_marker,
 };
 
-/// Input rules and corrections for the CommonMark preset.
+/// Input rules and corrections for the CommonMark preset, and the settling of
+/// the delimiter pair a cursor toggle leaves pending.
 pub fn commonmark_extensions(schema: &Schema) -> Extension {
     Extension::all([
         input_rules(commonmark_input_rules()),
         corrections(commonmark_corrections(schema)),
+        crate::pending::pending_pairs(),
     ])
 }
 
@@ -740,8 +745,9 @@ fn guard_backslashes(
     carets: &[usize],
 ) -> Vec<Change> {
     let schema = cx.start_state.schema();
+    let marker = item_marker(schema, cx.doc, cx.content_start);
     items
-        .guard_insertions(schema, kind)
+        .guard_insertions(schema, kind, marker.as_deref())
         .into_iter()
         .filter(|at| {
             let line = items.0[..*at]
