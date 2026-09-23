@@ -4,7 +4,7 @@
 //! departures the editor's own tests describe: Backspace at the start of a list
 //! item outdents before it lifts or joins, Enter in an empty list item leaves
 //! the list, and Backspace in an empty verbatim block turns it into a
-//! paragraph.
+//! paragraph — or, for a raw block after another block, deletes it.
 
 use crate::types::DocTypes;
 use markraft_core::commands::structure::markup_of;
@@ -202,7 +202,9 @@ pub(crate) fn enter_with(types: &DocTypes, wrap: Option<&crate::SplitWrap>) -> C
 ///
 /// A verbatim block keeps Enter for itself, so the key that would otherwise
 /// delete nothing is the way out of an empty one. A raw block has no chrome of
-/// its own, so an empty one is invisible as well as inescapable.
+/// its own, so an empty one is invisible as well as inescapable: it goes the
+/// way an empty paragraph does, joining the block before it, and only becomes
+/// a paragraph when there is nothing to join.
 fn clear_empty_verbatim(types: &DocTypes) -> Command {
     let types = types.clone();
     command(move |state| {
@@ -215,6 +217,11 @@ fn clear_empty_verbatim(types: &DocTypes) -> Command {
         // Empty content leaves the cursor nowhere but the block's start.
         if resolved.parent().content_size() != 0 {
             return None;
+        }
+        if Some(resolved.parent().type_id()) == types.raw_block
+            && let Some(joined) = join_backward()(state)
+        {
+            return Some(joined);
         }
         set_block_type(paragraph, Attrs::empty())(state)
     })
@@ -1078,6 +1085,30 @@ mod tests {
         let state = at(&state, line.to);
         let deleted = applied(&state, &backspace(&types)).expect("a grapheme goes");
         assert_eq!(to_markdown(state.schema(), deleted.doc()), "<div");
+    }
+
+    /// An emptied raw block after another block goes in one press, as an
+    /// empty paragraph would, leaving the caret where the block before ends.
+    /// An empty code block is still only turned into a paragraph.
+    #[test]
+    fn backspace_in_an_empty_raw_block_after_a_block_deletes_it() {
+        let state = state_of("a\n\n[r]: https://x.y");
+        let types = types_of(&state);
+        let line = projection_of(&state).lines()[1].clone();
+        let emptied = applied(&state, &delete_range(line.from, line.to)).expect("the text goes");
+        let emptied = at(&emptied, projection_of(&emptied).lines()[1].from);
+        let joined = applied(&emptied, &backspace(&types)).expect("Backspace applies");
+        assert_eq!(to_markdown(state.schema(), joined.doc()), "a");
+        assert_eq!(joined.doc().child_count(), 1);
+        assert_eq!(Some(joined.doc().child(0).type_id()), types.paragraph);
+        let end = projection_of(&joined).lines()[0].to;
+        assert_eq!(joined.selection().head(joined.doc()), end);
+
+        let state = state_of("a\n\n```\n```");
+        let state = at(&state, projection_of(&state).lines()[1].from);
+        let cleared = applied(&state, &backspace(&types_of(&state))).expect("Backspace applies");
+        assert_eq!(cleared.doc().child_count(), 2);
+        assert_eq!(Some(cleared.doc().child(1).type_id()), types.paragraph);
     }
 
     #[test]
