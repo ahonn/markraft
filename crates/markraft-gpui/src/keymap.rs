@@ -472,17 +472,17 @@ pub(crate) fn move_document_edge(end: bool, extend: bool) -> Command {
     })
 }
 
-/// Tab: step to the next table cell, sink a list item, or indent inside a
-/// verbatim block.
+/// Tab: step to the next table cell, sink a list item, or insert `text` at a
+/// caret in a verbatim block.
 ///
 /// A cell holds inline content, so no verbatim block can sit in one and the two
 /// never compete.
-pub(crate) fn indent(types: &DocTypes) -> Command {
+pub(crate) fn indent(types: &DocTypes, text: &str) -> Command {
     let verbatim = {
         let types = types.clone();
         when(
             move |state| types.in_verbatim_block_at(state) && state.selection().is_cursor(),
-            markraft_core::commands::insert_text("\t"),
+            markraft_core::commands::insert_text(text),
         )
     };
     let mut list = vec![types.table_types().map(goto_next_cell)];
@@ -589,9 +589,14 @@ pub(crate) fn toggle_wrap_in(ty: NodeTypeId, attrs: Attrs) -> Command {
     })
 }
 
-/// Wrap in a list of `ty`, or leave the list when the cursor is already in one
-/// of that type holding items of `item`.
-pub(crate) fn toggle_list(types: &DocTypes, ty: NodeTypeId, item: NodeTypeId) -> Command {
+/// Wrap in a list of `ty` carrying `list_attrs`, or leave the list when the
+/// cursor is already in one of that type holding items of `item`.
+pub(crate) fn toggle_list(
+    types: &DocTypes,
+    ty: NodeTypeId,
+    list_attrs: Attrs,
+    item: NodeTypeId,
+) -> Command {
     let types = types.clone();
     command(move |state| {
         let current = types.list_at_cursor(state);
@@ -605,7 +610,7 @@ pub(crate) fn toggle_list(types: &DocTypes, ty: NodeTypeId, item: NodeTypeId) ->
             return convert_items(&types, item)(state);
         }
         composed(vec![
-            wrap_in_list(ty, Attrs::empty()),
+            wrap_in_list(ty, list_attrs.clone()),
             convert_items(&types, item),
         ])(state)
     })
@@ -935,12 +940,27 @@ mod tests {
     fn tab_and_shift_tab_sink_and_lift_a_list_item() {
         let state = state_of("- one\n- two");
         let state = at(&state, caret_in(&state, "two"));
-        let sunk = after(&state, &indent(&types_of(&state))).expect("the sink applies");
+        let sunk = after(&state, &indent(&types_of(&state), "\t")).expect("the sink applies");
         assert_eq!(sunk, "- one\n  - two");
         let state = state_of("- one\n  - two");
         let state = at(&state, caret_in(&state, "two"));
         let lifted = after(&state, &outdent(&types_of(&state))).expect("the lift applies");
         assert_eq!(lifted, "- one\n- two");
+    }
+
+    #[test]
+    fn tab_in_a_code_block_inserts_the_indent_text_it_is_given() {
+        let state = state_of("```\nab\n```");
+        let state = at(&state, caret_in(&state, "ab") + 1);
+        let types = types_of(&state);
+        assert_eq!(
+            after(&state, &indent(&types, "\t")).as_deref(),
+            Some("```\na\tb\n```")
+        );
+        assert_eq!(
+            after(&state, &indent(&types, "    ")).as_deref(),
+            Some("```\na    b\n```")
+        );
     }
 
     /// Tab walks a table in row-major order and grows it rather than falling
@@ -951,10 +971,10 @@ mod tests {
         let types = types_of(&state);
         let lines = projection_of(&state);
         let (first, last) = (lines.lines()[0].from(), lines.lines()[3].to());
-        let stepped = applied(&at(&state, first), &indent(&types)).expect("Tab steps right");
+        let stepped = applied(&at(&state, first), &indent(&types, "\t")).expect("Tab steps right");
         assert_eq!(to_markdown(state.schema(), stepped.doc()), markdown);
         assert_eq!(cell_of(&stepped), Some((0, 1)));
-        let grown = applied(&at(&state, last), &indent(&types)).expect("Tab grows the table");
+        let grown = applied(&at(&state, last), &indent(&types, "\t")).expect("Tab grows the table");
         assert_eq!(projection_of(&grown).lines().len(), 6, "a row was appended");
         assert_eq!(cell_of(&grown), Some((2, 0)));
         // ⇧Tab steps back, and stops rather than lifting the first cell out of
@@ -1088,20 +1108,40 @@ mod tests {
         let bullet = state.schema().node_id(md::BULLET_LIST).unwrap();
         let item = state.schema().node_id(md::LIST_ITEM).unwrap();
         let task = state.schema().node_id(md::TASK_ITEM).unwrap();
-        let bullets = toggle_list(&types, bullet, item);
+        let bullets = toggle_list(&types, bullet, Attrs::empty(), item);
         assert_eq!(after(&state, &bullets).as_deref(), Some("- text"));
         let state = state_of("- text");
         assert_eq!(after(&state, &bullets).as_deref(), Some("text"));
         // The same list with the other item kind converts in place.
-        let tasks = toggle_list(&types, bullet, task);
+        let tasks = toggle_list(&types, bullet, Attrs::empty(), task);
         assert_eq!(after(&state, &tasks).as_deref(), Some("- [ ] text"));
+    }
+
+    #[test]
+    fn a_new_list_carries_the_attributes_it_is_given() {
+        let state = state_of("text");
+        let types = types_of(&state);
+        let bullet = state.schema().node_id(md::BULLET_LIST).unwrap();
+        let item = state.schema().node_id(md::LIST_ITEM).unwrap();
+        let stars = toggle_list(
+            &types,
+            bullet,
+            markraft_core::attrs! {"bullet_char" => "*"},
+            item,
+        );
+        assert_eq!(after(&state, &stars).as_deref(), Some("* text"));
     }
 
     #[test]
     fn a_paragraph_can_be_wrapped_directly_in_a_task_list() {
         let state = state_of("text");
         let types = types_of(&state);
-        let command = toggle_list(&types, types.bullet_list.unwrap(), types.task_item.unwrap());
+        let command = toggle_list(
+            &types,
+            types.bullet_list.unwrap(),
+            Attrs::empty(),
+            types.task_item.unwrap(),
+        );
         assert_eq!(after(&state, &command).as_deref(), Some("- [ ] text"));
         let state = state_of("one\n\ntwo");
         let state = state

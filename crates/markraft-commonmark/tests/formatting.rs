@@ -9,8 +9,9 @@ mod common;
 use common::{Codec, html};
 use markraft_commonmark::schema as md;
 use markraft_commonmark::{
-    CommandRefusal, FormatCommand, Inexpressible, clear_formatting, commonmark_extensions,
-    keeping_styles, set_link, split_block_keeping_styles, to_markdown, toggle_style, unlink,
+    CommandRefusal, FormatCommand, HouseStyle, Inexpressible, clear_formatting,
+    commonmark_extensions, keeping_styles, set_house_style, set_link, split_block_keeping_styles,
+    to_markdown, toggle_style, unlink,
 };
 use markraft_core::commands::{Direction, delete_by_grapheme, insert_text, run_command};
 use markraft_core::{
@@ -1212,4 +1213,77 @@ fn undo_gives_back_a_spelling_the_caret_kept() {
     assert_saves(&codec, &back, "x ![a](b.png)");
     let typed_away = undo_once(&back);
     assert_saves(&codec, &typed_away, "x");
+}
+
+// -- the house style -------------------------------------------------------------
+
+/// The underscore house style for as long as it lives, and the default again
+/// after — even when the test fails.
+struct Underscores;
+
+impl Underscores {
+    fn on() -> Underscores {
+        set_house_style(HouseStyle { emphasis: '_' });
+        Underscores
+    }
+}
+
+impl Drop for Underscores {
+    fn drop(&mut self) {
+        set_house_style(HouseStyle::default());
+    }
+}
+
+#[test]
+fn the_underscore_house_style_spells_a_whole_word_with_underscores() {
+    let _style = Underscores::on();
+    let codec = Codec::new();
+    for (mark, expected) in [(md::EM, "a _b_ c"), (md::STRONG, "a __b__ c")] {
+        let state = selecting(&codec, "a b c", 2, 3);
+        let on = formatted(&state, &toggle(&codec, mark));
+        assert_saves(&codec, &on, expected);
+        assert_eq!(selected_text(&codec, &on), "b");
+        let off = formatted(&on, &toggle(&codec, mark));
+        assert_saves(&codec, &off, "a b c");
+    }
+}
+
+/// `foo_bar_baz` is plain text to a reader, so part of a word is spelled with
+/// asterisks instead of being refused.
+#[test]
+fn the_underscore_house_style_falls_back_to_asterisks_inside_a_word() {
+    let _style = Underscores::on();
+    let codec = Codec::new();
+    for (mark, expected) in [(md::EM, "foo*bar*baz"), (md::STRONG, "foo**bar**baz")] {
+        let state = selecting(&codec, "foobarbaz", 3, 6);
+        let on = formatted(&state, &toggle(&codec, mark));
+        assert_saves(&codec, &on, expected);
+        assert_eq!(selected_text(&codec, &on), "bar");
+        assert_one_undo(&state, &on);
+    }
+}
+
+#[test]
+fn the_underscore_house_style_leaves_a_pair_of_underscores_between_words() {
+    let _style = Underscores::on();
+    let codec = Codec::new();
+    let state = editor(&codec, "a  b", Selection::cursor(at(2)));
+    let paired = toggled(&codec, &state, md::EM);
+    assert_eq!(block_source(&paired, 0), "a __ b");
+    assert_eq!(caret(&paired), at(3));
+    assert_saves(&codec, &typed(&paired, "X"), "a _X_ b");
+
+    let paired = toggled(&codec, &state, md::STRONG);
+    assert_eq!(block_source(&paired, 0), "a ____ b");
+    assert_saves(&codec, &typed(&paired, "X"), "a __X__ b");
+}
+
+#[test]
+fn the_underscore_house_style_leaves_a_pair_of_asterisks_inside_a_word() {
+    let _style = Underscores::on();
+    let codec = Codec::new();
+    let state = editor(&codec, "ab", Selection::cursor(at(1)));
+    let paired = toggled(&codec, &state, md::EM);
+    assert_eq!(block_source(&paired, 0), "a**b");
+    assert_saves(&codec, &typed(&paired, "X"), "a*X*b");
 }

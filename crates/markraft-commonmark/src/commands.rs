@@ -21,6 +21,12 @@
 //!    with a [`CommandRefusal`] the host can show; it never writes something
 //!    a reader would read differently.
 //!
+//! Emphasis and strong are written in the [`HouseStyle`](crate::HouseStyle)'s
+//! delimiter. Where that is `_`, which a reader does not take inside a word —
+//! `foo_bar_baz` is plain text —, the steps above are tried again in `*`
+//! before the command refuses, and a cursor toggle likewise writes the `*`
+//! pair where the `_` one would not be read.
+//!
 //! Only the characters that differ are replaced, so the edit is one undo step
 //! and carets elsewhere in the block stay where they were. The selected
 //! characters stay selected.
@@ -70,9 +76,10 @@ use markraft_core::{
 };
 
 use crate::derive::{BlockKind, Conceal, DeriveContext, Derived, Style, StyleSpan, derive};
+use crate::house::emphasis_candidates;
+use crate::house_style;
 use crate::inline::style_delimiters;
 use crate::pending::{Layer, pending, pending_after, reads_back, runs};
-use crate::preset::commonmark_serializer;
 use crate::schema as md;
 use crate::serialize::spell_run;
 use crate::textblock::{Item, Items, block_kind, document_context, style_mark, syntax_mark};
@@ -680,16 +687,39 @@ fn items_to_nodes(schema: &Schema, items: &[Item]) -> Vec<Node> {
     out
 }
 
-/// Rewrite `block` so the units `selected` carry what `op` asks for, trying
-/// the selection as it is and then shrunk past the whitespace and punctuation
-/// at its ends, which stay as they were. See the module documentation.
+/// Rewrite `block` so the units `selected` carry what `op` asks for, in the
+/// house style's emphasis delimiter and then, where that cannot be read — `_`
+/// inside a word —, in `*`. See [`rewrite_in`].
 fn rewrite(
     schema: &Schema,
     block: &Block,
     selected: Range<usize>,
     op: &Op,
 ) -> Result<Rewrite, CommandRefusal> {
-    let first = attempt(schema, block, selected.clone(), op);
+    let mut refusal = None;
+    for &emphasis in emphasis_candidates() {
+        match rewrite_in(schema, block, selected.clone(), op, emphasis) {
+            Ok(rewrite) => return Ok(rewrite),
+            Err(refused) => {
+                refusal.get_or_insert(refused);
+            }
+        }
+    }
+    Err(refusal.expect("there is always one emphasis delimiter to try"))
+}
+
+/// Rewrite `block` so the units `selected` carry what `op` asks for, with
+/// emphasis and strong spelled in `emphasis`, trying the selection as it is
+/// and then shrunk past the whitespace and punctuation at its ends, which
+/// stay as they were. See the module documentation.
+fn rewrite_in(
+    schema: &Schema,
+    block: &Block,
+    selected: Range<usize>,
+    op: &Op,
+    emphasis: char,
+) -> Result<Rewrite, CommandRefusal> {
+    let first = attempt(schema, block, selected.clone(), op, emphasis);
     let refusal = match first {
         Ok(rewrite) => return Ok(rewrite),
         Err(refusal) => refusal,
@@ -705,7 +735,7 @@ fn rewrite(
     if shrunk.is_empty() || shrunk == selected {
         return Err(refusal);
     }
-    attempt(schema, block, shrunk, op).map_err(|_| refusal)
+    attempt(schema, block, shrunk, op, emphasis).map_err(|_| refusal)
 }
 
 fn attempt(
@@ -713,6 +743,7 @@ fn attempt(
     block: &Block,
     selected: Range<usize>,
     op: &Op,
+    emphasis: char,
 ) -> Result<Rewrite, CommandRefusal> {
     let units = &block.units;
     let target: Vec<Vec<Style>> = units
@@ -797,6 +828,7 @@ fn attempt(
             &context,
             lo,
             bracketed,
+            emphasis,
         )?;
         let new_items = spelled_items(&spelled, atoms)?;
 
@@ -885,6 +917,7 @@ fn check(units: &[Unit], target: &[Vec<Style>], read: &[Unit]) -> Result<(), Opt
 /// The source for the units at `inside`, carrying `target` styles less the
 /// `context` a surrounding span already gives them, and the atoms it holds in
 /// order: an atom is spelled as U+FFFC and a soft line break as `\n`.
+/// Emphasis and strong are spelled in `emphasis`.
 fn spell_units<'u>(
     schema: &Schema,
     block: &Block,
@@ -892,6 +925,7 @@ fn spell_units<'u>(
     context: &[Style],
     at: usize,
     bracketed_links: bool,
+    emphasis: char,
 ) -> Result<(String, Vec<Node>), CommandRefusal> {
     let marks_of = |styles: &[Style]| {
         MarkSet::from_marks(
@@ -939,33 +973,42 @@ fn spell_units<'u>(
         }
     }
     let temp = block.node.copy(Fragment::from_nodes(children));
-    let serializer = if bracketed_links {
-        let mut marks = crate::preset::commonmark_mark_rules();
+    let mut marks = crate::preset::mark_rules_for(emphasis);
+    if bracketed_links {
         marks.insert(md::LINK.to_string(), crate::preset::inline_link_mark_rule());
-        crate::serialize::MarkdownSerializer::new(
-            schema.clone(),
-            crate::preset::commonmark_node_rules(),
-            marks,
-        )
-    } else {
-        commonmark_serializer(schema)
-    };
+    }
+    let serializer = crate::serialize::MarkdownSerializer::new(
+        schema.clone(),
+        crate::preset::commonmark_node_rules(),
+        marks,
+    );
     let at_line_start = at == 0 || block.items.0.get(at - 1) == Some(&Item::Break);
     Ok((spell_run(&serializer, &temp, at_line_start), atoms))
 }
 
 // -- a cursor ---------------------------------------------------------------------
 
-/// The delimiters a cursor toggle writes for `style`.
-fn pair_of(style: &Style) -> Option<(&'static str, &'static str)> {
-    style_delimiters(style.mark_name()).or_else(|| (*style == Style::Code).then_some(("`", "`")))
+/// The delimiter pairs a cursor toggle may write for `style`, best first:
+/// emphasis and strong in the house style's delimiter, then in `*` where
+/// that is `_`, which a reader does not take inside a word.
+fn pairs_of(style: &Style) -> Vec<(&'static str, &'static str)> {
+    let mut pairs: Vec<_> = emphasis_candidates()
+        .iter()
+        .filter_map(|emphasis| style_delimiters(style.mark_name(), *emphasis))
+        .collect();
+    pairs.dedup();
+    if pairs.is_empty() && *style == Style::Code {
+        pairs.push(("`", "`"));
+    }
+    pairs
 }
 
 /// [`toggle_style`] at a cursor. See the module documentation for the cases.
 fn toggle_at_cursor(state: &EditorState, style: &Style) -> Formatted {
-    let Some((open, close)) = pair_of(style) else {
+    let pairs = pairs_of(style);
+    if pairs.is_empty() {
         return Ok(None);
-    };
+    }
     let schema = state.schema();
     let doc = state.doc();
     let caret = state.selection().head(doc);
@@ -987,18 +1030,28 @@ fn toggle_at_cursor(state: &EditorState, style: &Style) -> Formatted {
     if let Some(pending) = pending(state).filter(|pending| pending.caret() == Some(caret)) {
         let region = pending.range().start - start..pending.range().end - start;
         let mut layers = pending.layers.clone();
-        match layers.iter().position(|layer| layer.style == *style) {
+        let tries: Vec<Vec<Layer>> = match layers.iter().position(|layer| layer.style == *style) {
             Some(index) => {
                 layers.remove(index);
+                vec![layers]
             }
-            None => layers.push(Layer {
-                style: style.clone(),
-                adds: true,
-                open: open.to_string(),
-                close: close.to_string(),
-            }),
-        }
-        return write_pair(schema, &block, region, layers)
+            None => pairs
+                .iter()
+                .map(|(open, close)| {
+                    let mut layers = layers.clone();
+                    layers.push(Layer {
+                        style: style.clone(),
+                        adds: true,
+                        open: open.to_string(),
+                        close: close.to_string(),
+                    });
+                    layers
+                })
+                .collect(),
+        };
+        return tries
+            .into_iter()
+            .find_map(|layers| write_pair(schema, &block, region.clone(), layers))
             .map(Some)
             .ok_or_else(refusal);
     }
@@ -1017,7 +1070,10 @@ fn toggle_at_cursor(state: &EditorState, style: &Style) -> Formatted {
     }
 
     // An empty pair a reader sees as characters: the toggle takes it off.
-    if let Some(region) = literal_pair(&block, offset, open, close) {
+    if let Some(region) = pairs
+        .iter()
+        .find_map(|(open, close)| literal_pair(&block, offset, open, close))
+    {
         return write_pair(schema, &block, region, Vec::new())
             .map(Some)
             .ok_or_else(refusal);
@@ -1068,14 +1124,16 @@ fn toggle_at_cursor(state: &EditorState, style: &Style) -> Formatted {
     }
 
     // Anywhere else: the empty pair, where typing takes the style on.
-    let layer = Layer {
-        style: style.clone(),
-        adds: true,
-        open: open.to_string(),
-        close: close.to_string(),
-    };
-    if let Some(spec) = write_pair(schema, &block, offset..offset, vec![layer]) {
-        return Ok(Some(spec));
+    for (open, close) in &pairs {
+        let layer = Layer {
+            style: style.clone(),
+            adds: true,
+            open: open.to_string(),
+            close: close.to_string(),
+        };
+        if let Some(spec) = write_pair(schema, &block, offset..offset, vec![layer]) {
+            return Ok(Some(spec));
+        }
     }
     // Where no pair would be read — right after a span of this style or right
     // before one — go into that span instead.
@@ -1271,6 +1329,8 @@ fn insert_linked(state: &EditorState, link: &Style, href: &str) -> Formatted {
             &context,
             offset,
             bracketed,
+            // The link's text is spelled with no style of its own.
+            house_style().emphasis,
         )?;
         let new_items: Vec<Item> = spelled.chars().map(Item::Char).collect();
         let mut all = block.items.0[..offset].to_vec();

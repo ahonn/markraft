@@ -97,9 +97,17 @@ pub(crate) fn wrap_mark(schema: &Schema, mark: Mark, children: Vec<Node>) -> Vec
         .collect()
 }
 
-/// The delimiter pair a style mark is spelled with, if it has one.
-pub(crate) fn style_delimiters(mark_name: &str) -> Option<(&'static str, &'static str)> {
+/// The delimiter pair a style mark is spelled with, if it has one, with
+/// emphasis and strong written in `emphasis` — `*` or `_`, see
+/// [`HouseStyle`](crate::HouseStyle).
+pub(crate) fn style_delimiters(
+    mark_name: &str,
+    emphasis: char,
+) -> Option<(&'static str, &'static str)> {
+    let underscore = emphasis == '_';
     match mark_name {
+        md::STRONG if underscore => Some(("__", "__")),
+        md::EM if underscore => Some(("_", "_")),
         md::STRONG => Some(("**", "**")),
         md::EM => Some(("*", "*")),
         md::STRIKETHROUGH => Some(("~~", "~~")),

@@ -3,7 +3,9 @@
 mod common;
 
 use markraft_commonmark::schema as md;
-use markraft_commonmark::{commonmark_extensions, commonmark_schema};
+use markraft_commonmark::{
+    commonmark_extensions, commonmark_extensions_with_shortcuts, commonmark_schema,
+};
 use markraft_core::commands::{insert_text, run_command};
 use markraft_core::{EditorState, EditorStateConfig, Node, Schema, Selection, attrs};
 
@@ -78,6 +80,40 @@ fn hash_markers_make_headings_of_every_level() {
     }
     // Seven is not a heading, so the text stays.
     assert_eq!(typed("####### "), "doc(paragraph(\"####### \"))");
+}
+
+#[test]
+fn markdown_shortcuts_follow_their_switch() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let schema = commonmark_schema();
+    let shortcuts = Arc::new(AtomicBool::new(false));
+    let doc = schema
+        .doc([schema.node(md::PARAGRAPH, []).expect("a paragraph")])
+        .expect("a document");
+    let state = EditorState::create(
+        EditorStateConfig::new(schema.clone())
+            .doc(doc)
+            .selection(Selection::cursor(1))
+            .extensions(commonmark_extensions_with_shortcuts(
+                &schema,
+                shortcuts.clone(),
+            )),
+    )
+    .expect("a valid starting state");
+
+    // Off, the marker is only text.
+    assert_eq!(
+        schema.describe(type_all(&state, "# ").doc()),
+        "doc(paragraph(\"# \"))"
+    );
+    // On, the same state makes a heading: the switch is read per keystroke.
+    shortcuts.store(true, Ordering::Relaxed);
+    assert_eq!(
+        schema.describe(type_all(&state, "# ").doc()),
+        "doc(heading[level=Int(1)]())"
+    );
 }
 
 #[test]

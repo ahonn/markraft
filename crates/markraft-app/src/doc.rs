@@ -11,7 +11,7 @@
 
 use markraft_commonmark::{
     CommandRefusal, CommonMarkCodecs, CommonMarkSpelling, commonmark_doc_type_names,
-    commonmark_extensions, commonmark_schema, holds_definitions, schema as md,
+    commonmark_schema, holds_definitions, schema as md,
 };
 use markraft_core::commands::{Command, command, replace_selection};
 use markraft_core::kind::Codecs;
@@ -21,6 +21,7 @@ use markraft_core::{
 };
 use markraft_gpui::{CalloutAttrs, DocTypes};
 use markraft_gpui::{Formatting, LinkSetter, MarkToggle, SplitWrap};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, LazyLock};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -55,9 +56,41 @@ pub fn codecs() -> Arc<dyn Codecs> {
     CODECS.clone()
 }
 
-/// The input rules and corrections a CommonMark editor wants.
-pub fn extensions() -> Extension {
-    commonmark_extensions(schema())
+/// The input rules and corrections a CommonMark editor wants. The input rules — `# `,
+/// `- `, `> ` and the rest turning a line into a block — run while `shortcuts` holds.
+pub fn extensions(shortcuts: Arc<AtomicBool>) -> Extension {
+    markraft_commonmark::commonmark_extensions_with_shortcuts(schema(), shortcuts)
+}
+
+/// The markers a block made from the toolbar or the `/` menu is written with. One
+/// typed at the start of a line keeps what was typed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Markers {
+    pub bullet: char,
+    pub fence: char,
+}
+
+impl Default for Markers {
+    fn default() -> Self {
+        Self {
+            bullet: '-',
+            fence: '`',
+        }
+    }
+}
+
+thread_local! {
+    // The commands are built wherever a menu is, some of them far from the app, and
+    // all of them run on the main thread: the preference is read where they are made.
+    static MARKERS: std::cell::Cell<Markers> = std::cell::Cell::new(Markers::default());
+}
+
+pub fn set_markers(markers: Markers) {
+    MARKERS.with(|cell| cell.set(markers));
+}
+
+fn markers() -> Markers {
+    MARKERS.with(|cell| cell.get())
 }
 
 /// How this document kind spells the parts of itself a focused line reveals.
@@ -268,6 +301,10 @@ fn mark(name: &str) -> MarkTypeId {
         .unwrap_or_else(|| panic!("the CommonMark schema declares {name}"))
 }
 
+fn bullet_attrs() -> Attrs {
+    Attrs::from_pairs([("bullet_char", markers().bullet.to_string())])
+}
+
 /// A block format the user interface offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Block {
@@ -298,9 +335,11 @@ impl Block {
                 node(md::HEADING),
                 Attrs::from_pairs([("level", i64::from(level))]),
             ),
-            Block::Code => {
-                markraft_gpui::commands::toggle_block(types, node(md::CODE_BLOCK), Attrs::empty())
-            }
+            Block::Code => markraft_gpui::commands::toggle_block(
+                types,
+                node(md::CODE_BLOCK),
+                Attrs::from_pairs([("fence_char", markers().fence.to_string())]),
+            ),
             Block::Quote => markraft_gpui::commands::toggle_quote(types),
             Block::Callout => markraft_gpui::commands::toggle_wrap(
                 node(md::BLOCKQUOTE),
@@ -309,16 +348,19 @@ impl Block {
             Block::Ordered => markraft_gpui::commands::toggle_list(
                 types,
                 node(md::ORDERED_LIST),
+                Attrs::empty(),
                 node(md::LIST_ITEM),
             ),
             Block::Bullet => markraft_gpui::commands::toggle_list(
                 types,
                 node(md::BULLET_LIST),
+                bullet_attrs(),
                 node(md::LIST_ITEM),
             ),
             Block::Task => markraft_gpui::commands::toggle_list(
                 types,
                 node(md::BULLET_LIST),
+                bullet_attrs(),
                 node(md::TASK_ITEM),
             ),
             // A closed slice of block content splits the textblock around it, so
@@ -452,7 +494,7 @@ mod tests {
                 .extensions(Extension::all([
                     markraft_core::projection::projection(),
                     markraft_core::history::history(Default::default()),
-                    extensions(),
+                    extensions(Arc::new(true.into())),
                 ])),
         )
         .expect("a valid state")
@@ -544,6 +586,29 @@ mod tests {
             .state()
             .clone();
         assert_eq!(active(&all), None);
+    }
+
+    #[test]
+    fn a_list_or_code_block_made_from_the_toolbar_takes_the_preferred_markers() {
+        let run = |block: Block| {
+            let state = state_of("text");
+            let done = markraft_core::commands::run_command(&state, &block.command())
+                .expect("the command applies")
+                .expect("a transaction")
+                .state()
+                .clone();
+            to_markdown(done.doc())
+        };
+        assert_eq!(run(Block::Bullet), "- text");
+        assert_eq!(run(Block::Code), "```\ntext\n```");
+        set_markers(Markers {
+            bullet: '*',
+            fence: '~',
+        });
+        assert_eq!(run(Block::Bullet), "* text");
+        assert_eq!(run(Block::Task), "* [ ] text");
+        assert_eq!(run(Block::Code), "~~~\ntext\n~~~");
+        set_markers(Markers::default());
     }
 
     #[test]

@@ -32,7 +32,9 @@
 //! content that has marks but no spelling — pasted HTML. Text carrying
 //! [`SYNTAX`](md::SYNTAX) there is spelling already and goes out as it stands.
 //! Otherwise emphasis,
-//! strong and strikethrough use `*`, `**` and `~~`, underline `<u>`…`</u>`, a
+//! strong and strikethrough use `*`, `**` and `~~` — `_` and `__` for the
+//! first two under an underscore [`HouseStyle`](crate::HouseStyle), except
+//! where a letter or digit borders the run —, underline `<u>`…`</u>`, a
 //! hard break a trailing `\`, and a link whose text is its own URL the bare
 //! URL wherever a reader gives that link back.
 
@@ -585,15 +587,28 @@ fn interrupts_paragraph(state: &SerializerState<'_>, node: &Node) -> bool {
 
 /// The CommonMark/GFM mark rules, keyed by schema type name, which
 /// [`spell`](crate::serialize::spell) writes semantic content with.
+///
+/// Emphasis and strong are written in the [`house_style`](crate::house_style)
+/// current when the rules are made.
 pub fn commonmark_mark_rules() -> MarkRules {
+    mark_rules_for(crate::house_style().emphasis)
+}
+
+/// [`commonmark_mark_rules`] with emphasis and strong written in `emphasis`.
+pub(crate) fn mark_rules_for(emphasis: char) -> MarkRules {
     let mut rules = MarkRules::new();
     rules.insert(md::LINK.to_string(), autolink_link_rule());
     rules.insert(
         md::FOOTNOTE_REFERENCE.to_string(),
         MarkRule::fixed("[^", "]"),
     );
-    rules.insert(md::STRONG.to_string(), emphasis_rule("**", '*'));
-    rules.insert(md::EM.to_string(), emphasis_rule("*", '*'));
+    if emphasis == '_' {
+        rules.insert(md::STRONG.to_string(), underscore_rule("__", "**"));
+        rules.insert(md::EM.to_string(), underscore_rule("_", "*"));
+    } else {
+        rules.insert(md::STRONG.to_string(), emphasis_rule("**", '*'));
+        rules.insert(md::EM.to_string(), emphasis_rule("*", '*'));
+    }
     rules.insert(md::STRIKETHROUGH.to_string(), emphasis_rule("~~", '~'));
     rules.insert(md::UNDERLINE.to_string(), MarkRule::fixed("<u>", "</u>"));
     rules.insert(md::HIGHLIGHT.to_string(), emphasis_rule("==", '='));
@@ -629,6 +644,67 @@ fn emphasis_rule(run: &'static str, delimiter: char) -> MarkRule {
         lead: Some(delimiter),
         trail: Some(delimiter),
     }
+}
+
+/// A mark written as a run of `_`, or as the `*` run `asterisks` where a
+/// letter or digit borders it: `_` neither opens after one nor closes before
+/// one, so `foo_bar_baz` is plain text where `foo*bar*baz` is not.
+///
+/// The choice is made when the mark opens, from the character written before
+/// it and the one the run will be followed by, and remembered as the mark's
+/// alternative spelling so the closing run matches.
+fn underscore_rule(run: &'static str, asterisks: &'static str) -> MarkRule {
+    let open: MarkStringFn = Arc::new(move |state: &mut SerializerState<'_>, target| {
+        let before = (!state.at_line_start())
+            .then(|| state.char_before_run('_'))
+            .flatten();
+        let after = char_after_run(target);
+        let intraword = [before, after]
+            .into_iter()
+            .flatten()
+            .any(char::is_alphanumeric);
+        state.set_tagged(target.mark.ty, intraword);
+        if intraword { asterisks } else { run }.to_string()
+    });
+    let close: MarkStringFn = Arc::new(move |state: &mut SerializerState<'_>, target| {
+        if state.tagged(target.mark.ty) {
+            asterisks
+        } else {
+            run
+        }
+        .to_string()
+    });
+    MarkRule {
+        open,
+        close,
+        mixable: true,
+        expel_enclosing_whitespace: true,
+        escape: true,
+        lead: Some('_'),
+        trail: Some('_'),
+    }
+}
+
+/// The character right after the run of `target.mark` that starts at
+/// `target.index`, as far as the content shows it: the first character of
+/// the text after the run, or the whitespace that leaves the run. `None` at
+/// the end of the block or before something that is not text.
+fn char_after_run(target: &MarkTarget<'_>) -> Option<char> {
+    let parent = target.parent;
+    let mut index = target.index;
+    while index + 1 < parent.child_count() && parent.child(index + 1).marks().contains(target.mark)
+    {
+        index += 1;
+    }
+    // Whitespace ending the run moves out of it, so the run closes before it.
+    let last = parent
+        .maybe_child(index)?
+        .text()
+        .and_then(|t| t.chars().next_back());
+    if last.is_some_and(char::is_whitespace) {
+        return last;
+    }
+    parent.maybe_child(index + 1)?.text()?.chars().next()
 }
 
 fn code_rule() -> MarkRule {

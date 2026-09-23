@@ -16,18 +16,23 @@
 //! Markraft has no Dock icon to come back through.
 
 mod controls;
+mod select;
 mod shortcut;
 
 use super::*;
 use crate::platform::Shortcut;
-use crate::storage::Preferences;
+use crate::storage::{
+    BulletMarker, CodeFence, EditorFont, EmphasisMarker, LineHeight, NoteNaming, Preferences,
+    TabKey,
+};
 use controls::{
-    ChordFace, Palette, button, checkbox, chord_face, divider, error, help, line, metrics::*, row,
-    segmented, stepper, value,
+    ChordFace, Palette, button, checkbox, chord_face, error, group_gap, line, metrics::*, row,
+    segmented, stepper,
 };
 use gpui_base::{Tab, Tabs};
+use select::{MenuItem, MenuRow};
 use shortcut::Recorded;
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
 actions!(
     markraft_settings,
@@ -47,7 +52,23 @@ const HEIGHT: f32 = 420.;
 const MAX_HEIGHT: f32 = 720.;
 const KEY_CONTEXT: &str = "MarkraftSettings";
 const TOOLBAR_CONTEXT: &str = "MarkraftSettingsToolbar";
-const DEFAULT_SHORTCUT: &str = "Alt+N";
+const REPOSITORY: &str = "https://github.com/ahonn/markraft";
+const RELEASES: &str = "https://github.com/ahonn/markraft/releases";
+const NEW_ISSUE: &str = "https://github.com/ahonn/markraft/issues/new";
+const ABOUT_ICON: f32 = 64.;
+const ABOUT_NAME_SIZE: f32 = 15.;
+const ABOUT_TOP: f32 = 22.;
+
+/// The app's icon, decoded once: the About page is the one place it is drawn.
+fn app_icon() -> Arc<Image> {
+    static ICON: std::sync::LazyLock<Arc<Image>> = std::sync::LazyLock::new(|| {
+        Arc::new(Image::from_bytes(
+            ImageFormat::Png,
+            include_bytes!("../../../../../assets/icon/Markraft.png").to_vec(),
+        ))
+    });
+    ICON.clone()
+}
 
 /// Scoped to the window, so the note's own bindings for the same keys stay its own.
 pub(in crate::app) fn bind_keys(cx: &mut App) {
@@ -70,6 +91,7 @@ pub(in crate::app) struct SettingsErrors {
     login: Option<String>,
     new_notes: Option<String>,
     images: Option<String>,
+    updates: Option<String>,
 }
 
 #[derive(Clone)]
@@ -93,6 +115,18 @@ enum Change {
     ImageLocation,
     ResetImageLocation,
     RevealFolder,
+    TabKey(TabKey),
+    MarkdownShortcuts(bool),
+    Font(EditorFont),
+    LineHeight(LineHeight),
+    Bullet(BulletMarker),
+    Fence(CodeFence),
+    Emphasis(EmphasisMarker),
+    NewNoteName(NoteNaming),
+    AutomaticUpdates(bool),
+    CheckForUpdates,
+    /// The page on screen, remembered for the next time the window opens.
+    Page(Page),
 }
 
 /// What a page draws, read from the app once per frame.
@@ -113,6 +147,16 @@ struct Snapshot {
     /// Where new notes and images go, and whether that is other than the default.
     new_notes: Option<(String, bool)>,
     images: Option<(String, bool)>,
+    new_note_name: NoteNaming,
+    tab_key: TabKey,
+    markdown_shortcuts: bool,
+    font: EditorFont,
+    line_height: LineHeight,
+    bullet: BulletMarker,
+    fence: CodeFence,
+    emphasis: EmphasisMarker,
+    /// None where this copy has no updater to ask: unbundled, or not configured.
+    automatic_updates: Option<bool>,
     errors: SettingsErrors,
 }
 
@@ -153,6 +197,7 @@ impl NotesApp {
             (new_notes, images)
         };
         let (new_notes, images) = self.path.as_ref().map(placed).unzip();
+        let preferences = &self.library.preferences;
         Snapshot {
             dark: self.dark,
             theme: self.library.preferences.dark_mode,
@@ -175,6 +220,15 @@ impl NotesApp {
             folder: self.path.clone(),
             new_notes,
             images,
+            new_note_name: workspace.new_note_name,
+            tab_key: preferences.tab_key,
+            markdown_shortcuts: preferences.markdown_shortcuts,
+            font: preferences.font,
+            line_height: preferences.line_height,
+            bullet: preferences.bullet_marker,
+            fence: preferences.code_fence,
+            emphasis: preferences.emphasis_marker,
+            automatic_updates: self.updater.automatically_checks(),
             errors: self.settings_errors.clone(),
         }
     }
@@ -266,6 +320,42 @@ impl NotesApp {
                 if let Some(path) = &self.path {
                     cx.reveal_path(path);
                 }
+            }
+            Change::TabKey(key) => self.set_tab_key(key, cx),
+            Change::MarkdownShortcuts(enabled) => self.set_markdown_shortcuts(enabled, cx),
+            Change::Font(font) => {
+                self.set_typography(font, self.library.preferences.line_height, cx)
+            }
+            Change::LineHeight(height) => {
+                self.set_typography(self.library.preferences.font, height, cx)
+            }
+            Change::Bullet(bullet) => {
+                let p = &self.library.preferences;
+                self.set_markdown_markers(bullet, p.code_fence, p.emphasis_marker, cx)
+            }
+            Change::Fence(fence) => {
+                let p = &self.library.preferences;
+                self.set_markdown_markers(p.bullet_marker, fence, p.emphasis_marker, cx)
+            }
+            Change::Emphasis(emphasis) => {
+                let p = &self.library.preferences;
+                self.set_markdown_markers(p.bullet_marker, p.code_fence, emphasis, cx)
+            }
+            Change::NewNoteName(naming) => {
+                self.library.workspace.new_note_name = naming;
+                self.schedule_save(cx);
+            }
+            Change::AutomaticUpdates(enabled) => {
+                if let Err(error) = self.updater.set_automatically_checks(enabled) {
+                    self.settings_errors.updates = Some(error);
+                }
+            }
+            Change::CheckForUpdates => {
+                self.settings_errors.updates = self.updater.check().err();
+            }
+            Change::Page(page) => {
+                self.library.preferences.settings_page = page.key().to_owned();
+                self.schedule_save(cx);
             }
         }
         cx.notify();
@@ -391,7 +481,8 @@ fn create(
         is_movable: true,
         // A settings window keeps its width; its height follows the page.
         is_resizable: false,
-        is_minimizable: true,
+        // ⌘, brings it back at once, so macOS settings windows are not minimized.
+        is_minimizable: false,
         window_background: WindowBackgroundAppearance::Opaque,
         ..Default::default()
     };
@@ -414,19 +505,6 @@ fn create(
             None
         }
     }
-}
-
-/// A path as it is read: under the home folder, from `~`.
-fn home_relative(path: &std::path::Path) -> String {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .and_then(|home| {
-            let rest = path.strip_prefix(home).ok()?;
-            Some(PathBuf::from("~").join(rest))
-        })
-        .unwrap_or_else(|| path.to_owned())
-        .display()
-        .to_string()
 }
 
 /// Where the window opens on the note's display: beside the note, so the note — which
@@ -456,25 +534,56 @@ fn placement(screen: Size<Pixels>, near: Bounds<Pixels>, extent: Size<Pixels>) -
 enum Page {
     General,
     Editor,
-    Notes,
+    Markdown,
+    Files,
+    About,
 }
 
 impl Page {
-    const ALL: [Page; 3] = [Page::General, Page::Editor, Page::Notes];
+    const ALL: [Page; 5] = [
+        Page::General,
+        Page::Editor,
+        Page::Markdown,
+        Page::Files,
+        Page::About,
+    ];
 
     fn title(self) -> &'static str {
         match self {
             Page::General => "General",
             Page::Editor => "Editor",
-            Page::Notes => "Notes",
+            Page::Files => "Files",
+            Page::Markdown => "Markdown",
+            Page::About => "About",
         }
+    }
+
+    /// What the preferences remember the page by.
+    fn key(self) -> &'static str {
+        match self {
+            Page::General => "general",
+            Page::Editor => "editor",
+            Page::Files => "files",
+            Page::Markdown => "markdown",
+            Page::About => "about",
+        }
+    }
+
+    /// The page remembered as `key`, or the first one for a key no page has.
+    fn remembered(key: &str) -> Page {
+        Page::ALL
+            .into_iter()
+            .find(|page| page.key() == key)
+            .unwrap_or(Page::General)
     }
 
     fn icon(self) -> Icon {
         match self {
             Page::General => Icon::Settings,
-            Page::Editor => Icon::Edit,
-            Page::Notes => Icon::Open,
+            Page::Editor => Icon::Typing,
+            Page::Files => Icon::Open,
+            Page::Markdown => Icon::Markdown,
+            Page::About => Icon::About,
         }
     }
 
@@ -509,6 +618,8 @@ pub(in crate::app) struct SettingsView {
     /// so the window follows the page without asking twice for the same height.
     page_height: Rc<Cell<f32>>,
     fitted: Rc<Cell<f32>>,
+    /// Which pop-up button's menu is open, and the row lit in it.
+    selects: select::Selects,
     /// Set while AppKit animates the window to a new height. GPUI draws each step of
     /// it, so a page chosen meanwhile is measured mid-animation; its fit waits for the
     /// frame drawn once this one has settled rather than starting a second animation
@@ -556,9 +667,11 @@ impl SettingsView {
             subscriptions
                 .push(cx.on_focus_out(recorder, window, |view, _, _, cx| view.stop_recording(cx)));
         }
+        // The window opens on the page it was last closed on, as macOS settings do.
+        let page = Page::remembered(&app.read(cx).library.preferences.settings_page);
         Self {
             link,
-            page: Page::General,
+            page,
             toolbar: cx.focus_handle().tab_stop(true),
             recorders,
             recording: None,
@@ -567,6 +680,7 @@ impl SettingsView {
             scroll: ScrollHandle::new(),
             page_height: Rc::default(),
             fitted: Rc::default(),
+            selects: select::Selects::new(cx),
             fitting: Rc::default(),
             _subscriptions: subscriptions,
         }
@@ -590,8 +704,10 @@ impl SettingsView {
     fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
         if self.page != page {
             self.stop_recording(cx);
+            self.selects.close();
             self.page = page;
             self.scroll.set_offset(point(px(0.), px(0.)));
+            self.link.send(Change::Page(page), cx);
             cx.notify();
         }
     }
@@ -727,6 +843,8 @@ impl SettingsView {
                     .py(px(TOOLBAR_ITEM_PAD_Y))
                     .rounded(px(TOOLBAR_ITEM_RADIUS))
                     .text_size(px(TOOLBAR_LABEL_SIZE))
+                    // The chosen page's tab is marked by its ground alone: Finder raises
+                    // it on glass, which a flat window has nothing to draw with.
                     .text_color(if selected { p.text } else { p.subtitle })
                     .when(selected, |item| item.bg(p.selected))
                     .when(!selected, |item| {
@@ -766,6 +884,22 @@ impl SettingsView {
             Shortcut::Toggle => "Show and hide shortcut",
             Shortcut::NewNote => "New note shortcut",
         };
+        let clear = (bound && self.recording != Some(which)).then(|| {
+            div()
+                .id(SharedString::from(format!(
+                    "clear-shortcut-{}",
+                    which as usize
+                )))
+                .role(Role::Button)
+                .aria_label(format!("Clear {}", name.to_lowercase()))
+                .flex_shrink_0()
+                .cursor_pointer()
+                // Its own click, not the field's: clearing is not recording.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(self.on_click(Change::Shortcut(which, String::new())))
+                .child(sized_icon(Icon::ClearField, p.subtitle, RECORDER_CLEAR))
+                .into_any_element()
+        });
         div()
             .id(SharedString::from(format!("shortcut-{}", which as usize)))
             .track_focus(&self.recorders[which as usize])
@@ -780,7 +914,7 @@ impl SettingsView {
                 window.focus(&view.recorders[which as usize], cx);
                 view.start_recording(which, cx);
             }))
-            .child(chord_face(face, p))
+            .child(chord_face(face, clear, p))
             .into_any_element()
     }
 
@@ -789,10 +923,6 @@ impl SettingsView {
     fn shortcut_notes(&self, which: Shortcut, s: &Snapshot, p: Palette) -> Vec<AnyElement> {
         let mut notes = Vec::new();
         if self.recording == Some(which) {
-            notes.push(help(
-                "Press the new shortcut. Esc cancels; ⌫ turns it off.",
-                p,
-            ));
             if let Some(refusal) = self.refusal {
                 notes.push(error(refusal, p));
             }
@@ -813,36 +943,20 @@ impl SettingsView {
         );
 
         let [toggle, new_note] = &s.shortcuts;
-        let mut toggle_line = vec![self.shortcut_field(Shortcut::Toggle, toggle, p, cx)];
-        if toggle != DEFAULT_SHORTCUT && self.recording != Some(Shortcut::Toggle) {
-            toggle_line.push(
-                button(
-                    "reset-shortcut",
-                    "Reset",
-                    p,
-                    self.on_click(Change::Shortcut(Shortcut::Toggle, DEFAULT_SHORTCUT.into())),
-                )
-                .into_any_element(),
-            );
-        }
-        let mut toggle_lines = vec![line(toggle_line)];
+        let mut toggle_lines = vec![line(vec![self.shortcut_field(
+            Shortcut::Toggle,
+            toggle,
+            p,
+            cx,
+        )])];
         toggle_lines.extend(self.shortcut_notes(Shortcut::Toggle, s, p));
-
-        let mut new_note_line = vec![self.shortcut_field(Shortcut::NewNote, new_note, p, cx)];
-        if !new_note.is_empty() && self.recording != Some(Shortcut::NewNote) {
-            new_note_line.push(
-                button(
-                    "clear-new-note-shortcut",
-                    "Clear",
-                    p,
-                    self.on_click(Change::Shortcut(Shortcut::NewNote, String::new())),
-                )
-                .into_any_element(),
-            );
-        }
-        let mut new_note_lines = vec![line(new_note_line)];
+        let mut new_note_lines = vec![line(vec![self.shortcut_field(
+            Shortcut::NewNote,
+            new_note,
+            p,
+            cx,
+        )])];
         new_note_lines.extend(self.shortcut_notes(Shortcut::NewNote, s, p));
-        new_note_lines.push(help("Both work from any app.", p));
 
         let mut startup = vec![
             checkbox(
@@ -858,21 +972,15 @@ impl SettingsView {
         if let Some(refused) = &s.errors.login {
             startup.push(error(refused.clone(), p));
         }
-        startup.push(help(
-            "Markraft stays in the menu bar while the note is hidden.",
-            p,
-        ));
 
+        // Launching at login comes first: for an app that lives in the menu bar it is
+        // what decides whether it is there at all.
         vec![
-            row(
-                Some("Appearance"),
-                vec![line(vec![theme.into_any_element()])],
-                p,
-            ),
-            divider(p),
+            row(Some("Startup"), startup, p),
+            group_gap(),
             row(Some("Show and hide"), toggle_lines, p),
             row(Some("New note"), new_note_lines, p),
-            divider(p),
+            group_gap(),
             row(
                 Some("Note window"),
                 vec![
@@ -894,14 +1002,28 @@ impl SettingsView {
                         self.sender(Change::HideOnDeactivate),
                     )
                     .into_any_element(),
+                    checkbox(
+                        "auto-height",
+                        "Grow with the note",
+                        s.auto_height,
+                        false,
+                        p,
+                        self.sender(Change::AutoHeight),
+                    )
+                    .into_any_element(),
                 ],
                 p,
             ),
-            row(Some("Startup"), startup, p),
+            group_gap(),
+            row(
+                Some("Appearance"),
+                vec![line(vec![theme.into_any_element()])],
+                p,
+            ),
         ]
     }
 
-    fn editor(&self, s: &Snapshot, p: Palette) -> Vec<Div> {
+    fn editor(&self, s: &Snapshot, p: Palette, cx: &mut Context<Self>) -> Vec<Div> {
         let range = Preferences::TEXT_SIZES;
         let size = s.text_size;
         let link = self.link.clone();
@@ -926,19 +1048,63 @@ impl SettingsView {
                 .into_any_element(),
             );
         }
+        let font = self.select(
+            "font",
+            "Font",
+            &[
+                ("System", EditorFont::System),
+                ("Serif", EditorFont::Serif),
+                ("Rounded", EditorFont::Rounded),
+                ("Mono", EditorFont::Mono),
+            ],
+            s.font,
+            Change::Font,
+            p,
+            cx,
+        );
+        let line_height = self.select(
+            "line-height",
+            "Line height",
+            &[
+                ("Tight", LineHeight::Tight),
+                ("Normal", LineHeight::Normal),
+                ("Relaxed", LineHeight::Relaxed),
+            ],
+            s.line_height,
+            Change::LineHeight,
+            p,
+            cx,
+        );
+        let tab_key = self.select(
+            "tab-key",
+            "Tab key",
+            &[
+                ("Tab", TabKey::Tab),
+                ("2 Spaces", TabKey::TwoSpaces),
+                ("4 Spaces", TabKey::FourSpaces),
+            ],
+            s.tab_key,
+            Change::TabKey,
+            p,
+            cx,
+        );
         vec![
-            row(
-                Some("Text size"),
-                vec![
-                    line(size_line),
-                    help("⌘+ and ⌘− change it from the note; ⌘0 puts it back.", p),
-                ],
-                p,
-            ),
-            divider(p),
+            row(Some("Text size"), vec![line(size_line)], p),
+            row(Some("Font"), vec![line(vec![font])], p),
+            row(Some("Line height"), vec![line(vec![line_height])], p),
+            group_gap(),
             row(
                 Some("Editing"),
                 vec![
+                    checkbox(
+                        "markdown-shortcuts",
+                        "Format Markdown as you type",
+                        s.markdown_shortcuts,
+                        false,
+                        p,
+                        self.sender(Change::MarkdownShortcuts),
+                    )
+                    .into_any_element(),
                     checkbox(
                         "vim-mode",
                         "Vim mode",
@@ -948,40 +1114,11 @@ impl SettingsView {
                         self.sender(Change::VimMode),
                     )
                     .into_any_element(),
-                    checkbox(
-                        "emoji-characters",
-                        "Insert emoji as characters",
-                        s.emoji_characters,
-                        false,
-                        p,
-                        self.sender(Change::EmojiCharacters),
-                    )
-                    .into_any_element(),
-                    help(
-                        "Off, the : menu writes shortcodes such as :smile:, as Typora does. \
-                         Obsidian shows those as text.",
-                        p,
-                    ),
                 ],
                 p,
             ),
-            row(
-                Some("Window height"),
-                vec![
-                    checkbox(
-                        "auto-height",
-                        "Grow with the note",
-                        s.auto_height,
-                        false,
-                        p,
-                        self.sender(Change::AutoHeight),
-                    )
-                    .into_any_element(),
-                    help("Resizing the note by hand turns this off.", p),
-                ],
-                p,
-            ),
-            divider(p),
+            row(Some("Tab in code"), vec![line(vec![tab_key])], p),
+            group_gap(),
             row(
                 Some("Web images"),
                 vec![
@@ -994,107 +1131,255 @@ impl SettingsView {
                         self.sender(Change::RemoteImages),
                     )
                     .into_any_element(),
-                    help("Loading one tells the server it comes from.", p),
                 ],
                 p,
             ),
         ]
     }
 
-    fn notes(&self, s: &Snapshot, p: Palette) -> Vec<Div> {
-        let click = |change: Change| self.on_click(change);
-        let folder = match &s.folder {
-            Some(path) => vec![
-                value(
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.display().to_string()),
-                    false,
-                    p,
-                ),
-                value(home_relative(path), true, p),
-                line(vec![
-                    button("change-folder", "Change…", p, click(Change::ChooseFolder))
-                        .into_any_element(),
-                    button(
-                        "reveal-folder",
-                        "Show in Finder",
-                        p,
-                        click(Change::RevealFolder),
-                    )
-                    .into_any_element(),
-                ]),
-            ],
-            None => vec![
-                value("None — editing individual files", false, p),
-                line(vec![
-                    button(
-                        "change-folder",
-                        "Open Folder…",
-                        p,
-                        click(Change::ChooseFolder),
-                    )
-                    .into_any_element(),
-                ]),
-            ],
-        };
-        let mut folder = folder;
-        folder.push(help(
-            "Documents/Markraft by default. Any Markdown folder works, an Obsidian vault \
-             included.",
-            p,
-        ));
-        let mut page = vec![row(Some("Notes folder"), folder, p)];
-
-        let location = |id: &'static str,
-                        (place, custom): &(String, bool),
-                        change: Change,
-                        reset: Change,
-                        refused: &Option<String>| {
-            let mut controls = vec![
-                value(place.clone(), false, p),
-                button(id, "Change…", p, click(change)).into_any_element(),
-            ];
-            if *custom {
-                controls.push(
-                    button(
-                        SharedString::from(format!("reset-{id}")),
-                        "Reset",
-                        p,
-                        click(reset),
-                    )
-                    .into_any_element(),
-                );
-            }
-            let mut lines = vec![line(controls)];
-            if let Some(refused) = refused {
-                lines.push(error(refused.clone(), p));
-            }
-            lines
-        };
-        if let (Some(new_notes), Some(images)) = (&s.new_notes, &s.images) {
-            page.push(divider(p));
-            page.push(row(
-                Some("New notes"),
-                location(
-                    "new-note-location",
-                    new_notes,
-                    Change::NewNoteLocation,
-                    Change::ResetNewNoteLocation,
-                    &s.errors.new_notes,
-                ),
+    /// Where the notes are and where new files go, each a folder pop-up the way Safari
+    /// picks its download folder: the folder on the button, and what can be done
+    /// with it — show it, choose another, go back to the default — in its menu.
+    fn files(&self, s: &Snapshot, p: Palette, cx: &mut Context<Self>) -> Vec<Div> {
+        let Some(root) = &s.folder else {
+            let choose = self.pop_up(
+                "notes-folder",
+                "Notes folder",
+                "None".into(),
+                vec![MenuItem::action("Choose Folder…", Change::ChooseFolder)],
                 p,
-            ));
-            let mut images = location(
-                "image-location",
-                images,
-                Change::ImageLocation,
-                Change::ResetImageLocation,
-                &s.errors.images,
+                cx,
             );
-            images.push(help("Both are folders inside the notes folder.", p));
-            page.push(row(Some("Images"), images, p));
+            return vec![row(Some("Notes folder"), vec![line(vec![choose])], p)];
+        };
+        let root_name = root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.display().to_string());
+        let notes_folder = self.pop_up(
+            "notes-folder",
+            "Notes folder",
+            root_name.clone().into(),
+            vec![
+                MenuItem::choice(root_name.clone(), None, true),
+                MenuRow::Separator,
+                MenuItem::action("Show in Finder", Change::RevealFolder),
+                MenuItem::action("Choose Folder…", Change::ChooseFolder),
+            ],
+            p,
+            cx,
+        );
+        let mut page = vec![row(Some("Notes folder"), vec![line(vec![notes_folder])], p)];
+
+        // A location inside the notes folder: the default, or the folder chosen instead,
+        // which the button names by its last component.
+        let location = |id: &'static str,
+                        label: &'static str,
+                        default: String,
+                        (place, custom): &(String, bool),
+                        reset: Change,
+                        choose: Change,
+                        cx: &mut Context<Self>| {
+            let face = if *custom {
+                place.rsplit('/').next().unwrap_or(place).to_owned()
+            } else {
+                default.clone()
+            };
+            let mut rows = vec![MenuItem::choice(default, custom.then_some(reset), !custom)];
+            if *custom {
+                rows.push(MenuItem::choice(place.clone(), None, true));
+            }
+            rows.push(MenuRow::Separator);
+            rows.push(MenuItem::action("Choose Folder…", choose));
+            self.pop_up(id, label, face.into(), rows, p, cx)
+        };
+
+        if let (Some(new_notes), Some(images)) = (&s.new_notes, &s.images) {
+            page.push(group_gap());
+            let mut new_note_lines = vec![line(vec![location(
+                "new-note-folder",
+                "Save new notes in",
+                root_name.clone(),
+                new_notes,
+                Change::ResetNewNoteLocation,
+                Change::NewNoteLocation,
+                cx,
+            )])];
+            if let Some(refused) = &s.errors.new_notes {
+                new_note_lines.push(error(refused.clone(), p));
+            }
+            page.push(row(Some("Save new notes in"), new_note_lines, p));
+            let naming = self.select(
+                "new-note-name",
+                "Name new notes",
+                &[
+                    ("First Line", NoteNaming::FirstLine),
+                    ("Date and Time", NoteNaming::DateTime),
+                ],
+                s.new_note_name,
+                Change::NewNoteName,
+                p,
+                cx,
+            );
+            page.push(row(Some("Name new notes"), vec![line(vec![naming])], p));
+
+            page.push(group_gap());
+            let mut image_lines = vec![line(vec![location(
+                "image-folder",
+                "Save images in",
+                "Beside Each Note".to_owned(),
+                images,
+                Change::ResetImageLocation,
+                Change::ImageLocation,
+                cx,
+            )])];
+            if let Some(refused) = &s.errors.images {
+                image_lines.push(error(refused.clone(), p));
+            }
+            page.push(row(Some("Save images in"), image_lines, p));
         }
+        page
+    }
+
+    fn markdown(&self, s: &Snapshot, p: Palette, cx: &mut Context<Self>) -> Vec<Div> {
+        let bullet = self.select(
+            "bullet-marker",
+            "Bullet list",
+            &[
+                ("-  Item", BulletMarker::Dash),
+                ("*  Item", BulletMarker::Star),
+                ("+  Item", BulletMarker::Plus),
+            ],
+            s.bullet,
+            Change::Bullet,
+            p,
+            cx,
+        );
+        let fence = self.select(
+            "code-fence",
+            "Code block",
+            &[("```", CodeFence::Backticks), ("~~~", CodeFence::Tildes)],
+            s.fence,
+            Change::Fence,
+            p,
+            cx,
+        );
+        let emphasis = self.select(
+            "emphasis-marker",
+            "Emphasis",
+            &[
+                ("*Italic*  **Bold**", EmphasisMarker::Star),
+                ("_Italic_  __Bold__", EmphasisMarker::Underscore),
+            ],
+            s.emphasis,
+            Change::Emphasis,
+            p,
+            cx,
+        );
+        vec![
+            row(Some("Bullet list"), vec![line(vec![bullet])], p),
+            row(Some("Code block"), vec![line(vec![fence])], p),
+            row(Some("Emphasis"), vec![line(vec![emphasis])], p),
+            group_gap(),
+            row(
+                Some("Emoji"),
+                vec![
+                    checkbox(
+                        "emoji-characters",
+                        "Insert emoji as characters",
+                        s.emoji_characters,
+                        false,
+                        p,
+                        self.sender(Change::EmojiCharacters),
+                    )
+                    .into_any_element(),
+                ],
+                p,
+            ),
+        ]
+    }
+
+    fn about(&self, s: &Snapshot, p: Palette) -> Vec<Div> {
+        let (version, build) = crate::platform::app_version();
+        let version = match build {
+            Some(build) => format!("Version {version} ({build})"),
+            None => format!("Version {version}"),
+        };
+        let identity = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(4.))
+            // As much room above the icon as there is under the version, so the
+            // identity sits centred between the toolbar and the rows.
+            .pt(px(ABOUT_TOP))
+            .pb(px(6.))
+            .child(img(app_icon()).size(px(ABOUT_ICON)))
+            .child(
+                div()
+                    .text_size(px(ABOUT_NAME_SIZE))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Markraft"),
+            )
+            .child(
+                div()
+                    .text_size(px(HELP_SIZE))
+                    .text_color(p.subtitle)
+                    .child(version),
+            );
+
+        let mut updates = vec![
+            checkbox(
+                "automatic-updates",
+                "Check for updates automatically",
+                s.automatic_updates.unwrap_or(false),
+                s.automatic_updates.is_none(),
+                p,
+                self.sender(Change::AutomaticUpdates),
+            )
+            .into_any_element(),
+        ];
+        // A copy that cannot update itself shows both controls dimmed, without saying
+        // why: only the builds from GitHub carry an update feed.
+        let available = s.automatic_updates.is_some();
+        updates.push(line(vec![
+            button(
+                "check-for-updates",
+                "Check for Updates…",
+                p,
+                self.on_click(Change::CheckForUpdates),
+            )
+            .disabled(!available)
+            .when(!available, |button| button.opacity(0.45).cursor_default())
+            .into_any_element(),
+        ]));
+        if let Some(refused) = &s.errors.updates {
+            updates.push(error(refused.clone(), p));
+        }
+
+        let open = |url: &'static str| {
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| cx.open_url(url)
+        };
+        let links = vec![
+            button("github", "GitHub", p, open(REPOSITORY)).into_any_element(),
+            button("release-notes", "Release Notes", p, open(RELEASES)).into_any_element(),
+            button("report-issue", "Report an Issue", p, open(NEW_ISSUE)).into_any_element(),
+        ];
+        let mut page = vec![
+            identity,
+            group_gap(),
+            row(Some("Updates"), updates, p),
+            row(Some("Links"), vec![line(links)], p),
+        ];
+        page.push(
+            div()
+                .pt(px(10.))
+                .flex()
+                .justify_center()
+                .text_size(px(HELP_SIZE))
+                .text_color(p.subtitle)
+                .child("© 2026 Yuexun Jiang. Released under the MIT License."),
+        );
         page
     }
 }
@@ -1112,8 +1397,10 @@ impl Render for SettingsView {
         let p = Palette::new(snapshot.dark);
         let rows = match self.page {
             Page::General => self.general(&snapshot, p, cx),
-            Page::Editor => self.editor(&snapshot, p),
-            Page::Notes => self.notes(&snapshot, p),
+            Page::Editor => self.editor(&snapshot, p, cx),
+            Page::Files => self.files(&snapshot, p, cx),
+            Page::Markdown => self.markdown(&snapshot, p, cx),
+            Page::About => self.about(&snapshot, p),
         };
         let page_height = self.page_height.clone();
         let measured = page_height.clone();
@@ -1235,7 +1522,17 @@ mod tests {
     fn arrow_keys_walk_the_pages_without_wrapping() {
         assert_eq!(Page::General.step(false), Page::General);
         assert_eq!(Page::General.step(true), Page::Editor);
-        assert_eq!(Page::Notes.step(true), Page::Notes);
-        assert_eq!(Page::Notes.step(false), Page::Editor);
+        assert_eq!(Page::Markdown.step(true), Page::Files);
+        assert_eq!(Page::About.step(true), Page::About);
+        assert_eq!(Page::About.step(false), Page::Files);
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_window_opens_on_the_page_it_was_left_on() {
+        for page in Page::ALL {
+            assert_eq!(Page::remembered(page.key()), page);
+        }
+        assert_eq!(Page::remembered(""), Page::General);
+        assert_eq!(Page::remembered("gone"), Page::General);
     }
 }

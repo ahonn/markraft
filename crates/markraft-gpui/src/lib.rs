@@ -474,6 +474,8 @@ pub struct EditorView {
     /// rows it last produced from them.
     shaping: shaping::Shaping,
     pub(crate) placeholder: SharedString,
+    /// What Tab inserts in a verbatim block; see [`EditorView::set_indent_text`].
+    indent_text: SharedString,
     /// What the editor calls itself to assistive technology. A host that lends one
     /// editor to several surfaces renames it as it hands it over.
     pub(crate) aria_label: SharedString,
@@ -575,6 +577,7 @@ impl EditorView {
             host_extensions: extensions,
             extensions: Vec::new(),
             placeholder: SharedString::default(),
+            indent_text: "\t".into(),
             aria_label: DEFAULT_ARIA_LABEL.into(),
             single_line: false,
             single_line_scroll_x: px(0.),
@@ -739,6 +742,12 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.placeholder = placeholder.into();
+        cx.notify();
+    }
+    /// What Tab inserts at a caret in a verbatim block — a tab, the default,
+    /// or the spaces a host's indentation preference asks for.
+    pub fn set_indent_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.indent_text = text.into();
         cx.notify();
     }
     pub fn set_style(&mut self, style: EditorStyle, cx: &mut Context<Self>) {
@@ -1968,7 +1977,16 @@ impl EditorView {
             }
         }));
         rich!(LineBreak, keymap::line_break);
-        rich!(Indent, keymap::indent);
+        root = root.on_action(cx.listener(|this, _: &Indent, _, cx| {
+            if this.single_line {
+                cx.propagate();
+                return;
+            }
+            let command = keymap::indent(&this.types, &this.indent_text);
+            if !this.run_command(&command, cx) {
+                cx.propagate();
+            }
+        }));
         rich!(Outdent, keymap::outdent);
         run!(Left, |_: &DocTypes| keymap::move_grapheme(
             Direction::Backward,
@@ -2186,9 +2204,13 @@ fn block(types: &DocTypes, ty: Option<NodeTypeId>, attrs: Attrs) -> Command {
 }
 
 /// Toggle a list whose type or item type the schema may not declare.
+///
+/// A new list takes the schema's default attributes: the view has no list
+/// preference of its own, so a host that wants another marker binds the
+/// action itself and calls [`commands::toggle_list`] with its attributes.
 fn list(types: &DocTypes, ty: Option<NodeTypeId>, item: Option<NodeTypeId>) -> Command {
     match (ty, item) {
-        (Some(ty), Some(item)) => keymap::toggle_list(types, ty, item),
+        (Some(ty), Some(item)) => keymap::toggle_list(types, ty, Attrs::empty(), item),
         _ => markraft_core::commands::command(|_| None),
     }
 }

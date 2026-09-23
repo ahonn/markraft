@@ -229,3 +229,32 @@ fn a_rule_composes_with_a_command_chain() {
         r#"doc(bullet_list(list_item(paragraph("a"), paragraph())))"#
     );
 }
+
+#[test]
+fn a_gated_rule_fires_only_while_enabled() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let schema = shared_schema();
+    let enabled = Arc::new(AtomicBool::new(false));
+    let flag = enabled.clone();
+    let rules = markdown_rules()
+        .into_iter()
+        .map(|rule| {
+            let flag = flag.clone();
+            rule.when(move || flag.load(Ordering::Relaxed))
+        })
+        .collect::<Vec<_>>();
+    let start = state(
+        doc(&schema, [n(&schema, "paragraph", [])]),
+        input_rules(rules),
+    );
+
+    let off = type_all(&start, "## ");
+    assert_eq!(schema.describe(off.doc()), "doc(paragraph(\"## \"))");
+
+    // The flag is read on every keystroke, so the same state picks it up.
+    enabled.store(true, Ordering::Relaxed);
+    let on = type_all(&start, "## ");
+    assert_eq!(schema.describe(on.doc()), r#"doc(heading[level=Int(2)]())"#);
+}

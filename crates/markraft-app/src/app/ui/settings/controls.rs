@@ -13,12 +13,14 @@ pub(super) mod metrics {
     pub const TITLE_HEIGHT: f32 = 30.;
     pub const TITLE_SIZE: f32 = 13.;
     /// The row of pages under the title, the way a macOS settings window has it.
-    pub const TOOLBAR_PAD_BOTTOM: f32 = 6.;
-    pub const TOOLBAR_GAP: f32 = 2.;
-    pub const TOOLBAR_ITEM_MIN_WIDTH: f32 = 64.;
-    pub const TOOLBAR_ITEM_PAD_X: f32 = 8.;
-    pub const TOOLBAR_ITEM_PAD_Y: f32 = 5.;
-    pub const TOOLBAR_ITEM_RADIUS: f32 = 6.;
+    /// Finder's: tabs as wide as their labels, a little apart, 49pt tall, and the hairline
+    /// 88pt from the window's top.
+    pub const TOOLBAR_PAD_BOTTOM: f32 = 9.;
+    pub const TOOLBAR_GAP: f32 = 4.;
+    pub const TOOLBAR_ITEM_MIN_WIDTH: f32 = 56.;
+    pub const TOOLBAR_ITEM_PAD_X: f32 = 7.;
+    pub const TOOLBAR_ITEM_PAD_Y: f32 = 6.5;
+    pub const TOOLBAR_ITEM_RADIUS: f32 = 8.;
     pub const TOOLBAR_ICON: f32 = 20.;
     pub const TOOLBAR_LABEL_GAP: f32 = 3.;
     pub const TOOLBAR_LABEL_SIZE: f32 = 11.;
@@ -32,12 +34,13 @@ pub(super) mod metrics {
     pub const LABEL_GAP: f32 = 10.;
     /// One line of a form: every control and every label sits on a line this tall,
     /// so a label reads level with the first control beside it.
-    pub const LINE_HEIGHT: f32 = 24.;
+    pub const LINE_HEIGHT: f32 = 22.;
     pub const ROW_GAP: f32 = 6.;
-    pub const LINE_GAP: f32 = 2.;
+    pub const LINE_GAP: f32 = 1.;
     pub const TEXT_SIZE: f32 = 13.;
     pub const HELP_SIZE: f32 = 11.;
-    pub const DIVIDER_MARGIN: f32 = 12.;
+    /// The space that sets one group of rows apart from the next.
+    pub const GROUP_GAP: f32 = 14.;
 
     pub const CONTROL_HEIGHT: f32 = 24.;
     pub const CONTROL_RADIUS: f32 = 6.;
@@ -45,10 +48,10 @@ pub(super) mod metrics {
     pub const BUTTON_PAD_X: f32 = 10.;
     pub const BUTTON_TEXT_SIZE: f32 = 12.5;
 
-    pub const CHECKBOX_SIZE: f32 = 14.;
+    pub const CHECKBOX_SIZE: f32 = 16.;
     pub const CHECKBOX_RADIUS: f32 = 4.;
     pub const CHECKBOX_GAP: f32 = 7.;
-    pub const CHECKMARK_SIZE: f32 = 10.;
+    pub const CHECKMARK_SIZE: f32 = 11.;
 
     pub const SEGMENTED_PAD: f32 = 2.;
     pub const SEGMENTED_RADIUS: f32 = 7.;
@@ -57,52 +60,86 @@ pub(super) mod metrics {
     pub const SEGMENTED_OPTION_PAD_X: f32 = 8.;
     pub const SEGMENTED_TEXT_SIZE: f32 = 12.;
 
-    pub const KEYCAP_PAD_X: f32 = 8.;
-    pub const KEYCAP_GAP: f32 = 5.;
-    /// The recorder while it listens: wider than the chords it holds, because what it
-    /// says then is the longest thing in it.
-    pub const RECORDER_WIDTH: f32 = 150.;
+    /// The recorder is only as wide as what it says at its longest, "Press
+    /// shortcut…", with room for the clear button.
+    pub const RECORDER_WIDTH: f32 = 124.;
+    pub const RECORDER_PAD_RIGHT: f32 = 4.;
+    pub const RECORDER_CLEAR: f32 = 13.;
     pub const STEPPER_VALUE_WIDTH: f32 = 44.;
+
+    /// The pop-up button and the menu it opens, measured off Finder's: a 24pt button,
+    /// menu rows of 24pt and the labels 31pt in from the menu's edge, past the
+    /// checkmark column.
+    pub const SELECT_WIDTH: f32 = 180.;
+    pub const SELECT_HEIGHT: f32 = 24.;
+    pub const SELECT_RADIUS: f32 = 6.;
+    pub const SELECT_PAD_RIGHT: f32 = 7.;
+    pub const SELECT_CHEVRON: f32 = 10.;
+    pub const SELECT_MENU_PAD: f32 = 5.;
+    pub const SELECT_MENU_RADIUS: f32 = 10.;
+    pub const SELECT_ROW_HEIGHT: f32 = 24.;
+    pub const SELECT_ROW_PAD_X: f32 = 8.;
+    pub const SELECT_ROW_RADIUS: f32 = 6.;
+    pub const SELECT_CHECK_WIDTH: f32 = 18.;
+    pub const SELECT_CHECK: f32 = 11.;
+    pub const SELECT_SEPARATOR_HEIGHT: f32 = 11.;
 }
 
 use metrics::*;
 
-/// The window's colours, derived from the note's own text and ground: every tint is
-/// the text colour at a fixed strength.
+/// The window's colours: AppKit's own for a settings window rather than the note's
+/// paper, read off Finder's Settings window — a white ground, one hairline under the
+/// toolbar, controls in a light grey fill and the system blue for what is chosen.
 #[derive(Clone, Copy)]
 pub(super) struct Palette {
     pub surface: Hsla,
-    /// The title band and the toolbar under it.
+    /// The title band and the toolbar under it: the window's own ground.
     pub toolbar: Hsla,
     pub text: Hsla,
     pub subtitle: Hsla,
+    /// Hairlines: the one under the toolbar and those between groups.
     pub border: Hsla,
-    pub hover: Hsla,
+    /// The chosen page's tab, and a tab under the pointer.
     pub selected: Hsla,
+    pub hover: Hsla,
     /// A keycap's fill, and a button's.
     pub fill: Hsla,
     pub pressed: Hsla,
+    /// An unticked checkbox.
+    pub unchecked: Hsla,
     pub accent: Hsla,
     pub danger: Hsla,
+    /// A menu, raised off the page.
+    pub menu: Hsla,
+    /// A text field's ground and outline: the shortcut recorder.
+    pub field: Hsla,
+    pub field_border: Hsla,
 }
 
 impl Palette {
     pub fn new(dark: bool) -> Self {
-        let style = crate::app::notes_style(dark);
-        let text = style.text;
-        let surface = style.background;
+        let ink: Hsla = if dark { rgb(0xffffff) } else { rgb(0x000000) }.into();
+        let surface: Hsla = if dark { rgb(0x262626) } else { rgb(0xffffff) }.into();
         Self {
             surface,
-            toolbar: surface.blend(text.alpha(if dark { 0.03 } else { 0.035 })),
-            text,
-            subtitle: text.alpha(0.58),
-            border: text.alpha(if dark { 0.12 } else { 0.1 }),
-            hover: text.alpha(0.06),
-            selected: text.alpha(if dark { 0.12 } else { 0.09 }),
-            fill: text.alpha(if dark { 0.1 } else { 0.07 }),
-            pressed: text.alpha(if dark { 0.16 } else { 0.12 }),
-            accent: style.marker,
-            danger: if dark { rgb(0xf18a8a) } else { rgb(0xc44d4d) }.into(),
+            toolbar: surface,
+            text: ink.alpha(0.85),
+            subtitle: ink.alpha(if dark { 0.55 } else { 0.5 }),
+            border: ink.alpha(if dark { 0.12 } else { 0.08 }),
+            selected: ink.alpha(if dark { 0.12 } else { 0.07 }),
+            hover: ink.alpha(if dark { 0.06 } else { 0.035 }),
+            fill: ink.alpha(if dark { 0.1 } else { 0.063 }),
+            pressed: ink.alpha(if dark { 0.18 } else { 0.12 }),
+            unchecked: ink.alpha(if dark { 0.12 } else { 0.083 }),
+            accent: if dark { rgb(0x0a84ff) } else { rgb(0x0087ff) }.into(),
+            danger: if dark { rgb(0xff6961) } else { rgb(0xd70015) }.into(),
+            menu: if dark { rgb(0x2c2c2c) } else { rgb(0xffffff) }.into(),
+            field: if dark {
+                ink.alpha(0.05)
+            } else {
+                rgb(0xffffff).into()
+            },
+            field_border: ink.alpha(if dark { 0.18 } else { 0.16 }),
         }
     }
 }
@@ -149,16 +186,6 @@ pub(super) fn line(controls: Vec<AnyElement>) -> AnyElement {
         .into_any_element()
 }
 
-/// The secondary line that explains the control above it.
-pub(super) fn help(text: impl Into<SharedString>, p: Palette) -> AnyElement {
-    div()
-        .pb(px(2.))
-        .text_size(px(HELP_SIZE))
-        .text_color(p.subtitle)
-        .child(text.into())
-        .into_any_element()
-}
-
 /// Why the value that was just asked for was refused, under the control that asked.
 pub(super) fn error(text: impl Into<SharedString>, p: Palette) -> AnyElement {
     div()
@@ -168,20 +195,9 @@ pub(super) fn error(text: impl Into<SharedString>, p: Palette) -> AnyElement {
         .into_any_element()
 }
 
-/// The hairline between groups of rows.
-pub(super) fn divider(p: Palette) -> Div {
-    div().my(px(DIVIDER_MARGIN)).h(px(1.)).bg(p.border)
-}
-
-/// A value that reads on one line, cut short rather than wrapped: a path.
-pub(super) fn value(text: impl Into<SharedString>, secondary: bool, p: Palette) -> AnyElement {
-    div()
-        .min_w_0()
-        .truncate()
-        .text_size(px(if secondary { HELP_SIZE } else { TEXT_SIZE }))
-        .text_color(if secondary { p.subtitle } else { p.text })
-        .child(text.into())
-        .into_any_element()
+/// What sets one group of rows apart from the next: space, not a line.
+pub(super) fn group_gap() -> Div {
+    div().h(px(GROUP_GAP))
 }
 
 pub(super) fn button(
@@ -244,11 +260,7 @@ pub(super) fn checkbox(
                         CHECKMARK_SIZE,
                     ))
                 })
-                .when(!checked, |mark| {
-                    mark.bg(p.surface)
-                        .border_1()
-                        .border_color(p.text.alpha(0.3))
-                }),
+                .when(!checked, |mark| mark.bg(p.unchecked)),
         )
         .child(label)
 }
@@ -355,38 +367,36 @@ pub(super) fn stepper(
         .child(step(1, "+", can_increase))
 }
 
-/// What a shortcut field shows: listening, the chord it holds, or none.
 pub(super) enum ChordFace {
     Recording,
     Bound(Vec<String>),
     Unbound,
 }
 
-pub(super) fn chord_face(face: ChordFace, p: Palette) -> Div {
-    let pill = || {
-        div()
-            .flex()
-            .items_center()
-            .flex_shrink_0()
-            .h(px(CONTROL_HEIGHT))
-            .px(px(KEYCAP_PAD_X))
-            .rounded(px(CONTROL_RADIUS))
-            .text_size(px(TEXT_SIZE))
+/// A shortcut recorder, drawn as the field macOS utilities use for one: the chord,
+/// or what to do, in a text field whose outline takes the accent while it listens.
+/// `clear` sits at its trailing end while a chord is bound.
+pub(super) fn chord_face(face: ChordFace, clear: Option<AnyElement>, p: Palette) -> Div {
+    let listening = matches!(face, ChordFace::Recording);
+    let (text, color) = match face {
+        ChordFace::Recording => ("Press shortcut…".to_owned(), p.subtitle),
+        ChordFace::Bound(keys) => (keys.concat(), p.text),
+        ChordFace::Unbound => ("Record Shortcut".to_owned(), p.subtitle),
     };
-    match face {
-        ChordFace::Recording => pill()
-            .justify_center()
-            .w(px(RECORDER_WIDTH))
-            .bg(p.text.alpha(0.06))
-            .border_1()
-            .border_color(p.subtitle)
-            .text_color(p.subtitle)
-            .child("Press shortcut…"),
-        ChordFace::Bound(keys) => pill()
-            .gap(px(KEYCAP_GAP))
-            .bg(p.fill)
-            .text_color(p.text)
-            .children(keys),
-        ChordFace::Unbound => pill().bg(p.fill).text_color(p.subtitle).child("None"),
-    }
+    div()
+        .flex()
+        .items_center()
+        .flex_shrink_0()
+        .w(px(RECORDER_WIDTH))
+        .h(px(SELECT_HEIGHT))
+        .pl(px(BUTTON_PAD_X))
+        .pr(px(RECORDER_PAD_RIGHT))
+        .rounded(px(SELECT_RADIUS))
+        .bg(p.field)
+        .border_1()
+        .border_color(if listening { p.accent } else { p.field_border })
+        .text_size(px(TEXT_SIZE))
+        .text_color(color)
+        .child(div().flex_1().min_w_0().truncate().child(text))
+        .children(clear)
 }

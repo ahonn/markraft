@@ -148,7 +148,7 @@ impl NotesApp {
                     .link_setter(doc::link_setter(refusal_message))
                     .split_wrap(doc::split_wrap())
                     .enter_rule(doc::enter_rule())
-                    .extensions(doc::extensions())
+                    .extensions(doc::extensions(self.shortcuts.clone()))
                     .doc(document),
                 cx,
             )
@@ -188,6 +188,7 @@ impl NotesApp {
         let extensions = editor.update(cx, |editor, cx| {
             editor.set_wiki_resolver(resolver, cx);
             editor.set_remote_images(self.remote_image_fetcher(), cx);
+            editor.set_indent_text(self.library.preferences.tab_key.text(), cx);
             [
                 editor.add_extension(menu, cx),
                 editor.add_extension(links, cx),
@@ -353,6 +354,61 @@ impl NotesApp {
         }
         self.library.preferences.emoji_characters = enabled;
         self.emoji.set_characters(enabled);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// Turn the Markdown input rules on or off in every open note at once: their rules
+    /// all read the one flag.
+    pub(super) fn set_markdown_shortcuts(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.library.preferences.markdown_shortcuts = enabled;
+        self.shortcuts
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    pub(super) fn set_tab_key(&mut self, key: crate::storage::TabKey, cx: &mut Context<Self>) {
+        self.library.preferences.tab_key = key;
+        let editors: Vec<_> = self
+            .sessions
+            .values()
+            .map(|session| session.editor().clone())
+            .collect();
+        for editor in editors {
+            editor.update(cx, |editor, cx| editor.set_indent_text(key.text(), cx));
+        }
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// The typeface or line height changed: every open note is set again.
+    pub(super) fn set_typography(
+        &mut self,
+        font: crate::storage::EditorFont,
+        line_height: crate::storage::LineHeight,
+        cx: &mut Context<Self>,
+    ) {
+        self.library.preferences.font = font;
+        self.library.preferences.line_height = line_height;
+        self.restyle_editors(cx);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// The markers new syntax is written with. What is already written stays as it is.
+    pub(super) fn set_markdown_markers(
+        &mut self,
+        bullet: crate::storage::BulletMarker,
+        fence: crate::storage::CodeFence,
+        emphasis: crate::storage::EmphasisMarker,
+        cx: &mut Context<Self>,
+    ) {
+        let preferences = &mut self.library.preferences;
+        preferences.bullet_marker = bullet;
+        preferences.code_fence = fence;
+        preferences.emphasis_marker = emphasis;
+        super::apply_markdown_style(preferences);
         self.schedule_save(cx);
         cx.notify();
     }

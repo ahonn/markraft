@@ -1,9 +1,18 @@
-use gpui::{Hsla, Pixels, px, rgb, rgba};
+use gpui::{Hsla, Pixels, SharedString, px, rgb, rgba};
+
+/// The system UI face, which a note's text is set in unless the host picks
+/// another.
+const DEFAULT_FONT_FAMILY: &str = ".SystemUIFont";
 
 /// Editor presentation, independent of document semantics and host window policy.
 #[derive(Clone, Debug)]
 pub struct EditorStyle {
     pub padding: Pixels,
+    /// The family the note's own text is set in: its paragraphs, headings,
+    /// list and quote text, table cells and placeholder. Code keeps its
+    /// monospaced face, and the editor's chrome — pills, labels — the system
+    /// one.
+    pub font_family: SharedString,
     pub body_size: Pixels,
     pub heading_sizes: [Pixels; 6],
     pub line_height_ratio: f32,
@@ -70,6 +79,7 @@ impl Default for EditorStyle {
     fn default() -> Self {
         Self {
             padding: px(32.),
+            font_family: DEFAULT_FONT_FAMILY.into(),
             body_size: px(17.),
             heading_sizes: [px(30.), px(25.), px(21.), px(19.), px(18.), px(17.)],
             line_height_ratio: 1.5,
@@ -119,6 +129,7 @@ impl EditorStyle {
     pub fn notes() -> Self {
         Self {
             padding: px(24.),
+            font_family: DEFAULT_FONT_FAMILY.into(),
             body_size: px(14.),
             // Typora's ratios (2.25, 1.75, 1.5, 1.25, 1, 1 em) held down at the
             // top, so a floating note's title does not crowd its own window.

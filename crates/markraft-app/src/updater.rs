@@ -112,6 +112,26 @@ impl Updater {
             .map_err(|error| error.to_string())
     }
 
+    /// Whether Sparkle checks for updates on its own schedule. None where there is no
+    /// updater to ask: an unbundled or unconfigured copy.
+    pub fn automatically_checks(&self) -> Option<bool> {
+        self.native
+            .as_ref()?
+            .automatically_checks_for_updates()
+            .ok()
+    }
+
+    /// Sparkle keeps the answer in its own user defaults, so it outlives the app.
+    pub fn set_automatically_checks(&self, enabled: bool) -> Result<(), String> {
+        let native = self
+            .native
+            .as_ref()
+            .ok_or_else(|| self.unavailable.clone())?;
+        native
+            .set_automatically_checks_for_updates(enabled)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn take_relaunch(&self) -> Option<RelaunchContinuation> {
         self.pending.borrow_mut().take_ready()
     }

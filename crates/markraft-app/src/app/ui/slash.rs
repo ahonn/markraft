@@ -247,7 +247,7 @@ mod tests {
                 .extensions(Extension::all([
                     markraft_core::projection::projection(),
                     markraft_core::history::history(Default::default()),
-                    doc::extensions(),
+                    doc::extensions(std::sync::Arc::new(true.into())),
                 ])),
         )
         .expect("a valid state")

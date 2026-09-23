@@ -34,9 +34,12 @@ pub fn delete_word(types: &DocTypes, dir: Direction) -> Command {
     keymap::delete_word(types, dir)
 }
 
-/// Tab: sink a list item, or indent inside a code block.
+/// Tab: sink a list item, or insert a tab inside a code block.
+///
+/// [`EditorView`](crate::EditorView) inserts its
+/// [indent text](crate::EditorView::set_indent_text) instead.
 pub fn indent(types: &DocTypes) -> Command {
-    keymap::indent(types)
+    keymap::indent(types, "\t")
 }
 
 /// Shift-Tab: lift a list item, or lift a block out of its wrapper.
@@ -64,8 +67,16 @@ pub fn toggle_wrap(ty: NodeTypeId, attrs: Attrs) -> Command {
 }
 
 /// Wrap in a list of `ty` holding items of `item`, or leave it.
-pub fn toggle_list(types: &DocTypes, ty: NodeTypeId, item: NodeTypeId) -> Command {
-    keymap::toggle_list(types, ty, item)
+///
+/// A new list carries `list_attrs` — a bullet list's `bullet_char`, an ordered
+/// list's delimiter —; a list the selection is already in keeps its own.
+pub fn toggle_list(
+    types: &DocTypes,
+    ty: NodeTypeId,
+    list_attrs: Attrs,
+    item: NodeTypeId,
+) -> Command {
+    keymap::toggle_list(types, ty, list_attrs, item)
 }
 
 /// ⌘⏎: tick or clear a task box, else leave a code block.

@@ -49,6 +49,23 @@ unsafe impl Encode for NSRect {
 
 const LOGIN_ITEMS: &str = "System Settings → General → Login Items & Extensions";
 
+/// The version this copy says it is, and its build when that says something more:
+/// from the bundle, or from the crate when running outside one.
+pub fn app_version() -> (String, Option<String>) {
+    use objc2_foundation::{NSBundle, NSString};
+    let bundle = NSBundle::mainBundle();
+    let value = |key: &str| {
+        bundle
+            .objectForInfoDictionaryKey(&NSString::from_str(key))
+            .and_then(|value| value.downcast::<NSString>().ok())
+            .map(|value| value.to_string())
+    };
+    let version =
+        value("CFBundleShortVersionString").unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
+    let build = value("CFBundleVersion").filter(|build| *build != version);
+    (version, build)
+}
+
 /// Seconds this Mac's clock stands ahead of UTC, including whatever daylight saving is
 /// in force. Timestamps are stored in UTC; a date shown to the user has to be the one
 /// on their calendar, so it is read through this.

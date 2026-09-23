@@ -117,6 +117,41 @@ fn a_bare_style_mark_is_spelled_with_its_delimiters() {
     assert_eq!(spelled, codec.parse("**bold**"));
 }
 
+/// Content spelled from its marks — a paste — follows the house style, and
+/// uses asterisks where a letter borders the run and `_` would not be read.
+#[test]
+fn spelling_marks_in_the_underscore_house_style() {
+    use markraft_commonmark::{HouseStyle, commonmark_serializer, set_house_style};
+    use markraft_core::MarkSet;
+
+    set_house_style(HouseStyle { emphasis: '_' });
+    let codec = Codec::new();
+    let serializer = commonmark_serializer(&codec.schema);
+    set_house_style(HouseStyle::default());
+
+    let schema = &codec.schema;
+    let spelled = |mark: &str, parts: [&str; 3]| {
+        let marks = MarkSet::from_marks(schema, [schema.mark(mark, Attrs::empty()).unwrap()]);
+        let doc = schema
+            .doc([schema
+                .node(
+                    md::PARAGRAPH,
+                    [
+                        schema.text(parts[0]),
+                        schema.text_marked(parts[1], marks),
+                        schema.text(parts[2]),
+                    ],
+                )
+                .unwrap()])
+            .unwrap();
+        codec.write(&spell_document(&serializer, &doc))
+    };
+    assert_eq!(spelled(md::EM, ["a ", "b", " c"]), "a _b_ c");
+    assert_eq!(spelled(md::STRONG, ["a ", "b", ", c"]), "a __b__, c");
+    assert_eq!(spelled(md::EM, ["foo", "bar", "baz"]), "foo*bar*baz");
+    assert_eq!(spelled(md::STRONG, ["中", "文", "字"]), "中**文**字");
+}
+
 #[test]
 fn deleting_a_delimiter_takes_the_style_with_it() {
     let codec = Codec::new();

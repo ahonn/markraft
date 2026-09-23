@@ -1672,6 +1672,14 @@ impl Render for NotesApp {
                     cx.propagate();
                 }
             }))
+            // The editor's own ⌘* and ⌘( make a list with the schema's marker; the note's
+            // lists take the one the preferences ask for, as the toolbar's do.
+            .capture_action(cx.listener(|this, _: &markraft_gpui::Bullet, w, cx| {
+                this.run_list_shortcut(doc::Block::Bullet, w, cx);
+            }))
+            .capture_action(cx.listener(|this, _: &markraft_gpui::Task, w, cx| {
+                this.run_list_shortcut(doc::Block::Task, w, cx);
+            }))
             // Every keystroke passes here on its way down, which is where the chrome
             // learns that someone is at the window. Space additionally runs the ringed
             // control: it is bound to nothing, so it only ever reaches here when no text

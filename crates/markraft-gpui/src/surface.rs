@@ -66,6 +66,10 @@ const LOADING_FRAME_MAX_HEIGHT: Pixels = px(320.);
 const LOADING_FRAME_MAX_WIDTH: Pixels = px(480.);
 // SF Mono; Menlo is wider and heavier at this size.
 const CODE_FONT: &str = ".AppleSystemUIFontMonospaced";
+/// The face of the editor's own chrome — a pill's label, an emoji atom —,
+/// which stays the system's whatever [`EditorStyle::font_family`] the note's
+/// text is set in.
+const UI_FONT: &str = ".SystemUIFont";
 const CODE_PADDING: Pixels = px(12.);
 /// How far a code block's panel reaches above and below its text. It spells no
 /// fences, focused or not — as in Typora — so this is padding and nothing else,
@@ -2280,7 +2284,7 @@ fn filler_width(font_size: Pixels, text_system: &WindowTextSystem) -> Pixels {
         font_size,
         &[TextRun {
             len: text.len(),
-            font: font(".SystemUIFont"),
+            font: font(UI_FONT),
             color: gpui::transparent_black(),
             background_color: None,
             underline: None,
@@ -2472,9 +2476,12 @@ fn atom_of(
     // sentence's own size, the one in the code font it is and the other in the
     // link colour, which is what says it can be followed.
     let (face, size) = match shape {
-        AtomShape::Pill => (font(".SystemUIFont"), font_size * PILL_SCALE),
+        AtomShape::Pill => (font(UI_FONT), font_size * PILL_SCALE),
         AtomShape::Source => (font(CODE_FONT), font_size),
-        AtomShape::Link | AtomShape::Glyph => (font(".SystemUIFont"), font_size),
+        // A wiki link's label is the row's own text, so it is measured in the
+        // face the row sets it in.
+        AtomShape::Link => (font(style.font_family.clone()), font_size),
+        AtomShape::Glyph => (font(UI_FONT), font_size),
     };
     // A link the host says it cannot open is still drawn as a link, because that is
     // what the source says it is — but not in the colour that invites a click, since
@@ -2627,7 +2634,7 @@ fn text_runs(
         color: Some(style.muted_text),
     });
     if text.synthetic {
-        let mut face = font(".SystemUIFont");
+        let mut face = font(style.font_family.clone());
         if heading.is_some() {
             face.weight = FontWeight::BOLD;
         }
@@ -2663,7 +2670,11 @@ fn text_runs(
         // the underline a link has.
         let footnote = has(types.footnote_reference, marks);
         let is_link = has(types.link, marks) || footnote;
-        let mut face = font(if is_code { CODE_FONT } else { ".SystemUIFont" });
+        let mut face = if is_code {
+            font(CODE_FONT)
+        } else {
+            font(style.font_family.clone())
+        };
         if has(types.strong, marks) || heading.is_some() || header {
             face.weight = FontWeight::BOLD;
         }
@@ -2687,6 +2698,11 @@ fn text_runs(
             face = font(CODE_FONT);
         }
         let widened = placeholder == Some(AtomShape::Pill);
+        // A pill's fillers reserve the width `filler_width` measured in the
+        // chrome face, so they are shaped in it whatever the note's face is.
+        if widened && !is_code {
+            face.family = UI_FONT.into();
+        }
         // An emoji is a character of the sentence, not something to follow.
         let glyph = placeholder == Some(AtomShape::Glyph);
         // Revealed markup — a `**`, a link's `](…)`, an escape's `\` — is
@@ -2820,7 +2836,7 @@ fn source_highlight_runs(
             .map(|(_, part)| *part)
     };
     let run = |len: usize, part: Option<SourceHighlight>| {
-        let mut face = font(".SystemUIFont");
+        let mut face = font(style.font_family.clone());
         let (color, underline) = match part {
             Some(SourceHighlight::Label) => {
                 face.weight = FontWeight::BOLD;
@@ -3004,7 +3020,7 @@ fn ordered_marker(
             font_size,
             &[TextRun {
                 len: text.len(),
-                font: font(".SystemUIFont"),
+                font: font(style.font_family.clone()),
                 color: style.marker,
                 background_color: None,
                 underline: None,
@@ -3039,7 +3055,7 @@ fn footnote_marker(
         font_size,
         &[TextRun {
             len: text.len(),
-            font: font(".SystemUIFont"),
+            font: font(style.font_family.clone()),
             color: style.link,
             background_color: None,
             underline: None,
@@ -3283,7 +3299,7 @@ fn callout_label(
     style: &EditorStyle,
     text_system: &WindowTextSystem,
 ) -> Rc<ShapedLine> {
-    let mut face = font(".SystemUIFont");
+    let mut face = font(style.font_family.clone());
     face.weight = FontWeight::BOLD;
     let text: SharedString = label.to_owned().into();
     Rc::new(text_system.shape_line(
@@ -3843,7 +3859,7 @@ impl Element for EditorSurface {
                     // Presentation only: the empty block still owns hit testing and IME coordinates.
                     let run = TextRun {
                         len: text.len(),
-                        font: font(".SystemUIFont"),
+                        font: font(style.font_family.clone()),
                         color: style.muted_text,
                         background_color: None,
                         underline: None,
@@ -4882,12 +4898,20 @@ mod tests {
 
     /// [`runs_of`] with the document `selection`, which reveals syntax runs.
     fn runs_with(source: &str, selection: Range<usize>) -> (String, Runs, EditorStyle) {
+        runs_styled(source, selection, EditorStyle::notes())
+    }
+
+    /// [`runs_with`] in `style`.
+    fn runs_styled(
+        source: &str,
+        selection: Range<usize>,
+        style: EditorStyle,
+    ) -> (String, Runs, EditorStyle) {
         let state = state_of(source);
         let projection = projection_of(&state);
         let images = crate::images::Images::default();
         let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
         let types = callout_types();
-        let style = EditorStyle::notes();
         let input = ShapeInput {
             images: &images,
             spelling: Some(&spelling),
@@ -4920,6 +4944,19 @@ mod tests {
             .expect("a run covers every byte")
     }
 
+    /// The note's text is set in the style's family; code keeps its own face.
+    #[test]
+    fn prose_takes_the_style_font_family_and_code_keeps_its_face() {
+        let style = EditorStyle {
+            font_family: "Georgia".into(),
+            ..EditorStyle::notes()
+        };
+        let (text, runs, _) = runs_styled("a **b** `c`", 0..0, style);
+        assert_eq!(run_over(&text, &runs, 'a').font.family.as_ref(), "Georgia");
+        assert_eq!(run_over(&text, &runs, 'b').font.family.as_ref(), "Georgia");
+        assert_eq!(run_over(&text, &runs, 'c').font.family.as_ref(), CODE_FONT);
+    }
+
     /// Link definitions are drawn as Typora draws them: in the prose face, the
     /// label bold and the destination underlined. Other raw source stays
     /// monospaced.
@@ -4928,7 +4965,7 @@ mod tests {
         let (text, runs, style) = runs_of("[ref]: https://e.com \"T\"\n[b]: /u\n\nafter");
         assert_eq!(text, "[ref]: https://e.com \"T\"\n[b]: /u");
         let label = run_over(&text, &runs, 'r');
-        assert_eq!(label.font.family.as_ref(), ".SystemUIFont");
+        assert_eq!(label.font.family, style.font_family);
         assert_eq!(label.font.weight, gpui::FontWeight::BOLD);
         assert_eq!(label.color, style.text);
         let destination = run_over(&text, &runs, 'h');

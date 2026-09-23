@@ -59,6 +59,9 @@
 //! Nothing else: key bindings, clipboard handling and the rest belong to a
 //! host, which composes them with this.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use markraft_core::commands::structure::markup_of;
 use markraft_core::commands::{InputRule, InputRuleMatch, input_rules};
 use markraft_core::{
@@ -77,8 +80,30 @@ use crate::textblock::{
 /// Input rules and corrections for the CommonMark preset, and the settling of
 /// the delimiter pair a cursor toggle leaves pending.
 pub fn commonmark_extensions(schema: &Schema) -> Extension {
+    with_rules(schema, commonmark_input_rules())
+}
+
+/// [`commonmark_extensions`], with every input rule answering to `shortcuts`.
+///
+/// The rules match only while the flag is set; the corrections, pending pairs
+/// and atom unfolding stay on regardless, since they keep the tree what its
+/// source says rather than convert anything a writer typed. The flag is read
+/// on every keystroke, so a host can turn Markdown shortcuts off and on
+/// without rebuilding its states.
+pub fn commonmark_extensions_with_shortcuts(
+    schema: &Schema,
+    shortcuts: Arc<AtomicBool>,
+) -> Extension {
+    let rules = commonmark_input_rules().into_iter().map(|rule| {
+        let shortcuts = shortcuts.clone();
+        rule.when(move || shortcuts.load(Ordering::Relaxed))
+    });
+    with_rules(schema, rules)
+}
+
+fn with_rules(schema: &Schema, rules: impl IntoIterator<Item = InputRule>) -> Extension {
     Extension::all([
-        input_rules(commonmark_input_rules()),
+        input_rules(rules),
         corrections(commonmark_corrections(schema)),
         crate::pending::pending_pairs(),
         crate::unfold::unfold_atoms(),

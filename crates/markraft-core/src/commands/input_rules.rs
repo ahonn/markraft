@@ -130,6 +130,19 @@ impl InputRule {
         let len = pattern.chars().count();
         InputRule::new(move |before| (before == pattern).then_some(len), handler)
     }
+
+    /// This rule, matching only while `enabled` answers true.
+    ///
+    /// `enabled` is asked on every typing transaction, so a host can switch a
+    /// set of rules on and off — a "Markdown shortcuts" preference — without
+    /// rebuilding the state's extensions.
+    pub fn when(self, enabled: impl Fn() -> bool + Send + Sync + 'static) -> InputRule {
+        let matcher = self.matcher;
+        InputRule {
+            matcher: Arc::new(move |before| if enabled() { matcher(before) } else { None }),
+            handler: self.handler,
+        }
+    }
 }
 
 /// What [`undo_input_rule`] needs to take a rule back.

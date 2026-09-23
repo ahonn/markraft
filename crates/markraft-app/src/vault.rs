@@ -878,7 +878,7 @@ impl Store {
                 let folder = self.directory.join(relative);
                 reject_symlink_components(&self.directory, &folder)?;
                 fs::create_dir_all(&folder).map_err(|e| describe(&folder, &e))?;
-                let name = file_name(note);
+                let name = file_name(note, library.workspace.new_note_name);
                 (1..)
                     .map(|n| {
                         folder.join(if n == 1 {
@@ -1045,7 +1045,13 @@ fn unsafe_file(path: &Path) -> Result<Option<String>, String> {
         None
     })
 }
-fn file_name(note: &Note) -> String {
+fn file_name(note: &Note, naming: crate::storage::NoteNaming) -> String {
+    if naming == crate::storage::NoteNaming::DateTime {
+        return date_time_name(
+            note.created_at
+                .saturating_add_signed(crate::platform::local_utc_offset() * 1000),
+        );
+    }
     let mut name = safe_stem(&note.title());
     while name.len() > 180 {
         name.pop();
@@ -1056,6 +1062,13 @@ fn file_name(note: &Note) -> String {
         name
     }
 }
+/// A local timestamp as a file name, `2026-09-23 14.05`: sortable, and free of the
+/// `:` a name cannot hold.
+fn date_time_name(local_milliseconds: u64) -> String {
+    let (year, month, day, hour, minute, ..) = civil(local_milliseconds);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}.{minute:02}")
+}
+
 /// What a file may be called, with everything a name cannot carry taken out of it.
 /// The rule lives here rather than in the one caller so that a name the user types
 /// can be held to the same one.
@@ -2064,7 +2077,7 @@ mod tests {
         let name = |source: &str| {
             let mut library = Library::default();
             let id = library.new_note(doc::from_markdown(source));
-            file_name(library.note(&id).unwrap())
+            file_name(library.note(&id).unwrap(), Default::default())
         };
         for (source, expected) in [
             // A wiki link is an atom, and the title reads it as the label the editor
@@ -2101,6 +2114,23 @@ mod tests {
         assert_eq!(
             markdown_files(root.path()),
             [root.path().join("notes/Q3 planning.md")]
+        );
+    }
+    #[test]
+    fn a_new_note_can_be_named_for_when_it_was_made() {
+        assert_eq!(date_time_name(0), "1970-01-01 00.00");
+        assert_eq!(date_time_name(1_790_165_100_000), "2026-09-23 12.05");
+        let root = tempfile::tempdir().unwrap();
+        let (mut store, mut library) = open(root.path());
+        library.workspace.new_note_name = crate::storage::NoteNaming::DateTime;
+        let id = library.new_note(doc::from_markdown("Meeting notes"));
+        let created = library.note(&id).unwrap().created_at;
+        store.save(&library).unwrap();
+        let path = store.files.get(&id).unwrap().path.clone();
+        let local = created.saturating_add_signed(crate::platform::local_utc_offset() * 1000);
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            format!("{}.md", date_time_name(local))
         );
     }
     #[test]

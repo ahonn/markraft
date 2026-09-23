@@ -34,6 +34,10 @@ define_icons! {
     Text => "paintbrush",
     Close => "xmark.circle",
     ChevronDown => "chevron.down",
+    // Clearing a field: the shortcut recorder's chord.
+    ClearField => "xmark.circle.fill",
+    // A pop-up button's pair of chevrons.
+    UpDown => "chevron.up.chevron.down",
     Check => "checkmark",
     Pin => "pin",
     Trash => "trash",
@@ -43,6 +47,11 @@ define_icons! {
     Export => "square.and.arrow.up",
     Document => "doc.text",
     Settings => "gearshape",
+    // The Settings pages for the editor and for the syntax it writes: typing, and the
+    // plain text a note is kept as.
+    Typing => "character.cursor.ibeam",
+    Markdown => "doc.plaintext",
+    About => "info.circle",
     Bold => "bold",
     Italic => "italic",
     Code => "chevron.left.forwardslash.chevron.right",

@@ -91,6 +91,132 @@ pub struct Preferences {
     /// Whether the emoji menu and `:name:` write the emoji character rather than its
     /// shortcode. Off by default, as Typora writes shortcodes.
     pub emoji_characters: bool,
+    /// What Tab inserts in a code block.
+    pub tab_key: TabKey,
+    /// Whether typing `# `, `- `, `> ` and the like at the start of a line turns it
+    /// into that block.
+    pub markdown_shortcuts: bool,
+    /// The typeface of the note's prose; code keeps its monospaced one.
+    pub font: EditorFont,
+    pub line_height: LineHeight,
+    /// The marker a list made from the toolbar or the `/` menu is written with. One
+    /// typed at the start of a line keeps the marker typed.
+    pub bullet_marker: BulletMarker,
+    /// The fence a code block made from the toolbar or the `/` menu is written with.
+    pub code_fence: CodeFence,
+    /// The delimiter ⌘I and ⌘B write: `*` or `_`, doubled for strong.
+    pub emphasis_marker: EmphasisMarker,
+    /// The Settings page last shown, which the window opens on next time.
+    pub settings_page: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TabKey {
+    #[default]
+    Tab,
+    TwoSpaces,
+    FourSpaces,
+}
+
+impl TabKey {
+    pub fn text(self) -> &'static str {
+        match self {
+            TabKey::Tab => "\t",
+            TabKey::TwoSpaces => "  ",
+            TabKey::FourSpaces => "    ",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EditorFont {
+    #[default]
+    System,
+    Serif,
+    Rounded,
+    Mono,
+}
+
+impl EditorFont {
+    /// The family GPUI shapes it with: each is one of the system's own designs, so
+    /// every Mac has it.
+    pub fn family(self) -> &'static str {
+        match self {
+            EditorFont::System => ".SystemUIFont",
+            EditorFont::Serif => ".AppleSystemUIFontSerif",
+            EditorFont::Rounded => ".AppleSystemUIFontRounded",
+            EditorFont::Mono => ".AppleSystemUIFontMonospaced",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LineHeight {
+    Tight,
+    #[default]
+    Normal,
+    Relaxed,
+}
+
+impl LineHeight {
+    /// Line height as a multiple of the text size.
+    pub fn ratio(self) -> f32 {
+        match self {
+            LineHeight::Tight => 1.35,
+            LineHeight::Normal => 1.5,
+            LineHeight::Relaxed => 1.7,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BulletMarker {
+    #[default]
+    Dash,
+    Star,
+    Plus,
+}
+
+impl BulletMarker {
+    pub fn char(self) -> char {
+        match self {
+            BulletMarker::Dash => '-',
+            BulletMarker::Star => '*',
+            BulletMarker::Plus => '+',
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodeFence {
+    #[default]
+    Backticks,
+    Tildes,
+}
+
+impl CodeFence {
+    pub fn char(self) -> char {
+        match self {
+            CodeFence::Backticks => '`',
+            CodeFence::Tildes => '~',
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EmphasisMarker {
+    #[default]
+    Star,
+    Underscore,
+}
+
+impl EmphasisMarker {
+    pub fn char(self) -> char {
+        match self {
+            EmphasisMarker::Star => '*',
+            EmphasisMarker::Underscore => '_',
+        }
+    }
 }
 
 impl Preferences {
@@ -112,6 +238,14 @@ impl Default for Preferences {
             always_on_top: true,
             new_note_hotkey: String::new(),
             emoji_characters: false,
+            tab_key: TabKey::default(),
+            markdown_shortcuts: true,
+            font: EditorFont::default(),
+            line_height: LineHeight::default(),
+            bullet_marker: BulletMarker::default(),
+            code_fence: CodeFence::default(),
+            emphasis_marker: EmphasisMarker::default(),
+            settings_page: String::new(),
         }
     }
 }
@@ -360,6 +494,19 @@ pub enum AttachmentPolicy {
 pub struct WorkspaceSettings {
     pub new_note_directory: PathBuf,
     pub attachments: AttachmentPolicy,
+    /// What a new note's file is called when it is first written.
+    pub new_note_name: NoteNaming,
+}
+
+/// How a new note's file is named. Either way the name is given once, when the note
+/// is first written, and never follows later edits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoteNaming {
+    /// Its first line, as a title.
+    #[default]
+    FirstLine,
+    /// The local date and time it was created, `2026-09-23 14.05`.
+    DateTime,
 }
 
 /// Per-machine state kept outside the notes folder.

@@ -126,6 +126,8 @@ pub struct NotesApp {
     /// What every note editor's emoji menu and `:name:` write, shared so the
     /// preference reaches them all at once.
     emoji: markraft_gpui::EmojiInsertion,
+    /// Whether the Markdown input rules run, shared with every note editor's rules.
+    shortcuts: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Whether someone is at the window, which is what the chrome follows.
     presence: Presence,
     /// The window's own size, and the one resize the app asked for.
@@ -235,6 +237,8 @@ impl NotesApp {
             platform.set_traffic_lights_alpha(window, if pointer_inside { 1. } else { 0. }, false);
         }
         let emoji = markraft_gpui::EmojiInsertion::new(library.preferences.emoji_characters);
+        let shortcuts = std::sync::Arc::new(library.preferences.markdown_shortcuts.into());
+        apply_markdown_style(&library.preferences);
         let mut app = Self {
             library,
             persistence: store.map(Persistence::new),
@@ -257,6 +261,7 @@ impl NotesApp {
             trashed: Vec::new(),
             links: Default::default(),
             emoji,
+            shortcuts,
             toolbar: Toolbar::default(),
             format: Cursor::default(),
             dark,
@@ -734,6 +739,23 @@ impl NotesApp {
         self.show_popover(Popover::FileStatus, cx);
         cx.notify();
     }
+    /// ⌘* or ⌘( in the note: the list the toolbar would make. Anywhere else the key is
+    /// left to whoever has the keyboard.
+    fn run_list_shortcut(
+        &mut self,
+        block: doc::Block,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editor = self.editor().clone();
+        if self.interaction.panel() != Panel::Editor || !editor.focus_handle(cx).is_focused(window)
+        {
+            cx.propagate();
+            return;
+        }
+        cx.stop_propagation();
+        editor.update(cx, |e, cx| e.run_command(&block.command(), cx));
+    }
     pub fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(error) = self.updater.check() {
             self.show(window, cx);
@@ -971,9 +993,14 @@ impl NotesApp {
         self.style_input(cx);
         cx.notify();
     }
-    /// The note editors' style: the theme's, at the text size the preferences ask for.
+    /// The note editors' style: the theme's, in the typeface, size and line height the
+    /// preferences ask for.
     fn editor_style(&self) -> EditorStyle {
-        scaled(notes_style(self.dark), self.library.preferences.text_size)
+        let preferences = &self.library.preferences;
+        let mut style = scaled(notes_style(self.dark), preferences.text_size);
+        style.font_family = preferences.font.family().into();
+        style.line_height_ratio = preferences.line_height.ratio();
+        style
     }
     fn restyle_editors(&self, cx: &mut Context<Self>) {
         let style = self.editor_style();
@@ -1883,6 +1910,18 @@ fn apply_platform_preferences(
     let toggle = platform.set_shortcut(Shortcut::Toggle, &preferences.hotkey);
     let new_note = platform.set_shortcut(Shortcut::NewNote, &preferences.new_note_hotkey);
     on_top.and(toggle).and(new_note)
+}
+
+/// Tell the Markdown writer which markers the preferences ask new syntax to be spelled
+/// with. Both halves keep them per thread, and the editors all run on this one.
+fn apply_markdown_style(preferences: &crate::storage::Preferences) {
+    crate::doc::set_markers(crate::doc::Markers {
+        bullet: preferences.bullet_marker.char(),
+        fence: preferences.code_fence.char(),
+    });
+    markraft_commonmark::set_house_style(markraft_commonmark::HouseStyle {
+        emphasis: preferences.emphasis_marker.char(),
+    });
 }
 
 /// `style` with its text at `size` points: every size and gap the body sets grows with

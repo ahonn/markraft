@@ -113,6 +113,7 @@ mod extensions;
 mod fit;
 pub mod fragment;
 mod guard;
+mod house;
 pub mod html;
 mod inline;
 mod kind;
@@ -136,8 +137,12 @@ pub use comrak;
 
 pub use callout::{Callout, read_callout};
 pub use enter::block_from_line;
-pub use extensions::{commonmark_corrections, commonmark_extensions, commonmark_input_rules};
+pub use extensions::{
+    commonmark_corrections, commonmark_extensions, commonmark_extensions_with_shortcuts,
+    commonmark_input_rules,
+};
 pub use fragment::open_fragment;
+pub use house::{HouseStyle, house_style, set_house_style};
 pub use html::{
     HtmlParser, HtmlRule, HtmlRules, HtmlSerializer, commonmark_html_rules,
     commonmark_html_serializer,
