@@ -1177,3 +1177,39 @@ fn enter_in_an_empty_pair_at_the_end_of_a_paragraph() {
     assert_eq!(block_source(&split, 1), "Para four echo.");
     assert_eq!(block_source(&split, 2), "");
 }
+
+/// An edit made while the caret keeps a picture's spelling as text undoes to
+/// that text, and the step before it still undoes: the history holds nothing
+/// the correction changed behind its back.
+#[test]
+fn undo_gives_back_a_spelling_the_caret_kept() {
+    use markraft_core::commands::{insert_text, run_command};
+    use markraft_core::{Change, Fragment, Slice, TransactionSpec};
+    let codec = Codec::new();
+    let mut state = editor(&codec, "x", Selection::cursor(at(1)));
+    for character in " ![a](b.png)".chars() {
+        state = run_command(&state, &insert_text(&character.to_string()))
+            .expect("typing applies")
+            .expect("a transaction")
+            .state()
+            .clone();
+    }
+    assert_saves(&codec, &state, "x ![a](b.png)");
+    let slice = Slice::from_fragment(Fragment::from_node(codec.schema.text("X")));
+    let replaced = state
+        .update([TransactionSpec::new()
+            .changes([Change::replace(at(2), at(13), slice)])
+            .user_event("input.replace")])
+        .expect("the edit applies")
+        .state()
+        .clone();
+    assert_saves(&codec, &replaced, "x X");
+    let undo_once = |state: &EditorState| {
+        let spec = undo(state).expect("something to undo");
+        state.update([spec]).expect("undo applies").state().clone()
+    };
+    let back = undo_once(&replaced);
+    assert_saves(&codec, &back, "x ![a](b.png)");
+    let typed_away = undo_once(&back);
+    assert_saves(&codec, &typed_away, "x");
+}

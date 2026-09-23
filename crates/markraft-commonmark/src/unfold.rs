@@ -56,9 +56,18 @@ pub(crate) fn unfold_atoms() -> Extension {
 
 /// Whether the correction should leave a spelling the caret touches as text in
 /// `tr`: one that lets the caret into an atom, one that only moves the caret,
-/// or one that types.
+/// one that types, or an undo or a redo.
+///
+/// An undo puts back the caret the undone edit started from, so a spelling it
+/// restores is one the caret was in, which was text then. Folding it would
+/// append a change the history never recorded, and the next undo, written
+/// against the text, would no longer apply.
 pub(crate) fn keeps_spelling_at_caret(tr: &Transaction) -> bool {
-    tr.annotation(&UNFOLDS) == Some(&true) || !tr.doc_changed() || tr.is_user_event("input.type")
+    tr.annotation(&UNFOLDS) == Some(&true)
+        || !tr.doc_changed()
+        || tr.is_user_event("input.type")
+        || tr.is_user_event("undo")
+        || tr.is_user_event("redo")
 }
 
 /// Whether `node` is an atom a reader wrote as text: one the caret should find
