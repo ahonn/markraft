@@ -1,8 +1,10 @@
 //! AccessKit text coordinates are selectable units, not UTF-16 offsets.
+use crate::conceal::{self, Reveal};
 use crate::surface::LayoutLine;
 use gpui::{A11ySubtreeBuilder, App, Bounds, Entity, Pixels, Role, Window, accesskit};
 use markraft_core::projection::Projection;
 use markraft_core::{EditorState, Selection};
+use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Default)]
@@ -119,6 +121,37 @@ struct TextRun {
     cell: Option<(usize, usize)>,
 }
 
+/// What one visual row shows of a line, given as `pieces` over its projected
+/// text and the `char` range `inner` of it the row holds, with the projection
+/// offset before each shown `char`.
+///
+/// A concealed run the row hides adds nothing; one it substitutes adds what it
+/// displays, every character of which stands before the whole run, so a
+/// selection can only take or leave it whole.
+fn shown_row(pieces: &[conceal::Piece<'_>], inner: Range<usize>) -> (String, Vec<usize>) {
+    let mut value = String::new();
+    let mut before = Vec::new();
+    for piece in pieces {
+        if piece.own {
+            let from = piece.source.start.max(inner.start);
+            let to = piece.source.end.min(inner.end);
+            for (index, c) in piece.text.chars().enumerate() {
+                let at = piece.source.start + index;
+                if (from..to).contains(&at) {
+                    value.push(c);
+                    before.push(at);
+                }
+            }
+        } else if inner.contains(&piece.source.start) {
+            for c in piece.text.chars() {
+                value.push(c);
+                before.push(piece.source.start);
+            }
+        }
+    }
+    (value, before)
+}
+
 // AccessKit uses u8 for each selectable unit's UTF-8 length. An unusually long
 // combining sequence cannot fit; expose its scalars and clamp incoming requests
 // through the projection so editing still cannot split the grapheme.
@@ -149,6 +182,12 @@ impl AccessibleText {
     ) {
         let doc = state.doc();
         self.selection = (state.selection().anchor(doc), state.selection().head(doc));
+        // What a reader hears is what the screen shows: a concealed span reads
+        // as what it displays, and as its source while the caret reveals it.
+        let reveal = Reveal::at(
+            state.selection().from(doc)..state.selection().to(doc),
+            markraft_core::composition_range(state).map(|range| range.from..range.to),
+        );
         self.runs.clear();
         self.controls.clear();
         let last_line = projection.line_count().saturating_sub(1);
@@ -156,7 +195,16 @@ impl AccessibleText {
             let Some(line) = projection.line(row.index) else {
                 continue;
             };
-            let text = projection.line_text(row.index).unwrap_or_default();
+            let source = projection.line_text(row.index).unwrap_or_default();
+            let shown = conceal::shown(types.syntax, line, &reveal);
+            let pieces = conceal::pieces(line, source, &shown);
+            let prose: String = {
+                let shown = conceal::shown(types.syntax, line, &Reveal::nothing());
+                conceal::pieces(line, source, &shown)
+                    .iter()
+                    .map(|piece| piece.text)
+                    .collect()
+            };
             for run in &line.runs {
                 let markraft_core::projection::RunContent::Atom(node) = &run.content else {
                     continue;
@@ -210,10 +258,10 @@ impl AccessibleText {
                 self.controls.push(AccessibleControl {
                     node_id: None,
                     action: ControlAction::ToggleTask(row.from),
-                    label: if text.is_empty() {
+                    label: if prose.is_empty() {
                         "Task".into()
                     } else {
-                        text.into()
+                        prose.clone()
                     },
                     checked: Some(checked),
                     bounds: accessible_bounds(bounds, scale),
@@ -252,13 +300,10 @@ impl AccessibleText {
                 }
             }
             for (visual, inner) in row.accessible_rows().into_iter().enumerate() {
-                let mut value: String = text
-                    .chars()
-                    .skip(inner.start)
-                    .take(inner.end - inner.start)
-                    .collect();
+                let (mut value, mut before) = shown_row(&pieces, inner.clone());
                 if inner.end == line.len() && row.index < last_line {
                     value.push('\n');
+                    before.push(inner.end);
                 }
                 let x = f32::from(row.origin.x) * scale;
                 let y = f32::from(row.origin.y + row.line_height * visual as f32) * scale;
@@ -266,7 +311,11 @@ impl AccessibleText {
                 let positions = offsets
                     .iter()
                     .map(|&byte| {
-                        let offset = (inner.start + value[..byte].chars().count()).min(inner.end);
+                        let offset = before
+                            .get(value[..byte].chars().count())
+                            .copied()
+                            .unwrap_or(inner.end)
+                            .min(inner.end);
                         line.offset_to_pos(offset)
                             .expect("a visible offset inside the line")
                     })
@@ -613,6 +662,71 @@ mod tests {
                 html_label(node.attrs().get("source").unwrap().as_str().unwrap())
             );
         }
+    }
+
+    /// A screen reader reads what the screen shows: concealed delimiters are
+    /// left out, an entity reads as its character and spans the whole entity,
+    /// and the span the caret is in reads as its source.
+    #[test]
+    fn accessible_text_reads_concealed_runs_as_they_are_shown() {
+        let state = crate::typeahead::tests::state_of("x **ab** &amp; y");
+        let types = crate::DocTypes::from_schema_names(
+            state.schema(),
+            &markraft_commonmark::commonmark_doc_type_names(),
+        );
+        let read = |state: &EditorState| {
+            let projection = markraft_core::projection::projection_of(state);
+            let style = crate::EditorStyle::notes();
+            let images = crate::images::Images::default();
+            let text_system = gpui::WindowTextSystem::new(std::sync::Arc::new(
+                gpui::TextSystem::new(std::sync::Arc::new(gpui::NoopTextSystem::new())),
+            ));
+            let doc = state.doc();
+            let rows = crate::surface::shape(
+                &crate::surface::ShapeInput {
+                    doc,
+                    types: &types,
+                    projection: &projection,
+                    style: &style,
+                    single_line: false,
+                    images: &images,
+                    wiki: None,
+                    protected: None,
+                    selection: state.selection().from(doc)..state.selection().to(doc),
+                    spelling: None,
+                    composition: None,
+                },
+                gpui::px(400.),
+                &text_system,
+            );
+            let mut text = AccessibleText::default();
+            text.update(&projection, state, &types, &rows, 1.);
+            let run = text.runs.remove(0);
+            let line = &projection.lines()[0];
+            let offsets: Vec<usize> = run
+                .positions
+                .iter()
+                .map(|pos| line.pos_to_offset(*pos).unwrap())
+                .collect();
+            (run.text, offsets)
+        };
+        let projection = markraft_core::projection::projection_of(&state);
+        let at = |offset| projection.lines()[0].offset_to_pos(offset).unwrap();
+        let away = state
+            .update([markraft_core::TransactionSpec::new().selection(Selection::cursor(at(0)))])
+            .unwrap()
+            .state()
+            .clone();
+        let (text, offsets) = read(&away);
+        assert_eq!(text, "x ab & y");
+        // x, space, a, b, space, the entity, space, y — and the end.
+        assert_eq!(offsets, vec![0, 1, 4, 5, 8, 9, 14, 15, 16]);
+        let inside = state
+            .update([markraft_core::TransactionSpec::new().selection(Selection::cursor(at(5)))])
+            .unwrap()
+            .state()
+            .clone();
+        assert_eq!(read(&inside).0, "x **ab** & y");
     }
 
     #[test]

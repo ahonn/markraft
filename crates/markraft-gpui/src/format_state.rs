@@ -1,7 +1,8 @@
 //! What the selection is formatted as, for a host drawing a toolbar.
 
+use crate::conceal::{Reveal, Shown};
 use markraft_core::projection::{Line, Projection};
-use markraft_core::{Attrs, EditorState, MarkSet, NodeTypeId};
+use markraft_core::{Attrs, EditorState, MarkSet, MarkTypeId, NodeTypeId};
 
 /// The marks every part of the selection carries, or the marks new text would
 /// get at a cursor.
@@ -12,31 +13,46 @@ use markraft_core::{Attrs, EditorState, MarkSet, NodeTypeId};
 /// of the mark sets of the inline content it actually covers: a block whose
 /// covered stretch is empty contributes nothing, so selecting to the start of
 /// the next block does not clear the toolbar.
-pub(crate) fn active_marks(state: &EditorState) -> MarkSet {
+///
+/// What a reader sees is what counts. A run the kind conceals with nothing to
+/// display — a delimiter, an escape's backslash — is spelling, not content,
+/// so it is left out of the intersection; and the conceal role `syntax` is
+/// never reported as a format of its own.
+pub(crate) fn active_marks(state: &EditorState, syntax: Option<MarkTypeId>) -> MarkSet {
+    let without_role = |marks: MarkSet| match syntax {
+        Some(role) => marks.filter(|mark| mark.ty != role),
+        None => marks,
+    };
     let doc = state.doc();
     let selection = state.selection();
     if selection.is_cursor() {
         if let Some(marks) = selection.stored_marks() {
-            return marks.clone();
+            return without_role(marks.clone());
         }
         return doc
             .resolve(selection.head(doc))
-            .map(|resolved| resolved.marks(state.schema()))
+            .map(|resolved| without_role(resolved.marks(state.schema())))
             .unwrap_or_else(|_| MarkSet::empty());
     }
     let (from, to) = (selection.from(doc), selection.to(doc));
     let mut common: Option<MarkSet> = None;
     let projection = markraft_core::projection::projection_of(state);
-    for run in projection.lines().iter().flat_map(|line| &line.runs) {
-        if run.from.max(from) >= run.to.min(to) {
+    for line in projection.lines() {
+        if line.to <= from || line.from >= to {
             continue;
         }
-        common = Some(match common.take() {
-            None => run.marks.clone(),
-            Some(previous) => previous.filter(|mark| run.marks.contains(mark)),
-        });
+        let shown = crate::conceal::shown(syntax, line, &Reveal::nothing());
+        for (run, shown) in line.runs.iter().zip(shown) {
+            if run.from.max(from) >= run.to.min(to) || shown == Shown::Hidden {
+                continue;
+            }
+            common = Some(match common.take() {
+                None => run.marks.clone(),
+                Some(previous) => previous.filter(|mark| run.marks.contains(mark)),
+            });
+        }
     }
-    common.unwrap_or_else(MarkSet::empty)
+    common.map(without_role).unwrap_or_else(MarkSet::empty)
 }
 
 /// The type and attributes every textblock the selection touches shares, or
@@ -143,6 +159,10 @@ mod tests {
             .clone()
     }
 
+    fn syntax() -> Option<markraft_core::MarkTypeId> {
+        commonmark_schema().mark_id(md::SYNTAX)
+    }
+
     fn has(marks: &MarkSet, schema: &Schema, name: &str) -> bool {
         schema
             .mark_id(name)
@@ -164,7 +184,7 @@ mod tests {
             .expect("a transaction")
             .state()
             .clone();
-        let marks = active_marks(&state);
+        let marks = active_marks(&state, syntax());
         assert!(has(&marks, &schema, md::STRONG));
         assert!(has(&marks, &schema, md::CODE));
         assert_eq!(state.doc().content_size(), 2);
@@ -184,12 +204,39 @@ mod tests {
         let ef = plain.find("ef").expect("ef");
         let pos = |offset| projection.line_offset_to_pos(0, offset).unwrap();
         let both = select(&state, pos(ab), pos(ab + 2));
-        assert!(active_marks(&both).contains_type(em));
-        assert!(active_marks(&both).contains_type(strong));
-        assert!(active_marks(&select(&state, pos(ab + 2), pos(ab))).contains_type(strong));
-        assert!(!active_marks(&select(&state, pos(ab), pos(cd + 2))).contains_type(strong));
-        assert!(active_marks(&select(&state, pos(ef), pos(ef + 2))).contains_type(em));
-        assert!(active_marks(&select(&state, pos(ef + 2), pos(ef))).contains_type(em));
+        assert!(active_marks(&both, syntax()).contains_type(em));
+        assert!(active_marks(&both, syntax()).contains_type(strong));
+        assert!(
+            active_marks(&select(&state, pos(ab + 2), pos(ab)), syntax()).contains_type(strong)
+        );
+        assert!(
+            !active_marks(&select(&state, pos(ab), pos(cd + 2)), syntax()).contains_type(strong)
+        );
+        assert!(active_marks(&select(&state, pos(ef), pos(ef + 2)), syntax()).contains_type(em));
+        assert!(active_marks(&select(&state, pos(ef + 2), pos(ef)), syntax()).contains_type(em));
+    }
+
+    /// The characters that spell a style are not a format: a caret just past
+    /// an opening delimiter, or a range over a span delimiters and all, reports
+    /// the style and never the conceal role itself.
+    #[test]
+    fn concealed_spelling_is_not_a_format() {
+        let (schema, state) = state_of("x **ab** y");
+        let strong = schema.mark_id(md::STRONG).unwrap();
+        let role = syntax().unwrap();
+        let projection = projection_of(&state);
+        let pos = |offset| projection.line_offset_to_pos(0, offset).unwrap();
+        let caret = select(&state, pos(4), pos(4));
+        let marks = active_marks(&caret, syntax());
+        assert!(marks.contains_type(strong));
+        assert!(!marks.contains_type(role));
+        let span = select(&state, pos(2), pos(8));
+        let marks = active_marks(&span, syntax());
+        assert!(marks.contains_type(strong));
+        assert!(!marks.contains_type(role));
+        // Only the delimiters: nothing a reader sees is selected.
+        let delimiters = select(&state, pos(2), pos(4));
+        assert!(active_marks(&delimiters, syntax()).is_empty());
     }
 
     #[test]
@@ -200,7 +247,7 @@ mod tests {
         let projection = projection_of(&state);
         let para_start = projection.lines()[1].from;
         let to_next_block = select(&state, 1, para_start);
-        assert!(active_marks(&to_next_block).contains_type(strong));
+        assert!(active_marks(&to_next_block, syntax()).contains_type(strong));
         assert_eq!(
             active_block_type(&to_next_block, &projection).map(|(ty, _)| ty),
             Some(heading)
@@ -212,7 +259,7 @@ mod tests {
         );
         // One character into the paragraph and the two formats differ.
         let into_next = select(&state, 1, para_start + 1);
-        assert!(!active_marks(&into_next).contains_type(strong));
+        assert!(!active_marks(&into_next, syntax()).contains_type(strong));
         assert_eq!(active_block_type(&into_next, &projection), None);
     }
 
@@ -238,7 +285,7 @@ mod tests {
         let paragraph = schema.node_id(md::PARAGRAPH).unwrap();
         let projection = projection_of(&state);
         let all = select(&state, 0, state.doc().content_size());
-        assert!(active_marks(&all).contains_type(strong));
+        assert!(active_marks(&all, syntax()).contains_type(strong));
         assert_eq!(
             active_block_type(&all, &projection).map(|(ty, _)| ty),
             Some(paragraph)
@@ -246,6 +293,6 @@ mod tests {
         // A cursor in the empty middle paragraph carries nothing.
         let empty_line = projection.lines()[1].from;
         let cursor = select(&state, empty_line, empty_line);
-        assert!(active_marks(&cursor).is_empty());
+        assert!(active_marks(&cursor, syntax()).is_empty());
     }
 }

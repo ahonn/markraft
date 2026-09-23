@@ -8,7 +8,7 @@
 //! through on their own because the schema offers them nothing to do.
 
 use gpui::{Pixels, px};
-use markraft_core::{Codecs, Node, NodeTypeSpec, Schema, SchemaSpec, Slice};
+use markraft_core::{Codecs, MarkTypeId, Node, NodeTypeSpec, Schema, SchemaSpec, Slice};
 use std::sync::LazyLock;
 use std::{borrow::Cow, ops::Range};
 
@@ -40,12 +40,18 @@ pub(crate) fn text(text: &str, single_line: bool) -> Cow<'_, str> {
 ///
 /// The host's own plain-text flavour is preferred, because a kind that keeps
 /// the characters spelling a mark in the document leaves them out of its prose
-/// and this schema has no mark to hang them on.
-pub(crate) fn document(doc: &Node, from: &Schema, codecs: Option<&dyn Codecs>) -> Node {
+/// and this schema has no mark to hang them on. Without one, each run marked
+/// with the conceal role `syntax` reads as what it displays.
+pub(crate) fn document(
+    doc: &Node,
+    from: &Schema,
+    syntax: Option<MarkTypeId>,
+    codecs: Option<&dyn Codecs>,
+) -> Node {
     let slice = Slice::new(doc.content().clone(), 0, 0);
     let plain = match codecs {
         Some(codecs) => codecs.to_text(&slice),
-        None => markraft_core::projection::slice_to_plain_text(from, &slice),
+        None => crate::conceal::slice_text(from, syntax, &slice),
     };
     let flat = text(&plain, true).into_owned();
     document_from_text(&flat)
@@ -123,7 +129,7 @@ mod tests {
         let rich = commonmark_schema();
         let doc = from_markdown(&rich, "# Title\n\n**bold**").expect("valid Markdown");
         let codecs = markraft_commonmark::CommonMarkCodecs::new(rich.clone());
-        let flattened = document(&doc, &rich, Some(&codecs));
+        let flattened = document(&doc, &rich, None, Some(&codecs));
         let projection = markraft_core::projection::Projection::of(&flattened, schema());
         assert_eq!(projection.plain_text(), "Title bold");
         assert_eq!(projection.line_count(), 1);
@@ -132,6 +138,18 @@ mod tests {
                 .runs
                 .iter()
                 .all(|run| run.marks.is_empty())
+        );
+        // Without codecs the view's own reading of the conceal role flattens
+        // it the same way.
+        let syntax = crate::types::DocTypes::from_schema_names(
+            &rich,
+            &markraft_commonmark::commonmark_doc_type_names(),
+        )
+        .syntax;
+        let bare = document(&doc, &rich, syntax, None);
+        assert_eq!(
+            markraft_core::projection::Projection::of(&bare, schema()).plain_text(),
+            "Title bold"
         );
         // The schema itself is what keeps a second block out.
         assert!(schema().node_id("heading").is_none());

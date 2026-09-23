@@ -11,6 +11,7 @@ mod caret;
 mod clipboard;
 pub mod commands;
 mod completion;
+mod conceal;
 mod emoji;
 mod extension;
 mod format_state;
@@ -804,7 +805,7 @@ impl EditorView {
 
     /// Marks shared by all selected text, or the marks new text would get.
     pub fn active_marks(&self) -> MarkSet {
-        format_state::active_marks(&self.state)
+        format_state::active_marks(&self.state, self.types.syntax)
     }
     /// The type and attributes every selected block shares; mixed formats give `None`.
     pub fn active_block_type(&self) -> Option<(NodeTypeId, Attrs)> {
@@ -814,7 +815,12 @@ impl EditorView {
     /// Replace the document, discarding the undo history with it.
     pub fn replace_doc(&mut self, doc: Node, cx: &mut Context<Self>) {
         let doc = if self.single_line {
-            single_line::document(&doc, &self.state.schema().clone(), self.codecs.as_deref())
+            single_line::document(
+                &doc,
+                &self.state.schema().clone(),
+                self.types.syntax,
+                self.codecs.as_deref(),
+            )
         } else {
             doc
         };
@@ -1463,7 +1469,7 @@ impl EditorView {
             // Without codecs there is only one flavour to write, and a
             // single-line editor holds nothing but text anyway.
             None => {
-                let text = markraft_core::projection::slice_to_plain_text(&schema, &slice);
+                let text = conceal::slice_text(&schema, self.types.syntax, &slice);
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
         }

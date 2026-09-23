@@ -78,8 +78,10 @@ pub struct DocTypeNames {
     /// The mark a kind puts on the characters that *spell* rather than say —
     /// a run that marks up the text around it, or stands for something else,
     /// where the kind keeps that spelling in the document's text. A view
-    /// conceals such a run and reveals it while the caret or a composition
-    /// touches the span it belongs to.
+    /// conceals such a run and reveals it while the selection, the caret or a
+    /// composition touches the span it belongs to — anywhere from the start of
+    /// the span's first run to the end of its last one in the textblock, a
+    /// caret at either edge included.
     ///
     /// The mark carries two attributes:
     ///

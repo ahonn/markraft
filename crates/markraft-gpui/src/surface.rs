@@ -12,6 +12,7 @@
 //! primitive alike are drawn as the source they hold, in the code font, so a
 //! note shows exactly what it will be written back as.
 
+use crate::conceal::{Reveal, Shown};
 use crate::style::EditorStyle;
 use crate::types::DocTypes;
 use crate::{CaretShape, EditorView};
@@ -175,23 +176,25 @@ struct InlineAtom {
 ///
 /// Every geometry query the view answers is in projection offsets, and the rows
 /// are shaped from the display text, so the two spaces have to be mapped onto
-/// each other. An atom *widens* one projected character into a label; a hidden
-/// syntax run — the characters that spell a mark — *collapses* several
-/// projected characters to none.
+/// each other. An atom *widens* one projected character into a label; a
+/// concealed run — characters that spell rather than say, see
+/// [`crate::conceal`] — *collapses* to nothing, or is *substituted* by what it
+/// displays, which is as long as it happens to be.
 #[derive(Clone, Copy)]
 struct Widening {
     /// `char` offset of the remapped span within the projection line.
     source: usize,
-    /// How many projection `char`s the span covers. Atoms are one; a collapsed
-    /// delimiter run is the length of that run.
+    /// How many projection `char`s the span covers. Atoms are one; a
+    /// concealed run is the length of that run.
     source_len: usize,
     /// `char` offset of the replacement within the display text.
     display: usize,
     /// How many `char`s the replacement takes. Zero when the span is hidden.
     len: usize,
-    /// What the placeholder holds, which is what says whether its own
-    /// characters reach the screen. Ignored for collapses.
-    shape: AtomShape,
+    /// What an atom's placeholder holds, which is what says whether its own
+    /// characters reach the screen. `None` for a concealed run, whose
+    /// replacement is drawn as the text around it is.
+    shape: Option<AtomShape>,
     /// A wiki link the host says it cannot open. Decided while the atom is shaped,
     /// because that is where the node is; read where the row's text is coloured,
     /// because a link's label is the row's own text rather than the atom's.
@@ -439,8 +442,8 @@ impl LayoutLine {
                 shift += widening.len as isize - widening.source_len as isize;
                 continue;
             }
-            // Inside a remapped span: collapsed delimiters park at the display
-            // point; an expanded atom keeps the left edge.
+            // Inside a remapped span: a collapsed run parks at the display
+            // point; an atom or a substituted run keeps its left edge.
             return widening.display;
         }
         offset
@@ -449,8 +452,9 @@ impl LayoutLine {
     }
 
     /// The projection `char` offset a display offset stands at. Inside a
-    /// placeholder the nearer of the atom's two edges wins, so a click on its
-    /// right half puts the caret after it. A collapsed span has no interior.
+    /// replacement the nearer of the span's two edges wins, so a click on the
+    /// right half of an atom — or of the `&` an entity shows — puts the caret
+    /// after the whole span. A collapsed span has no interior.
     fn to_source(&self, display: usize) -> usize {
         let mut shift: isize = 0;
         for widening in &self.widenings {
@@ -467,7 +471,7 @@ impl LayoutLine {
                 shift += delta;
             } else if display > widening.display {
                 let past = display - widening.display >= widening.len.div_ceil(2);
-                return widening.source + usize::from(past);
+                return widening.source + if past { widening.source_len } else { 0 };
             } else {
                 break;
             }
@@ -1685,6 +1689,7 @@ fn display_text(
     // An image that has its line to itself is drawn at full size; one sharing
     // its line with text has to stay within a row.
     let alone = line.runs.len() == 1 && line.len() == 1;
+    let shown = crate::conceal::shown(input.types.syntax, line, &reveal_of(input));
     let mut text = String::with_capacity(source.len());
     let mut run_bytes = Vec::with_capacity(line.runs.len());
     let mut widenings = Vec::new();
@@ -1733,27 +1738,43 @@ fn display_text(
                     source_len: 1,
                     display,
                     len: count,
-                    shape: atom.shape,
+                    shape: Some(atom.shape),
                     broken: atom.broken,
                 });
                 display += count;
             }
-            None if hide_syntax_run(input, line, index_in_line) => {
-                widenings.push(Widening {
-                    source: run.char_from,
-                    source_len: chars,
-                    display,
-                    len: 0,
-                    shape: AtomShape::Pill,
-                    broken: false,
-                });
-                run_bytes.push(0);
-            }
-            None => {
-                text.push_str(slice);
-                run_bytes.push(len);
-                display += chars;
-            }
+            None => match shown.get(index_in_line).copied().unwrap_or(Shown::Source) {
+                Shown::Hidden => {
+                    widenings.push(Widening {
+                        source: run.char_from,
+                        source_len: chars,
+                        display,
+                        len: 0,
+                        shape: None,
+                        broken: false,
+                    });
+                    run_bytes.push(0);
+                }
+                Shown::Display(shows) => {
+                    let count = shows.chars().count();
+                    text.push_str(shows);
+                    run_bytes.push(shows.len());
+                    widenings.push(Widening {
+                        source: run.char_from,
+                        source_len: chars,
+                        display,
+                        len: count,
+                        shape: None,
+                        broken: false,
+                    });
+                    display += count;
+                }
+                Shown::Source | Shown::Revealed => {
+                    text.push_str(slice);
+                    run_bytes.push(len);
+                    display += chars;
+                }
+            },
         }
     }
     DisplayText {
@@ -1766,95 +1787,33 @@ fn display_text(
     }
 }
 
-/// Whether a syntax run should be omitted from the display text.
-///
-/// A delimiter is hidden while the caret is outside *its own* span. The span is
-/// the run of neighbouring runs that carry the same style marks: a line may hold
-/// several spans of one style, and `**a** and **b**` opens only the one the
-/// caret is in — asking whether any run on the line shares the mark would open
-/// every bold word at once.
-fn hide_syntax_run(input: &ShapeInput<'_>, line: &Line, index: usize) -> bool {
-    let Some(syntax) = input.types.syntax else {
-        return false;
-    };
-    let Some(run) = line.runs.get(index) else {
-        return false;
-    };
-    let Some(mark) = run.marks.get(syntax) else {
-        return false;
-    };
-    // A run that stands for something — an entity — shows its spelling until
-    // the view can draw what it displays instead.
-    let displays = mark
-        .attrs
-        .get("display")
-        .and_then(|value| value.as_str())
-        .is_some_and(|display| !display.is_empty());
-    if displays {
-        return false;
-    }
-    let style: Vec<_> = run
-        .marks
-        .iter()
-        .filter(|mark| mark.ty != syntax)
-        .map(|mark| mark.ty)
-        .collect();
-    // A pair with nothing between it yet — what a toggle at a cursor leaves —
-    // carries no style mark, so it stands for itself alone.
-    let (mut first, mut last) = (index, index);
-    if !style.is_empty() {
-        let covers = |run: &Run| style.iter().all(|ty| run.marks.contains_type(*ty));
-        while first > 0 && covers(&line.runs[first - 1]) {
-            first -= 1;
-        }
-        while last + 1 < line.runs.len() && covers(&line.runs[last + 1]) {
-            last += 1;
-        }
-    }
-    let (Some(from), Some(to)) = (
-        line.offset_to_pos(line.runs[first].char_from),
-        line.offset_to_pos(line.runs[last].char_to),
-    ) else {
-        return false;
-    };
-    let touches = |range: &Range<usize>| {
-        if range.start == range.end {
-            range.start >= from && range.start <= to
-        } else {
-            range.start < to && range.end > from
-        }
-    };
-    // An input method's marked text is being edited as much as the caret is.
-    if input.composition.as_ref().is_some_and(touches) {
-        return false;
-    }
-    !touches(&input.selection)
+/// What reveals a concealed span while this input is shaped.
+fn reveal_of(input: &ShapeInput<'_>) -> Reveal {
+    Reveal::at(input.selection.clone(), input.composition.clone())
 }
 
-/// Which delimiter runs are open, as the shaping cache's own key.
+/// Which concealed spans and atoms stand revealed, as the shaping cache's own
+/// key.
 ///
 /// Shaping is the view's largest cost and it now depends on where the caret
-/// stands, but almost every caret move leaves every delimiter exactly as it was.
+/// stands, but almost every caret move leaves every span exactly as it was.
 /// Walking the runs is orders of magnitude cheaper than laying the text out
 /// again, so the rows are kept until the *revealed set* changes rather than
 /// until the selection does.
 pub(crate) fn reveal_key(input: &ShapeInput<'_>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let reveal = reveal_of(input);
     for line in input.projection.lines() {
-        for (index, run) in line.runs.iter().enumerate() {
-            if !hide_syntax_run(input, line, index) {
-                run.from.hash(&mut hasher);
-            }
-            if matches!(run.content, RunContent::Atom(_)) {
-                let touches = |range: &Range<usize>| {
-                    if range.start == range.end {
-                        range.start >= run.from && range.start <= run.to
-                    } else {
-                        range.start < run.to && range.end > run.from
-                    }
-                };
-                if touches(&input.selection) || input.composition.as_ref().is_some_and(touches) {
+        // Only a line the selection or the marked text reaches can have
+        // anything revealed on it.
+        if reveal.touches(line.from, line.to) {
+            let shown = crate::conceal::shown(input.types.syntax, line, &reveal);
+            for (run, shown) in line.runs.iter().zip(shown) {
+                if shown == Shown::Revealed {
+                    run.from.hash(&mut hasher);
+                }
+                if matches!(run.content, RunContent::Atom(_)) && reveal.touches(run.from, run.to) {
                     run.from.hash(&mut hasher);
                     1u8.hash(&mut hasher);
                 }
@@ -2258,7 +2217,7 @@ fn text_runs(
             .widenings
             .iter()
             .find(|widening| widening.source == run.char_from);
-        let placeholder = widening.map(|widening| widening.shape);
+        let placeholder = widening.and_then(|widening| widening.shape);
         let source_atom = placeholder == Some(AtomShape::Source);
         if source_atom {
             face = font(CODE_FONT);
@@ -4267,7 +4226,7 @@ mod tests {
             source_len: 1,
             display: 2,
             len: 5,
-            shape: AtomShape::Pill,
+            shape: Some(AtomShape::Pill),
             broken: false,
         }];
         for offset in 0..=row.char_len {
@@ -5113,6 +5072,139 @@ mod tests {
             rows[0].widenings.iter().filter(|w| w.len == 0).count(),
             2,
             "the marked span opens even though the selection is elsewhere"
+        );
+    }
+
+    /// What a laid-out line shows, row by row.
+    fn shown_text(line: &LayoutLine) -> Vec<&str> {
+        line.rows.iter().map(LayoutRow::text).collect()
+    }
+
+    /// A caret at the `offset`th source character of the first line.
+    fn caret_at(source: &str, offset: usize) -> std::ops::Range<usize> {
+        let state = state_of(source);
+        let pos = projection_of(&state).lines()[0]
+            .offset_to_pos(offset)
+            .expect("a position in the line");
+        pos..pos
+    }
+
+    /// An entity away from the caret is drawn as the character it stands for,
+    /// and every offset around it still maps to a caret stop: a click on the
+    /// `&` lands before or after the whole entity, never inside it.
+    #[test]
+    fn a_concealed_entity_is_drawn_as_what_it_displays() {
+        let source = "a &amp; b";
+        let rows = shaped_revealing(source, 0..0, None);
+        let row = &rows[0];
+        assert_eq!(shown_text(row), vec!["a & b"]);
+        let entity: Vec<_> = row
+            .widenings
+            .iter()
+            .map(|w| (w.source, w.source_len, w.display, w.len, w.shape.is_none()))
+            .collect();
+        assert_eq!(entity, vec![(2, 5, 2, 1, true)]);
+        assert_eq!(row.to_display(2), 2, "the entity starts where its `&` does");
+        assert_eq!(row.to_display(7), 3, "and ends where it does");
+        assert_eq!(row.to_display(9), 5, "the text after it follows on");
+        assert_eq!(row.to_source(2), 2);
+        assert_eq!(row.to_source(3), 7, "past the `&` is past the whole entity");
+        assert_eq!(row.to_source(5), 9);
+        for offset in [0, 1, 2, 7, 8, 9] {
+            assert_eq!(row.to_source(row.to_display(offset)), offset, "at {offset}");
+        }
+        // With the caret on it the entity is its source again.
+        let revealed = shaped_revealing(source, caret_at(source, 4), None);
+        assert_eq!(shown_text(&revealed[0]), vec!["a &amp; b"]);
+        assert!(revealed[0].widenings.is_empty());
+    }
+
+    /// A hard break's backslash is hidden until the caret ends its row, and
+    /// shown then.
+    #[test]
+    fn a_hard_break_spelling_shows_only_at_the_caret() {
+        let source = "ab\\\ncd";
+        let away = shaped_revealing(source, 0..0, None);
+        assert_eq!(shown_text(&away[0]), vec!["ab", "cd"]);
+        let at_end = shaped_revealing(source, caret_at(source, 3), None);
+        assert_eq!(shown_text(&at_end[0]), vec!["ab\\", "cd"]);
+        let next_row = shaped_revealing(source, caret_at(source, 4), None);
+        assert_eq!(shown_text(&next_row[0]), vec!["ab", "cd"]);
+    }
+
+    /// A caret beside an escape opens that escape and nothing else; a caret in
+    /// the span beside it opens the span and leaves the escape concealed.
+    #[test]
+    fn an_escape_and_the_span_beside_it_reveal_apart() {
+        let source = "\\***a**";
+        let escape = shaped_revealing(source, caret_at(source, 1), None);
+        assert_eq!(shown_text(&escape[0]), vec!["\\*a"]);
+        let span = shaped_revealing(source, caret_at(source, 5), None);
+        assert_eq!(shown_text(&span[0]), vec!["***a**"]);
+    }
+
+    /// Nested spans open by their own extent: a caret in the inner one opens
+    /// both, one only in the outer one opens just the outer pair.
+    #[test]
+    fn nested_spans_reveal_by_their_own_extent() {
+        let source = "*a **b** c*";
+        let inner = shaped_revealing(source, caret_at(source, 5), None);
+        assert_eq!(shown_text(&inner[0]), vec!["*a **b** c*"]);
+        let outer = shaped_revealing(source, caret_at(source, 9), None);
+        assert_eq!(shown_text(&outer[0]), vec!["*a b c*"]);
+    }
+
+    /// Marked text inside an entity's span opens it, the way it opens a style.
+    #[test]
+    fn marked_text_opens_an_entity() {
+        let source = "a &amp; b";
+        let marked = caret_at(source, 4);
+        let rows = shaped_revealing(source, 0..0, Some(marked.start..marked.end + 1));
+        assert_eq!(shown_text(&rows[0]), vec!["a &amp; b"]);
+    }
+
+    /// The shaping cache's key moves when what is revealed moves, and only
+    /// then: a caret walking within one span, or outside every span, keeps the
+    /// rows it was shaped with.
+    #[test]
+    fn the_reveal_key_changes_only_with_the_revealed_set() {
+        let source = "x **ab** y &amp; z";
+        let state = state_of(source);
+        let projection = projection_of(&state);
+        let images = crate::images::Images::default();
+        let style = EditorStyle::notes();
+        let types = callout_types();
+        let key = |offset: usize, composition: Option<usize>| {
+            let pos = |offset| projection.lines()[0].offset_to_pos(offset).unwrap();
+            let input = ShapeInput {
+                images: &images,
+                spelling: None,
+                wiki: None,
+                protected: None,
+                doc: state.doc(),
+                types: &types,
+                projection: &projection,
+                style: &style,
+                single_line: false,
+                selection: pos(offset)..pos(offset),
+                composition: composition.map(|offset| pos(offset)..pos(offset) + 1),
+            };
+            super::reveal_key(&input)
+        };
+        assert_eq!(key(0, None), key(1, None), "outside every span");
+        assert_eq!(key(3, None), key(5, None), "inside the same span");
+        assert_eq!(key(2, None), key(8, None), "at either edge of it");
+        assert_ne!(key(1, None), key(2, None), "onto the span's edge");
+        assert_ne!(key(5, None), key(12, None), "from the span to the entity");
+        assert_ne!(
+            key(0, None),
+            key(0, Some(12)),
+            "marked text opens the entity"
+        );
+        assert_eq!(
+            key(0, Some(9)),
+            key(1, None),
+            "marked text outside every span"
         );
     }
 
