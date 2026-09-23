@@ -17,8 +17,6 @@
 //! hands the view whatever it needs beside this table.
 
 use crate::node::Node;
-use crate::projection::Line;
-use crate::schema::NodeTypeId;
 use crate::slice::Slice;
 
 /// The integer attribute of the [`DocTypeNames::syntax`] mark naming the span
@@ -199,34 +197,14 @@ pub trait Codecs: Send + Sync {
 /// How a document kind spells the parts of itself that a view may want to show
 /// as source.
 ///
-/// An editing surface that reveals the characters behind what it draws — the
-/// `##` of a heading while the caret is on it, the fence of a code block, a
-/// link's `](…)` — needs to know what those characters are, and only the kind
+/// An editing surface that reveals the characters behind what it draws — an
+/// image's source, a wiki link's brackets — needs to know what those characters are, and only the kind
 /// does. Nothing here is required: a kind whose blocks have no written prefix
 /// answers `None` and the view draws only what it drew before.
 ///
 /// This is the counterpart of [`Codecs`] for the *view* rather than for the
 /// clipboard, and a host that has no such spelling simply does not supply one.
 pub trait SourceSpelling: Send + Sync {
-    /// What the line's own block writes before its text — `## `, `- `, `1. `,
-    /// `- [x] ` — for a line the view is showing as source.
-    ///
-    /// Only the block the line belongs to; enclosing containers are
-    /// [`SourceSpelling::container_marker`].
-    fn line_prefix(&self, line: &Line) -> Option<String>;
-
-    /// What a block holding its text verbatim opens and closes with, for a view
-    /// that shows the fence around it.
-    fn verbatim_fence(&self, line: &Line) -> Option<(String, String)>;
-
-    /// What one level of an enclosing container of `node_type` writes at the
-    /// start of each of its lines — a block quote's `> `.
-    ///
-    /// Whatever separates the marker from the content belongs here, because a
-    /// view draws the answer as it stands and the space is what keeps the
-    /// marker from reading as part of the first word.
-    fn container_marker(&self, node_type: NodeTypeId) -> Option<String>;
-
     /// An inline atom as the source it was read from.
     fn atom_source(&self, node: &Node) -> Option<String>;
 }

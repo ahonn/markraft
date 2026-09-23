@@ -240,7 +240,7 @@ pub enum EditorEvent {
 ///
 /// Every field is geometry or position from the frame the editor last painted,
 /// so this is only meaningful after a paint — as
-/// [`EditorView::code_header_bounds`] is.
+/// [`EditorView::code_language_bounds`] is.
 #[derive(Clone, Copy, Debug)]
 pub struct TableInfo {
     /// Window bounds of the whole grid, for anchoring a toolbar to the table.
@@ -1120,11 +1120,13 @@ impl EditorView {
         })
     }
 
-    pub fn code_header_bounds(&self, pos: usize) -> Option<Bounds<Pixels>> {
+    /// Window bounds of the language tag of the code block starting at `pos`,
+    /// for anchoring the host's language picker to it.
+    pub fn code_language_bounds(&self, pos: usize) -> Option<Bounds<Pixels>> {
         self.layout
             .iter()
             .find(|row| row.code_pos == Some(pos))?
-            .code_fence_bounds()
+            .code_language_bounds()
     }
 
     /// Set the language of the code block starting at `pos`.
@@ -1678,6 +1680,22 @@ impl EditorView {
         {
             self.selecting = false;
             cx.emit(EditorEvent::RawHtmlRequested { pos });
+            return;
+        }
+        // A focused code block's language tag is chrome over the block's text:
+        // a click on it opens the picker rather than placing the caret.
+        if let Some(pos) = self.layout.iter().find_map(|row| {
+            row.code_language_bounds()
+                .filter(|bounds| bounds.contains(&event.position))
+                .and(row.code_pos)
+        }) {
+            self.selecting = false;
+            self.run_control(
+                accessibility::ControlAction::CodeLanguage(pos),
+                true,
+                window,
+                cx,
+            );
             return;
         }
         // Task markers are presentation outside the text coordinate space.

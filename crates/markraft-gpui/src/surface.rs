@@ -66,11 +66,16 @@ const LOADING_FRAME_MAX_WIDTH: Pixels = px(480.);
 // SF Mono; Menlo is wider and heavier at this size.
 const CODE_FONT: &str = ".AppleSystemUIFontMonospaced";
 const CODE_PADDING: Pixels = px(12.);
-/// The panel's edge beyond a fence row: a code block keeps a row above and one
-/// below its text for the fences, which it spells there while it is focused
-/// and leaves blank otherwise, so the caret coming or going never changes its
-/// height.
-const CODE_FENCE_INSET: Pixels = px(6.);
+/// How far a code block's panel reaches above and below its text. It spells no
+/// fences, focused or not — as in Typora — so this is padding and nothing else,
+/// and the caret coming or going never changes the block's height.
+const CODE_INSET: Pixels = px(12.);
+/// The language tag a focused code block shows in its panel's top-right
+/// corner, flush with the panel's top and right edges: its height and its
+/// horizontal padding. It is drawn over the block's own text, so it takes no
+/// room from the layout and never reaches past the panel.
+const CODE_LANGUAGE_HEIGHT: Pixels = px(18.);
+const CODE_LANGUAGE_PADDING: Pixels = px(6.);
 const CODE_RADIUS: Pixels = px(12.);
 /// The row a table keeps above its grid for the host's table toolbar, focused
 /// or not, so the toolbar never covers the block above and the caret coming
@@ -132,8 +137,10 @@ struct InlineCode {
 struct Repaint {
     /// Byte range within the whole line text.
     range: Range<usize>,
-    font: Font,
-    ink: Hsla,
+    /// The face and ink of each stretch of `range`, as byte lengths that sum
+    /// to its length. One span can carry several: revealed backticks keep the
+    /// quiet markup ink inside the one pill their code is drawn in.
+    runs: Vec<(usize, Font, Hsla)>,
     /// A script rather than code.
     raised: bool,
     /// Of a script, whether it is subscript.
@@ -285,11 +292,7 @@ enum Marker {
     Task {
         checked: bool,
         number: Option<Rc<ShapedLine>>,
-        /// Focused spelling `- [ ] ` / `- [x] `, drawn instead of the checkbox.
-        source: Option<Rc<ShapedLine>>,
     },
-    /// Markdown source prefix shown while a heading or list line is focused.
-    Source(Rc<ShapedLine>),
     /// A footnote definition's label, right-aligned against its first line.
     /// Clicking it goes back to the first reference.
     Footnote(Rc<ShapedLine>),
@@ -381,16 +384,11 @@ pub(crate) struct LayoutLine {
     pub(crate) code_pos: Option<usize>,
     marker: Option<Marker>,
     decoration: Option<Decoration>,
-    /// The opening fence drawn above a focused code block's text.
-    code_header: Option<Rc<ShapedLine>>,
-    /// The closing fence drawn under a focused code block's text.
-    code_footer: Option<Rc<ShapedLine>>,
-    /// The fence row a code block keeps above and below its text, focused or
-    /// not; zero on any other line.
-    code_fence_row: Pixels,
-    /// The marker each quote level draws in the gutter while the line is
-    /// focused, as the host's kind spells it.
-    quote_marker: Option<Rc<ShapedLine>>,
+    /// The language tag a focused code block shows under its panel.
+    code_language: Option<Rc<ShapedLine>>,
+    /// How far a code block's panel reaches above and below its text; zero on
+    /// any other line.
+    code_inset: Pixels,
     /// How far left of the text each quote the line sits in draws its bar,
     /// outermost first. See [`quote_bar_distances`].
     quote_bars: Vec<Pixels>,
@@ -494,13 +492,6 @@ impl LayoutLine {
         self.line_height * self.visual_rows() as f32
     }
 
-    /// The row a code block keeps under its text for its closing fence. The
-    /// fence is chrome, not a caret stop, so it is room the block reserves
-    /// below itself, as it reserves the opening fence's row above.
-    fn code_footer_height(&self) -> Pixels {
-        self.code_fence_row
-    }
-
     /// The x of the bar drawn for `level` of the innermost `levels` quotes the
     /// line sits in.
     fn quote_bar_x(&self, levels: usize, level: usize, style: &EditorStyle) -> Pixels {
@@ -515,7 +506,7 @@ impl LayoutLine {
 
     /// How far a code block's panel reaches above and below its text.
     fn code_panel_room(&self) -> Pixels {
-        self.code_fence_row + CODE_FENCE_INSET
+        self.code_inset
     }
 
     /// The display-text `char` offset a projection offset stands at.
@@ -581,35 +572,55 @@ impl LayoutLine {
         (index, char_to_byte(row.text(), local))
     }
 
-    /// What a callout's header says and the box it is drawn in, relative to the
-    /// line's own origin — available only on the line that opens one.
+    /// The top-left corner of the band a callout's header is drawn in. The
+    /// header sits directly above the block it opens: above a paragraph's text,
+    /// and above a code block's panel — whose padding is the block's own —
+    /// rather than inside it, flush with the panel's left edge,
+    /// which is where a paragraph's text would start.
+    fn callout_header_origin(&self) -> Point<Pixels> {
+        if self.code_inset > Pixels::ZERO {
+            point(
+                self.origin.x - CODE_PADDING,
+                self.origin.y - self.code_panel_room() - CALLOUT_HEADER_HEIGHT,
+            )
+        } else {
+            point(self.origin.x, self.origin.y - CALLOUT_HEADER_HEIGHT)
+        }
+    }
+
     /// Whether `y` falls in the band a callout's header is drawn in. The band is
     /// chrome above the line, so a click there means the start of the body rather
     /// than whichever character happens to sit under it.
     pub(crate) fn in_callout_header(&self, y: Pixels) -> bool {
-        self.callout_header.is_some()
-            && y >= self.origin.y - CALLOUT_HEADER_HEIGHT
-            && y < self.origin.y
+        let top = self.callout_header_origin().y;
+        self.callout_header.is_some() && y >= top && y < top + CALLOUT_HEADER_HEIGHT
     }
 
+    /// What a callout's header says and the box it is drawn in, in the same
+    /// space as the line's origin — available only on the line that opens one.
     pub(crate) fn callout_header(&self) -> Option<(&str, Bounds<Pixels>)> {
         let header = self.callout_header.as_ref()?;
         Some((
             header.text.as_str(),
             Bounds::new(
-                point(self.origin.x, self.origin.y - CALLOUT_HEADER_HEIGHT),
+                self.callout_header_origin(),
                 size(header.label.width, CALLOUT_HEADER_HEIGHT),
             ),
         ))
     }
 
-    /// Window-space bounds of the row above a code block's text where its
-    /// opening fence is spelled, for anchoring the host's language picker.
-    pub(crate) fn code_fence_bounds(&self) -> Option<Bounds<Pixels>> {
+    /// Window-space bounds of a code block's language tag, in its panel's
+    /// top-right corner: where the tag is drawn, what a click on it hits,
+    /// and what the host's language picker anchors to. `None` while the block
+    /// is not focused, when it shows no tag.
+    pub(crate) fn code_language_bounds(&self) -> Option<Bounds<Pixels>> {
         self.code_pos?;
+        let width = self.code_language.as_ref()?.width + CODE_LANGUAGE_PADDING * 2.;
+        let right = self.origin.x + self.width + CODE_PADDING;
+        let top = self.origin.y - self.code_inset;
         Some(Bounds::new(
-            point(self.origin.x, self.origin.y - self.code_fence_row),
-            size(self.width, self.code_fence_row),
+            point(right - width, top),
+            size(width, CODE_LANGUAGE_HEIGHT),
         ))
     }
 
@@ -625,12 +636,6 @@ impl LayoutLine {
             Marker::Number(line) | Marker::Footnote(line) => {
                 (line.width + NUMBER_GAP, line.width, self.line_height)
             }
-            // A spelling ends in the space the writer typed after it, so it
-            // sits flush against the text, as typed characters would.
-            Marker::Source(line)
-            | Marker::Task {
-                source: Some(line), ..
-            } => (line.width, line.width, self.line_height),
             // Drawn markers share one center, 15px left of the text.
             Marker::Bullet { .. } => (px(17.5), px(5.), px(5.)),
             Marker::Task { .. } => (px(22.), px(14.), px(14.)),
@@ -1127,12 +1132,9 @@ fn shape_line(
         .flatten();
     let focused = line_focused(input, line);
     let marker = chrome_marker(
-        input,
+        types,
         line,
         number.as_ref().map(|(shaped, _)| shaped.clone()),
-        focused,
-        font_size,
-        text_system,
     )
     .or_else(|| {
         footnote
@@ -1141,27 +1143,14 @@ fn shape_line(
             .map(|(label, _)| Marker::Footnote(label.clone()))
     });
     let decoration = decoration_of(input, index, line, cell.is_some(), max_indent);
-    // Headings park ATX hashes in a dedicated gutter. List source spellings
-    // reuse the ordered-number reserve so `- `, `1. `, and `- [ ] ` all fit.
-    let heading_gutter = match &marker {
-        Some(Marker::Source(label)) if heading.is_some() => label.width,
-        _ => px(0.),
-    };
-    // The room left of the text the marker needs: a drawn ordinal stands off
-    // the text by a gap, a spelling ends in its own typed space.
-    let marker_reserve = match &marker {
-        Some(Marker::Source(label)) if heading.is_none() => Some(label.width),
-        Some(Marker::Task {
-            source: Some(label),
-            ..
-        }) => Some(label.width),
-        _ => number
-            .as_ref()
-            .or(footnote.as_ref())
-            .map(|(_, width)| *width + NUMBER_GAP),
-    };
-    let indent = (indent_of(types, line, style, marker_reserve) + heading_gutter).min(max_indent);
-    let quote_bars = quote_bar_distances(types, line, style, marker_reserve, heading_gutter);
+    // The room left of the text a drawn ordinal needs, standing off the text
+    // by a gap.
+    let marker_reserve = number
+        .as_ref()
+        .or(footnote.as_ref())
+        .map(|(_, width)| *width + NUMBER_GAP);
+    let indent = indent_of(types, line, style, marker_reserve).min(max_indent);
+    let quote_bars = quote_bar_distances(types, line, style, marker_reserve);
 
     let wrap_width = match cell {
         Some(CellWidth::Column(content)) => content.max(px(16.)),
@@ -1190,7 +1179,10 @@ fn shape_line(
     let mut rows = Vec::with_capacity(shaped.len());
     let mut char_start = 0usize;
     let mut visual_start = 0usize;
-    for wrapped in shaped {
+    for mut wrapped in shaped {
+        if !unwrapped {
+            keep_line_breaking_rules(&mut wrapped, wrap_width);
+        }
         let row = LayoutRow {
             char_start,
             visual_start,
@@ -1203,16 +1195,12 @@ fn shape_line(
     }
 
     let gap = gap_below(input, index, line, heading, code, &marker);
-    // A code block's own top padding holds its header, at the top of the document
+    // A code block's panel reaches above its text, at the top of the document
     // as anywhere else. Everything else starts flush and only a heading claims
     // space.
-    let code_fence_row = if code {
-        font_size * style.line_height_ratio
-    } else {
-        px(0.)
-    };
+    let code_inset = if code { CODE_INSET } else { px(0.) };
     let top_gap = if code {
-        code_fence_row + CODE_FENCE_INSET
+        code_inset
     } else if index == 0 {
         px(0.)
     } else if let Some(level) = heading {
@@ -1220,37 +1208,24 @@ fn shape_line(
     } else {
         px(0.)
     };
-    let fence = (code && focused)
-        .then(|| {
-            input
-                .spelling
-                .and_then(|spelling| spelling.verbatim_fence(line))
-        })
-        .flatten();
-    let shape_fence = |spelling: &str| {
+    // Typora's language box, as a tag: the block's language as written, or
+    // what the language picker calls none.
+    let code_language = (code && focused).then(|| {
+        let language = line
+            .ancestors()
+            .last()
+            .and_then(|block| block.attrs.get("language"))
+            .and_then(|value| value.as_str())
+            .filter(|language| !language.is_empty())
+            .unwrap_or("Plain Text");
         shape_source_label(
-            spelling,
+            language,
             font(CODE_FONT),
-            font_size,
+            font_size - px(1.),
             style.muted_text,
             text_system,
         )
-    };
-    let code_header = fence.as_ref().map(|(open, _)| shape_fence(open));
-    let code_footer = fence.as_ref().map(|(_, close)| shape_fence(close));
-    let quote_marker = (focused && matches!(decoration, Some(Decoration::Quote { .. })))
-        .then(|| {
-            let spelling = input.spelling?;
-            let marker = spelling.container_marker(types.blockquote?)?;
-            Some(shape_source_label(
-                &marker,
-                font(".SystemUIFont"),
-                style.body_size,
-                style.muted_text,
-                text_system,
-            ))
-        })
-        .flatten();
+    });
     // A callout says what kind of note it is on a line of its own above the
     // block it opens. The line is chrome: it holds no caret stop, so it lives
     // in the room the block reserves above itself rather than in the text.
@@ -1290,10 +1265,8 @@ fn shape_line(
         code_pos: code.then(|| line.block_before()).flatten(),
         marker,
         decoration,
-        code_header,
-        code_footer,
-        code_fence_row,
-        quote_marker,
+        code_language,
+        code_inset,
         quote_bars,
         callout_header,
         widenings: text.widenings,
@@ -1315,8 +1288,8 @@ fn shape_line(
             .fold(px(0.), |widest, width| widest.max(width));
         layout.min_width = min_content_width(&layout, &runs.code);
     }
-    layout.height = layout.text_height() + layout.code_footer_height() + gap;
-    shape_inline_code(&mut layout, &text.text, &runs.code, font_size, text_system);
+    layout.height = layout.text_height() + layout.code_inset + gap;
+    shape_inline_code(&mut layout, &runs.code, font_size, text_system);
     place_atoms(&mut layout, text.atoms);
     layout
 }
@@ -1419,11 +1392,7 @@ fn unbreakable_units(text: &str, glue: &[Range<usize>]) -> Vec<Range<usize>> {
     let mut previous = '\0';
     let mut seen = false;
     for (byte, c) in text.char_indices() {
-        let opportunity = if is_word_char(c) {
-            previous == ' ' && seen
-        } else {
-            c != ' ' && seen
-        };
+        let opportunity = seen && may_break(previous, c);
         if opportunity
             && !glue
                 .iter()
@@ -1445,6 +1414,158 @@ fn unbreakable_units(text: &str, glue: &[Range<usize>]) -> Vec<Range<usize>> {
             (!trimmed.is_empty()).then(|| start + lead..start + lead + trimmed.len())
         })
         .collect()
+}
+
+/// Whether a line may wrap between `previous` and `c`.
+///
+/// gpui's wrapper breaks before a word character only after a space, and
+/// before anything else that is not a space — so between any two CJK
+/// characters. Less what CJK line breaking forbids: a line never starts with
+/// closing punctuation such as `，` or `」`, nor ends with opening punctuation
+/// such as `（` or `「`.
+fn may_break(previous: char, c: char) -> bool {
+    if c == ' ' || never_starts_line(c) || never_ends_line(previous) {
+        return false;
+    }
+    !is_word_char(c) || previous == ' '
+}
+
+/// The full-width closing marks, and the like, that never start a line (UAX #14
+/// classes CL, CP, EX, IS and NS). gpui's wrapper knows only their ASCII
+/// counterparts.
+fn never_starts_line(c: char) -> bool {
+    matches!(
+        c,
+        '，' | '。'
+            | '、'
+            | '；'
+            | '：'
+            | '？'
+            | '！'
+            | '）'
+            | '］'
+            | '｝'
+            | '】'
+            | '》'
+            | '〉'
+            | '」'
+            | '』'
+            | '〕'
+            | '〗'
+            | '〙'
+            | '〛'
+            | '”'
+            | '’'
+            | '…'
+            | '‥'
+            | '・'
+            | 'ー'
+            | '～'
+            | '％'
+            | '．'
+            | '｡'
+            | '､'
+    )
+}
+
+/// The opening marks that never end a line (UAX #14 class OP and opening
+/// quotes).
+fn never_ends_line(c: char) -> bool {
+    matches!(
+        c,
+        '（' | '［'
+            | '｛'
+            | '【'
+            | '《'
+            | '〈'
+            | '「'
+            | '『'
+            | '〔'
+            | '〖'
+            | '〘'
+            | '〚'
+            | '“'
+            | '‘'
+    )
+}
+
+/// Wrap `line` again where gpui's wrapper broke it before closing punctuation
+/// or after opening punctuation.
+///
+/// gpui's `LineWrapper` is not configurable, so its boundaries are checked
+/// rather than replaced: a line it wrapped well keeps them. One that breaks a
+/// rule is wrapped afresh, greedily, over the shaped glyphs' own positions,
+/// with the opportunities [`may_break`] allows, and a line with none that fits
+/// breaks at the glyph that overflows, as gpui's does. Spaces hang past the
+/// edge, as they do there.
+fn keep_line_breaking_rules(line: &mut WrappedLine, wrap_width: Pixels) {
+    let text = line.text.clone();
+    let layout = line.unwrapped_layout.clone();
+    let char_at = |byte: usize| text.get(byte..).and_then(|rest| rest.chars().next());
+    let char_before = |byte: usize| text.get(..byte).and_then(|head| head.chars().next_back());
+    let glyph_byte = |boundary: &WrapBoundary| {
+        layout
+            .runs
+            .get(boundary.run_ix)
+            .and_then(|run| run.glyphs.get(boundary.glyph_ix))
+            .map(|glyph| glyph.index)
+    };
+    let broken = line.wrap_boundaries.iter().any(|boundary| {
+        glyph_byte(boundary).is_some_and(|byte| {
+            char_at(byte).is_some_and(never_starts_line)
+                || char_before(byte).is_some_and(never_ends_line)
+        })
+    });
+    if !broken {
+        return;
+    }
+    // In text order: a line shaped with fallback fonts holds one run per font,
+    // not one per stretch of text.
+    let mut glyphs: Vec<(WrapBoundary, usize, Pixels)> = layout
+        .runs
+        .iter()
+        .enumerate()
+        .flat_map(|(run_ix, run)| {
+            run.glyphs.iter().enumerate().map(move |(glyph_ix, glyph)| {
+                (
+                    WrapBoundary { run_ix, glyph_ix },
+                    glyph.index,
+                    glyph.position.x,
+                )
+            })
+        })
+        .collect();
+    glyphs.sort_by_key(|glyph| glyph.1);
+    let breakable = |at: usize| {
+        let byte = glyphs[at].1;
+        match (char_before(byte), char_at(byte)) {
+            (Some(previous), Some(c)) => may_break(previous, c),
+            _ => false,
+        }
+    };
+    let mut boundaries = Vec::new();
+    let mut row_start = 0usize;
+    let mut candidate: Option<usize> = None;
+    for at in 0..glyphs.len() {
+        if at > row_start && breakable(at) {
+            candidate = Some(at);
+        }
+        if char_at(glyphs[at].1) == Some(' ') {
+            continue;
+        }
+        let right = glyphs.get(at + 1).map_or(layout.width, |glyph| glyph.2);
+        if at > row_start && right - glyphs[row_start].2 > wrap_width {
+            let wrap = candidate.unwrap_or(at);
+            boundaries.push(glyphs[wrap].0);
+            row_start = wrap;
+            candidate = (wrap + 1..=at).rev().find(|&later| breakable(later));
+        }
+    }
+    **line = Arc::new(WrappedLineLayout {
+        unwrapped_layout: layout,
+        wrap_boundaries: boundaries.into_iter().collect(),
+        wrap_width: Some(wrap_width),
+    });
 }
 
 /// Whether the line wrapper treats `c` as part of a word, which is what decides
@@ -2072,8 +2193,8 @@ pub(crate) fn reveal_key(input: &ShapeInput<'_>) -> u64 {
                 }
             }
         }
-        // Any line that draws differently while it has the caret: a heading's
-        // hashes, a list marker's spelling, a fence, a quote's marker. Asking
+        // Any line that draws differently while it has the caret: a list
+        // marker's spelling, a fence, a quote's marker. Asking
         // the kind only for the lines the caret actually touches keeps this to
         // a couple of calls per move.
         if affinity_touches(input, line.from(), line.to()) && focus_chrome(input, line) {
@@ -2490,9 +2611,8 @@ fn text_runs(
             gpui::transparent_black()
         } else if inline_code || raised {
             code.push(Repaint {
+                runs: vec![(range.len(), face.clone(), ink)],
                 range,
-                font: face.clone(),
-                ink,
                 raised: raised && !inline_code,
                 lowered: lowered && !inline_code,
             });
@@ -2504,9 +2624,10 @@ fn text_runs(
             len,
             font: face,
             color,
-            // The fill goes down after the pills, over them: inside a
-            // highlight a code span keeps its pill and the fill stops at it.
-            background_color: (has(types.highlight, marks) && !code_block && !inline_code)
+            // A code span inside a highlight takes the fill too, across its
+            // pill's whole slot, so the band is unbroken; the pill is painted
+            // over the fill.
+            background_color: (has(types.highlight, marks) && !code_block)
                 .then_some(style.highlight),
             underline: (!widened
                 && !markup
@@ -2536,8 +2657,8 @@ fn text_runs(
             runs = highlight_runs(&highlighted, font_size);
         }
     }
-    // A revealed syntax run is a run of its own; without merging, each
-    // backtick would paint a separate pill and the background would break.
+    // A revealed syntax run is a run of its own, in the quieter markup ink;
+    // without merging, each backtick would paint a separate pill.
     Runs {
         runs,
         code: merge_adjacent_code(code),
@@ -2545,18 +2666,28 @@ fn text_runs(
 }
 
 /// Join contiguous inline-code byte ranges into one pill, and contiguous superscript
-/// into one raised run.
+/// into one raised run. Each part keeps its own face and ink as a run of the
+/// merged span.
 fn merge_adjacent_code(code: Vec<Repaint>) -> Vec<Repaint> {
     let mut merged: Vec<Repaint> = Vec::with_capacity(code.len());
     for repaint in code {
         match merged.last_mut() {
             Some(last)
                 if last.range.end == repaint.range.start
-                    && last.ink == repaint.ink
                     && last.raised == repaint.raised
                     && last.lowered == repaint.lowered =>
             {
                 last.range.end = repaint.range.end;
+                for (len, face, ink) in repaint.runs {
+                    match last.runs.last_mut() {
+                        Some((last_len, last_face, last_ink))
+                            if *last_face == face && *last_ink == ink =>
+                        {
+                            *last_len += len;
+                        }
+                        _ => last.runs.push((len, face, ink)),
+                    }
+                }
             }
             _ => merged.push(repaint),
         }
@@ -2662,14 +2793,13 @@ fn ancestor_indent(types: &DocTypes, line: &Line, index: usize, style: &EditorSt
 
 /// How far left of the line's text each quote it sits in draws its bar,
 /// outermost first: the quote's own indent and all the indent nested inside
-/// it — a list's, a code panel's, a heading's hashes — so a bar stays at its
+/// it — a list's, a code panel's — so a bar stays at its
 /// quote's edge rather than at the text's, wherever in the quote the line is.
 fn quote_bar_distances(
     types: &DocTypes,
     line: &Line,
     style: &EditorStyle,
     marker_reserve: Option<Pixels>,
-    heading_gutter: Pixels,
 ) -> Vec<Pixels> {
     let ancestors = line.ancestors();
     let reserve =
@@ -2686,7 +2816,7 @@ fn quote_bar_distances(
                 types.is_list(ancestor.node_type)
                     || Some(ancestor.node_type) == types.footnote_definition
             });
-            inside + if numbered { reserve } else { px(0.) } + heading_gutter
+            inside + if numbered { reserve } else { px(0.) }
         })
         .collect()
 }
@@ -2800,19 +2930,12 @@ fn starts_item(types: &DocTypes, line: &Line) -> bool {
 
 /// Whether this line has anything to draw differently while it is focused.
 ///
-/// A line with no source spelling of its own — an ordinary paragraph — looks the
-/// same either way, so the caret passing through it does not invalidate the
-/// shaped rows.
+/// Only a code block does, showing its language tag: every other block draws
+/// its marker, bar or heading the same wherever the caret is, as Typora does.
+/// So the caret passing through any other line does not invalidate the shaped
+/// rows.
 fn focus_chrome(input: &ShapeInput<'_>, line: &Line) -> bool {
-    let quoted = input.types.blockquote.is_some_and(|quote| {
-        line.ancestors()
-            .iter()
-            .any(|ancestor| ancestor.node_type == quote)
-    });
-    quoted
-        || input.spelling.is_some_and(|spelling| {
-            spelling.line_prefix(line).is_some() || spelling.verbatim_fence(line).is_some()
-        })
+    input.types.is_code_block(line)
 }
 
 /// Whether the selection or composition touches this projection line.
@@ -2831,10 +2954,8 @@ fn affinity_touches(input: &ShapeInput<'_>, from: usize, to: usize) -> bool {
     touches(&input.selection) || input.composition.as_ref().is_some_and(touches)
 }
 
-/// Shapes source the view shows in place of chrome — a heading's hashes, a
-/// list marker, a quote's `>`, a fence. It is drawn in `face`, the face the
-/// same characters would have if the writer had typed them into the line, so
-/// revealing a line's markup shows exactly what was typed and nothing else.
+/// Shapes a label the view draws beside the text — a code block's language
+/// tag — in `face` and `color`.
 fn shape_source_label(
     text: &str,
     face: Font,
@@ -2857,60 +2978,15 @@ fn shape_source_label(
     ))
 }
 
-/// The gutter marker a line draws: its source spelling while the caret is on
-/// it, and the rendered bullet or ordinal otherwise.
+/// The gutter marker a line draws: the bullet, ordinal or check box of the
+/// list item it opens.
 ///
-/// What the source *is* comes from the host's kind, not from here — a view that
-/// spelled `##` or `- [x] ` itself would only be able to draw one kind of
-/// document, and would have to keep its escaping in step with the codec's.
-fn chrome_marker(
-    input: &ShapeInput<'_>,
-    line: &Line,
-    number: Option<Rc<ShapedLine>>,
-    focused: bool,
-    font_size: Pixels,
-    text_system: &WindowTextSystem,
-) -> Option<Marker> {
-    let types = input.types;
-    let style = input.style;
-    let source = focused
-        .then(|| {
-            input
-                .spelling
-                .and_then(|spelling| spelling.line_prefix(line))
-        })
-        .flatten()
-        .map(|text| {
-            let mut face = font(".SystemUIFont");
-            if types.heading_level(line).is_some() {
-                face.weight = FontWeight::BOLD;
-            }
-            shape_source_label(&text, face, font_size, style.muted_text, text_system)
-        });
-    if types.heading_level(line).is_some() {
-        // A heading has nothing to draw when it is not showing its hashes.
-        return source.map(Marker::Source);
-    }
-    let (item, _) = types.item_of(line)?;
-    if !starts_item(types, line) {
-        return None;
-    }
-    match source {
-        Some(label) if Some(item.node_type) == types.task_item => Some(Marker::Task {
-            checked: DocTypes::task_checked(&item.attrs),
-            number: None,
-            source: Some(label),
-        }),
-        Some(label) => Some(Marker::Source(label)),
-        None => chrome_marker_unfocused(types, line, number),
-    }
-}
-
-fn chrome_marker_unfocused(
-    types: &DocTypes,
-    line: &Line,
-    number: Option<Rc<ShapedLine>>,
-) -> Option<Marker> {
+/// It is the same wherever the caret is. As in Typora, a list item never shows
+/// the `- `, `1. ` or `- [ ] ` it is spelled with, nor a heading its hashes:
+/// they are not text the caret can reach, so showing them would only suggest
+/// an edit that cannot be made, and swapping a drawn marker for its spelling
+/// as the caret came and went moved the line's text under it.
+fn chrome_marker(types: &DocTypes, line: &Line, number: Option<Rc<ShapedLine>>) -> Option<Marker> {
     let (item, list) = types.item_of(line)?;
     if !starts_item(types, line) {
         return None;
@@ -2919,7 +2995,6 @@ fn chrome_marker_unfocused(
         return Some(Marker::Task {
             checked: DocTypes::task_checked(&item.attrs),
             number,
-            source: None,
         });
     }
     if let Some(number) = number {
@@ -3001,11 +3076,11 @@ fn block_gap(
     marker: &Option<Marker>,
 ) -> Pixels {
     let style = input.style;
-    // The code fill reaches CODE_FENCE_INSET past the closing fence's row
-    // (`shape_line` adds that row on top of this gap), so a code block keeps
-    // its own bottom padding whatever block follows it.
+    // The code fill reaches CODE_INSET past the text (`shape_line` adds it on
+    // top of this gap), so a code block keeps its own bottom padding whatever
+    // block follows it.
     if code {
-        return CODE_FENCE_INSET + style.paragraph_gap;
+        return style.paragraph_gap;
     }
     // A table is one block: its cells sit tight against each other, and only
     // the cell that closes the grid is spaced off what follows it.
@@ -3068,7 +3143,6 @@ fn callout_label(
 /// slot, and record the slots it sits in.
 fn shape_inline_code(
     layout: &mut LayoutLine,
-    text: &str,
     code_ranges: &[Repaint],
     font_size: Pixels,
     text_system: &WindowTextSystem,
@@ -3078,29 +3152,11 @@ fn shape_inline_code(
     }
     for Repaint {
         range,
-        font: face,
-        ink,
+        runs,
         raised,
         lowered,
     } in code_ranges
     {
-        // The slot is as wide as full-size text. Shrinking code by a fixed ratio would
-        // leave long spans mostly padding, so its size is chosen to leave about
-        // `INLINE_CODE_PADDING` on either side of each visual row instead.
-        let chars = byte_to_char(text, range.start)..byte_to_char(text, range.end);
-        let slots = layout.display_rectangles(chars.clone(), false);
-        let reserved: Pixels = slots.iter().map(|slot| slot.size.width).sum();
-        let padding = INLINE_CODE_PADDING * 2. * slots.len() as f32;
-        let (scale, lift) = if *raised && *lowered {
-            (SUPERSCRIPT_SCALE, -(font_size * SUBSCRIPT_DROP).round())
-        } else if *raised {
-            (SUPERSCRIPT_SCALE, (font_size * SUPERSCRIPT_LIFT).round())
-        } else {
-            (
-                ((reserved - padding) / reserved.max(px(1.))).clamp(INLINE_CODE_SCALE, 1.),
-                px(0.),
-            )
-        };
         let mut pieces: Vec<(usize, Range<usize>, Bounds<Pixels>)> = Vec::new();
         for (index, row) in layout.rows.iter().enumerate() {
             let row_text = row.text();
@@ -3113,7 +3169,21 @@ fn shape_inline_code(
             let starts = row.wrap_starts();
             for (visual, &start) in starts.iter().enumerate() {
                 let end = starts.get(visual + 1).copied().unwrap_or(row_text.len());
-                let part = from.max(start)..to.min(end);
+                let mut part = from.max(start)..to.min(end);
+                // A visual row the span does not reach.
+                if part.is_empty() {
+                    continue;
+                }
+                // The space a row wraps at is not drawn, and a selection's
+                // rectangle runs on to the row's end past it; a piece keeps to
+                // its visible glyphs, so the pill hugs them and the text
+                // centred in it carries no dangling space.
+                if part.end == end && visual + 1 < starts.len() {
+                    part.end = part.start + row_text[part.clone()].trim_end().len();
+                }
+                if part.start == start && visual > 0 {
+                    part.start = part.end - row_text[part.clone()].trim_start().len();
+                }
                 if part.is_empty() {
                     continue;
                 }
@@ -3125,19 +3195,29 @@ fn shape_inline_code(
                 pieces.push((index, part, slot));
             }
         }
+        // The slot is as wide as full-size text. Shrinking code by a fixed ratio would
+        // leave long spans mostly padding, so its size is chosen to leave about
+        // `INLINE_CODE_PADDING` on either side of each visual row instead.
+        let reserved: Pixels = pieces.iter().map(|(_, _, slot)| slot.size.width).sum();
+        let padding = INLINE_CODE_PADDING * 2. * pieces.len() as f32;
+        let (scale, lift) = if *raised && *lowered {
+            (SUPERSCRIPT_SCALE, -(font_size * SUBSCRIPT_DROP).round())
+        } else if *raised {
+            (SUPERSCRIPT_SCALE, (font_size * SUPERSCRIPT_LIFT).round())
+        } else {
+            (
+                ((reserved - padding) / reserved.max(px(1.))).clamp(INLINE_CODE_SCALE, 1.),
+                px(0.),
+            )
+        };
         for (index, part, slot) in pieces {
             let row_text = layout.rows[index].text().to_owned();
+            let absolute = row_byte_start(layout, index);
+            let absolute = absolute + part.start..absolute + part.end;
             let line = text_system.shape_line(
                 row_text[part.clone()].to_owned().into(),
                 font_size * scale,
-                &[TextRun {
-                    len: part.len(),
-                    font: face.clone(),
-                    color: *ink,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
+                &piece_runs(range.start, runs, absolute),
                 None,
             );
             let visual = layout.rows[index].visual_start
@@ -3153,6 +3233,29 @@ fn shape_inline_code(
             });
         }
     }
+}
+
+/// The runs of a span's `runs`, which start at byte `start` of the line text,
+/// that fall within `piece`, a stretch of the same span.
+fn piece_runs(start: usize, runs: &[(usize, Font, Hsla)], piece: Range<usize>) -> Vec<TextRun> {
+    let mut pieces = Vec::new();
+    let mut from = start;
+    for (len, face, ink) in runs {
+        let to = from + len;
+        let (a, b) = (from.max(piece.start), to.min(piece.end));
+        if a < b {
+            pieces.push(TextRun {
+                len: b - a,
+                font: face.clone(),
+                color: *ink,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+        from = to;
+    }
+    pieces
 }
 
 /// The byte offset at which a row's text starts within the line's text.
@@ -3387,24 +3490,6 @@ impl Element for EditorSurface {
             // draws, including the selection.
             paint_tables(rows, &style, caret_pos, &scroll, window);
             for row in rows.iter() {
-                for inner in &row.rows {
-                    for code in inner.inline_code.iter().filter(|code| !code.raised) {
-                        // A pill shorter than the line.
-                        let inset = (row.line_height * 0.1).round();
-                        let pill = Bounds::new(
-                            row.origin
-                                + point(
-                                    code.left,
-                                    row.line_height * code.visual_row as f32 + inset,
-                                ),
-                            size(code.slot, row.line_height - inset * 2.),
-                        );
-                        window.paint_quad(
-                            fill(pill, style.inline_code_background)
-                                .corner_radii(style.code_radius),
-                        );
-                    }
-                }
                 for atom in &row.atoms {
                     paint_atom(row, atom, &style, window, cx);
                 }
@@ -3433,24 +3518,6 @@ impl Element for EditorSurface {
                                 Bounds::new(point(bar_x, top), size(QUOTE_BAR, height)),
                                 tones.get(level).copied().flatten().unwrap_or(style.marker),
                             ));
-                            if let Some(marker) = &row.quote_marker {
-                                // A focused quote shows its own marker beside
-                                // each bar, one per level it sits in. The
-                                // marker ends where the next one — or the text
-                                // — begins, so the space its spelling carries
-                                // is the gap the reader sees. A gutter too
-                                // narrow for it keeps it off the bar instead.
-                                let next = bar_x + style.quote_indent;
-                                let x = (next - marker.width).max(bar_x + QUOTE_BAR);
-                                let _ = marker.paint(
-                                    point(x, row.origin.y),
-                                    row.line_height,
-                                    TextAlign::Left,
-                                    None,
-                                    window,
-                                    cx,
-                                );
-                            }
                         }
                     }
                     Some(Decoration::Divider) => window.paint_quad(fill(
@@ -3467,7 +3534,7 @@ impl Element for EditorSurface {
                     }) => {
                         // The panel stands where a paragraph's text would in
                         // the same quotes, so the bars keep their places; they
-                        // reach over the panel's fence rows and padding.
+                        // reach over the panel's padding.
                         let top = row.origin.y - row.top_gap;
                         for level in 0..levels {
                             let below = if level < joined {
@@ -3503,29 +3570,9 @@ impl Element for EditorSurface {
                     }
                     None => {}
                 }
-                if let Some(header) = &row.code_header {
-                    let _ = header.paint(
-                        point(row.origin.x, row.origin.y - row.code_fence_row),
-                        row.line_height,
-                        TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    );
-                }
-                if let Some(footer) = &row.code_footer {
-                    let _ = footer.paint(
-                        point(row.origin.x, row.origin.y + row.text_height()),
-                        row.line_height,
-                        TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    );
-                }
                 if let Some(header) = &row.callout_header {
                     let _ = header.label.paint(
-                        point(row.origin.x, row.origin.y - CALLOUT_HEADER_HEIGHT),
+                        row.callout_header_origin(),
                         CALLOUT_HEADER_HEIGHT,
                         TextAlign::Left,
                         None,
@@ -3548,6 +3595,27 @@ impl Element for EditorSurface {
                         window,
                         cx,
                     );
+                }
+                // Inline code pills go over the fill: a code span inside a
+                // highlight carries the fill across its whole slot, so the band
+                // runs unbroken through it and the pill sits on top.
+                for inner in &row.rows {
+                    for code in inner.inline_code.iter().filter(|code| !code.raised) {
+                        // A pill shorter than the line.
+                        let inset = (row.line_height * 0.1).round();
+                        let pill = Bounds::new(
+                            row.origin
+                                + point(
+                                    code.left,
+                                    row.line_height * code.visual_row as f32 + inset,
+                                ),
+                            size(code.slot, row.line_height - inset * 2.),
+                        );
+                        window.paint_quad(
+                            fill(pill, style.inline_code_background)
+                                .corner_radii(style.code_radius),
+                        );
+                    }
                 }
                 if a != b {
                     let from = row.pos_to_offset(a);
@@ -3653,6 +3721,36 @@ impl Element for EditorSurface {
                         ),
                         color,
                     ));
+                }
+            }
+            // A focused code block's language tag sits in its panel's corner,
+            // over the block's own text, so it goes down after every line.
+            for row in rows.iter() {
+                if let (Some(label), Some(bounds)) =
+                    (&row.code_language, row.code_language_bounds())
+                {
+                    // A shade darker than the panel it sits on, and cut to its
+                    // corner: rounded where the panel is, and on the one
+                    // corner that stands inside it.
+                    let mut tone = style.code_background;
+                    tone.l = (tone.l - 0.04).max(0.);
+                    window.paint_quad(fill(bounds, tone).corner_radii(Corners {
+                        top_left: px(0.),
+                        top_right: CODE_RADIUS,
+                        bottom_right: px(0.),
+                        bottom_left: px(6.),
+                    }));
+                    let _ = label.paint(
+                        point(
+                            bounds.left() + CODE_LANGUAGE_PADDING,
+                            bounds.top() + (CODE_LANGUAGE_HEIGHT - row.line_height) * 0.5,
+                        ),
+                        row.line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
                 }
             }
             // Last, over the cells: the fade is what says a clipped grid continues.
@@ -4007,19 +4105,7 @@ fn paint_marker(
 ) {
     let bounds = row.marker_bounds().expect("marker has bounds");
     match marker {
-        Marker::Number(line) | Marker::Source(line) | Marker::Footnote(line) => {
-            let _ = line.paint(
-                bounds.origin,
-                row.line_height,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-        }
-        Marker::Task {
-            source: Some(line), ..
-        } => {
+        Marker::Number(line) | Marker::Footnote(line) => {
             let _ = line.paint(
                 bounds.origin,
                 row.line_height,
@@ -4044,11 +4130,7 @@ fn paint_marker(
                 window.paint_quad(fill(bounds, style.marker).corner_radii(radius));
             }
         }
-        Marker::Task {
-            checked,
-            number,
-            source: None,
-        } => {
+        Marker::Task { checked, number } => {
             if let Some(number) = number {
                 let _ = number.paint(
                     point(bounds.left() - NUMBER_GAP - number.width, row.origin.y),
@@ -4088,9 +4170,9 @@ fn paint_marker(
 #[cfg(test)]
 mod tests {
     use super::{
-        AtomShape, CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_FENCE_INSET, CODE_FONT,
+        AtomShape, CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_FONT, CODE_INSET,
         Decoration, LayoutLine, LayoutRow, Marker, QUOTE_BAR, Runs, ShapeInput, TableScroll,
-        Widening, atom_label, cell_under, chrome_marker_unfocused, column_demands, column_widths,
+        Widening, atom_label, cell_under, chrome_marker, column_demands, column_widths,
         decoration_of, display_text, drawn_image, file_name, gap_below, max_indent,
         merge_row_centers, picture_source, place_table, quote_bars, reveal_offset, shape,
         table_overflows, text_runs, unbreakable_units, visible_strips,
@@ -4099,13 +4181,14 @@ mod tests {
     use crate::typeahead::tests::{at, run, state_of};
     use crate::types::DocTypes;
     use gpui::{Bounds, NoopTextSystem, Pixels, TextSystem, WindowTextSystem, point, px, size};
-    use gpui::{TextRun, font};
+    use gpui::{Hsla, TextRun, font};
     use markraft_commonmark::{commonmark_doc_type_names, commonmark_schema};
     use markraft_core::EditorState;
     use markraft_core::commands::ColumnAlignment;
     use markraft_core::commands::insert_text;
     use markraft_core::projection::{Line, RunContent, projection_of};
     use std::collections::HashMap;
+    use std::ops::Range;
     use std::sync::Arc;
 
     /// A row carrying only the token range it stands for, which is all the
@@ -4126,11 +4209,9 @@ mod tests {
             code_pos: None,
             marker: None,
             decoration: None,
-            code_header: None,
-            code_footer: None,
-            quote_marker: None,
+            code_language: None,
             callout_header: None,
-            code_fence_row: px(0.),
+            code_inset: px(0.),
             quote_bars: Vec::new(),
             widenings: Vec::new(),
             atoms: Vec::new(),
@@ -4314,7 +4395,7 @@ mod tests {
                 line,
                 input.types.heading_level(line),
                 input.types.is_code_block(line),
-                &chrome_marker_unfocused(input.types, line, None),
+                &chrome_marker(input.types, line, None),
             )
         })
     }
@@ -4361,13 +4442,14 @@ mod tests {
         }
     }
 
-    /// The code fill is drawn past the last row, so the gap below has to clear it
-    /// even where a quote would otherwise sit tight.
+    /// The code fill is drawn past the last row, and the line's height holds it,
+    /// so the gap below it is the note's own even where a quote would otherwise
+    /// sit tight.
     #[test]
     fn a_code_block_keeps_its_bottom_padding_above_a_quote() {
         let style = spaced_style();
         let gaps = gaps_of("```\nx\n```\n\n> quote", &style);
-        assert_eq!(gaps[0], CODE_FENCE_INSET + style.paragraph_gap);
+        assert_eq!(gaps[0], style.paragraph_gap);
     }
 
     /// A quote spaces the blocks it holds as the note does: off what comes
@@ -4499,6 +4581,17 @@ mod tests {
     }
 
     fn shaped_with(source: &str, types: DocTypes) -> Vec<LayoutLine> {
+        shaped_in(source, types, px(600.), 0..0)
+    }
+
+    /// Every line of `source`, laid out `width` wide with the document
+    /// `selection`, which is what reveals a syntax run.
+    fn shaped_in(
+        source: &str,
+        types: DocTypes,
+        width: Pixels,
+        selection: Range<usize>,
+    ) -> Vec<LayoutLine> {
         let state = state_of(source);
         let projection = projection_of(&state);
         let images = crate::images::Images::default();
@@ -4513,10 +4606,10 @@ mod tests {
             projection: &projection,
             style: &style,
             single_line: false,
-            selection: 0..0,
+            selection,
             composition: None,
         };
-        shape(&input, px(600.), &text_system())
+        shape(&input, width, &text_system())
     }
 
     /// The label each atom pill of `source`'s first line reaches the screen with, the
@@ -4605,6 +4698,11 @@ mod tests {
 
     /// The display text of `source`'s first line and the runs it is shaped with.
     fn runs_of(source: &str) -> (String, Runs, EditorStyle) {
+        runs_with(source, 0..0)
+    }
+
+    /// [`runs_of`] with the document `selection`, which reveals syntax runs.
+    fn runs_with(source: &str, selection: Range<usize>) -> (String, Runs, EditorStyle) {
         let state = state_of(source);
         let projection = projection_of(&state);
         let images = crate::images::Images::default();
@@ -4620,7 +4718,7 @@ mod tests {
             projection: &projection,
             style: &style,
             single_line: false,
-            selection: 0..0,
+            selection,
             composition: None,
         };
         let line = &projection.lines()[0];
@@ -4670,20 +4768,144 @@ mod tests {
         assert_eq!(run_over(&text, &runs, 'e').background_color, None);
     }
 
-    /// A code span inside a highlight keeps its pill: the fill, painted after
-    /// the pills, is left off the code's runs and stays on the text around it.
+    /// A code span inside a highlight shares the fill of the text around it,
+    /// so the band runs unbroken through the pill's slot, padding included;
+    /// the pill itself is painted over the fill.
     #[test]
-    fn a_highlight_leaves_the_code_pill_inside_it_uncovered() {
+    fn a_highlight_keeps_one_fill_through_the_code_pill_inside_it() {
         let (text, runs, style) = runs_of("x ==a `c` b== y");
-        for needle in ['a', 'b'] {
+        for needle in ['a', 'c', 'b'] {
             assert_eq!(
                 run_over(&text, &runs, needle).background_color,
                 Some(style.highlight),
                 "{needle} sits in the highlight"
             );
         }
-        assert_eq!(run_over(&text, &runs, 'c').background_color, None);
+        // Every run from `a` to `b` carries it — the code's delimiters and the
+        // spaces beside the pill included — so the fill never breaks.
+        let (from, to) = (text.find('a').unwrap(), text.find('b').unwrap());
+        let mut start = 0;
+        for run in &runs.runs {
+            let end = start + run.len;
+            if end > from && start <= to {
+                assert_eq!(
+                    run.background_color,
+                    Some(style.highlight),
+                    "{:?}",
+                    &text[start..end]
+                );
+            }
+            start = end;
+        }
+        assert_eq!(run_over(&text, &runs, 'x').background_color, None);
+        assert_eq!(run_over(&text, &runs, 'y').background_color, None);
         assert!(!runs.code.is_empty(), "the code keeps its pill");
+    }
+
+    /// The code spans drawn as pills on each visual row of `line`, as the
+    /// text each one holds.
+    fn pills(line: &LayoutLine) -> Vec<(usize, String)> {
+        line.rows
+            .iter()
+            .flat_map(|row| {
+                row.inline_code
+                    .iter()
+                    .filter(|code| !code.raised)
+                    .map(|code| (code.visual_row, row.text()[code.range.clone()].to_owned()))
+            })
+            .collect()
+    }
+
+    /// A code span wrapped across two rows is drawn as a pill on each. The
+    /// row it wraps from ends in the space it wraps at, which is not drawn:
+    /// the pill stops at the last glyph instead of running on to the row's
+    /// end, and the smaller text centred in it holds no trailing space.
+    #[test]
+    fn a_wrapped_code_span_is_pilled_to_its_glyphs() {
+        // Every character is as wide as every other, so at this width the row
+        // wraps after `inline code `.
+        let lines = shaped_in(
+            "alpha beta `inline code span here` gamma",
+            callout_types(),
+            px(200.),
+            0..0,
+        );
+        let line = &lines[0];
+        let row = &line.rows[0];
+        assert_eq!(row.wrap_starts(), [0, 23]);
+        assert_eq!(
+            pills(line),
+            [(0, "inline code".to_owned()), (1, "span here".to_owned())]
+        );
+        let x = |byte| {
+            row.line
+                .position_for_index(byte, line.line_height)
+                .unwrap()
+                .x
+        };
+        let first = &row.inline_code[0];
+        assert_eq!(first.left, x(11));
+        assert_eq!(first.slot, x(22) - x(11), "as wide as its glyphs");
+        assert!(
+            first.left + first.slot < line.width,
+            "short of the row's end"
+        );
+        let second = &row.inline_code[1];
+        assert_eq!(second.left, px(0.), "the next row starts with the pill");
+        assert_eq!(second.line.text.as_ref(), "span here");
+    }
+
+    /// With the caret inside a code span its backticks are revealed as runs
+    /// of their own, in the quieter markup ink. They still sit in the one pill
+    /// the code is drawn in, rather than in pills of their own abutting it.
+    #[test]
+    fn revealed_backticks_share_the_code_pill() {
+        // The caret between `c` and `o`: doc position 1 opens the paragraph.
+        let (text, runs, style) = runs_with("x `code` y", 5..5);
+        assert_eq!(text, "x `code` y", "the backticks are revealed");
+        assert_eq!(runs.code.len(), 1, "one span for the backticks and code");
+        let inks: Vec<(usize, Hsla)> = runs.code[0]
+            .runs
+            .iter()
+            .map(|(len, _, ink)| (*len, *ink))
+            .collect();
+        assert_eq!(
+            inks,
+            [
+                (1, style.muted_text),
+                (4, style.inline_code_text),
+                (1, style.muted_text)
+            ],
+            "the backticks keep the markup ink"
+        );
+        let lines = shaped_in("x `code` y", callout_types(), px(600.), 5..5);
+        assert_eq!(pills(&lines[0]), [(0, "`code`".to_owned())]);
+    }
+
+    /// Revealed inside a highlight, the span is still one pill over one fill.
+    #[test]
+    fn revealed_backticks_in_a_highlight_share_the_pill_and_the_fill() {
+        // The caret on `c`: `x ==a ` takes doc positions 1 to 7.
+        let source = "x ==a `c` b== y";
+        let (text, runs, style) = runs_with(source, 8..8);
+        assert!(text.contains("`c`"), "the backticks are revealed: {text}");
+        assert_eq!(runs.code.len(), 1, "one span for the backticks and code");
+        let (from, to) = (text.find('a').unwrap(), text.find('b').unwrap());
+        let mut start = 0;
+        for run in &runs.runs {
+            let end = start + run.len;
+            if end > from && start <= to {
+                assert_eq!(
+                    run.background_color,
+                    Some(style.highlight),
+                    "{:?}",
+                    &text[start..end]
+                );
+            }
+            start = end;
+        }
+        let lines = shaped_in(source, callout_types(), px(600.), 8..8);
+        assert_eq!(pills(&lines[0]), [(0, "`c`".to_owned())]);
     }
 
     #[test]
@@ -4995,6 +5217,49 @@ mod tests {
         assert_eq!(lines[0].top_gap, Pixels::ZERO);
     }
 
+    /// A callout that opens on a code block draws its header in a band of its
+    /// own above the panel, not inside the panel's padding: the line keeps the
+    /// room a code block in a plain quote keeps, plus the header's band on top.
+    #[test]
+    fn a_callout_opening_on_a_code_block_draws_its_header_above_the_panel() {
+        let mut callout = shaped("> [!warning] Warn\n> ```\n> warn code\n> ```");
+        let mut plain = shaped("> ```\n> warn code\n> ```");
+        stack(&mut callout, Pixels::ZERO);
+        stack(&mut plain, Pixels::ZERO);
+        let (code, bare) = (&callout[0], &plain[0]);
+        assert!(code.code_inset > Pixels::ZERO, "the first line is code");
+        assert!(bare.callout_header().is_none());
+        assert_eq!(code.top_gap, bare.top_gap + super::CALLOUT_HEADER_HEIGHT);
+        assert_eq!(code.height, bare.height);
+        let (label, header) = code.callout_header().expect("a header");
+        assert_eq!(label, "Warn");
+        // The band starts where the line's room starts and ends where the panel
+        // begins, flush with the panel's left edge.
+        let panel_top = code.origin.y - code.code_panel_room();
+        assert_eq!(header.top(), code.origin.y - code.top_gap);
+        assert_eq!(header.bottom(), panel_top);
+        assert_eq!(header.left(), code.origin.x - super::CODE_PADDING);
+        assert!(code.in_callout_header(header.top()));
+        assert!(!code.in_callout_header(panel_top));
+        // The panel itself is where it is in a plain quote, one band lower.
+        assert_eq!(code.origin.y - bare.origin.y, super::CALLOUT_HEADER_HEIGHT);
+        assert_eq!(code.origin.x, bare.origin.x);
+
+        // A callout opening on a paragraph keeps its header right above the text.
+        let mut prose = shaped("> [!warning] Warn\n> warn text");
+        stack(&mut prose, Pixels::ZERO);
+        let first = &prose[0];
+        assert_eq!(first.top_gap, super::CALLOUT_HEADER_HEIGHT);
+        let (_, header) = first.callout_header().expect("a header");
+        assert_eq!(header.bottom(), first.origin.y);
+        assert_eq!(header.top(), first.origin.y - super::CALLOUT_HEADER_HEIGHT);
+        // Both headers start at the same x: where the paragraph's text does.
+        assert_eq!(
+            header.left(),
+            code.callout_header().expect("a header").1.left()
+        );
+    }
+
     /// Callouts are the host's to ask for: the attributes that spell one are not
     /// in any role table, so a host that names none gets the block quotes its
     /// schema declares and nothing drawn around them — however those attributes
@@ -5137,6 +5402,56 @@ mod tests {
         }
     }
 
+    /// A code span wholly on the first visual row of a wrapped line gets its
+    /// one pill there, and the rows after it none.
+    #[test]
+    fn a_code_span_before_a_wrap_is_pilled_on_its_own_row() {
+        let lines = shaped_in(
+            "alpha `code` beta gamma delta epsilon zeta eta theta iota kappa lambda mu",
+            callout_types(),
+            px(200.),
+            0..0,
+        );
+        assert!(lines[0].rows[0].visual_rows() > 1, "the line wraps");
+        assert_eq!(pills(&lines[0]), [(0, "code".to_owned())]);
+    }
+
+    /// Where the wrapper would break before a full-width comma, the character
+    /// before it goes down with it: no row starts with closing punctuation,
+    /// and none ends with opening punctuation.
+    #[test]
+    fn a_row_never_starts_with_closing_punctuation() {
+        let starts = |source: &str| {
+            let lines = shaped_in(source, callout_types(), px(200.), 0..0);
+            let row = &lines[0].rows[0];
+            row.wrap_starts()
+                .into_iter()
+                .map(|byte| row.text()[..byte].chars().count())
+                .collect::<Vec<_>>()
+        };
+        let plain = "一".repeat(60);
+        let first = starts(&plain)[1];
+        assert!(first > 1, "the test width holds more than one character");
+
+        let mut chars: Vec<char> = plain.chars().collect();
+        chars[first] = '，';
+        let comma: String = chars.iter().collect();
+        assert_eq!(
+            starts(&comma)[1],
+            first - 1,
+            "the comma keeps its character"
+        );
+
+        let mut chars: Vec<char> = plain.chars().collect();
+        chars[first - 1] = '「';
+        let quote: String = chars.iter().collect();
+        assert_eq!(
+            starts(&quote)[1],
+            first - 1,
+            "the quote goes down with its text"
+        );
+    }
+
     /// What a column may never be narrower than: the widest run of text the
     /// line wrapper would not break. These ranges have to agree with where gpui
     /// actually wraps, or a column floors at a width that still splits a word.
@@ -5157,6 +5472,8 @@ mod tests {
         // CJK breaks between any two characters, so one character is all a
         // column has to reserve room for.
         assert_eq!(units("表格标题", &[]), ["表", "格", "标", "题"]);
+        // Except where a mark may not start or end a line.
+        assert_eq!(units("表，格「标」题", &[]), ["表，", "格", "「标」", "题"]);
         // A code span is drawn as one pill, so it counts as one unit however
         // many words it holds.
         let span = std::slice::from_ref(&(4usize..14usize));
@@ -5301,11 +5618,10 @@ mod tests {
             .lines()
             .iter()
             .map(|line| {
-                chrome_marker_unfocused(&types, line, None).map(|marker| match marker {
+                chrome_marker(&types, line, None).map(|marker| match marker {
                     Marker::Number(_) => "number",
                     Marker::Bullet { .. } => "bullet",
                     Marker::Task { .. } => "task",
-                    Marker::Source(_) => "source",
                     Marker::Footnote(_) => "footnote",
                 })
             })
@@ -5530,28 +5846,8 @@ mod tests {
         );
     }
 
-    /// A revealed spelling reads as the characters the writer typed: in the
-    /// line's own face, and ending in the typed space, so it sits flush against
-    /// the text with no gap of its own — a heading's `# ` as a list's `- `.
     #[test]
-    fn a_revealed_spelling_sits_flush_against_its_text() {
-        let source = "# Head\n\n- item";
-        let projection = projection_of(&state_of(source));
-        for index in 0..2 {
-            let pos = projection.lines()[index].from() + 1;
-            let rows = shaped_revealing(source, pos..pos, None);
-            let row = &rows[index];
-            let Some(Marker::Source(label)) = &row.marker else {
-                panic!("line {index} shows its spelling");
-            };
-            let bounds = row.marker_bounds().unwrap();
-            assert_eq!(bounds.right(), row.origin.x, "line {index}");
-            assert_eq!(bounds.size.width, label.width);
-        }
-    }
-
-    #[test]
-    fn focused_heading_and_list_draw_source_markers() {
+    fn the_caret_never_swaps_a_marker_for_its_spelling() {
         let text = text_system();
         let state = state_of("# Hello\n\n- item\n\n1. numbered\n\n- [ ] task");
         let projection = projection_of(&state);
@@ -5576,8 +5872,8 @@ mod tests {
         };
         let rows = shape(&input, px(400.), &text);
         assert!(
-            matches!(rows[0].marker, Some(Marker::Source(_))),
-            "focused heading shows ATX hashes"
+            rows[0].marker.is_none(),
+            "a focused heading shows no hashes, as in Typora"
         );
         // Caret in the bullet item.
         let bullet_pos = projection.lines()[1].from();
@@ -5587,8 +5883,36 @@ mod tests {
         };
         let rows = shape(&input, px(400.), &text);
         assert!(
-            matches!(rows[1].marker, Some(Marker::Source(_))),
-            "focused bullet shows `- ` spelling"
+            matches!(rows[1].marker, Some(Marker::Bullet { .. })),
+            "a focused bullet stays a drawn marker, as in Typora"
+        );
+        let ordered_pos = projection.lines()[2].from();
+        let rows = shape(
+            &ShapeInput {
+                selection: ordered_pos..ordered_pos,
+                composition: None,
+                ..input
+            },
+            px(400.),
+            &text,
+        );
+        assert!(
+            matches!(rows[2].marker, Some(Marker::Number(_))),
+            "a focused ordinal stays drawn"
+        );
+        let task_pos = projection.lines()[3].from();
+        let rows = shape(
+            &ShapeInput {
+                selection: task_pos..task_pos,
+                composition: None,
+                ..input
+            },
+            px(400.),
+            &text,
+        );
+        assert!(
+            matches!(rows[3].marker, Some(Marker::Task { .. })),
+            "a focused task keeps its check box"
         );
         // Unfocused list keeps chrome.
         let input = ShapeInput {
@@ -5600,11 +5924,34 @@ mod tests {
             matches!(rows[1].marker, Some(Marker::Bullet { .. })),
             "unfocused bullet stays a drawn marker"
         );
+        let state = state_of("- # Item heading");
+        let projection = projection_of(&state);
+        let pos = projection.lines()[0].from();
+        let rows = shape(
+            &ShapeInput {
+                images: &images,
+                spelling: Some(&spelling),
+                doc: state.doc(),
+                types: &types,
+                projection: &projection,
+                style: &style,
+                single_line: false,
+                wiki: None,
+                selection: pos..pos,
+                composition: None,
+            },
+            px(400.),
+            &text,
+        );
+        assert!(
+            matches!(rows[0].marker, Some(Marker::Bullet { .. })),
+            "a heading opening a list item keeps the item's bullet"
+        );
     }
 
-    /// A code block keeps a row above and below its text for its fences
-    /// whether or not the caret is in it, so focusing it spells the fences in
-    /// room it already had: nothing below it moves.
+    /// A code block spells no fences, focused or not: its panel reaches only
+    /// its padding past its text, and focusing it adds a language tag that
+    /// hangs over what follows. Nothing below it moves.
     #[test]
     fn a_code_block_is_as_tall_focused_as_it_is_unfocused() {
         let source = "```rust\nfn main() {}\n```\n\nafter";
@@ -5614,12 +5961,15 @@ mod tests {
         let focused = shaped_revealing(source, inside..inside, None);
         let unfocused = shaped_revealing(source, outside..outside, None);
         let (code, plain) = (&focused[0], &unfocused[0]);
-        assert!(code.code_footer.is_some() && plain.code_footer.is_none());
-        assert!(code.code_header.is_some() && plain.code_header.is_none());
+        assert_eq!(code.code_inset, CODE_INSET);
+        assert_eq!(code.top_gap, CODE_INSET, "no fence row above the text");
         assert_eq!(code.top_gap, plain.top_gap);
         assert_eq!(code.height, plain.height);
-        assert_eq!(code.code_footer_height(), code.line_height);
-        assert_eq!(plain.code_footer_height(), plain.line_height);
+        assert_eq!(
+            code.height,
+            code.text_height() + CODE_INSET + EditorStyle::notes().paragraph_gap,
+            "no fence row below it either"
+        );
         let total = |lines: &[LayoutLine]| {
             lines
                 .iter()
@@ -5628,36 +5978,49 @@ mod tests {
         assert_eq!(total(&focused), total(&unfocused));
     }
 
+    /// A focused code block shows its language as a tag in its panel's
+    /// top-right corner, and a block with none shows what the language
+    /// picker calls none; an unfocused block shows no tag.
     #[test]
-    fn focused_code_block_shows_fence_spelling() {
-        let text = text_system();
-        let state = state_of("```rust\nfn main() {}\n```");
-        let projection = projection_of(&state);
-        let schema = commonmark_schema();
-        let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
-        let style = EditorStyle::default();
-        let images = crate::images::Images::default();
-        let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
-        let pos = projection.lines()[0].from() + 1;
-        let input = ShapeInput {
-            images: &images,
-            spelling: Some(&spelling),
-            doc: state.doc(),
-            types: &types,
-            projection: &projection,
-            style: &style,
-            single_line: false,
-            wiki: None,
-            selection: pos..pos,
-            composition: None,
+    fn a_focused_code_block_tags_its_language_inside_its_panel() {
+        let tag = |source: &str, focused: bool| {
+            let projection = projection_of(&state_of(source));
+            let pos = if focused {
+                projection.lines()[0].from() + 1
+            } else {
+                projection.lines()[1].from() + 1
+            };
+            let lines = shaped_revealing(source, pos..pos, None);
+            let code = &lines[0];
+            let label = code
+                .code_language
+                .as_ref()
+                .map(|label| label.text.to_string());
+            (label, code.code_language_bounds(), code.clone())
         };
-        let rows = shape(&input, px(400.), &text);
-        assert!(rows[0].code_footer.is_some(), "closing fence while focused");
-        assert!(rows[0].code_header.is_some());
+        let (label, bounds, code) = tag("```rust\nfn main() {}\n```\n\nafter", true);
+        assert_eq!(label.as_deref(), Some("rust"));
+        let bounds = bounds.expect("a focused block's tag has bounds");
+        assert_eq!(
+            bounds.right(),
+            code.origin.x + code.width + super::CODE_PADDING,
+            "flush with the panel's right edge"
+        );
+        assert_eq!(
+            bounds.top(),
+            code.origin.y - CODE_INSET,
+            "flush with the panel's top edge"
+        );
+        let (label, _, _) = tag("```\nplain\n```\n\nafter", true);
+        assert_eq!(label.as_deref(), Some("Plain Text"));
+        let (label, bounds, _) = tag("```rust\nfn main() {}\n```\n\nafter", false);
+        assert!(label.is_none() && bounds.is_none(), "no tag unfocused");
     }
 
+    /// A quote draws its bar and nothing else wherever the caret is: no `>`
+    /// beside it, as in Typora.
     #[test]
-    fn focused_quote_shows_source_markers() {
+    fn a_focused_quote_draws_as_it_does_unfocused() {
         let text = text_system();
         let state = state_of("> quoted\n\npara");
         let projection = projection_of(&state);
@@ -5679,29 +6042,19 @@ mod tests {
             selection: quote_pos..quote_pos,
             composition: None,
         };
-        let rows = shape(&input, px(400.), &text);
-        // Whatever the kind spells a quote level with, marker and all — the
-        // view draws that and nothing of its own.
-        let expected = markraft_core::kind::SourceSpelling::container_marker(
-            &spelling,
-            types.blockquote.expect("the quote type"),
-        )
-        .expect("a quote marker");
-        assert_eq!(
-            rows[0].quote_marker.as_ref().map(|line| line.len),
-            Some(expected.len()),
-            "focused quote shows its own spelling"
-        );
+        let focused = shape(&input, px(400.), &text);
         let para_pos = projection.lines()[1].from();
-        let input = ShapeInput {
-            selection: para_pos..para_pos,
-            ..input
-        };
-        let rows = shape(&input, px(400.), &text);
-        assert!(
-            rows[0].quote_marker.is_none(),
-            "unfocused quote hides its `>` spelling"
+        let unfocused = shape(
+            &ShapeInput {
+                selection: para_pos..para_pos,
+                composition: None,
+                ..input
+            },
+            px(400.),
+            &text,
         );
+        assert_eq!(focused[0].origin, unfocused[0].origin);
+        assert_eq!(focused[0].quote_bars, unfocused[0].quote_bars);
     }
 
     /// An input method's marked text opens the span it is being typed into, and
@@ -5955,12 +6308,9 @@ mod tests {
             None => "none".to_owned(),
             Some(Marker::Number(label)) => format!("number {:?}", label.text),
             Some(Marker::Bullet { depth }) => format!("bullet {depth}"),
-            Some(Marker::Task {
-                checked,
-                number,
-                source,
-            }) => format!("task {checked} {:?} {:?}", text(number), text(source)),
-            Some(Marker::Source(label)) => format!("source {:?}", label.text),
+            Some(Marker::Task { checked, number }) => {
+                format!("task {checked} {:?}", text(number))
+            }
             Some(Marker::Footnote(label)) => format!("footnote {:?}", label.text),
         };
         let decoration = match &line.decoration {
@@ -5980,10 +6330,8 @@ mod tests {
         };
         write!(
             out,
-            "\n marker {marker}\n decoration {decoration}\n chrome {:?} {:?} {:?} {:?}",
-            text(&line.code_header),
-            text(&line.code_footer),
-            text(&line.quote_marker),
+            "\n marker {marker}\n decoration {decoration}\n chrome {:?} {:?}",
+            text(&line.code_language),
             line.callout_header
                 .as_ref()
                 .map(|header| (header.text.clone(), header.label.text.to_string())),

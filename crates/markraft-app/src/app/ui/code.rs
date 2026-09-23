@@ -81,7 +81,7 @@ impl NotesApp {
         let pos = self.interaction.code_language()?;
         let editor = self.editor().read(cx);
         let active = editor.code_language(pos)?.trim().to_lowercase();
-        let anchor = editor.code_header_bounds(pos)?;
+        let anchor = editor.code_language_bounds(pos)?;
         let languages = self.matching_code_languages(cx);
         let empty = languages.is_empty();
         let viewport = window.bounds().size;

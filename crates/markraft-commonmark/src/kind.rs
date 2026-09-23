@@ -8,7 +8,6 @@
 //! them without depending on this crate.
 
 use markraft_core::kind::SYNTAX_DISPLAY_ATTR;
-use markraft_core::projection::{Ancestor, Line};
 use markraft_core::{
     Attrs, Fragment, MarkSet, Node, NodeTypeId, Schema, Slice,
     kind::{Codecs, DocTypeNames, SourceSpelling},
@@ -388,34 +387,6 @@ impl CommonMarkSpelling {
     fn name(&self, ty: NodeTypeId) -> &str {
         self.schema.node_type(ty).name()
     }
-
-    fn is_item(&self, ty: NodeTypeId) -> bool {
-        matches!(self.name(ty), schema::LIST_ITEM | schema::TASK_ITEM)
-    }
-
-    /// The item and list a line sits in, when the line is the item's first —
-    /// which is where a marker belongs. Every ancestor between the item and the
-    /// line has to be a first child, or a table row inside an item would get a
-    /// bullet of its own.
-    fn item_of<'a>(&self, line: &'a Line) -> Option<(&'a Ancestor, &'a Ancestor)> {
-        let index = line
-            .ancestors()
-            .iter()
-            .rposition(|ancestor| self.is_item(ancestor.node_type))?;
-        let starts = index + 1 < line.ancestors().len()
-            && line.ancestors()[index + 1..]
-                .iter()
-                .all(|ancestor| ancestor.index == 0);
-        if !starts {
-            return None;
-        }
-        let list = line.ancestors().get(index.checked_sub(1)?)?;
-        matches!(
-            self.name(list.node_type),
-            schema::BULLET_LIST | schema::ORDERED_LIST
-        )
-        .then(|| (&line.ancestors()[index], list))
-    }
 }
 
 fn attr_str<'a>(attrs: &'a Attrs, name: &str, default: &'a str) -> &'a str {
@@ -425,60 +396,7 @@ fn attr_str<'a>(attrs: &'a Attrs, name: &str, default: &'a str) -> &'a str {
         .unwrap_or(default)
 }
 
-fn attr_int(attrs: &Attrs, name: &str, default: i64) -> i64 {
-    attrs
-        .get(name)
-        .and_then(|value| value.as_int())
-        .unwrap_or(default)
-}
-
 impl SourceSpelling for CommonMarkSpelling {
-    fn line_prefix(&self, line: &Line) -> Option<String> {
-        let block = line.ancestors().last()?;
-        if self.name(block.node_type) == schema::HEADING {
-            let level = attr_int(&block.attrs, "level", 1).clamp(1, 6) as usize;
-            return Some(format!("{} ", "#".repeat(level)));
-        }
-        let (item, list) = self.item_of(line)?;
-        let bullet = attr_str(&list.attrs, "bullet_char", "-");
-        if self.name(item.node_type) == schema::TASK_ITEM {
-            let checked = item
-                .attrs
-                .get("checked")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
-            return Some(format!("{bullet} [{}] ", if checked { "x" } else { " " }));
-        }
-        if self.name(list.node_type) == schema::ORDERED_LIST {
-            let start = attr_int(&list.attrs, "start", 1);
-            let delimiter = attr_str(&list.attrs, "delimiter", ".");
-            return Some(format!("{}{delimiter} ", start + item.index as i64));
-        }
-        Some(format!("{bullet} "))
-    }
-
-    fn verbatim_fence(&self, line: &Line) -> Option<(String, String)> {
-        let block = line.ancestors().last()?;
-        if self.name(block.node_type) != schema::CODE_BLOCK {
-            return None;
-        }
-        let character = attr_str(&block.attrs, "fence_char", "`")
-            .chars()
-            .next()
-            .unwrap_or('`');
-        let length = attr_int(&block.attrs, "fence_length", 3).clamp(3, 12) as usize;
-        let fence: String = std::iter::repeat_n(character, length).collect();
-        let language = attr_str(&block.attrs, "language", "");
-        Some((format!("{fence}{language}"), fence))
-    }
-
-    fn container_marker(&self, node_type: NodeTypeId) -> Option<String> {
-        // The space is part of the spelling: `>foo` and `> foo` are the same
-        // quote, and what a writer types — and what a save writes — is the
-        // second.
-        (self.name(node_type) == schema::BLOCKQUOTE).then(|| "> ".to_string())
-    }
-
     fn atom_source(&self, node: &Node) -> Option<String> {
         match self.name(node.type_id()) {
             schema::IMAGE => Some(crate::textblock::image_spelling(node.attrs())),
