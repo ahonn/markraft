@@ -45,6 +45,7 @@
 //! | 40 | [`STRONG`] | `**…**` |
 //! | 50 | [`EM`] | `*…*` |
 //! | 55 | [`SUPERSCRIPT`] | `^…^` |
+//! | 56 | [`SUBSCRIPT`] | `~…~` |
 //! | 60 | [`CODE`] | `` `…` `` — innermost, because its content is literal |
 //! | 65 | [`MATH`] | `$…$` or `$$…$$` — literal, as code is |
 //! | 70 | [`SYNTAX`] | never spelled: it marks spelling |
@@ -225,6 +226,9 @@ pub const UNDERLINE: &str = "underline";
 pub const HIGHLIGHT: &str = "highlight";
 /// Superscript: `^…^`, or a paired `<sup>`…`</sup>`.
 pub const SUPERSCRIPT: &str = "superscript";
+/// Subscript: `~…~`, or a paired `<sub>`…`</sub>`. A single tilde is
+/// subscript and a double one strikethrough, as Typora reads them.
+pub const SUBSCRIPT: &str = "subscript";
 /// A code span.
 pub const CODE: &str = "code";
 /// A formula: `$…$`, `$$…$$` or `` $`…`$ ``, with [`MATH_DISPLAY_ATTR`]
@@ -249,7 +253,7 @@ pub const MATH_DISPLAY_ATTR: &str = "display";
 pub const SYNTAX: &str = "syntax";
 
 /// The group holding [`STRONG`], [`EM`], [`STRIKETHROUGH`], [`UNDERLINE`],
-/// [`HIGHLIGHT`] and [`SUPERSCRIPT`]: the marks that have a delimiter run or a
+/// [`HIGHLIGHT`], [`SUPERSCRIPT`] and [`SUBSCRIPT`]: the marks that have a delimiter run or a
 /// tag of their own.
 pub const STYLE_GROUP: &str = "style";
 /// The group holding every block node type.
@@ -423,6 +427,7 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
         .mark(MarkTypeSpec::new(STRONG).rank(40).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(EM).rank(50).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(SUPERSCRIPT).rank(55).group(STYLE_GROUP))
+        .mark(MarkTypeSpec::new(SUBSCRIPT).rank(56).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(CODE).rank(60))
         .mark(MarkTypeSpec::new(MATH).rank(65).attr(AttrSpec::new(
             MATH_DISPLAY_ATTR,

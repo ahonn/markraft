@@ -106,6 +106,7 @@ pub fn commonmark_rules() -> ParseRules {
         .with(&NodeValue::Underline, ParseRule::mark(md::UNDERLINE))
         .with(&NodeValue::Highlight, ParseRule::mark(md::HIGHLIGHT))
         .with(&NodeValue::Superscript, ParseRule::mark(md::SUPERSCRIPT))
+        .with(&NodeValue::Subscript, ParseRule::mark(md::SUBSCRIPT))
         .with(
             &NodeValue::Math(NodeMath::default()),
             ParseRule::Text {

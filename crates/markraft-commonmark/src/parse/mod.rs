@@ -123,12 +123,14 @@ impl From<NodeError> for ParseError {
 /// count. The embed form `![[…]]` is not comrak's at all and is recognised in
 /// the conversion layer.
 ///
-/// `highlight` (`==…==`), `superscript` (`^…^`), `math_dollars` (`$…$` and
-/// `$$…$$`) and `math_code` (`` $`…`$ ``) are on for the spellings the notes
-/// this editor shares use. Math content is literal, so a `^` or a `*` inside a
-/// formula is never read as a style. `subscript` stays off: it would take the
-/// single `~` GFM reads as strikethrough. So does `underline`, which would take
-/// `__` from strong emphasis.
+/// `highlight` (`==…==`), `superscript` (`^…^`), `subscript` (`~…~`),
+/// `math_dollars` (`$…$` and `$$…$$`) and `math_code` (`` $`…`$ ``) are on for
+/// the spellings the notes this editor shares use. Math content is literal, so
+/// a `^` or a `*` inside a formula is never read as a style. `subscript` takes
+/// the single `~` GFM reads as strikethrough, leaving strikethrough to `~~`:
+/// that is how Typora reads them, and the notes come from there more often
+/// than they are written for GitHub. `underline` stays off, since it would
+/// take `__` from strong emphasis.
 ///
 /// `cjk_friendly_emphasis` is on because CommonMark's flanking rules refuse a
 /// delimiter run between CJK punctuation and a letter, so `**注意：**这里` would
@@ -151,6 +153,7 @@ pub fn commonmark_options() -> Options<'static> {
     options.extension.wikilinks_title_after_pipe = true;
     options.extension.highlight = true;
     options.extension.superscript = true;
+    options.extension.subscript = true;
     options.extension.math_dollars = true;
     options.extension.math_code = true;
     options.extension.cjk_friendly_emphasis = true;

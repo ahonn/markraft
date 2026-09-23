@@ -186,6 +186,11 @@ fn every_styling_tag_has_a_mark() {
 fn highlight_superscript_and_math_come_across_as_their_markdown() {
     assert_eq!(markdown("<p>a <mark>hit</mark> b</p>"), "a ==hit== b");
     assert_eq!(markdown("<p>x<sup>2</sup></p>"), "x^2^");
+    assert_eq!(markdown("<p>H<sub>2</sub>O</p>"), "H~2~O");
+    assert_eq!(
+        markdown("<p>H<span style='vertical-align:sub'>2</span>O</p>"),
+        "H~2~O"
+    );
     assert_eq!(
         markdown("<p>x<span style='vertical-align:super'>2</span></p>"),
         "x^2^"

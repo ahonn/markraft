@@ -118,6 +118,9 @@ pub struct DocTypes {
     /// Superscript, drawn smaller and raised in the slot full-size text would
     /// take. Without it the text is drawn on the line like its neighbours.
     pub superscript: Option<MarkTypeId>,
+    /// Subscript, drawn smaller and lowered in the slot full-size text would
+    /// take. Without it the text is drawn on the line like its neighbours.
+    pub subscript: Option<MarkTypeId>,
     /// A formula. Its TeX source is drawn as it stands, in the code font, and
     /// no emoji shortcode is replaced inside one. Without it a formula is drawn
     /// as prose.
@@ -183,6 +186,7 @@ impl DocTypes {
             underline: mark(names.underline),
             highlight: mark(names.highlight),
             superscript: mark(names.superscript),
+            subscript: mark(names.subscript),
             math: mark(names.math),
             link: mark(names.link),
             syntax: mark(names.syntax),

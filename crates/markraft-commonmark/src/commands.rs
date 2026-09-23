@@ -432,6 +432,7 @@ fn style_of(name: &str) -> Option<Style> {
         md::UNDERLINE => Some(Style::Underline),
         md::HIGHLIGHT => Some(Style::Highlight),
         md::SUPERSCRIPT => Some(Style::Superscript),
+        md::SUBSCRIPT => Some(Style::Subscript),
         _ => None,
     }
 }

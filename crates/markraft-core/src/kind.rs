@@ -107,6 +107,8 @@ pub struct DocTypeNames {
     pub highlight: Option<&'static str>,
     /// Superscript.
     pub superscript: Option<&'static str>,
+    /// Subscript.
+    pub subscript: Option<&'static str>,
     /// A formula, whose content is TeX source rather than prose.
     pub math: Option<&'static str>,
     /// A link, carrying a [`LINK_HREF_ATTR`] attribute.

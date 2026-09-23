@@ -501,6 +501,7 @@ pub fn commonmark_html_rules() -> HtmlRules {
         .with_all(&["u", "ins"], HtmlRule::mark(md::UNDERLINE))
         .with("mark", HtmlRule::mark(md::HIGHLIGHT))
         .with("sup", HtmlRule::mark(md::SUPERSCRIPT))
+        .with("sub", HtmlRule::mark(md::SUBSCRIPT))
         // A formula as comrak renders one, `data-math-style` on a `<code>` or
         // a `<span>`; the serialiser writes it back the same way.
         .matching(
@@ -653,7 +654,7 @@ fn fully_modelled_span(target: HtmlTarget<'_>) -> bool {
                                 .split_whitespace()
                                 .all(|word| matches!(word, "underline" | "line-through"))
                     }
-                    "vertical-align" => value == "super",
+                    "vertical-align" => value == "super" || value == "sub",
                     _ => false,
                 }
             })

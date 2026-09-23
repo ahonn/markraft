@@ -566,6 +566,7 @@ pub fn commonmark_mark_rules() -> MarkRules {
     rules.insert(md::UNDERLINE.to_string(), MarkRule::fixed("<u>", "</u>"));
     rules.insert(md::HIGHLIGHT.to_string(), emphasis_rule("==", '='));
     rules.insert(md::SUPERSCRIPT.to_string(), emphasis_rule("^", '^'));
+    rules.insert(md::SUBSCRIPT.to_string(), emphasis_rule("~", '~'));
     rules.insert(md::CODE.to_string(), code_rule());
     rules.insert(md::MATH.to_string(), math_rule());
     // Text already spelled — a soft break, an empty link's `[](…)` — goes out

@@ -54,10 +54,11 @@ fn visible(kind: BlockKind, text: &str) -> String {
 
 #[test]
 fn a_style_covers_its_delimiters_and_conceals_them_as_one_span() {
+    // A single tilde is subscript and a double one strikethrough.
     assert_eq!(para("**ab**"), "strong(0..6) 0..2@0 4..6@0");
     assert_eq!(
         para("~~s~~ ~t~"),
-        "strikethrough(0..5) strikethrough(6..9) 0..2@0 3..5@0 6..7@1 8..9@1"
+        "strikethrough(0..5) subscript(6..9) 0..2@0 3..5@0 6..7@1 8..9@1"
     );
     assert_eq!(visible(BlockKind::Paragraph, "a **b** c"), "a b c");
 }
@@ -85,6 +86,16 @@ fn highlight_and_superscript_conceal_their_delimiters() {
     assert_eq!(para("a == b == c"), "");
     assert_eq!(para("a ===b=== c"), "");
     assert_eq!(para("2^10"), "");
+}
+
+#[test]
+fn a_single_tilde_is_subscript_and_a_double_one_strikethrough() {
+    assert_eq!(para("H~2~O"), "subscript(1..4) 1..2@0 3..4@0");
+    assert_eq!(visible(BlockKind::Paragraph, "H~2~O ~~x~~"), "H2O x");
+    assert_eq!(para("~~x~~"), "strikethrough(0..5) 0..2@0 3..5@0");
+    // A run with a space in it is plain text: `~` there means "about".
+    assert_eq!(para("a ~b c~ d"), "");
+    assert_eq!(para("about ~5 to ~10 min"), "");
 }
 
 #[test]

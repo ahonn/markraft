@@ -211,6 +211,7 @@ enum Seen {
     U,
     Mark,
     Sup,
+    Sub,
     Math,
 }
 
@@ -268,6 +269,7 @@ fn derived_meaning(text: &str, derived: &Derived) -> Meaning {
                 Style::Underline => Seen::U,
                 Style::Highlight => Seen::Mark,
                 Style::Superscript => Seen::Sup,
+                Style::Subscript => Seen::Sub,
                 Style::Math { .. } => Seen::Math,
             })
             .collect()
@@ -341,6 +343,7 @@ fn walk_html(node: scraper::ElementRef<'_>, styles: &mut Vec<Seen>, out: &mut Me
                     "u" => Some(Seen::U),
                     "mark" => Some(Seen::Mark),
                     "sup" => Some(Seen::Sup),
+                    "sub" => Some(Seen::Sub),
                     "a" => Some(Seen::Link(
                         element.attr("href").unwrap_or_default().to_string(),
                         element.attr("title").unwrap_or_default().to_string(),

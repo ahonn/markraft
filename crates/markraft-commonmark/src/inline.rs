@@ -106,6 +106,7 @@ pub(crate) fn style_delimiters(mark_name: &str) -> Option<(&'static str, &'stati
         md::UNDERLINE => Some(("<u>", "</u>")),
         md::HIGHLIGHT => Some(("==", "==")),
         md::SUPERSCRIPT => Some(("^", "^")),
+        md::SUBSCRIPT => Some(("~", "~")),
         _ => None,
     }
 }

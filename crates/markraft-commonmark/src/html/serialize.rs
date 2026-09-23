@@ -676,6 +676,7 @@ pub fn commonmark_html_mark_rules() -> HtmlMarkRules {
     rules.insert(md::EM.to_string(), tags("<em>", "</em>"));
     rules.insert(md::HIGHLIGHT.to_string(), tags("<mark>", "</mark>"));
     rules.insert(md::SUPERSCRIPT.to_string(), tags("<sup>", "</sup>"));
+    rules.insert(md::SUBSCRIPT.to_string(), tags("<sub>", "</sub>"));
     rules.insert(md::CODE.to_string(), tags("<code>", "</code>"));
     // TeX is shown as the source it is, in the attribute comrak renders math
     // with, so a reader that knows it can typeset it.

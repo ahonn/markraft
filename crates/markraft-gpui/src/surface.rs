@@ -36,10 +36,11 @@ const EMPTY_BLOCK_CARET_RATIO: f32 = 0.4;
 const CARET_THICKNESS: Pixels = px(2.);
 
 const INLINE_CODE_SCALE: f32 = 0.86;
-/// How large superscript is drawn, and how far its row is raised, as shares of
-/// the line's font size.
+/// How large superscript and subscript are drawn, and how far a superscript's
+/// row is raised and a subscript's lowered, as shares of the line's font size.
 const SUPERSCRIPT_SCALE: f32 = 0.72;
 const SUPERSCRIPT_LIFT: f32 = 0.3;
+const SUBSCRIPT_DROP: f32 = 0.18;
 const INLINE_CODE_PADDING: Pixels = px(5.);
 const NUMBER_GAP: Pixels = px(6.);
 
@@ -102,10 +103,10 @@ fn byte_to_char(text: &str, byte: usize) -> usize {
     text[..byte.min(text.len())].chars().count()
 }
 
-/// Inline code or superscript on one visual row. Text runs share one font size, so the
-/// main line only reserves the space and the text is painted again, smaller, centred in
-/// that slot. Around code, what is left of the slot on either side becomes the pill's
-/// padding; superscript has no pill and is raised instead.
+/// Inline code, superscript or subscript on one visual row. Text runs share one font
+/// size, so the main line only reserves the space and the text is painted again,
+/// smaller, centred in that slot. Around code, what is left of the slot on either side
+/// becomes the pill's padding; a script has no pill and is raised or lowered instead.
 #[derive(Clone)]
 struct InlineCode {
     /// Byte range within the row's own text.
@@ -116,7 +117,8 @@ struct InlineCode {
     left: Pixels,
     slot: Pixels,
     line: Rc<ShapedLine>,
-    /// Superscript: no pill behind it, and painted `lift` above the row.
+    /// A script: no pill behind it, and painted `lift` above the row — below
+    /// it for a subscript, whose lift is negative.
     raised: bool,
     lift: Pixels,
 }
@@ -128,8 +130,10 @@ struct Repaint {
     range: Range<usize>,
     font: Font,
     ink: Hsla,
-    /// Superscript rather than code.
+    /// A script rather than code.
     raised: bool,
+    /// Of a script, whether it is subscript.
+    lowered: bool,
 }
 
 impl InlineCode {
@@ -2291,7 +2295,10 @@ fn drawn_image(
 /// [`LOADING_FRAME_MAX_WIDTH`], at a photo's proportions.
 fn loading_frame(column: Pixels) -> Size<Pixels> {
     let width = column.min(LOADING_FRAME_MAX_WIDTH).max(px(1.));
-    size(width, (width * 0.5625).min(LOADING_FRAME_MAX_HEIGHT).round())
+    size(
+        width,
+        (width * 0.5625).min(LOADING_FRAME_MAX_HEIGHT).round(),
+    )
 }
 
 /// The file name an image source ends in, for a placeholder with no alt text.
@@ -2412,9 +2419,11 @@ fn text_runs(
         } else {
             text_color
         };
-        // Inline code and superscript only reserve their space here; see `InlineCode`.
+        // Inline code and scripts only reserve their space here; see `InlineCode`.
         let inline_code = has(types.code, marks) && !code_block;
-        let raised = has(types.superscript, marks) && !code_block && !raw && !atom;
+        let script = !code_block && !raw && !atom;
+        let lowered = has(types.subscript, marks) && script;
+        let raised = (has(types.superscript, marks) && script) || lowered;
         let color = if widened {
             gpui::transparent_black()
         } else if inline_code || raised {
@@ -2423,6 +2432,7 @@ fn text_runs(
                 font: face.clone(),
                 ink,
                 raised: raised && !inline_code,
+                lowered: lowered && !inline_code,
             });
             gpui::transparent_black()
         } else {
@@ -2478,7 +2488,8 @@ fn merge_adjacent_code(code: Vec<Repaint>) -> Vec<Repaint> {
             Some(last)
                 if last.range.end == repaint.range.start
                     && last.ink == repaint.ink
-                    && last.raised == repaint.raised =>
+                    && last.raised == repaint.raised
+                    && last.lowered == repaint.lowered =>
             {
                 last.range.end = repaint.range.end;
             }
@@ -2934,6 +2945,7 @@ fn shape_inline_code(
         font: face,
         ink,
         raised,
+        lowered,
     } in code_ranges
     {
         // The slot is as wide as full-size text. Shrinking code by a fixed ratio would
@@ -2943,7 +2955,9 @@ fn shape_inline_code(
         let slots = layout.display_rectangles(chars.clone(), false);
         let reserved: Pixels = slots.iter().map(|slot| slot.size.width).sum();
         let padding = INLINE_CODE_PADDING * 2. * slots.len() as f32;
-        let (scale, lift) = if *raised {
+        let (scale, lift) = if *raised && *lowered {
+            (SUPERSCRIPT_SCALE, -(font_size * SUBSCRIPT_DROP).round())
+        } else if *raised {
             (SUPERSCRIPT_SCALE, (font_size * SUPERSCRIPT_LIFT).round())
         } else {
             (
@@ -4594,6 +4608,19 @@ mod tests {
             .find(|code| code.raised)
             .expect("the superscript");
         assert!(two.lift > px(0.), "raised above the row");
+    }
+
+    #[test]
+    fn subscript_is_painted_again_smaller_and_lowered() {
+        let lines = shaped("H~2~O");
+        let row = &lines[0].rows[0];
+        let script = row
+            .inline_code
+            .iter()
+            .find(|code| code.raised)
+            .expect("the subscript");
+        assert_eq!(&row.text()[script.range.clone()], "2");
+        assert!(script.lift < px(0.), "lowered below the row");
     }
 
     /// A raw block's source is its own text, so it goes through the rows a code

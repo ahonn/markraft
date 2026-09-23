@@ -368,6 +368,7 @@ pub(crate) fn derived_mark_types(schema: &Schema) -> Vec<MarkTypeId> {
         md::STRONG,
         md::EM,
         md::SUPERSCRIPT,
+        md::SUBSCRIPT,
         md::CODE,
         md::MATH,
         md::SYNTAX,

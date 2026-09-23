@@ -1646,6 +1646,7 @@ fn refusal_message(refusal: &markraft_commonmark::CommandRefusal) -> String {
                 md::UNDERLINE => ("underline", "<u>"),
                 md::HIGHLIGHT => ("highlight", "=="),
                 md::SUPERSCRIPT => ("superscript", "^"),
+                md::SUBSCRIPT => ("subscript", "~"),
                 md::MATH => ("formula", "$"),
                 md::LINK => ("a link", "[…](…)"),
                 _ => ("this format", "its delimiters"),

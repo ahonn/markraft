@@ -153,6 +153,8 @@ pub enum Style {
     Highlight,
     /// `^…^` or a paired `<sup>`…`</sup>`.
     Superscript,
+    /// `~…~` or a paired `<sub>`…`</sub>`.
+    Subscript,
     /// A formula: `$…$` and `` $`…`$ `` inline, `$$…$$` display. Like a code
     /// span, nothing inside it is read.
     Math {
@@ -173,6 +175,7 @@ impl Style {
             Style::Underline => md::UNDERLINE,
             Style::Highlight => md::HIGHLIGHT,
             Style::Superscript => md::SUPERSCRIPT,
+            Style::Subscript => md::SUBSCRIPT,
             Style::Math { .. } => md::MATH,
         }
     }
@@ -823,6 +826,12 @@ impl Reader<'_> {
             NodeValue::Strikethrough => self.styled(node, whole, Style::Strikethrough),
             NodeValue::Highlight => self.styled(node, whole, Style::Highlight),
             NodeValue::Superscript => self.styled(node, whole, Style::Superscript),
+            // comrak lets a subscript run across spaces, so the tildes of
+            // `~5 to ~10` would make one. Typora and Pandoc need a space in one
+            // escaped, and a note's `~` means "about" far more often than it
+            // opens a subscript, so such a run is plain text.
+            NodeValue::Subscript if spans_whitespace(node) => self.inlines(node),
+            NodeValue::Subscript => self.styled(node, whole, Style::Subscript),
             NodeValue::Math(math) => self.math(whole, &math),
             NodeValue::Link(link) => {
                 let style = Style::Link {
@@ -1294,6 +1303,7 @@ impl HtmlTag {
             "del" => Style::Strikethrough,
             "mark" => Style::Highlight,
             "sup" => Style::Superscript,
+            "sub" => Style::Subscript,
             "a" => Style::Link {
                 href: self.attr("href")?.to_string(),
                 title: self.attr("title").unwrap_or_default().to_string(),
@@ -1462,3 +1472,13 @@ fn decode_entity(reference: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests;
+
+/// Whether an inline node's content holds whitespace or a line ending.
+fn spans_whitespace<'a>(node: &'a AstNode<'a>) -> bool {
+    node.descendants()
+        .any(|child| match &child.data.borrow().value {
+            NodeValue::Text(text) => text.chars().any(char::is_whitespace),
+            NodeValue::SoftBreak | NodeValue::LineBreak => true,
+            _ => false,
+        })
+}
