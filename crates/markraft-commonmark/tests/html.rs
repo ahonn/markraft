@@ -183,6 +183,24 @@ fn every_styling_tag_has_a_mark() {
 }
 
 #[test]
+fn highlight_superscript_and_math_come_across_as_their_markdown() {
+    assert_eq!(markdown("<p>a <mark>hit</mark> b</p>"), "a ==hit== b");
+    assert_eq!(markdown("<p>x<sup>2</sup></p>"), "x^2^");
+    assert_eq!(
+        markdown("<p>x<span style='vertical-align:super'>2</span></p>"),
+        "x^2^"
+    );
+    assert_eq!(
+        markdown("<p><code data-math-style=\"inline\">x^2</code></p>"),
+        "$x^2$"
+    );
+    assert_eq!(
+        markdown("<p><span data-math-style=\"display\">E=mc^2</span></p>"),
+        "$$E=mc^2$$"
+    );
+}
+
+#[test]
 fn an_ordered_list_keeps_the_ordinal_it_starts_at() {
     assert_eq!(
         markdown("<ol start='3'><li>a</li><li>b</li></ol>"),
@@ -245,15 +263,15 @@ fn a_fragment_opens_the_same_way_markdown_does() {
 
 #[test]
 fn the_rule_table_can_be_replaced() {
-    // A consumer that wants `<mark>` to mean something registers it, and one
+    // A consumer that wants `<kbd>` to mean something registers it, and one
     // that wants an element dropped says so.
     let rules = commonmark_html_rules()
-        .with("mark", HtmlRule::mark("strong"))
+        .with("kbd", HtmlRule::mark("strong"))
         .with("aside", HtmlRule::Ignore);
     let parser = HtmlParser::new(commonmark_schema(), rules);
     let codec = Codec::new();
     let doc = parser
-        .parse("<p><mark>hit</mark></p><aside>gone</aside>")
+        .parse("<p><kbd>hit</kbd></p><aside>gone</aside>")
         .expect("parses");
     assert_eq!(
         codec.describe(&doc),
@@ -306,6 +324,17 @@ fn a_document_writes_as_the_html_another_application_expects() {
         shape("<p>a</p><p><br></p><p>b</p>"),
         shape("<p>a</p><p></p><p>b</p>")
     );
+}
+
+#[test]
+fn highlight_superscript_and_math_write_as_html_and_read_back() {
+    let html = html_of("==hit== x^2^ $a*b$ $$E$$");
+    assert_eq!(
+        html,
+        "<p><mark>hit</mark> x<sup>2</sup> <code data-math-style=\"inline\">a*b</code> \
+         <code data-math-style=\"display\">E</code></p>"
+    );
+    assert_eq!(markdown(&html), "==hit== x^2^ $a*b$ $$E$$");
 }
 
 #[test]

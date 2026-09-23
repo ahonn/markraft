@@ -2,8 +2,8 @@
 
 use comrak::nodes::{
     LineColumn, ListDelimType, ListType, NodeCode, NodeCodeBlock, NodeFootnoteDefinition,
-    NodeFootnoteReference, NodeHeading, NodeHtmlBlock, NodeLink, NodeList, NodeTable, NodeTaskItem,
-    NodeValue, NodeWikiLink, Sourcepos, TableAlignment,
+    NodeFootnoteReference, NodeHeading, NodeHtmlBlock, NodeLink, NodeList, NodeMath, NodeTable,
+    NodeTaskItem, NodeValue, NodeWikiLink, Sourcepos, TableAlignment,
 };
 use markraft_core::kind::TABLE_ALIGNMENTS_ATTR;
 use markraft_core::{Attrs, attrs};
@@ -104,6 +104,18 @@ pub fn commonmark_rules() -> ParseRules {
             ParseRule::mark(md::STRIKETHROUGH),
         )
         .with(&NodeValue::Underline, ParseRule::mark(md::UNDERLINE))
+        .with(&NodeValue::Highlight, ParseRule::mark(md::HIGHLIGHT))
+        .with(&NodeValue::Superscript, ParseRule::mark(md::SUPERSCRIPT))
+        .with(
+            &NodeValue::Math(NodeMath::default()),
+            ParseRule::Text {
+                text: text_fn(|target| match &*target.value() {
+                    NodeValue::Math(math) => math.literal.clone(),
+                    _ => String::new(),
+                }),
+                marks: vec![md::MATH.to_string()],
+            },
+        )
         .with(
             &NodeValue::Link(Box::<NodeLink>::default()),
             ParseRule::mark_with(md::LINK, attrs_fn(link_attrs)),

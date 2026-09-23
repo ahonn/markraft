@@ -113,6 +113,15 @@ pub struct DocTypes {
     pub strikethrough: Option<MarkTypeId>,
     /// Underline. Present for HTML paste; Markdown write strips it.
     pub underline: Option<MarkTypeId>,
+    /// Highlighted text, drawn over [`EditorStyle::highlight`](crate::EditorStyle::highlight).
+    pub highlight: Option<MarkTypeId>,
+    /// Superscript, drawn smaller and raised in the slot full-size text would
+    /// take. Without it the text is drawn on the line like its neighbours.
+    pub superscript: Option<MarkTypeId>,
+    /// A formula. Its TeX source is drawn as it stands, in the code font, and
+    /// no emoji shortcode is replaced inside one. Without it a formula is drawn
+    /// as prose.
+    pub math: Option<MarkTypeId>,
     /// A link, carrying an `href` attribute. Without it links cannot be set,
     /// followed or pasted as links.
     pub link: Option<MarkTypeId>,
@@ -172,6 +181,9 @@ impl DocTypes {
             code: mark(names.code),
             strikethrough: mark(names.strikethrough),
             underline: mark(names.underline),
+            highlight: mark(names.highlight),
+            superscript: mark(names.superscript),
+            math: mark(names.math),
             link: mark(names.link),
             syntax: mark(names.syntax),
             callout: None,

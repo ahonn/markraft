@@ -564,7 +564,10 @@ pub fn commonmark_mark_rules() -> MarkRules {
     rules.insert(md::EM.to_string(), emphasis_rule("*", '*'));
     rules.insert(md::STRIKETHROUGH.to_string(), emphasis_rule("~~", '~'));
     rules.insert(md::UNDERLINE.to_string(), MarkRule::fixed("<u>", "</u>"));
+    rules.insert(md::HIGHLIGHT.to_string(), emphasis_rule("==", '='));
+    rules.insert(md::SUPERSCRIPT.to_string(), emphasis_rule("^", '^'));
     rules.insert(md::CODE.to_string(), code_rule());
+    rules.insert(md::MATH.to_string(), math_rule());
     // Text already spelled — a soft break, an empty link's `[](…)` — goes out
     // as it stands.
     rules.insert(
@@ -612,6 +615,31 @@ fn code_rule() -> MarkRule {
         escape: false,
         lead: Some('`'),
         trail: Some('`'),
+    }
+}
+
+/// A formula, written `$…$`, or `$$…$$` for display math. Its content is TeX
+/// and goes out as it stands; a formula no fence can hold — one with a `$` in
+/// it, or with a space inside an inline fence — does not read back, which the
+/// commands that spell one check for.
+fn math_rule() -> MarkRule {
+    let fence = |target: &MarkTarget<'_>| {
+        let display = target
+            .mark
+            .attrs
+            .get(md::MATH_DISPLAY_ATTR)
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        if display { "$$" } else { "$" }.to_string()
+    };
+    MarkRule {
+        open: Arc::new(move |_, target| fence(target)),
+        close: Arc::new(move |_, target| fence(target)),
+        mixable: false,
+        expel_enclosing_whitespace: false,
+        escape: false,
+        lead: Some('$'),
+        trail: Some('$'),
     }
 }
 

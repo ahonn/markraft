@@ -499,6 +499,20 @@ pub fn commonmark_html_rules() -> HtmlRules {
         .with_all(&["em", "i"], HtmlRule::mark(md::EM))
         .with_all(&["s", "del", "strike"], HtmlRule::mark(md::STRIKETHROUGH))
         .with_all(&["u", "ins"], HtmlRule::mark(md::UNDERLINE))
+        .with("mark", HtmlRule::mark(md::HIGHLIGHT))
+        .with("sup", HtmlRule::mark(md::SUPERSCRIPT))
+        // A formula as comrak renders one, `data-math-style` on a `<code>` or
+        // a `<span>`; the serialiser writes it back the same way.
+        .matching(
+            "code",
+            html_match_fn(|target| target.attr("data-math-style").is_some()),
+            math_rule(),
+        )
+        .matching(
+            "span",
+            html_match_fn(|target| target.attr("data-math-style").is_some()),
+            math_rule(),
+        )
         .with("code", HtmlRule::mark(md::CODE))
         .with_all(
             &[
@@ -639,8 +653,21 @@ fn fully_modelled_span(target: HtmlTarget<'_>) -> bool {
                                 .split_whitespace()
                                 .all(|word| matches!(word, "underline" | "line-through"))
                     }
+                    "vertical-align" => value == "super",
                     _ => false,
                 }
             })
     })
+}
+
+/// A formula's mark, display math where the element says so.
+fn math_rule() -> HtmlRule {
+    HtmlRule::mark_with(
+        md::MATH,
+        html_attrs_fn(|target| {
+            attrs! {
+                md::MATH_DISPLAY_ATTR => target.attr("data-math-style") == Some("display"),
+            }
+        }),
+    )
 }

@@ -209,6 +209,9 @@ enum Seen {
     Code,
     Link(String, String),
     U,
+    Mark,
+    Sup,
+    Math,
 }
 
 /// What a reader sees, one entry per visible character, with the styles over
@@ -263,6 +266,9 @@ fn derived_meaning(text: &str, derived: &Derived) -> Meaning {
                 Style::Code => Seen::Code,
                 Style::Link { href: url, title } => Seen::Link(href(url), title.clone()),
                 Style::Underline => Seen::U,
+                Style::Highlight => Seen::Mark,
+                Style::Superscript => Seen::Sup,
+                Style::Math { .. } => Seen::Math,
             })
             .collect()
     };
@@ -327,11 +333,14 @@ fn walk_html(node: scraper::ElementRef<'_>, styles: &mut Vec<Seen>, out: &mut Me
             }
             HtmlNode::Element(element) => {
                 let style = match element.name() {
+                    _ if element.attr("data-math-style").is_some() => Some(Seen::Math),
                     "strong" => Some(Seen::Strong),
                     "em" => Some(Seen::Em),
                     "del" => Some(Seen::Del),
                     "code" => Some(Seen::Code),
                     "u" => Some(Seen::U),
+                    "mark" => Some(Seen::Mark),
+                    "sup" => Some(Seen::Sup),
                     "a" => Some(Seen::Link(
                         element.attr("href").unwrap_or_default().to_string(),
                         element.attr("title").unwrap_or_default().to_string(),
@@ -587,7 +596,8 @@ fn summary(derived: &Derived) -> Vec<String> {
 /// characters that start blocks, and a little prose.
 const ALPHABET: &[char] = &[
     '*', '*', '_', '~', '`', '[', ']', '(', ')', '<', '>', '\\', '&', ';', '#', '|', '!', ':', '/',
-    '"', '-', '+', '=', '1', '.', ' ', ' ', '\n', 'a', 'b', 'x', 'é', '中', ATOM,
+    '"', '-', '+', '=', '=', '^', '$', '$', '1', '.', ' ', ' ', '\n', 'a', 'b', 'x', 'é', '中',
+    '，', ATOM,
 ];
 
 /// `text` after a few random single-character edits.

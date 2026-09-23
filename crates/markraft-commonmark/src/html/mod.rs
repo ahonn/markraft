@@ -43,8 +43,9 @@
 //! # Inline CSS
 //!
 //! Word processors put their formatting in a `style` attribute instead of a
-//! tag. On top of whatever the rules say, `font-weight`, `font-style` and
-//! `text-decoration` are read as the marks they stand for.
+//! tag. On top of whatever the rules say, `font-weight`, `font-style`,
+//! `text-decoration` and `vertical-align: super` are read as the marks they
+//! stand for.
 
 mod rules;
 mod serialize;
@@ -513,6 +514,7 @@ fn style_marks(element: ElementRef<'_>) -> Vec<&'static str> {
                     out.push(md::STRIKETHROUGH);
                 }
             }
+            "vertical-align" if value == "super" => out.push(md::SUPERSCRIPT),
             _ => {}
         }
     }

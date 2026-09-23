@@ -674,7 +674,26 @@ pub fn commonmark_html_mark_rules() -> HtmlMarkRules {
     rules.insert(md::STRIKETHROUGH.to_string(), tags("<del>", "</del>"));
     rules.insert(md::STRONG.to_string(), tags("<strong>", "</strong>"));
     rules.insert(md::EM.to_string(), tags("<em>", "</em>"));
+    rules.insert(md::HIGHLIGHT.to_string(), tags("<mark>", "</mark>"));
+    rules.insert(md::SUPERSCRIPT.to_string(), tags("<sup>", "</sup>"));
     rules.insert(md::CODE.to_string(), tags("<code>", "</code>"));
+    // TeX is shown as the source it is, in the attribute comrak renders math
+    // with, so a reader that knows it can typeset it.
+    rules.insert(
+        md::MATH.to_string(),
+        Arc::new(|mark: &Mark| {
+            let display = mark
+                .attrs
+                .get(md::MATH_DISPLAY_ATTR)
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let style = if display { "display" } else { "inline" };
+            (
+                format!("<code data-math-style=\"{style}\">"),
+                "</code>".to_string(),
+            )
+        }),
+    );
     rules
 }
 

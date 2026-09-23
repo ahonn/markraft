@@ -31,6 +31,9 @@ pub struct EditorStyle {
     pub inline_code_background: Hsla,
     pub inline_code_text: Hsla,
     pub code_radius: Pixels,
+    /// The fill behind highlighted text. Body text is drawn over it, so it
+    /// answers to the body text's floor.
+    pub highlight: Hsla,
     /// The fill behind a table's header row, which is its first row.
     ///
     /// A band rather than a tint of the text: the grid lines are drawn in
@@ -87,6 +90,7 @@ impl Default for EditorStyle {
             inline_code_background: rgb(0xedece7).into(),
             inline_code_text: rgb(0x24282e).into(),
             code_radius: px(0.),
+            highlight: rgb(0xf8e5a0).into(),
             table_header_background: rgb(0xf4f2ec).into(),
             rule: rgb(0xd9d7d0).into(),
             callout_tones: [
@@ -137,6 +141,7 @@ impl EditorStyle {
             inline_code_background: rgb(0xdbdbdd).into(),
             inline_code_text: rgb(0x55575c).into(),
             code_radius: px(6.),
+            highlight: rgb(0xf5df8e).into(),
             table_header_background: rgb(0xe6e6e7).into(),
             rule: rgb(0x86888d).into(),
             callout_tones: [
@@ -173,6 +178,7 @@ impl EditorStyle {
             code_background: rgb(0x34363b).into(),
             inline_code_background: rgb(0x3c3e44).into(),
             inline_code_text: rgb(0xb9bcc2).into(),
+            highlight: rgb(0x5b4a17).into(),
             table_header_background: rgb(0x1d1e21).into(),
             rule: rgb(0x6e717a).into(),
             callout_tones: [
@@ -278,6 +284,7 @@ mod tests {
                 style.table_header_background,
                 4.5,
             ),
+            ("highlighted text", body, style.highlight, 4.5),
             // A rule is a graphic, not text, so it answers to the 3:1 floor.
             ("rule", style.rule, style.background, 3.0),
             (

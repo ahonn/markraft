@@ -54,6 +54,9 @@ pub fn commonmark_doc_type_names() -> DocTypeNames {
         code: Some(schema::CODE),
         strikethrough: Some(schema::STRIKETHROUGH),
         underline: Some(schema::UNDERLINE),
+        highlight: Some(schema::HIGHLIGHT),
+        superscript: Some(schema::SUPERSCRIPT),
+        math: Some(schema::MATH),
         link: Some(schema::LINK),
         syntax: Some(schema::SYNTAX),
     }

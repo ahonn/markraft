@@ -42,6 +42,9 @@ fn spelled_text_is_escaped_only_where_a_reader_would_see_syntax() {
         "x|y and {z}",
         "5.0 and 1.5",
         "snake_case_name",
+        "a == b and a = b",
+        "costs $ 5",
+        "a ===b=== c",
     ] {
         let codec = Codec::new();
         let doc = spell_document(&codec.serializer, &paragraph(&codec, text));
@@ -126,4 +129,25 @@ fn a_line_ending_spelled_as_a_reference_stays_one() {
         r#"doc(paragraph("a", "&#10;"{syntax}, "b"))"#
     );
     assert_eq!(round("a&#10;b"), "a&#10;b");
+}
+
+#[test]
+fn spelled_text_keeps_highlight_superscript_and_math_delimiters_literal() {
+    let cases = [
+        ("2^10", "2\\^10"),
+        ("x==y==z", "x\\==y\\==z"),
+        ("==", "\\=\\="),
+        ("costs $5 and $10", "costs \\$5 and \\$10"),
+        ("$x$", "\\$x\\$"),
+        ("$$ a", "\\$$ a"),
+    ];
+    let codec = Codec::new();
+    for (text, expected) in cases {
+        let doc = spell_document(&codec.serializer, &paragraph(&codec, text));
+        let written = codec.write(&doc);
+        assert_eq!(written, expected, "{text:?}");
+        assert_eq!(codec.parse(&written), doc, "{text:?} does not come back");
+        assert!(!codec.describe(&doc).contains("highlight"), "{text:?}");
+        assert!(!codec.describe(&doc).contains("math"), "{text:?}");
+    }
 }

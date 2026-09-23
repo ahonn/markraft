@@ -307,10 +307,13 @@ pub(crate) fn derived_mark_types(schema: &Schema) -> Vec<MarkTypeId> {
     [
         md::LINK,
         md::UNDERLINE,
+        md::HIGHLIGHT,
         md::STRIKETHROUGH,
         md::STRONG,
         md::EM,
+        md::SUPERSCRIPT,
         md::CODE,
+        md::MATH,
         md::SYNTAX,
     ]
     .into_iter()
@@ -323,6 +326,7 @@ pub(crate) fn style_mark(schema: &Schema, style: &Style) -> Option<Mark> {
     let ty = schema.mark_id(style.mark_name())?;
     let given = match style {
         Style::Link { href, title } => attrs! {"href" => href.clone(), "title" => title.clone()},
+        Style::Math { display } => attrs! {md::MATH_DISPLAY_ATTR => AttrValue::Bool(*display)},
         _ => Attrs::empty(),
     };
     let attrs = schema.build_mark_attrs(ty, &given).ok()?;

@@ -399,8 +399,17 @@ fn style_of(name: &str) -> Option<Style> {
         md::STRIKETHROUGH => Some(Style::Strikethrough),
         md::CODE => Some(Style::Code),
         md::UNDERLINE => Some(Style::Underline),
+        md::HIGHLIGHT => Some(Style::Highlight),
+        md::SUPERSCRIPT => Some(Style::Superscript),
         _ => None,
     }
+}
+
+/// Whether a style's content is literal — a code span, a formula — so that
+/// no style inside it can change without spelling it again, and its
+/// whitespace is content like any other character.
+fn is_literal(style: &Style) -> bool {
+    matches!(style, Style::Code | Style::Math { .. })
 }
 
 fn is_blank(content: &Content) -> bool {
@@ -695,7 +704,7 @@ fn attempt(
                     unit.src.start >= lo
                         && unit.src.end <= hi
                         && ((unit.styles.contains(&span.style) && !wanted.contains(&span.style))
-                            || (span.style == Style::Code && unit.styles != *wanted))
+                            || (is_literal(&span.style) && unit.styles != *wanted))
                 });
             if around && !changes_inside {
                 context.push(span.style.clone());
@@ -805,12 +814,13 @@ fn check(units: &[Unit], target: &[Vec<Style>], read: &[Unit]) -> Result<(), Opt
         if unit.content != got.content {
             return Err(None);
         }
-        // Whitespace carries no style a reader sees, except inside code.
+        // Whitespace carries no style a reader sees, except inside code or a
+        // formula.
         let significant = |styles: &[Style]| -> Vec<Style> {
             if is_blank(&unit.content) {
                 styles
                     .iter()
-                    .filter(|style| **style == Style::Code)
+                    .filter(|style| is_literal(style))
                     .cloned()
                     .collect()
             } else {

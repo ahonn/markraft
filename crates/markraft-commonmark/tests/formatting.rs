@@ -121,6 +121,8 @@ fn every_delimited_style_toggles() {
         (md::EM, "a *b* c"),
         (md::STRIKETHROUGH, "a ~~b~~ c"),
         (md::CODE, "a `b` c"),
+        (md::HIGHLIGHT, "a ==b== c"),
+        (md::SUPERSCRIPT, "a ^b^ c"),
     ] {
         let state = selecting(&codec, "a b c", 2, 3);
         let on = formatted(&state, &toggle(&codec, mark));
@@ -204,6 +206,20 @@ fn strong_over_part_of_a_code_span() {
     let file = written(&codec, &bold);
     assert_eq!(html(&file), html("`a`**`b`**"), "wrote {file:?}");
     assert_eq!(selected_text(&codec, &bold), "b");
+}
+
+/// A formula is literal like a code span: strong over part of one keeps its
+/// TeX whole, and strong over all of it wraps the fences.
+#[test]
+fn strong_over_a_formula_keeps_it_whole() {
+    let codec = Codec::new();
+    let state = selecting(&codec, "$ab$", 2, 3);
+    let bold = formatted(&state, &toggle(&codec, md::STRONG));
+    let file = written(&codec, &bold);
+    assert_eq!(html(&file), html("$a$**$b$**"), "wrote {file:?}");
+    let state = selecting(&codec, "x $$a^2$$ y", 0, 11);
+    let bold = formatted(&state, &toggle(&codec, md::STRONG));
+    assert_saves(&codec, &bold, "**x $$a^2$$ y**");
 }
 
 /// Literal characters stay literal: an escaped `*` that ends up inside a new

@@ -36,6 +36,10 @@ const EMPTY_BLOCK_CARET_RATIO: f32 = 0.4;
 const CARET_THICKNESS: Pixels = px(2.);
 
 const INLINE_CODE_SCALE: f32 = 0.86;
+/// How large superscript is drawn, and how far its row is raised, as shares of
+/// the line's font size.
+const SUPERSCRIPT_SCALE: f32 = 0.72;
+const SUPERSCRIPT_LIFT: f32 = 0.3;
 const INLINE_CODE_PADDING: Pixels = px(5.);
 const NUMBER_GAP: Pixels = px(6.);
 
@@ -98,9 +102,10 @@ fn byte_to_char(text: &str, byte: usize) -> usize {
     text[..byte.min(text.len())].chars().count()
 }
 
-/// Inline code on one visual row. Text runs share one font size, so the main line only
-/// reserves the space and the code is painted again, smaller, centred in that slot.
-/// What is left of the slot on either side becomes the pill's padding.
+/// Inline code or superscript on one visual row. Text runs share one font size, so the
+/// main line only reserves the space and the text is painted again, smaller, centred in
+/// that slot. Around code, what is left of the slot on either side becomes the pill's
+/// padding; superscript has no pill and is raised instead.
 #[derive(Clone)]
 struct InlineCode {
     /// Byte range within the row's own text.
@@ -111,6 +116,20 @@ struct InlineCode {
     left: Pixels,
     slot: Pixels,
     line: Rc<ShapedLine>,
+    /// Superscript: no pill behind it, and painted `lift` above the row.
+    raised: bool,
+    lift: Pixels,
+}
+
+/// A span a row only reserves room for, painted again smaller: see [`InlineCode`].
+#[derive(Clone)]
+struct Repaint {
+    /// Byte range within the whole line text.
+    range: Range<usize>,
+    font: Font,
+    ink: Hsla,
+    /// Superscript rather than code.
+    raised: bool,
 }
 
 impl InlineCode {
@@ -1116,7 +1135,7 @@ fn decoration_of(
 /// two byte offsets is the width of the text between them. A unit wider than
 /// [`CELL_MAX_MIN_CONTENT`] only counts for that much, so one very long word
 /// cannot widen a column without bound.
-fn min_content_width(layout: &LayoutLine, code: &[(Range<usize>, Font, Hsla)]) -> Pixels {
+fn min_content_width(layout: &LayoutLine, code: &[Repaint]) -> Pixels {
     let mut widest = px(0.);
     for (index, row) in layout.rows.iter().enumerate() {
         let start = row_byte_start(layout, index);
@@ -1125,8 +1144,9 @@ fn min_content_width(layout: &LayoutLine, code: &[(Range<usize>, Font, Hsla)]) -
         // reads as two spans, so it is held together as one unit.
         let glue: Vec<Range<usize>> = code
             .iter()
-            .filter(|(range, _, _)| range.end > start && range.start < start + text.len())
-            .map(|(range, _, _)| range.start.saturating_sub(start)..range.end - start)
+            .map(|repaint| &repaint.range)
+            .filter(|range| range.end > start && range.start < start + text.len())
+            .map(|range| range.start.saturating_sub(start)..range.end - start)
             .collect();
         let x = |byte: usize| {
             row.line
@@ -2084,8 +2104,8 @@ fn file_name(src: &str) -> Option<&str> {
 
 struct Runs {
     runs: Vec<TextRun>,
-    /// Byte ranges of inline code within the whole line text, with their face.
-    code: Vec<(Range<usize>, Font, Hsla)>,
+    /// Inline code and superscript within the whole line text, with their face.
+    code: Vec<Repaint>,
 }
 
 fn text_runs(
@@ -2148,7 +2168,8 @@ fn text_runs(
             continue;
         }
         let marks = &run.marks;
-        let is_code = code_block || raw || has(types.code, marks);
+        let is_math = has(types.math, marks) && !code_block;
+        let is_code = code_block || raw || has(types.code, marks) || is_math;
         let is_link = has(types.link, marks);
         let mut face = font(if is_code { CODE_FONT } else { ".SystemUIFont" });
         if has(types.strong, marks) || heading.is_some() || header {
@@ -2180,16 +2201,23 @@ fn text_runs(
             style.broken_link
         } else if is_link || (atom && !code_block) {
             style.link
-        } else if has(types.code, marks) {
+        } else if has(types.code, marks) || is_math {
             style.inline_code_text
         } else {
             text_color
         };
-        // Inline code only reserves its space here; see `InlineCode`.
+        // Inline code and superscript only reserve their space here; see `InlineCode`.
+        let inline_code = has(types.code, marks) && !code_block;
+        let raised = has(types.superscript, marks) && !code_block && !raw && !atom;
         let color = if widened {
             gpui::transparent_black()
-        } else if has(types.code, marks) && !code_block {
-            code.push((range, face.clone(), ink));
+        } else if inline_code || raised {
+            code.push(Repaint {
+                range,
+                font: face.clone(),
+                ink,
+                raised: raised && !inline_code,
+            });
             gpui::transparent_black()
         } else {
             ink
@@ -2198,7 +2226,8 @@ fn text_runs(
             len,
             font: face,
             color,
-            background_color: None,
+            background_color: (has(types.highlight, marks) && !code_block)
+                .then_some(style.highlight),
             underline: (!widened && (has(types.underline, marks) || is_link)).then_some(
                 UnderlineStyle {
                     thickness: px(1.),
@@ -2234,15 +2263,20 @@ fn text_runs(
     }
 }
 
-/// Join contiguous inline-code byte ranges into one pill.
-fn merge_adjacent_code(code: Vec<(Range<usize>, Font, Hsla)>) -> Vec<(Range<usize>, Font, Hsla)> {
-    let mut merged: Vec<(Range<usize>, Font, Hsla)> = Vec::with_capacity(code.len());
-    for (range, face, ink) in code {
+/// Join contiguous inline-code byte ranges into one pill, and contiguous superscript
+/// into one raised run.
+fn merge_adjacent_code(code: Vec<Repaint>) -> Vec<Repaint> {
+    let mut merged: Vec<Repaint> = Vec::with_capacity(code.len());
+    for repaint in code {
         match merged.last_mut() {
-            Some((last, _, last_ink)) if last.end == range.start && *last_ink == ink => {
-                last.end = range.end;
+            Some(last)
+                if last.range.end == repaint.range.start
+                    && last.ink == repaint.ink
+                    && last.raised == repaint.raised =>
+            {
+                last.range.end = repaint.range.end;
             }
-            _ => merged.push((range, face, ink)),
+            _ => merged.push(repaint),
         }
     }
     merged
@@ -2662,27 +2696,40 @@ fn code_header(
     shaped
 }
 
-/// Shape the smaller text drawn inside each inline-code pill, and record the
-/// slots it sits in.
+/// Shape the smaller text drawn inside each inline-code pill and each superscript
+/// slot, and record the slots it sits in.
 fn shape_inline_code(
     layout: &mut LayoutLine,
     text: &str,
-    code_ranges: &[(Range<usize>, Font, Hsla)],
+    code_ranges: &[Repaint],
     font_size: Pixels,
     text_system: &WindowTextSystem,
 ) {
     if code_ranges.is_empty() {
         return;
     }
-    for (range, face, ink) in code_ranges {
-        // The slot is as wide as full-size text. Shrinking by a fixed ratio would
-        // leave long spans mostly padding, so the size is chosen to leave about
+    for Repaint {
+        range,
+        font: face,
+        ink,
+        raised,
+    } in code_ranges
+    {
+        // The slot is as wide as full-size text. Shrinking code by a fixed ratio would
+        // leave long spans mostly padding, so its size is chosen to leave about
         // `INLINE_CODE_PADDING` on either side of each visual row instead.
         let chars = byte_to_char(text, range.start)..byte_to_char(text, range.end);
         let slots = layout.display_rectangles(chars.clone(), false);
         let reserved: Pixels = slots.iter().map(|slot| slot.size.width).sum();
         let padding = INLINE_CODE_PADDING * 2. * slots.len() as f32;
-        let scale = ((reserved - padding) / reserved.max(px(1.))).clamp(INLINE_CODE_SCALE, 1.);
+        let (scale, lift) = if *raised {
+            (SUPERSCRIPT_SCALE, (font_size * SUPERSCRIPT_LIFT).round())
+        } else {
+            (
+                ((reserved - padding) / reserved.max(px(1.))).clamp(INLINE_CODE_SCALE, 1.),
+                px(0.),
+            )
+        };
         let mut pieces: Vec<(usize, Range<usize>, Bounds<Pixels>)> = Vec::new();
         for (index, row) in layout.rows.iter().enumerate() {
             let row_text = row.text();
@@ -2730,6 +2777,8 @@ fn shape_inline_code(
                 left: slot.origin.x - layout.origin.x,
                 slot: slot.size.width,
                 line: Rc::new(line),
+                raised: *raised,
+                lift,
             });
         }
     }
@@ -2974,7 +3023,7 @@ impl Element for EditorSurface {
             paint_tables(rows, &style, caret_pos, &scroll, window);
             for row in rows.iter() {
                 for inner in &row.rows {
-                    for code in &inner.inline_code {
+                    for code in inner.inline_code.iter().filter(|code| !code.raised) {
                         // A pill shorter than the line.
                         let inset = (row.line_height * 0.1).round();
                         let pill = Bounds::new(
@@ -3122,7 +3171,10 @@ impl Element for EditorSurface {
                     for code in &inner.inline_code {
                         let _ = code.line.paint(
                             row.origin
-                                + point(code.text_left(), row.line_height * code.visual_row as f32),
+                                + point(
+                                    code.text_left(),
+                                    row.line_height * code.visual_row as f32 - code.lift,
+                                ),
                             row.line_height,
                             TextAlign::Left,
                             None,
@@ -3719,17 +3771,18 @@ fn paint_code_header(
 #[cfg(test)]
 mod tests {
     use super::{
-        AtomShape, CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_PADDING, Decoration,
-        LayoutLine, LayoutRow, Marker, QUOTE_BAR, ShapeInput, TableScroll, Widening, atom_label,
-        cell_under, chrome_marker_unfocused, column_demands, column_widths, decoration_of,
-        drawn_image, file_name, gap_below, max_indent, merge_row_centers, picture_source,
-        place_table, quote_bars, reveal_offset, shape, table_overflows, unbreakable_units,
-        visible_strips,
+        AtomShape, CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_FONT, CODE_PADDING,
+        Decoration, LayoutLine, LayoutRow, Marker, QUOTE_BAR, Runs, ShapeInput, TableScroll,
+        Widening, atom_label, cell_under, chrome_marker_unfocused, column_demands, column_widths,
+        decoration_of, display_text, drawn_image, file_name, gap_below, max_indent,
+        merge_row_centers, picture_source, place_table, quote_bars, reveal_offset, shape,
+        table_overflows, text_runs, unbreakable_units, visible_strips,
     };
     use crate::style::EditorStyle;
     use crate::typeahead::tests::state_of;
     use crate::types::DocTypes;
     use gpui::{Bounds, NoopTextSystem, Pixels, TextSystem, WindowTextSystem, point, px, size};
+    use gpui::{TextRun, font};
     use markraft_commonmark::{commonmark_doc_type_names, commonmark_schema};
     use markraft_core::commands::ColumnAlignment;
     use markraft_core::projection::{Line, RunContent, projection_of};
@@ -4087,6 +4140,91 @@ mod tests {
             composition: None,
         };
         shape(&input, px(600.), &text_system())
+    }
+
+    /// The display text of `source`'s first line and the runs it is shaped with.
+    fn runs_of(source: &str) -> (String, Runs, EditorStyle) {
+        let state = state_of(source);
+        let projection = projection_of(&state);
+        let images = crate::images::Images::default();
+        let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
+        let types = callout_types();
+        let style = EditorStyle::notes();
+        let input = ShapeInput {
+            images: &images,
+            spelling: Some(&spelling),
+            wiki: None,
+            doc: state.doc(),
+            types: &types,
+            projection: &projection,
+            style: &style,
+            single_line: false,
+            selection: 0..0,
+            composition: None,
+        };
+        let line = &projection.lines()[0];
+        let font_size = style.font_size(None, false);
+        let text = display_text(&input, line, 0, font_size, px(600.), &text_system());
+        let runs = text_runs(&input, line, &text, None, false, font_size, &style);
+        (text.text.to_string(), runs, style.clone())
+    }
+
+    /// The run that draws the first occurrence of `needle` in `text`.
+    fn run_over<'r>(text: &str, runs: &'r Runs, needle: char) -> &'r TextRun {
+        let at = text.find(needle).expect("the text holds the needle");
+        let mut byte = 0;
+        runs.runs
+            .iter()
+            .find(|run| {
+                byte += run.len;
+                at < byte
+            })
+            .expect("a run covers every byte")
+    }
+
+    #[test]
+    fn highlighted_text_is_drawn_over_the_highlight_fill() {
+        let (text, runs, style) = runs_of("a ==b== c");
+        assert_eq!(
+            run_over(&text, &runs, 'b').background_color,
+            Some(style.highlight)
+        );
+        assert_eq!(run_over(&text, &runs, 'c').background_color, None);
+    }
+
+    #[test]
+    fn a_formula_is_drawn_as_its_source_in_the_code_font() {
+        let (text, runs, style) = runs_of("x $a+b$ y");
+        let formula = run_over(&text, &runs, '+');
+        assert_eq!(formula.font.family, font(CODE_FONT).family);
+        assert_eq!(formula.color, style.inline_code_text);
+        assert!(runs.code.is_empty(), "no pill is reserved for a formula");
+        assert_ne!(run_over(&text, &runs, 'y').font.family, formula.font.family);
+    }
+
+    #[test]
+    fn superscript_is_painted_again_smaller_and_raised() {
+        let lines = shaped("x^2^ and `c`");
+        let row = &lines[0].rows[0];
+        let raised: Vec<&str> = row
+            .inline_code
+            .iter()
+            .filter(|code| code.raised)
+            .map(|code| &row.text()[code.range.clone()])
+            .collect();
+        assert_eq!(raised, ["2"]);
+        let code = row
+            .inline_code
+            .iter()
+            .find(|code| !code.raised)
+            .expect("the code pill");
+        assert_eq!(code.lift, px(0.));
+        let two = row
+            .inline_code
+            .iter()
+            .find(|code| code.raised)
+            .expect("the superscript");
+        assert!(two.lift > px(0.), "raised above the row");
     }
 
     /// A raw block's source is its own text, so it goes through the rows a code

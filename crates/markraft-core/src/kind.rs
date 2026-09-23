@@ -103,6 +103,12 @@ pub struct DocTypeNames {
     pub strikethrough: Option<&'static str>,
     /// Underline.
     pub underline: Option<&'static str>,
+    /// Highlighted text.
+    pub highlight: Option<&'static str>,
+    /// Superscript.
+    pub superscript: Option<&'static str>,
+    /// A formula, whose content is TeX source rather than prose.
+    pub math: Option<&'static str>,
     /// A link, carrying a [`LINK_HREF_ATTR`] attribute.
     pub link: Option<&'static str>,
     /// The mark a kind puts on the characters that *spell* rather than say —

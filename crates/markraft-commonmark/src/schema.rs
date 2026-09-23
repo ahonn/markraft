@@ -40,14 +40,18 @@
 //! |-----:|------|------------|
 //! | 10 | [`LINK`] | `[…](href "title")` — outermost, so a link wraps its styling |
 //! | 20 | [`UNDERLINE`] | `<u>…</u>` |
+//! | 25 | [`HIGHLIGHT`] | `==…==` |
 //! | 30 | [`STRIKETHROUGH`] | `~~…~~` |
 //! | 40 | [`STRONG`] | `**…**` |
 //! | 50 | [`EM`] | `*…*` |
+//! | 55 | [`SUPERSCRIPT`] | `^…^` |
 //! | 60 | [`CODE`] | `` `…` `` — innermost, because its content is literal |
+//! | 65 | [`MATH`] | `$…$` or `$$…$$` — literal, as code is |
 //! | 70 | [`SYNTAX`] | never spelled: it marks spelling |
 //!
-//! [`CODE`] excludes nothing but itself: a code span carries whatever styles
-//! surround it, `` *`code`* `` being `<em><code>code</code></em>`.
+//! [`CODE`] and [`MATH`] exclude nothing but themselves: a code span or a
+//! formula carries whatever styles surround it, `` *`code`* `` being
+//! `<em><code>code</code></em>`.
 //!
 //! # Why `block+` for list items but `paragraph block*` for task items
 //!
@@ -217,8 +221,18 @@ pub const EM: &str = "em";
 pub const STRIKETHROUGH: &str = "strikethrough";
 /// Underline: a paired `<u>`…`</u>` in the text.
 pub const UNDERLINE: &str = "underline";
+/// Highlighted text: `==…==`, or a paired `<mark>`…`</mark>`.
+pub const HIGHLIGHT: &str = "highlight";
+/// Superscript: `^…^`, or a paired `<sup>`…`</sup>`.
+pub const SUPERSCRIPT: &str = "superscript";
 /// A code span.
 pub const CODE: &str = "code";
+/// A formula: `$…$`, `$$…$$` or `` $`…`$ ``, with [`MATH_DISPLAY_ATTR`]
+/// (`Bool`, default `false`) set for the `$$` spelling. Its content is TeX
+/// source, which nothing here interprets: no style is read inside it.
+pub const MATH: &str = "math";
+/// Whether a [`MATH`] span is display math, spelled `$$…$$`.
+pub const MATH_DISPLAY_ATTR: &str = "display";
 /// The characters that spell rather than say — a style's delimiters, an
 /// escape's backslash, an entity, a hard break's spelling — which a view
 /// conceals while the caret is away. `inclusive: false`, with:
@@ -234,8 +248,9 @@ pub const CODE: &str = "code";
 /// `` ` `` are two spans, not one run.
 pub const SYNTAX: &str = "syntax";
 
-/// The group holding [`STRONG`], [`EM`], [`STRIKETHROUGH`] and [`UNDERLINE`]:
-/// the marks that have a delimiter run or a tag of their own.
+/// The group holding [`STRONG`], [`EM`], [`STRIKETHROUGH`], [`UNDERLINE`],
+/// [`HIGHLIGHT`] and [`SUPERSCRIPT`]: the marks that have a delimiter run or a
+/// tag of their own.
 pub const STYLE_GROUP: &str = "style";
 /// The group holding every block node type.
 pub const BLOCK_GROUP: &str = "block";
@@ -403,10 +418,17 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                 .attr(str_attr("title", "")),
         )
         .mark(MarkTypeSpec::new(UNDERLINE).rank(20).group(STYLE_GROUP))
+        .mark(MarkTypeSpec::new(HIGHLIGHT).rank(25).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(STRIKETHROUGH).rank(30).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(STRONG).rank(40).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(EM).rank(50).group(STYLE_GROUP))
+        .mark(MarkTypeSpec::new(SUPERSCRIPT).rank(55).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(CODE).rank(60))
+        .mark(MarkTypeSpec::new(MATH).rank(65).attr(AttrSpec::new(
+            MATH_DISPLAY_ATTR,
+            AttrKind::Bool,
+            AttrValue::Bool(false),
+        )))
         .mark(
             MarkTypeSpec::new(SYNTAX)
                 .rank(70)

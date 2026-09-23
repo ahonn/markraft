@@ -292,7 +292,7 @@ pub fn html_is_read<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
     let Some(parent) = node.parent() else {
         return false;
     };
-    let style = ["u", "em", "strong", "del", "a"];
+    let style = ["u", "em", "strong", "del", "mark", "sup", "a"];
     let mut open: Vec<(String, *const comrak::nodes::AstNode<'a>)> = Vec::new();
     for sibling in parent.children() {
         let Some((name, closing, href)) = tag(sibling) else {

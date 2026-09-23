@@ -42,9 +42,9 @@
 //! # Inline HTML
 //!
 //! A tag a reader renders as a style is that style: a `<u>`, `<em>`,
-//! `<strong>`, `<del>` or `<a href>` paired with its closing tag among the
-//! same node's children styles what lies between, and the two tags are the
-//! span's concealed delimiters. A `<br>` a line ending follows is that line
+//! `<strong>`, `<del>`, `<mark>`, `<sup>` or `<a href>` paired with its closing
+//! tag among the same node's children styles what lies between, and the two
+//! tags are the span's concealed delimiters. A `<br>` a line ending follows is that line
 //! ending's hard-break spelling. Every other tag — a style tag without its
 //! partner included — is an atom.
 //!
@@ -83,7 +83,7 @@ use std::ops::Range;
 
 use std::collections::{HashMap, HashSet};
 
-use comrak::nodes::{AstNode, NodeValue, Sourcepos};
+use comrak::nodes::{AstNode, NodeMath, NodeValue, Sourcepos};
 use comrak::{Arena, Options, parse_document};
 use markraft_core::{Attrs, attrs};
 
@@ -149,6 +149,16 @@ pub enum Style {
     },
     /// A paired `<u>`…`</u>`.
     Underline,
+    /// `==…==` or a paired `<mark>`…`</mark>`.
+    Highlight,
+    /// `^…^` or a paired `<sup>`…`</sup>`.
+    Superscript,
+    /// A formula: `$…$` and `` $`…`$ `` inline, `$$…$$` display. Like a code
+    /// span, nothing inside it is read.
+    Math {
+        /// Whether it is spelled `$$…$$`.
+        display: bool,
+    },
 }
 
 impl Style {
@@ -161,6 +171,9 @@ impl Style {
             Style::Code => md::CODE,
             Style::Link { .. } => md::LINK,
             Style::Underline => md::UNDERLINE,
+            Style::Highlight => md::HIGHLIGHT,
+            Style::Superscript => md::SUPERSCRIPT,
+            Style::Math { .. } => md::MATH,
         }
     }
 }
@@ -808,6 +821,9 @@ impl Reader<'_> {
             NodeValue::Emph => self.styled(node, whole, Style::Emphasis),
             NodeValue::Strong => self.styled(node, whole, Style::Strong),
             NodeValue::Strikethrough => self.styled(node, whole, Style::Strikethrough),
+            NodeValue::Highlight => self.styled(node, whole, Style::Highlight),
+            NodeValue::Superscript => self.styled(node, whole, Style::Superscript),
+            NodeValue::Math(math) => self.math(whole, &math),
             NodeValue::Link(link) => {
                 let style = Style::Link {
                     href: link.url.clone(),
@@ -1057,6 +1073,27 @@ impl Reader<'_> {
         self.conceal(close, span, String::new());
     }
 
+    /// A formula: styled over its whole source, its fences concealed as one
+    /// span, its content left as the TeX it is.
+    ///
+    /// The fences are `$` or `$$` for dollar math and `` $` `` and `` `$ `` for
+    /// code math. They are single-byte characters no guard backslash sits
+    /// among, and comrak's end for a formula across lines is right.
+    fn math(&mut self, whole: Range<usize>, math: &NodeMath) {
+        let fence = if math.display_math || !math.dollar_math {
+            2
+        } else {
+            1
+        };
+        if whole.len() < fence * 2 {
+            return;
+        }
+        let display = math.display_math;
+        self.style(whole.clone(), Style::Math { display });
+        let content = whole.start + fence..whole.end - fence;
+        self.delimiters(whole, content);
+    }
+
     fn hard_break(&mut self, whole: Range<usize>) {
         // The node runs to the line ending, and for a spelling of more than
         // two spaces starts on the last two: every space before the line
@@ -1255,6 +1292,8 @@ impl HtmlTag {
             "em" => Style::Emphasis,
             "strong" => Style::Strong,
             "del" => Style::Strikethrough,
+            "mark" => Style::Highlight,
+            "sup" => Style::Superscript,
             "a" => Style::Link {
                 href: self.attr("href")?.to_string(),
                 title: self.attr("title").unwrap_or_default().to_string(),

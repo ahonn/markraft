@@ -154,18 +154,20 @@ fn shortcode(name: &str) -> Option<&'static str> {
         .map(Emoji::as_str)
 }
 
-/// Whether any of `from..to` carries the code mark: an emoji must not replace text
-/// inside an inline code span.
+/// Whether any of `from..to` carries the code or the math mark: an emoji must not
+/// replace text inside an inline code span or a formula, which are both literal.
 fn is_code(state: &EditorState, types: &DocTypes, from: usize, to: usize) -> bool {
-    let Some(code) = types.code else {
+    let literal: Vec<_> = [types.code, types.math].into_iter().flatten().collect();
+    if literal.is_empty() {
         return false;
-    };
+    }
     let mut found = false;
     state
         .doc()
         .nodes_between(from, to, &mut |node: &Node, pos, _, _| {
             let end = pos + node.node_size();
-            if node.marks().contains_type(code) && pos < to && from < end {
+            let marked = literal.iter().any(|ty| node.marks().contains_type(*ty));
+            if marked && pos < to && from < end {
                 found = true;
             }
             true

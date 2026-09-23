@@ -77,6 +77,62 @@ fn nested_spans_each_keep_their_own_delimiters() {
 }
 
 #[test]
+fn highlight_and_superscript_conceal_their_delimiters() {
+    assert_eq!(para("a ==b== c"), "highlight(2..7) 2..4@0 5..7@0");
+    assert_eq!(para("x^2^"), "superscript(1..4) 1..2@0 3..4@0");
+    assert_eq!(visible(BlockKind::Paragraph, "==b== x^2^"), "b x2");
+    // Highlight takes exactly two `=`, and superscript no space-free run.
+    assert_eq!(para("a == b == c"), "");
+    assert_eq!(para("a ===b=== c"), "");
+    assert_eq!(para("2^10"), "");
+}
+
+#[test]
+fn a_formula_conceals_its_fences_and_reads_nothing_inside() {
+    assert_eq!(para("$x^2$"), "math(0..5) 0..1@0 4..5@0");
+    assert_eq!(para("$$a*b*c$$"), "math(0..9) 0..2@0 7..9@0");
+    assert_eq!(para("$`x^2`$"), "math(0..7) 0..2@0 5..7@0");
+    let derived = derive(
+        BlockKind::Paragraph,
+        "$$\nE=mc^2\n$$",
+        &DeriveContext::new(),
+    );
+    assert_eq!(
+        derived.styles,
+        [StyleSpan {
+            range: 0..12,
+            style: Style::Math { display: true },
+        }]
+    );
+    assert_eq!(
+        derive(BlockKind::Paragraph, "$x$", &DeriveContext::new()).styles[0].style,
+        Style::Math { display: false }
+    );
+}
+
+#[test]
+fn dollars_a_formula_cannot_close_are_text() {
+    for text in ["costs $5 and $10", "$ a $", "a $b $c", "$5$6"] {
+        assert_eq!(para(text), "", "{text:?}");
+    }
+}
+
+#[test]
+fn emphasis_next_to_cjk_punctuation_is_read() {
+    assert_eq!(para("**注意：**这里"), "strong(0..7) 0..2@0 5..7@0");
+    assert_eq!(para("中文**“引号”**中文"), "strong(2..10) 2..4@0 8..10@0");
+    assert_eq!(para("中_文_字"), "");
+}
+
+#[test]
+fn paired_mark_and_sup_tags_style_as_their_markdown_does() {
+    assert_eq!(
+        para("<mark>a</mark> <sup>2</sup>"),
+        "highlight(0..14) superscript(15..27) 0..6@0 7..14@0 15..20@1 21..27@1"
+    );
+}
+
+#[test]
 fn an_unpaired_delimiter_is_plain_text() {
     assert_eq!(para("**ab"), "");
     assert_eq!(para("a*b"), "");

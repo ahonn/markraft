@@ -20,10 +20,10 @@
 //!   nothing.
 //! * **Inline HTML** is a `raw_inline` atom holding the tag as written, except
 //!   what [`derive`](crate::derive) reads as something else: a paired `<u>`,
-//!   `<em>`, `<strong>`, `<del>` or `<a href>` is that style spelled in the
-//!   text, a `<br>` ending a line spells that line's hard break, an `<img>` is
-//!   an `image` atom that writes its tag back, and a `<u>` or `</u>` without
-//!   its partner stays text.
+//!   `<em>`, `<strong>`, `<del>`, `<mark>`, `<sup>` or `<a href>` is that style
+//!   spelled in the text, a `<br>` ending a line spells that line's hard break,
+//!   an `<img>` is an `image` atom that writes its tag back, and a `<u>` or
+//!   `</u>` without its partner stays text.
 //! * An **Obsidian wiki link** — `[[target]]`, `[[target|alias]]` or the embed
 //!   `![[target]]` — becomes a `wiki_link` atom holding the bytes the source
 //!   spelled. A spelling [`crate::wiki`] refuses stays the text a reader sees.
@@ -123,6 +123,18 @@ impl From<NodeError> for ParseError {
 /// count. The embed form `![[…]]` is not comrak's at all and is recognised in
 /// the conversion layer.
 ///
+/// `highlight` (`==…==`), `superscript` (`^…^`), `math_dollars` (`$…$` and
+/// `$$…$$`) and `math_code` (`` $`…`$ ``) are on for the spellings the notes
+/// this editor shares use. Math content is literal, so a `^` or a `*` inside a
+/// formula is never read as a style. `subscript` stays off: it would take the
+/// single `~` GFM reads as strikethrough. So does `underline`, which would take
+/// `__` from strong emphasis.
+///
+/// `cjk_friendly_emphasis` is on because CommonMark's flanking rules refuse a
+/// delimiter run between CJK punctuation and a letter, so `**注意：**这里` would
+/// stay literal asterisks. It adds no syntax: it only lets emphasis that is
+/// already spelled be read.
+///
 /// Front matter is off: the host strips it before the codec sees the text.
 /// Setext headings are *not* ignored, so `Title\n=====` imports as a heading.
 ///
@@ -137,6 +149,11 @@ pub fn commonmark_options() -> Options<'static> {
     options.extension.table = true;
     options.extension.autolink = true;
     options.extension.wikilinks_title_after_pipe = true;
+    options.extension.highlight = true;
+    options.extension.superscript = true;
+    options.extension.math_dollars = true;
+    options.extension.math_code = true;
+    options.extension.cjk_friendly_emphasis = true;
     options
 }
 

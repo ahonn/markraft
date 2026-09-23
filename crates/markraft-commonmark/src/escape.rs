@@ -5,8 +5,15 @@
 //! punctuation character produces correct but unreadable output, so each rule
 //! below is as narrow as the grammar allows.
 //!
-//! * Always escaped: `` \ ` * [ ] ~ `` — these open a construct wherever they
-//!   appear.
+//! * Always escaped: `` \ ` * [ ] ~ ^ `` — these open a construct wherever
+//!   they appear, `^` a superscript.
+//! * `=` is escaped where it could be half of a highlight's `==`: in a run of
+//!   exactly two with something other than whitespace beside it, and at
+//!   either end of the text, where it could join the `=` of a delimiter
+//!   written next to it.
+//! * `$` is escaped unless whitespace follows it. A formula's opening `$` has
+//!   to be followed by something else, and a `$$` fence is one `$` followed by
+//!   another; one that ends the text could be followed by anything.
 //! * `_` is escaped unless it sits between two alphanumerics, where CommonMark
 //!   refuses to read it as emphasis anyway.
 //! * `<` is escaped only when what follows could start a tag or an autolink.
@@ -25,7 +32,7 @@
 use finl_unicode::categories::CharacterCategories;
 
 /// Characters that open an inline construct wherever they appear.
-const ALWAYS: &[char] = &['\\', '`', '*', '[', ']', '~'];
+const ALWAYS: &[char] = &['\\', '`', '*', '[', ']', '~', '^'];
 
 /// Escape `text` so a CommonMark reader gives it back unchanged.
 ///
@@ -66,6 +73,8 @@ fn escape(text: &str, at_line_start: bool, unlinked: bool) -> String {
         let escape = line_escapes.contains(&index)
             || ALWAYS.contains(&ch)
             || (ch == '_' && !intraword(&chars, index))
+            || (ch == '=' && halves_highlight(&chars, index))
+            || (ch == '$' && !chars.get(index + 1).is_some_and(|c| c.is_whitespace()))
             || (ch == '<' && opens_tag(&chars, index))
             || (ch == '&' && opens_reference(&chars, index))
             || (unlinked && opens_autolink(&chars, index));
@@ -160,6 +169,21 @@ fn intraword(chars: &[char], index: usize) -> bool {
     let before = index.checked_sub(1).and_then(|i| chars.get(i));
     let after = chars.get(index + 1);
     matches!((before, after), (Some(b), Some(a)) if b.is_alphanumeric() && a.is_alphanumeric())
+}
+
+/// Whether `=` at `index` could be half of a highlight delimiter: the first of
+/// a run of exactly two that is not whitespace on both sides — a backslash
+/// before it leaves a run of one, which delimits nothing — or a `=` at either
+/// end of the text.
+fn halves_highlight(chars: &[char], index: usize) -> bool {
+    if index == 0 || index + 1 == chars.len() {
+        return true;
+    }
+    let run = chars[index..].iter().take_while(|c| **c == '=').count();
+    let blank = |at: Option<&char>| at.is_some_and(|c| c.is_whitespace());
+    chars[index - 1] != '='
+        && run == 2
+        && !(blank(chars.get(index - 1)) && blank(chars.get(index + 2)))
 }
 
 /// Whether `<` at `index` could open an HTML tag, a comment or an autolink.
