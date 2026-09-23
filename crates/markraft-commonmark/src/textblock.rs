@@ -405,6 +405,16 @@ pub(crate) fn document_context(schema: &Schema, doc: &Node) -> DeriveContext {
     definitions_context(&definition_candidates(schema, doc))
 }
 
+/// Whether `block` is a raw block holding nothing but link reference
+/// definitions: source that tells links where they go, which a reader never
+/// sees as text.
+pub fn holds_definitions(schema: &Schema, block: &Node) -> bool {
+    schema.node_id(md::RAW_BLOCK) == Some(block.type_id()) && {
+        let text: String = block.children().filter_map(|leaf| leaf.text()).collect();
+        reads_as_definitions(&text)
+    }
+}
+
 /// Whether `text` reads as nothing but link reference definitions.
 ///
 /// comrak does not read a definition whose destination is `<>` when nothing

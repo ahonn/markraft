@@ -11,7 +11,7 @@
 
 use markraft_commonmark::{
     CommandRefusal, CommonMarkCodecs, CommonMarkSpelling, commonmark_doc_type_names,
-    commonmark_extensions, commonmark_schema, schema as md,
+    commonmark_extensions, commonmark_schema, holds_definitions, schema as md,
 };
 use markraft_core::Codecs;
 use markraft_core::commands::{Command, command, replace_selection};
@@ -22,6 +22,7 @@ use markraft_core::{
 use markraft_gpui::{CalloutAttrs, DocTypes};
 use markraft_gpui::{Formatting, LinkSetter, MarkToggle, SplitWrap};
 use std::sync::{Arc, LazyLock};
+use unicode_segmentation::UnicodeSegmentation;
 
 static SCHEMA: LazyLock<Schema> = LazyLock::new(commonmark_schema);
 static TYPES: LazyLock<DocTypes> = LazyLock::new(|| DocTypes {
@@ -121,6 +122,51 @@ pub fn to_markdown(doc: &Node) -> String {
 
 pub fn plain_text(doc: &Node) -> String {
     markraft_commonmark::to_plain_text(schema(), doc)
+}
+
+/// How many characters — or, with `words`, words — `doc` holds as a reader
+/// sees it, laid out as `projection` lays it out.
+///
+/// Each line counts what it reads as ([`Codecs::to_text`]), not the Markdown
+/// it holds: `**bold**` is four characters, `&amp;` one. A table puts each of
+/// its cells on a line of its own, and those breaks are the grid rather than
+/// anything anyone typed, so they are not characters — they still part words,
+/// as the break between two blocks does. Link reference definitions are
+/// where links go rather than anything read, so their blocks count nothing.
+pub fn count(doc: &Node, projection: &Projection, words: bool) -> usize {
+    let codecs = codecs();
+    let units = |text: &str| {
+        if words {
+            text.unicode_words().count()
+        } else {
+            text.graphemes(true).count()
+        }
+    };
+    let mut total = 0;
+    let mut previous: Option<Option<usize>> = None;
+    for line in projection.lines() {
+        // Reference definitions are where links go, not text a reader sees,
+        // and no break stands for the block they fill.
+        if line.ancestors.last().is_some_and(|block| {
+            doc.node_at(block.before)
+                .is_some_and(|node| holds_definitions(schema(), &node))
+        }) {
+            continue;
+        }
+        let text = doc
+            .slice(line.from, line.to)
+            .map(|slice| codecs.to_text(&slice))
+            .unwrap_or_default();
+        total += units(&text);
+        let table = table_of(line);
+        // The break this line opened with, unless it fell between two cells of
+        // one table, or the count is of words, which no break adds to.
+        if !words && previous.is_some_and(|before| table.is_none() || before != table) {
+            total += 1;
+        }
+        previous = Some(table);
+    }
+    total
 }
 
 /// The line a note is named after: the first one that reads as text.
@@ -539,5 +585,31 @@ mod tests {
         let converted = run(&quote, Block::Callout);
         assert_eq!(to_markdown(converted.doc()), "> [!note]\n> text");
         assert_eq!(to_markdown(run(&converted, Block::Quote).doc()), "> text");
+    }
+
+    /// The footer counts what a reader sees: delimiters, escapes and an
+    /// entity's spelling are no characters, and a line break inside a block is
+    /// one, as the break between two blocks is.
+    #[test]
+    fn a_note_counts_the_characters_a_reader_sees() {
+        let count_of = |source: &str, words: bool| {
+            let state = state_of(source);
+            count(state.doc(), &projection_of(&state), words)
+        };
+        assert_eq!(count_of("**bold** and *em*", false), "bold and em".len());
+        assert_eq!(
+            count_of(r"a \*b\* &amp; [c](https://x.y)", false),
+            "a *b* & c".len()
+        );
+        assert_eq!(count_of("one\n\n`two`", false), "one\ntwo".len());
+        assert_eq!(count_of("a\\\nb", false), "a\nb".len());
+        // A table's cells part words, but add no characters of their own.
+        assert_eq!(count_of("| a | **b** |\n| - | - |", false), 2);
+        assert_eq!(count_of("**bold** words, *here*", true), 3);
+        // Reference definitions are no text, and add no break of their own.
+        let referenced = "a [b][r]\n\n[r]: https://x.y\n\nc";
+        assert_eq!(count_of(referenced, false), "a b\nc".len());
+        assert_eq!(count_of(referenced, true), 3);
+        assert_eq!(count_of("[r]: https://x.y", false), 0);
     }
 }

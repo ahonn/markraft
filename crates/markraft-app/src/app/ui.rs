@@ -18,7 +18,6 @@ use slash::{Command, SlashEffect};
 use table::TableEdit;
 pub(in crate::app) use tokens::playback;
 use tokens::{POPOVER_RADIUS, ROW_HEIGHT, ROW_RADIUS, keycaps, popover_shadow};
-use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone)]
 enum Intent {
@@ -1839,13 +1838,6 @@ impl NotesApp {
         ));
         items
     }
-    fn count_units(&self, text: &str) -> usize {
-        if self.toolbar.counts_words() {
-            text.unicode_words().count()
-        } else {
-            text.graphemes(true).count()
-        }
-    }
     fn count_of(&self, units: usize) -> String {
         if self.toolbar.counts_words() {
             format!("{units} {}", if units == 1 { "word" } else { "words" })
@@ -1860,26 +1852,14 @@ impl NotesApp {
             )
         }
     }
-    /// What the footer counts: the note as the editor lays it out. A table puts each of
-    /// its cells on a line of its own, and those breaks are the grid rather than
-    /// anything anyone typed, so they are not characters — they still part words, as the
-    /// break between two blocks does.
+    /// What the footer counts: the note as a reader sees it. See [`doc::count`].
     fn note_count(&self, cx: &App) -> String {
-        let projection = self.editor().read(cx).projection();
-        let mut units = 0;
-        let mut previous: Option<Option<usize>> = None;
-        for (index, line) in projection.lines().iter().enumerate() {
-            units += self.count_units(projection.line_text(index).unwrap_or_default());
-            let table = doc::table_of(line);
-            // The break this line opened with, unless it fell between two cells of one
-            // table, or the count is of words, which no break adds to.
-            if !self.toolbar.counts_words()
-                && previous.is_some_and(|before| table.is_none() || before != table)
-            {
-                units += 1;
-            }
-            previous = Some(table);
-        }
+        let editor = self.editor().read(cx);
+        let units = doc::count(
+            editor.state().doc(),
+            &editor.projection(),
+            self.toolbar.counts_words(),
+        );
         self.count_of(units)
     }
     fn filtered_actions(&self, cx: &App) -> Vec<Command> {

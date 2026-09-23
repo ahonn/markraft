@@ -154,6 +154,7 @@ pub use serialize::{
 };
 pub use source::{SourceDocument, SourceError};
 pub use text::{slice_to_plain_text, to_plain_text};
+pub use textblock::holds_definitions;
 pub use wiki::{WikiLink, read_wiki_link, whole_wiki_link};
 
 /// Parse `source` into a document on the CommonMark schema.
