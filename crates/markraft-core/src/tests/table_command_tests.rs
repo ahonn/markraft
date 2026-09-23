@@ -211,6 +211,29 @@ fn enter_moves_down_the_column_and_appends_on_the_last_row() {
 }
 
 #[test]
+fn down_from_the_last_row_adds_a_block_only_when_nothing_follows() {
+    let state = grid();
+    let exit = exit_table_below(types());
+    // Above the last row it is ordinary motion.
+    assert!(exit(&at(&state, 6)).is_none());
+    let exited = run(&at(&state, 14), &exit);
+    assert_eq!(
+        shape(&exited),
+        r#"doc(table[alignments=Str("none,none")](table_row(table_cell("a"), table_cell("b")), table_row(table_cell("c"), table_cell("d"))), paragraph())"#
+    );
+    assert_eq!(cursor(&exited), 19);
+    // A block after the table is where ↓ goes by itself.
+    let followed = state_of(
+        document([
+            table("none,none", &[&["a", "b"], &["c", "d"]]),
+            paragraph("after"),
+        ]),
+        Extension::none(),
+    );
+    assert!(exit(&at(&followed, 14)).is_none());
+}
+
+#[test]
 fn goto_cell_above_never_creates_a_row() {
     let state = grid();
     assert_eq!(cursor(&run(&at(&state, 14), &goto_cell_above(types()))), 6);

@@ -25,6 +25,7 @@ mod shaping;
 mod single_line;
 mod style;
 mod surface;
+pub use surface::TABLE_TOOLBAR_ROOM;
 mod syntax;
 mod typeahead;
 mod types;
@@ -1469,6 +1470,15 @@ impl EditorView {
         Some((position, x, upstream))
     }
 
+    /// Whether `position` shows on the same visual row as the caret.
+    fn same_visual_row(&self, position: usize, upstream: bool) -> bool {
+        let caret_y = |pos: usize, upstream: bool| {
+            self.row_at(pos)
+                .map(|(row, offset)| row.caret(offset, upstream).y)
+        };
+        caret_y(position, upstream) == caret_y(self.head(), self.upstream)
+    }
+
     /// The start or end of the caret's visual row. A wrapped block has several.
     pub(crate) fn line_edge_target(&self, end: bool) -> Option<(usize, bool)> {
         let head = self.head();
@@ -1501,7 +1511,21 @@ impl EditorView {
                 return;
             }
         }
-        if let Some((position, x, upstream)) = self.visual_row_target(delta) {
+        let target = self.visual_row_target(delta);
+        // ↓ on a table's last visual row has nowhere to go when nothing follows
+        // the table: leave it for a new block, as Typora does.
+        if delta > 0
+            && !extend
+            && self.state.selection().is_cursor()
+            && let Some(types) = self.types.table_types()
+            && target.is_none_or(|(position, _, upstream)| self.same_visual_row(position, upstream))
+        {
+            let command = markraft_core::commands::exit_table_below(types);
+            if self.run_command(&command, cx) {
+                return;
+            }
+        }
+        if let Some((position, x, upstream)) = target {
             self.upstream = upstream;
             self.select(position, extend, cx);
             self.preferred_x = Some(x);

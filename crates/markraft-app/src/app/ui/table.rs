@@ -152,9 +152,12 @@ impl NotesApp {
         };
         let anchor = table.bounds;
         let viewport = window.bounds().size;
-        // Above the grid, unless that would leave the pill in the band the title and the
-        // action capsule float in, where it would sit on top of them; then it goes below.
-        let above = anchor.top() - HEIGHT - GAP;
+        // In the row the grid keeps clear above itself, unless that would leave the pill
+        // in the band the title and the action capsule float in, where it would sit on
+        // top of them; then it goes below.
+        // The row is a little shorter than the pill, which reaches into the gap every
+        // block keeps below itself rather than into the block.
+        let above = anchor.top() - HEIGHT - (markraft_gpui::TABLE_TOOLBAR_ROOM - HEIGHT).abs();
         let top = if above < TOOLBAR_HEIGHT + GAP {
             anchor.bottom() + GAP
         } else {

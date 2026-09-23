@@ -72,6 +72,10 @@ const CODE_PADDING: Pixels = px(12.);
 /// height.
 const CODE_FENCE_INSET: Pixels = px(6.);
 const CODE_RADIUS: Pixels = px(12.);
+/// The row a table keeps above its grid for the host's table toolbar, focused
+/// or not, so the toolbar never covers the block above and the caret coming
+/// or going never moves what follows.
+pub const TABLE_TOOLBAR_ROOM: Pixels = px(28.);
 
 /// A table is a grid: the projection gives every cell a line of its own, and
 /// the table pass puts the cells of one row on one band of y. A column is as
@@ -1042,6 +1046,9 @@ struct LineKey {
     /// Whether the line below goes on with this line's list, which sets the
     /// gap below this one.
     list_continues: bool,
+    /// Whether a table opens below the line, which keeps its toolbar's row in
+    /// the gap below this one.
+    table_below: bool,
     /// Whether the line opens a callout, which depends on the line above.
     callout_header: bool,
     /// Whether the host can open each wiki link on the line, in order.
@@ -1078,6 +1085,7 @@ fn line_key(input: &ShapeInput<'_>, index: usize) -> Option<LineKey> {
         list_len: ordered_list_len(input.doc, types, line),
         joined_quotes: joined_quote_levels(projection, index, types),
         list_continues: list_continues(types, line, next),
+        table_below: opens_table(types, next),
         callout_header: crate::callout::header_of(types, line, above).is_some(),
         links,
     })
@@ -2955,6 +2963,12 @@ fn list_continues(types: &DocTypes, line: &Line, next: Option<&Line>) -> bool {
     next.is_some_and(|next| types.item_of(next).is_some() && outermost(next) == outermost(line))
 }
 
+/// Whether `next` opens a table, which keeps its toolbar's row above itself.
+fn opens_table(types: &DocTypes, next: Option<&Line>) -> bool {
+    next.and_then(|next| types.table_cell_of(next))
+        .is_some_and(|(_, row, column)| row == 0 && column == 0)
+}
+
 fn gap_below(
     input: &ShapeInput<'_>,
     index: usize,
@@ -2963,11 +2977,30 @@ fn gap_below(
     code: bool,
     marker: &Option<Marker>,
 ) -> Pixels {
-    let style = input.style;
     if input.single_line {
         return px(0.);
     }
     let next = input.projection.line(index + 1);
+    // The row a table keeps for its toolbar is part of the gap above it, so
+    // the bars of a quote around both reach over it as over any gap.
+    let toolbar = if opens_table(input.types, next) {
+        TABLE_TOOLBAR_ROOM
+    } else {
+        px(0.)
+    };
+    block_gap(input, line, next, heading, code, marker) + toolbar
+}
+
+/// The space a block keeps below itself before the next one.
+fn block_gap(
+    input: &ShapeInput<'_>,
+    line: &Line,
+    next: Option<&Line>,
+    heading: Option<u8>,
+    code: bool,
+    marker: &Option<Marker>,
+) -> Pixels {
+    let style = input.style;
     // The code fill reaches CODE_FENCE_INSET past the closing fence's row
     // (`shape_line` adds that row on top of this gap), so a code block keeps
     // its own bottom padding whatever block follows it.
@@ -5243,13 +5276,17 @@ mod tests {
     }
 
     /// A table is one block: only the cell that closes the grid is spaced off
-    /// what follows it, and the block before it opens the same gap any pair of
-    /// blocks gets.
+    /// what follows it, and the block before it opens the gap any pair of
+    /// blocks gets plus the row the table keeps for its toolbar.
     #[test]
     fn a_table_is_one_block_whose_cells_sit_tight() {
         let style = spaced_style();
         let gaps = gaps_of("para\n\n| a | b |\n| - | - |\n| c | d |\n\npara", &style);
-        assert_eq!(gaps[0], style.paragraph_gap, "above the table");
+        assert_eq!(
+            gaps[0],
+            style.paragraph_gap + super::TABLE_TOOLBAR_ROOM,
+            "above the table"
+        );
         assert_eq!(&gaps[1..4], [Pixels::ZERO; 3], "between its cells");
         assert_eq!(gaps[4], style.paragraph_gap, "below the table");
     }

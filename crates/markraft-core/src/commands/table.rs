@@ -476,6 +476,51 @@ pub fn goto_cell_below(types: TableTypes) -> Command {
     })
 }
 
+/// Leave the table downwards from its last row, when nothing follows it to
+/// move to: an empty block of the default type is added after the table and
+/// the cursor goes into it, as ↓ does in Typora.
+///
+/// Does not apply above the last row, nor when a textblock follows the table
+/// anywhere below — moving there is ordinary vertical motion.
+pub fn exit_table_below(types: TableTypes) -> Command {
+    command(move |state| {
+        let ctx = context(types, state)?;
+        if ctx.pos.row + 1 < ctx.rows() {
+            return None;
+        }
+        let doc = state.doc();
+        let schema = state.schema();
+        let end = ctx.end();
+        if Selection::find_from(schema, doc, end, 1, true)
+            .is_some_and(|found| found.head(doc) >= end)
+        {
+            return None;
+        }
+        let resolved = doc.resolve(end).ok()?;
+        let ty = default_block_type(schema, resolved.parent(), resolved.index(resolved.depth()))?;
+        let block = schema.create_and_fill(
+            ty,
+            schema.node_type(ty).default_attrs().clone(),
+            MarkSet::empty(),
+            Fragment::empty(),
+        )?;
+        let (set, new_doc) = resolve_changes(
+            state,
+            vec![Change::insert(
+                end,
+                Slice::from_fragment(Fragment::from_node(block)),
+            )],
+        )?;
+        Some(
+            TransactionSpec::new()
+                .change_set(set)
+                .selection(Selection::near(schema, &new_doc, end, 1))
+                .user_event("insert")
+                .scroll_into_view(),
+        )
+    })
+}
+
 /// Move the cursor to the same column of the previous row.
 ///
 /// Does not apply in the header, and never creates a row.

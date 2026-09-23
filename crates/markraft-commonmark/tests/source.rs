@@ -272,6 +272,23 @@ fn deleting_a_wiki_link_removes_exactly_its_source_bytes() {
 }
 
 #[test]
+fn deleting_a_table_spelled_without_padding_saves() {
+    for (original, expected) in [
+        (
+            "Edit area\n\n| a | b |\n| - | - |\n| 1 | 2 |\n",
+            "Edit area\n",
+        ),
+        (
+            "Edit area\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\npara\n",
+            "Edit area\n\npara\n",
+        ),
+        ("| a | b |\n| - | - |\n\npara\n", "para\n"),
+    ] {
+        assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
+    }
+}
+
+#[test]
 fn inserting_a_wiki_link_writes_exactly_its_serialized_form() {
     for (original, expected) in [
         ("Read now\n", "Read [[page|label]] now\n"),

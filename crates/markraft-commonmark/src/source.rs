@@ -203,7 +203,26 @@ impl SourceDocument {
                 return self.insert_blocks(schema, document, result, prefix, suffix, &after);
             } else {
                 let range = self.blocks[prefix].start..self.blocks[end - 1].end;
-                result = self.patch(schema, document, result, range, &before, &after)?;
+                result = match self.patch(schema, document, result.clone(), range, &before, &after)
+                {
+                    Ok(patched) => patched,
+                    // Whole blocks went and nothing took their place, but their
+                    // source is not spelled the way the writer would spell them —
+                    // a table padded otherwise. Their spelling does not matter to
+                    // a deletion: drop their lines and the gap before them.
+                    Err(_) if prefix + suffix == new.len() => {
+                        let range = if prefix > 0 {
+                            self.blocks[prefix - 1].end..self.blocks[end - 1].end
+                        } else if suffix > 0 {
+                            self.blocks[prefix].start..self.blocks[end].start
+                        } else {
+                            self.blocks[prefix].start..self.blocks[end - 1].end
+                        };
+                        result.replace_range(range, "");
+                        result
+                    }
+                    Err(error) => return Err(error),
+                };
             }
         }
         self.validate(schema, document, result)

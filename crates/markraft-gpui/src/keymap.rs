@@ -1026,7 +1026,11 @@ mod tests {
             let types = types_of(&state);
             let start = projection_of(&state).lines()[0].from();
             let cleared = applied(&at(&state, start), &backspace(&types)).expect("clears");
-            assert_eq!(to_markdown(state.schema(), cleared.doc()), "title", "{heading:?}");
+            assert_eq!(
+                to_markdown(state.schema(), cleared.doc()),
+                "title",
+                "{heading:?}"
+            );
         }
         let state = state_of("# title");
         let types = types_of(&state);
