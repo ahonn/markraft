@@ -1186,16 +1186,16 @@ fn a_link_reference_definition_is_kept_where_it_stands() {
         round("[foo][ref]\n\n[ref]: /url \"t\""),
         "[foo][ref]\n\n[ref]: /url \"t\""
     );
-    // The definition is source the tree keeps verbatim; the reference is text
-    // until the tree resolves references.
+    // The definition is source the tree keeps verbatim, and the reference
+    // resolves against it wherever it stands.
     assert_eq!(
         shape("[foo]\n\n[foo]: /url"),
-        r#"doc(paragraph("[foo]"), raw_block("[foo]: /url"))"#
+        r#"doc(paragraph("["{link,syntax}, "foo"{link}, "]"{link,syntax}), raw_block("[foo]: /url"))"#
     );
     // At the start of a paragraph it is a block of its own.
     assert_eq!(
         shape("[foo]: /url\n[foo]"),
-        r#"doc(raw_block("[foo]: /url"), paragraph("[foo]"))"#
+        r#"doc(raw_block("[foo]: /url"), paragraph("["{link,syntax}, "foo"{link}, "]"{link,syntax}))"#
     );
     let codec = Codec::new();
     for source in [
@@ -1205,6 +1205,47 @@ fn a_link_reference_definition_is_kept_where_it_stands() {
     ] {
         judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
     }
+}
+
+#[test]
+fn every_reference_form_links_to_its_definition() {
+    for (source, text) in [
+        ("[a][ref]\n\n[ref]: /u \"t\"", "[a][ref]"),
+        ("[ref][]\n\n[ref]: /u \"t\"", "[ref][]"),
+        ("[ref]\n\n[ref]: /u \"t\"", "[ref]"),
+        // Definitions apply everywhere: inside a container, before it, and
+        // to a heading and a table cell.
+        ("> [a][ref]\n\n- x\n\n  [ref]: /u \"t\"", "[a][ref]"),
+        ("# [a][Ref]\n\n[ref]: /u \"t\"", "[a][Ref]"),
+        ("| [a][ref] |\n| -------- |\n\n[ref]: /u \"t\"", "[a][ref]"),
+    ] {
+        assert_eq!(first_href(source), "/u", "{source:?}");
+        let codec = Codec::new();
+        let doc = codec.parse(source);
+        let link = codec.schema.mark_id(md::LINK).expect("the link mark");
+        let mut linked = String::new();
+        let mut title = String::new();
+        doc.descendants(&mut |node, _, _, _| {
+            if let Some(mark) = node.marks().get(link) {
+                linked.push_str(node.text().unwrap_or_default());
+                title = mark
+                    .attrs
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+            }
+            true
+        });
+        assert_eq!(linked, text, "{source:?}");
+        assert_eq!(title, "t", "{source:?}");
+        assert_eq!(round(source), source);
+    }
+    // An undefined label stays the text it is.
+    assert_eq!(
+        shape("[a][nope]\n\n[ref]: /u"),
+        r#"doc(paragraph("[a][nope]"), raw_block("[ref]: /u"))"#
+    );
 }
 
 // -- autolinks ------------------------------------------------------------

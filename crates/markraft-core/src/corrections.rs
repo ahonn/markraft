@@ -104,6 +104,25 @@ pub struct CorrectionContext<'a> {
     /// round, and only for a correction registered with
     /// [`Correction::when_selection_leaves`].
     pub selection_left: bool,
+    /// The ranges of `doc` this round's input changed.
+    touched: &'a [(usize, usize)],
+    /// The positions of `doc` the selection left, in the first round.
+    left: &'a [usize],
+}
+
+impl CorrectionContext<'_> {
+    /// Whether this round's input reached `from..=to` of [`CorrectionContext::doc`]:
+    /// a change touched it, or an end of the selection left it.
+    ///
+    /// This is exactly when a [`CorrectionTrigger::Content`] correction
+    /// registered with [`Correction::when_selection_leaves`] is called for a
+    /// node whose content is `from..to`. A correction on an ancestor that
+    /// repairs such nodes itself uses it to leave to their own correction the
+    /// ones it is being called for anyway, so the two never ask for
+    /// overlapping changes.
+    pub fn touches(&self, from: usize, to: usize) -> bool {
+        overlaps(self.touched, from, to) || self.left.iter().any(|pos| (from..=to).contains(pos))
+    }
 }
 
 type CorrectFn = Arc<dyn Fn(&CorrectionContext<'_>) -> Vec<Change> + Send + Sync>;
@@ -400,6 +419,8 @@ fn corrections_for(
                 content_start,
                 before,
                 selection_left,
+                touched: &touched,
+                left,
             };
             out.extend((correction.correct)(&cx));
         }

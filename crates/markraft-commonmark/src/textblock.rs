@@ -361,6 +361,93 @@ pub(crate) fn derived_marks(schema: &Schema, derived: &Derived, len: usize) -> V
     out
 }
 
+/// The text of every raw block in `doc` that could hold link reference
+/// definitions, in document order: the ones that start with `[`.
+///
+/// Cheap to compare, so a caller can tell whether a transaction changed the
+/// definitions before it pays for [`document_context`].
+pub(crate) fn definition_candidates(schema: &Schema, doc: &Node) -> Vec<String> {
+    let Some(raw) = schema.node_id(md::RAW_BLOCK) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    doc.descendants(&mut |node, _, _, _| {
+        if node.type_id() == raw {
+            let text: String = node.children().filter_map(|leaf| leaf.text()).collect();
+            if text.trim_start().starts_with('[') {
+                out.push(text);
+            }
+            return false;
+        }
+        // Nothing inside a textblock is a block.
+        !node.is_textblock(schema)
+    });
+    out
+}
+
+/// What the textblocks of a document holding `candidates` — see
+/// [`definition_candidates`] — are read against: the link reference
+/// definitions among them, so `[a][ref]` resolves as it does in the file.
+///
+/// A definition may stand anywhere in a document and still apply to all of
+/// it; the first of two with one label wins, which the order keeps.
+pub(crate) fn definitions_context(candidates: &[String]) -> DeriveContext {
+    let definitions: Vec<&str> = candidates
+        .iter()
+        .map(String::as_str)
+        .filter(|text| reads_as_definitions(text))
+        .collect();
+    DeriveContext::new().with_definitions(definitions.join("\n\n"))
+}
+
+/// The context `doc`'s textblocks are read against.
+pub(crate) fn document_context(schema: &Schema, doc: &Node) -> DeriveContext {
+    definitions_context(&definition_candidates(schema, doc))
+}
+
+/// Whether `text` reads as nothing but link reference definitions.
+///
+/// comrak does not read a definition whose destination is `<>` when nothing
+/// follows it, so the text is given the line ending it had in the file.
+pub(crate) fn reads_as_definitions(text: &str) -> bool {
+    let arena = comrak::Arena::new();
+    !text.trim().is_empty()
+        && comrak::parse_document(&arena, &format!("{text}\n"), &crate::commonmark_options())
+            .first_child()
+            .is_none()
+}
+
+/// `doc` with every textblock's marks derived against the document's own
+/// definitions, which [`build`] could not know while the document was being
+/// read.
+pub(crate) fn resolve_references(schema: &Schema, doc: &Node) -> Node {
+    let ctx = document_context(schema, doc);
+    if ctx.definitions().is_empty() {
+        return doc.clone();
+    }
+    rederive(schema, doc, &ctx)
+}
+
+fn rederive(schema: &Schema, node: &Node, ctx: &DeriveContext) -> Node {
+    if let Some(kind) = block_kind(schema, node.type_id()) {
+        let items = Items::from_nodes(schema, node.children());
+        let text = items.text();
+        if !text.contains(']') {
+            return node.clone();
+        }
+        let derived = derive(kind, &text, ctx);
+        return node.copy(Fragment::from_nodes(items.nodes(schema, &derived)));
+    }
+    if node.is_leaf() || node.is_textblock(schema) {
+        return node.clone();
+    }
+    let children: Vec<Node> = node
+        .children()
+        .map(|child| rederive(schema, child, ctx))
+        .collect();
+    node.copy(Fragment::from_nodes(children))
+}
+
 /// Whether `block` is a textblock whose first line reads as a callout marker.
 pub(crate) fn looks_like_callout(schema: &Schema, block: &Node) -> bool {
     if block_kind(schema, block.type_id()) != Some(BlockKind::Paragraph) {

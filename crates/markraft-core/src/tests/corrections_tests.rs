@@ -367,3 +367,54 @@ fn a_selection_leaving_does_not_run_corrections_that_did_not_ask() {
     assert!(!tr.doc_changed());
     assert_eq!(probe.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn an_ancestor_is_told_which_nodes_a_round_reaches() {
+    use std::sync::Mutex;
+    let schema = shared_schema();
+    let top = schema.node_id("doc").unwrap();
+    let paragraph = schema.node_id("paragraph").unwrap();
+    // For each round: which paragraphs the doc's correction was told were
+    // reached, and which ones the paragraph correction was called for.
+    let told = Arc::new(Mutex::new(Vec::<Vec<bool>>::new()));
+    let called = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let (told_probe, called_probe) = (told.clone(), called.clone());
+    let doc_correction = Correction::on_content(top, move |cx| {
+        let mut pos = cx.content_start;
+        let mut reached = Vec::new();
+        for child in cx.node.children() {
+            reached.push(cx.touches(pos + 1, pos + child.node_size() - 1));
+            pos += child.node_size();
+        }
+        told.lock().unwrap().push(reached);
+        Vec::new()
+    });
+    let paragraph_correction = Correction::on_content(paragraph, move |cx| {
+        called.lock().unwrap().push(cx.content_start);
+        Vec::new()
+    })
+    .when_selection_leaves();
+    let start = crate::state::EditorState::create(
+        crate::state::EditorStateConfig::new(schema.clone())
+            .doc(two_paragraphs(&schema))
+            .selection(crate::selection::Selection::cursor(2))
+            .extensions(corrections([doc_correction, paragraph_correction])),
+    )
+    .unwrap();
+    // An edit in the second paragraph that moves the caret out of the first.
+    start
+        .update([TransactionSpec::new()
+            .changes([insert_text(&schema, 6, "X")])
+            .selection(crate::selection::Selection::cursor(7))])
+        .unwrap();
+    assert_eq!(*told_probe.lock().unwrap(), [vec![true, true]]);
+    let mut called = called_probe.lock().unwrap().clone();
+    called.sort_unstable();
+    assert_eq!(called, [1, 5]);
+    // An edit that leaves the caret where it was reaches only its paragraph.
+    told_probe.lock().unwrap().clear();
+    start
+        .update([TransactionSpec::new().changes([insert_text(&schema, 6, "X")])])
+        .unwrap();
+    assert_eq!(*told_probe.lock().unwrap(), [vec![false, true]]);
+}

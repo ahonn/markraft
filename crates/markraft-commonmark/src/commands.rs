@@ -47,7 +47,7 @@ use crate::inline::style_delimiters;
 use crate::preset::commonmark_serializer;
 use crate::schema as md;
 use crate::serialize::spell_run;
-use crate::textblock::{Item, Items, block_kind, style_mark, syntax_mark};
+use crate::textblock::{Item, Items, block_kind, document_context, style_mark, syntax_mark};
 
 /// Why a formatting command left the document alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -235,13 +235,15 @@ struct Block {
     items: Items,
     derived: Derived,
     units: Vec<Unit>,
+    /// What the block is read against: the document's definitions.
+    ctx: DeriveContext,
 }
 
 impl Block {
-    fn read(schema: &Schema, node: &Node, start: usize) -> Option<Block> {
+    fn read(schema: &Schema, ctx: &DeriveContext, node: &Node, start: usize) -> Option<Block> {
         let kind = block_kind(schema, node.type_id())?;
         let items = Items::from_nodes(schema, node.children());
-        let derived = derive(kind, &items.text(), &DeriveContext::new());
+        let derived = derive(kind, &items.text(), ctx);
         let units = units_of(&items, &derived);
         Some(Block {
             node: node.clone(),
@@ -250,6 +252,7 @@ impl Block {
             items,
             derived,
             units,
+            ctx: ctx.clone(),
         })
     }
 
@@ -433,6 +436,7 @@ struct Share {
 fn shares(state: &EditorState) -> Vec<Share> {
     let schema = state.schema();
     let doc = state.doc();
+    let ctx = document_context(schema, doc);
     let mut out = Vec::new();
     for range in state.selection().ranges(doc) {
         doc.nodes_between(range.from, range.to, &mut |node, pos, _, _| {
@@ -443,7 +447,7 @@ fn shares(state: &EditorState) -> Vec<Share> {
             let end = start + node.content_size();
             let from = range.from.clamp(start, end) - start;
             let to = range.to.clamp(start, end) - start;
-            if let Some(block) = Block::read(schema, node, start)
+            if let Some(block) = Block::read(schema, &ctx, node, start)
                 && let Some(selected) = block.units_in(from, to)
             {
                 out.push(Share { block, selected });
@@ -465,7 +469,8 @@ fn link_around_cursor(state: &EditorState) -> Option<Share> {
     if to > start + node.content_size() {
         return None;
     }
-    let block = Block::read(state.schema(), node, start)?;
+    let ctx = document_context(state.schema(), doc);
+    let block = Block::read(state.schema(), &ctx, node, start)?;
     let (from, to) = (from - start, to - start);
     let span = block
         .derived
@@ -749,7 +754,7 @@ fn attempt(
         all.extend(new_items.iter().cloned());
         all.extend(block.items.0[hi..].iter().cloned());
         let items = Items(all);
-        let derived = derive(block.kind, &items.text(), &DeriveContext::new());
+        let derived = derive(block.kind, &items.text(), &block.ctx);
         let read = units_of(&items, &derived);
         outcome = check(units, &target, &read).map(|()| (new_items, read));
         if outcome.is_ok() {
@@ -923,7 +928,8 @@ fn insert_linked(state: &EditorState, link: &Style, href: &str) -> Formatted {
     let pos = state.selection().head(doc);
     let resolved = doc.resolve(pos).map_err(|_| unreadable())?;
     let start = resolved.start(resolved.depth());
-    let Some(block) = Block::read(schema, resolved.parent(), start) else {
+    let ctx = document_context(schema, doc);
+    let Some(block) = Block::read(schema, &ctx, resolved.parent(), start) else {
         return Ok(None);
     };
     let mut offset = pos - start;
@@ -971,7 +977,7 @@ fn insert_linked(state: &EditorState, link: &Style, href: &str) -> Formatted {
         all.extend(new_items.iter().cloned());
         all.extend(block.items.0[offset..].iter().cloned());
         let items = Items(all);
-        let derived = derive(block.kind, &items.text(), &DeriveContext::new());
+        let derived = derive(block.kind, &items.text(), &block.ctx);
         let read = units_of(&items, &derived);
         outcome = check(&expected, &target, &read).map(|()| (new_items, read));
         if outcome.is_ok() {
@@ -1009,7 +1015,7 @@ fn split_keeping(state: &EditorState, split: &Command) -> Option<TransactionSpec
     let resolved = doc.resolve(head).ok()?;
     let node = resolved.parent();
     let start = resolved.start(resolved.depth());
-    let block = Block::read(schema, node, start)?;
+    let block = Block::read(schema, &document_context(schema, doc), node, start)?;
     let derived = &block.derived;
 
     // Move the cut off delimiters and out of a unit's spelling.
@@ -1181,7 +1187,7 @@ fn halves_read_back(block: &Block, units_before: usize, halves: &(Items, Items))
     let (left, right) = halves;
     let (before, after) = block.units.split_at(units_before);
     let reads = |items: &Items, units: &[Unit]| {
-        let derived = derive(block.kind, &items.text(), &DeriveContext::new());
+        let derived = derive(block.kind, &items.text(), &block.ctx);
         let read = units_of(items, &derived);
         let target: Vec<Vec<Style>> = units.iter().map(|unit| unit.styles.clone()).collect();
         check(units, &target, &read).is_ok()

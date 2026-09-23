@@ -46,6 +46,12 @@
 //! [`Correction::when_selection_leaves`] — so apart from the caret's line the
 //! tree always holds what the file will.
 //!
+//! A block is read against the document's link reference definitions, which
+//! stand in raw blocks of their own. A transaction that changes them reaches
+//! no textblock, so a second correction, on the document, re-derives the
+//! marks of every block a reference link could be in — see
+//! [`follow_definitions`].
+//!
 //! Nothing else: key bindings, clipboard handling and the rest belong to a
 //! host, which composes them with this.
 
@@ -56,9 +62,12 @@ use markraft_core::{
     Markup, Node, NodeTypeId, Schema, Slice, Token, attrs, corrections, fill_required_content,
 };
 
-use crate::derive::{BlockKind, DeriveContext, Derived, derive};
+use crate::derive::{BlockKind, Derived, derive};
 use crate::schema as md;
-use crate::textblock::{Item, Items, block_kind, derived_mark_types, derived_marks};
+use crate::textblock::{
+    Item, Items, block_kind, definition_candidates, definitions_context, derived_mark_types,
+    derived_marks,
+};
 
 /// Input rules and corrections for the CommonMark preset.
 pub fn commonmark_extensions(schema: &Schema) -> Extension {
@@ -94,6 +103,9 @@ pub fn commonmark_corrections(schema: &Schema) -> Vec<Correction> {
         if let Some(ty) = schema.node_id(name) {
             out.push(Correction::on_content(ty, canonicalise).when_selection_leaves());
         }
+    }
+    if let Some(doc) = schema.node_id(md::DOC) {
+        out.push(Correction::on_content(doc, follow_definitions));
     }
     out
 }
@@ -415,9 +427,11 @@ fn canonicalise(cx: &CorrectionContext<'_>) -> Vec<Change> {
     let first_round = cx.doc.ptr_eq(cx.tr.new_doc());
     let items = Items::from_nodes(schema, cx.node.children());
     let carets = caret_lines(cx, &items);
+    let candidates = definition_candidates(schema, cx.doc);
     if first_round
         && !edits_characters(cx)
         && !(cx.selection_left && left_a_line(cx, &items, &carets))
+        && candidates == definition_candidates(schema, cx.start_state.doc())
     {
         return Vec::new();
     }
@@ -425,7 +439,7 @@ fn canonicalise(cx: &CorrectionContext<'_>) -> Vec<Change> {
     if !lines.is_empty() {
         return lines;
     }
-    let ctx = DeriveContext::new();
+    let ctx = definitions_context(&candidates);
     let text = items.text();
     let derived = derive(kind, &text, &ctx);
     let atoms = fold_atoms(cx, &derived);
@@ -436,7 +450,49 @@ fn canonicalise(cx: &CorrectionContext<'_>) -> Vec<Change> {
     if !guards.is_empty() {
         return guards;
     }
-    mark_changes(cx, &items, &derived)
+    mark_changes(schema, cx.node, cx.content_start, &items, &derived)
+}
+
+/// Re-derive the marks of every textblock a change to the document's link
+/// reference definitions may have changed the meaning of.
+///
+/// A definition is a raw block of its own, so editing, adding or deleting one
+/// touches no textblock, and [`canonicalise`] is not called for the blocks
+/// whose `[a][ref]` it resolves. This is: it runs in the first round of a
+/// transaction whose definitions differ from the ones it started with, and
+/// sets the marks of each textblock that holds a `]` — no reference link can
+/// do without one — to what it reads as against the new definitions. A block
+/// the round reaches anyway is [`canonicalise`]'s, which reads it against
+/// the same definitions; leaving it alone keeps the two from asking for the
+/// same range.
+fn follow_definitions(cx: &CorrectionContext<'_>) -> Vec<Change> {
+    let schema = cx.start_state.schema();
+    if !cx.doc.ptr_eq(cx.tr.new_doc()) {
+        return Vec::new();
+    }
+    let candidates = definition_candidates(schema, cx.doc);
+    if candidates == definition_candidates(schema, cx.start_state.doc()) {
+        return Vec::new();
+    }
+    let ctx = definitions_context(&candidates);
+    let mut out = Vec::new();
+    cx.doc.descendants(&mut |node, pos, _, _| {
+        let Some(kind) = block_kind(schema, node.type_id()) else {
+            return !node.is_textblock(schema);
+        };
+        let content_start = pos + 1;
+        if cx.touches(content_start, content_start + node.content_size()) {
+            return false;
+        }
+        let items = Items::from_nodes(schema, node.children());
+        let text = items.text();
+        if text.contains(']') {
+            let derived = derive(kind, &text, &ctx);
+            out.extend(mark_changes(schema, node, content_start, &items, &derived));
+        }
+        false
+    });
+    out
 }
 
 /// Whether this transaction changed characters *in this block*.
@@ -702,18 +758,23 @@ fn guard_backslashes(
         .collect()
 }
 
-/// Step 4: the mark changes that make every derived mark type over the block
-/// what the derivation says.
+/// Step 4: the mark changes that make every derived mark type over `node`,
+/// whose content starts at `content_start`, what the derivation says.
 ///
 /// One [`Change::set_marks`] per run of positions whose marks differ from
 /// their target and share one target: the target keeps every mark type this
 /// kind does not derive and takes the derived ones from the derivation. The
 /// runs never overlap, so the whole block settles in one round.
-fn mark_changes(cx: &CorrectionContext<'_>, items: &Items, derived: &Derived) -> Vec<Change> {
-    let schema = cx.start_state.schema();
+fn mark_changes(
+    schema: &Schema,
+    node: &Node,
+    content_start: usize,
+    items: &Items,
+    derived: &Derived,
+) -> Vec<Change> {
     let wanted = derived_marks(schema, derived, items.len());
     let mut current: Vec<&MarkSet> = Vec::with_capacity(items.len());
-    for child in cx.node.children() {
+    for child in node.children() {
         let count = child.text().map_or(1, |text| text.chars().count());
         current.extend(std::iter::repeat_n(child.marks(), count));
     }
@@ -738,7 +799,11 @@ fn mark_changes(cx: &CorrectionContext<'_>, items: &Items, derived: &Derived) ->
             continue;
         }
         if let Some((from, marks)) = run.take() {
-            out.push(Change::set_marks(at(cx, from), at(cx, index), marks));
+            out.push(Change::set_marks(
+                content_start + from,
+                content_start + index,
+                marks,
+            ));
         }
         run = next.map(|set| (index, set));
     }

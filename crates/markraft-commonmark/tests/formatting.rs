@@ -361,6 +361,19 @@ fn unlinking_keeps_the_text_and_its_other_styles() {
     assert_saves(&codec, &formatted(&state, &unlink()), "[ab](u)c d");
 }
 
+#[test]
+fn a_reference_link_is_a_link_to_the_commands() {
+    let codec = Codec::new();
+    // Unlinking one leaves its text and the definition.
+    let state = editor(&codec, "a [b][r] c\n\n[r]: /u", Selection::cursor(at(4)));
+    let unlinked = formatted(&state, &unlink());
+    assert_saves(&codec, &unlinked, "a b c\n\n[r]: /u");
+    // Bold inside one keeps it the reference it is.
+    let state = selecting(&codec, "[bc][r] d\n\n[r]: /u", 1, 3);
+    let bold = formatted(&state, &toggle(&codec, md::STRONG));
+    assert_saves(&codec, &bold, "[**bc**][r] d\n\n[r]: /u");
+}
+
 // -- clearing -------------------------------------------------------------------
 
 #[test]

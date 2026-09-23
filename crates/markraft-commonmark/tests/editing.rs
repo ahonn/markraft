@@ -328,3 +328,166 @@ fn undoing_the_callout_rule_gives_the_typed_marker_back() {
         r#"doc(blockquote[callout=Str(""),fold=Str(""),title=Str("")](paragraph("[!note] ")))"#
     );
 }
+
+// -- reference links ------------------------------------------------------
+
+/// The state of `source`, the caret at the start.
+fn opened(source: &str) -> (Schema, EditorState) {
+    let schema = commonmark_schema();
+    let doc = markraft_commonmark::from_markdown(&schema, source).expect("parses");
+    let state = start_from(doc, &schema, 1);
+    (schema, state)
+}
+
+fn apply(state: &EditorState, changes: Vec<markraft_core::Change>) -> EditorState {
+    let tr = state
+        .update([markraft_core::TransactionSpec::new().changes(changes)])
+        .expect("the edit applies");
+    assert_eq!(
+        tr.annotation(markraft_core::corrections_diverged()),
+        None,
+        "the corrections settle"
+    );
+    tr.state().clone()
+}
+
+/// The text each run of link marks in `doc` covers, with its destination.
+fn links(schema: &Schema, doc: &Node) -> Vec<(String, String)> {
+    let link = schema.mark_id(md::LINK).expect("the link mark");
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut open = false;
+    doc.descendants(&mut |node, _, _, _| {
+        if !node.is_leaf() {
+            open = false;
+            return true;
+        }
+        let Some(mark) = node.marks().get(link) else {
+            open = false;
+            return true;
+        };
+        let href = mark
+            .attrs
+            .get("href")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let text = node.text().unwrap_or_default();
+        match out.last_mut() {
+            Some((linked, last)) if open && *last == href => linked.push_str(text),
+            _ => out.push((text.to_string(), href)),
+        }
+        open = true;
+        true
+    });
+    out
+}
+
+fn text(schema: &Schema, content: &str) -> markraft_core::Slice {
+    markraft_core::Slice::from_fragment(markraft_core::Fragment::from_node(schema.text(content)))
+}
+
+#[test]
+fn editing_a_definition_moves_every_link_that_refers_to_it() {
+    // paragraph `[a][ref]` is 0..10, the definition block's text starts at 11.
+    let (schema, state) = opened("[a][ref] and [ref]\n\n> [ref][]\n\n[ref]: /u");
+    assert_eq!(
+        links(&schema, state.doc()),
+        [
+            ("[a][ref]".to_string(), "/u".to_string()),
+            ("[ref]".to_string(), "/u".to_string()),
+            ("[ref][]".to_string(), "/u".to_string()),
+        ]
+    );
+    let definition = state.doc().content_size() - "/u".len() - 1;
+    let state = apply(
+        &state,
+        vec![markraft_core::Change::replace(
+            definition + 1,
+            definition + 2,
+            text(&schema, "v"),
+        )],
+    );
+    assert_eq!(
+        markraft_commonmark::to_markdown(&schema, state.doc()),
+        "[a][ref] and [ref]\n\n> [ref][]\n\n[ref]: /v"
+    );
+    let hrefs: Vec<String> = links(&schema, state.doc())
+        .into_iter()
+        .map(|(_, href)| href)
+        .collect();
+    assert_eq!(hrefs, ["/v", "/v", "/v"]);
+}
+
+#[test]
+fn deleting_a_definition_leaves_its_links_plain_text_and_a_new_one_links_them() {
+    let (schema, state) = opened("[a][ref]\n\n[ref]: /u");
+    let paragraph = state.doc().child(0).node_size();
+    let end = state.doc().content_size();
+    let gone = apply(&state, vec![markraft_core::Change::delete(paragraph, end)]);
+    assert_eq!(schema.describe(gone.doc()), r#"doc(paragraph("[a][ref]"))"#);
+    // A definition block put back links it again, and typing into it moves
+    // the link with every keystroke.
+    let definition = schema
+        .node(md::RAW_BLOCK, [schema.text("[ref]: /w")])
+        .expect("a raw block");
+    let end = gone.doc().content_size();
+    let back = apply(
+        &gone,
+        vec![markraft_core::Change::insert(
+            end,
+            markraft_core::Slice::from_fragment(markraft_core::Fragment::from_node(definition)),
+        )],
+    );
+    assert_eq!(
+        links(&schema, back.doc()),
+        [("[a][ref]".to_string(), "/w".to_string())]
+    );
+    let end = back.doc().content_size() - 1;
+    let back = back
+        .update([markraft_core::TransactionSpec::new().selection(Selection::cursor(end))])
+        .expect("the caret moves")
+        .state()
+        .clone();
+    let typed = type_all(&back, "x");
+    assert_eq!(
+        markraft_commonmark::to_markdown(&schema, typed.doc()),
+        "[a][ref]\n\n[ref]: /wx"
+    );
+    assert_eq!(
+        links(&schema, typed.doc()),
+        [("[a][ref]".to_string(), "/wx".to_string())]
+    );
+    // A label that no longer matches unlinks it.
+    let label = typed.doc().child(0).node_size() + 2;
+    let renamed = apply(
+        &typed,
+        vec![markraft_core::Change::replace(
+            label,
+            label + 3,
+            text(&schema, "rex"),
+        )],
+    );
+    assert!(links(&schema, renamed.doc()).is_empty());
+}
+
+#[test]
+fn one_edit_to_a_reference_and_its_definition_settles_both() {
+    let (schema, state) = opened("[a][ref] x\n\n[ref]: /u");
+    let definition = state.doc().content_size() - "/u".len() - 1;
+    // Type after the reference and change the destination in one transaction.
+    let state = apply(
+        &state,
+        vec![
+            markraft_core::Change::insert(11, text(&schema, "y")),
+            markraft_core::Change::replace(definition + 1, definition + 2, text(&schema, "v")),
+        ],
+    );
+    assert_eq!(
+        markraft_commonmark::to_markdown(&schema, state.doc()),
+        "[a][ref] xy\n\n[ref]: /v"
+    );
+    assert_eq!(
+        links(&schema, state.doc()),
+        [("[a][ref]".to_string(), "/v".to_string())]
+    );
+}

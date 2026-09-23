@@ -32,8 +32,8 @@
 //! * **Link reference definitions** are kept as they were written, in a
 //!   `raw_block` where they stood — between blocks, or at the start of the
 //!   paragraph they opened — so the reference links in the text still resolve
-//!   once the file is written back. The tree does not resolve them yet: a
-//!   reference link is text until it does.
+//!   once the file is written back. Every textblock is read against them, so
+//!   `[a][ref]`, `[ref][]` and `[ref]` are links wherever they stand.
 //! * A **GFM table** becomes a `table` of `table_row`s of `table_cell`s, with
 //!   the delimiter row's alignments on the table. The first row is the header
 //!   row, and every row is squared off to the column count the alignments
@@ -217,6 +217,7 @@ impl MarkdownParser {
         let blocks = walk.blocks(root)?;
         let doc = walk.fit(self.schema.top_type(), Attrs::empty(), blocks)?;
         let doc = crate::table::normalize_tables(&self.schema, &doc).unwrap_or(doc);
+        let doc = crate::textblock::resolve_references(&self.schema, &doc);
         doc.check(&self.schema)?;
         Ok(doc)
     }

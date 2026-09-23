@@ -1620,8 +1620,8 @@ fn rejection_message(error: &markraft_commonmark::SourceError) -> String {
              callout's own first line. Edit that part in another editor."
         }
         SourceError::ProtectedBlock => {
-            "This change would drop source Markraft cannot represent, such as a link reference \
-             definition. Edit this section in another editor."
+            "This change would rewrite a whole block that holds Markdown Markraft keeps exactly \
+             as written, such as math or a block anchor. Edit this section in another editor."
         }
         SourceError::UnsupportedEdit => {
             "Markraft could not write this change back without rewriting source it does not \
@@ -2146,8 +2146,10 @@ mod tests {
         // A wiki link is a node of its own now, so it is not on the list.
         assert!(messages[0].contains("callout"), "{}", messages[0]);
         assert!(!messages[0].contains("wiki link"), "{}", messages[0]);
+        // Reference definitions are blocks of the document now, so a whole
+        // block is only protected for what the codec keeps verbatim.
         assert!(
-            messages[1].contains("link reference definition"),
+            messages[1].contains("math") && !messages[1].contains("reference definition"),
             "{}",
             messages[1]
         );
