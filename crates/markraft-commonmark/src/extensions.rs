@@ -28,7 +28,7 @@
 //! correction brings the block back to what a reader of its source would read:
 //!
 //! 1. Its lines: a blank line splits the block in two, a line break at either
-//!    end of it goes, whitespace starting a line or ending the block goes,
+//!    end of it goes — with the `\` that spells it a hard break —, whitespace starting a line or ending the block goes,
 //!    and in a heading of level 3 or more — which has no way to hold one — or
 //!    a table cell a break becomes a space.
 //! 2. Its atoms: text a reader takes for an image, a wiki link or a raw HTML
@@ -616,6 +616,18 @@ fn at(cx: &CorrectionContext<'_>, index: usize) -> usize {
     cx.content_start + index
 }
 
+/// Whether the break at `index` is spelled by the `\\` before it: an odd run
+/// of backslashes, since each pair of them is an escaped backslash.
+fn spells_hard_break(items: &[Item], index: usize) -> bool {
+    items[..index]
+        .iter()
+        .rev()
+        .take_while(|item| **item == Item::Char('\\'))
+        .count()
+        % 2
+        == 1
+}
+
 /// Step 1: a blank line splits the block, a break at either end goes,
 /// whitespace starting a line or ending the block goes, and a break a heading
 /// of level 3 or more or a table cell cannot hold becomes a space.
@@ -677,14 +689,21 @@ fn settle_lines(
             Item::Break => {
                 let edge = (index == 0 && !carets.contains(&0))
                     || (index + 1 == items.len() && !carets.contains(&last_line));
+                // The `\` spelling a hard break goes with it: without the
+                // break it is a backslash a reader sees.
+                let from = if spells_hard_break(items, index) {
+                    index - 1
+                } else {
+                    index
+                };
                 if flatten {
                     out.push(Change::replace(
-                        at(cx, index),
+                        at(cx, from),
                         at(cx, index + 1),
                         Slice::from_fragment(Fragment::from_node(schema.text(" "))),
                     ));
                 } else if edge {
-                    out.push(Change::delete(at(cx, index), at(cx, index + 1)));
+                    out.push(Change::delete(at(cx, from), at(cx, index + 1)));
                 }
                 line += 1;
                 at_line_start = !flatten;

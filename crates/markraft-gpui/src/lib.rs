@@ -110,6 +110,7 @@ actions!(
         EditRawHtml,
         CopyCodeBlock,
         CharacterPalette,
+        LineBreak,
         WordLeft,
         WordRight,
         SelectWordLeft,
@@ -159,6 +160,7 @@ pub fn bind_keys(cx: &mut App) {
     }; }
     bind! {
         "backspace" => Backspace, "delete" => Delete, "enter" => Enter,
+        "shift-enter" => LineBreak,
         "left" => Left, "right" => Right, "up" => Up, "down" => Down,
         "shift-left" => SelectLeft, "shift-right" => SelectRight,
         "shift-up" => SelectUp, "shift-down" => SelectDown,
@@ -1965,6 +1967,7 @@ impl EditorView {
                 cx.propagate();
             }
         }));
+        rich!(LineBreak, keymap::line_break);
         rich!(Indent, keymap::indent);
         rich!(Outdent, keymap::outdent);
         run!(Left, |_: &DocTypes| keymap::move_grapheme(

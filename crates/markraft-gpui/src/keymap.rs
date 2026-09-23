@@ -14,10 +14,10 @@ use markraft_core::commands::{
     Command, Direction, add_row_after, chain, changes_spec, command, create_paragraph_near,
     delete_by, delete_by_grapheme, delete_empty_table, delete_selection, exit_code,
     goto_cell_below, goto_next_cell, goto_prev_cell, guard_cell_boundary, guard_cell_range,
-    guard_cell_split, join_backward, join_forward, lift, lift_empty_block, lift_list_item, move_by,
-    move_by_grapheme, new_line_in_code, select_node_backward, select_node_forward, set_block_type,
-    sink_list_item, split_block_keep_marks, split_list_item, undo_input_rule, wrap_in,
-    wrap_in_list,
+    guard_cell_split, insert_hard_break, join_backward, join_forward, lift, lift_empty_block,
+    lift_list_item, move_by, move_by_grapheme, new_line_in_code, select_node_backward,
+    select_node_forward, set_block_type, sink_list_item, split_block_keep_marks, split_list_item,
+    undo_input_rule, wrap_in, wrap_in_list,
 };
 use markraft_core::projection::projection_of;
 use markraft_core::{
@@ -204,6 +204,29 @@ pub(crate) fn enter_with(
         Some(splits(split_block_keep_marks())),
     ]);
     some(list)
+}
+
+/// Shift-Return: a new line inside the block rather than a new block.
+///
+/// In a verbatim block that is a newline, as Return is. Elsewhere it is a hard
+/// break, spelled — where the kind keeps its markup in the text — with the
+/// trailing `\` the serialiser writes, since a line ending alone is a soft
+/// break a reader sees as a space. A GFM table row is one line, so a cell takes
+/// none.
+pub(crate) fn line_break(types: &DocTypes) -> Command {
+    let hard_break = types.hard_break.map(|node| {
+        let types = types.clone();
+        let insert = if types.syntax.is_some() {
+            composed(vec![
+                markraft_core::commands::insert_text("\\"),
+                insert_hard_break(node),
+            ])
+        } else {
+            insert_hard_break(node)
+        };
+        when(move |state| !types.in_table_cell(state), insert)
+    });
+    some([Some(new_line_in_code()), hard_break])
 }
 
 /// Backspace at the start of an empty verbatim block: turn it into a paragraph.
@@ -1423,5 +1446,40 @@ mod tests {
         let moved = applied(&at(&state, inside), &forward).expect("⌥→ applies");
         let typed = markraft_core::commands::insert_text("X");
         assert_eq!(after(&moved, &typed).as_deref(), Some("a **bc**X d"));
+    }
+
+    /// Shift-Return breaks the line inside the block: a hard break, spelled
+    /// with the trailing `\` the file keeps, and a newline in a code block.
+    #[test]
+    fn shift_return_breaks_the_line_inside_the_block() {
+        let typed = markraft_core::commands::insert_text("b");
+        let state = state_of("a");
+        let types = types_of(&state);
+        let broken = applied(&at(&state, caret_in(&state, "a") + 1), &line_break(&types))
+            .expect("Shift-Return applies");
+        assert_eq!(after(&broken, &typed).as_deref(), Some("a\\\nb"));
+        // Left with nothing after it, the break goes, and its `\` with it.
+        let state = state_of("a\n\nz");
+        let broken = applied(&at(&state, caret_in(&state, "a") + 1), &line_break(&types))
+            .expect("Shift-Return applies");
+        let left = at(&broken, caret_in(&broken, "z"));
+        assert_eq!(to_markdown(left.schema(), left.doc()), "a\n\nz");
+
+        let state = state_of("**ab**");
+        let broken = applied(
+            &at(&state, caret_in(&state, "**ab**") + 3),
+            &line_break(&types),
+        )
+        .expect("Shift-Return applies inside a span");
+        assert_eq!(to_markdown(broken.schema(), broken.doc()), "**a\\\nb**");
+
+        let state = state_of("```\nx\n```");
+        let broken = applied(&at(&state, caret_in(&state, "x") + 1), &line_break(&types))
+            .expect("Shift-Return applies in code");
+        assert_eq!(after(&broken, &typed).as_deref(), Some("```\nx\nb\n```"));
+
+        let (state, _) = table_state();
+        let caret = caret_in(&state, "c") + 1;
+        assert!(run_command(&at(&state, caret), &line_break(&types)).is_none());
     }
 }
