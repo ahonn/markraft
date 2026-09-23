@@ -261,7 +261,7 @@ fn a_cell_holds_the_marks_links_and_images_a_paragraph_holds() {
         concat!(
             r#"doc(table[alignments=Str("none")](table_row(table_cell("#,
             r#""**"{strong,syntax}, "b"{strong}, "**"{strong,syntax}, " ", "*"{em,syntax}, "i"{em}, "*"{em,syntax}, " ", "`"{code,syntax}, "c"{code}, "`"{code,syntax}, " ", "["{link,syntax}, "l"{link}, "](u)"{link,syntax}, " ", "#,
-            r#"image[alt=Str("alt"),src=Str("p"),title=Str("")])), "#,
+            r#"image[alt=Str("alt"),source=Str(""),src=Str("p"),title=Str("")])), "#,
             r#"table_row(table_cell("<u>"{underline,syntax}, "u"{underline}, "</u>"{underline,syntax}))))"#
         )
     );
@@ -566,29 +566,85 @@ fn underline_is_a_pair_of_u_tags() {
 }
 
 #[test]
-fn every_other_inline_tag_is_a_raw_atom() {
+fn paired_style_tags_are_the_styles_they_spell() {
+    // `<em>`, `<strong>` and `<del>` pair the way `<u>` does: the tags are the
+    // span's delimiters, concealed, and the file keeps them as written.
     let codec = Codec::new();
     assert_eq!(
         shape("<em>a</em>"),
-        r#"doc(paragraph(raw_inline[source=Str("<em>")], "a", raw_inline[source=Str("</em>")]))"#
+        r#"doc(paragraph("<em>"{em,syntax}, "a"{em}, "</em>"{em,syntax}))"#
     );
     assert_eq!(
-        shape("<em>a"),
-        r#"doc(paragraph(raw_inline[source=Str("<em>")], "a"))"#
+        shape("<strong>a <del>b</del></strong>"),
+        concat!(
+            r#"doc(paragraph("<strong>"{strong,syntax}, "a "{strong}, "#,
+            r#""<del>"{strikethrough,strong,syntax}, "b"{strikethrough,strong}, "#,
+            r#""</del>"{strikethrough,strong,syntax}, "</strong>"{strong,syntax}))"#
+        )
     );
-    for source in ["<em>a</em>", "<strong>a</strong>", "<del>a</del>", "<em>a"] {
+    for source in [
+        "<em>a</em>",
+        "<strong>a</strong>",
+        "<del>a</del>",
+        "<EM>a</EM> and <em class=\"x\">b</em>",
+        "<strong>a *b*</strong>",
+    ] {
         assert_eq!(round(source), source);
         judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
     }
 }
 
 #[test]
-fn an_html_anchor_is_raw_source_around_its_text() {
+fn an_unpaired_style_tag_stays_a_raw_atom() {
+    // Only `<u>` stays text without its partner, as half of a style being
+    // typed. The others are the raw HTML a reader renders them as.
+    let codec = Codec::new();
+    assert_eq!(
+        shape("<em>a"),
+        r#"doc(paragraph(raw_inline[source=Str("<em>")], "a"))"#
+    );
+    assert_eq!(
+        shape("a</strong>"),
+        r#"doc(paragraph("a", raw_inline[source=Str("</strong>")]))"#
+    );
+    // Tags split across a span boundary pair with nothing.
+    assert_eq!(
+        shape("<em>*a</em>*"),
+        concat!(
+            r#"doc(paragraph(raw_inline[source=Str("<em>")], "*"{em,syntax}, "a"{em}, "#,
+            r#"raw_inline[source=Str("</em>")]{em}, "*"{em,syntax}))"#
+        )
+    );
+    for source in ["<em>a", "a</strong>", "<span>a</span>", "<em>*a</em>*"] {
+        assert_eq!(round(source), source);
+        judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
+    }
+}
+
+#[test]
+fn an_html_anchor_with_a_destination_is_a_link() {
     let codec = Codec::new();
     assert_eq!(
         shape("an <a href=\"https://example.com\">anchor</a> here"),
         concat!(
-            r#"doc(paragraph("an ", raw_inline[source=Str("<a href=\"https://example.com\">")], "#,
+            r##"doc(paragraph("an ", "<a href="https://example.com">"{link,syntax}, "##,
+            r#""anchor"{link}, "</a>"{link,syntax}, " here"))"#
+        )
+    );
+    let doc = codec.parse("<a href='/u?a=1&amp;b=2' title=\"t\">x</a>");
+    let link = codec.schema.mark_id("link").expect("a link mark");
+    let marks = doc.child(0).child(0).marks().clone();
+    let mark = marks.get(link).expect("the tag is a link");
+    assert_eq!(
+        mark.attrs.get("href").and_then(|v| v.as_str()),
+        Some("/u?a=1&b=2")
+    );
+    assert_eq!(mark.attrs.get("title").and_then(|v| v.as_str()), Some("t"));
+    // An anchor with nowhere to go is no link.
+    assert_eq!(
+        shape("an <a>anchor</a> here"),
+        concat!(
+            r#"doc(paragraph("an ", raw_inline[source=Str("<a>")], "#,
             r#""anchor", raw_inline[source=Str("</a>")], " here"))"#
         )
     );
@@ -732,15 +788,55 @@ fn a_wiki_link_is_an_atom_that_writes_back_the_bytes_it_took() {
 }
 
 #[test]
-fn image_and_break_tags_are_raw_atoms_that_write_themselves_again() {
+fn an_img_tag_is_an_image_that_writes_its_tag_again() {
     let codec = Codec::new();
+    assert_eq!(
+        shape("see <img src=\"x.png\" alt=\"img\"> here"),
+        concat!(
+            r#"doc(paragraph("see ", image[alt=Str("img"),"#,
+            r#"source=Str("<img src=\"x.png\" alt=\"img\">"),src=Str("x.png"),title=Str("")], " here"))"#
+        )
+    );
     for tag in [
         "<img src=\"x.png\" alt=\"img\">",
         "<img src=\"x.png\" alt=\"img\"/>",
         "<img src=\"x.png\" width=\"20\">",
-        "<br>",
-        "<br />",
+        "<img src='a&amp;b.png' title=t>",
     ] {
+        let source = format!("see {tag} here");
+        assert!(shape(&source).contains("image["), "{tag}");
+        assert_eq!(round(&source), source, "{tag}");
+        judge(&codec, &source).unwrap_or_else(|message| panic!("{message}"));
+    }
+    // With nothing to show it is no image.
+    assert_eq!(
+        shape("see <img alt=\"x\"> here"),
+        r#"doc(paragraph("see ", raw_inline[source=Str("<img alt=\"x\">")], " here"))"#
+    );
+    // A Markdown image is the image atom, written back in one spelling.
+    assert_eq!(
+        shape("see ![img](x.png \"t\") here"),
+        r#"doc(paragraph("see ", image[alt=Str("img"),source=Str(""),src=Str("x.png"),title=Str("t")], " here"))"#
+    );
+}
+
+#[test]
+fn a_br_tag_ending_a_line_spells_its_hard_break() {
+    let codec = Codec::new();
+    assert_eq!(
+        shape("a<br>\nb"),
+        r#"doc(paragraph("a", "<br>"{syntax}, line_break, "b"))"#
+    );
+    for source in ["a<br>\nb", "a<br/>\nb", "a <br />  \nb", "*a<br>\nb*"] {
+        assert_eq!(round(source), source, "{source:?}");
+        judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
+        let html = markraft_commonmark::HtmlSerializer::commonmark(&codec.schema)
+            .serialize(&codec.parse(source));
+        assert!(html.contains("<br>"), "{source:?} exports {html:?}");
+    }
+    // In the middle of a line there is no line ending for it to spell, and a
+    // break already hard is its own: the tag stays an atom.
+    for tag in ["<br>", "<br />"] {
         let source = format!("see {tag} here");
         assert_eq!(
             shape(&source),
@@ -750,11 +846,7 @@ fn image_and_break_tags_are_raw_atoms_that_write_themselves_again() {
         assert_eq!(round(&source), source, "{tag}");
         judge(&codec, &source).unwrap_or_else(|message| panic!("{message}"));
     }
-    // A Markdown image is the image atom, written back in one spelling.
-    assert_eq!(
-        shape("see ![img](x.png \"t\") here"),
-        r#"doc(paragraph("see ", image[alt=Str("img"),src=Str("x.png"),title=Str("t")], " here"))"#
-    );
+    assert!(shape("a<br>\\\nb").contains("raw_inline"));
 }
 
 #[test]
@@ -1066,12 +1158,12 @@ fn images_carry_their_alt_and_title() {
     );
     assert_eq!(
         shape("![alt](src.png \"a title\")"),
-        r#"doc(paragraph(image[alt=Str("alt"),src=Str("src.png"),title=Str("a title")]))"#
+        r#"doc(paragraph(image[alt=Str("alt"),source=Str(""),src=Str("src.png"),title=Str("a title")]))"#
     );
     // A label with markup flattens to the plain text CommonMark's `alt` holds.
     assert_eq!(
         shape("![*a*](s)"),
-        r#"doc(paragraph(image[alt=Str("a"),src=Str("s"),title=Str("")]))"#
+        r#"doc(paragraph(image[alt=Str("a"),source=Str(""),src=Str("s"),title=Str("")]))"#
     );
 }
 

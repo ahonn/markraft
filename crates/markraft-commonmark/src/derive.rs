@@ -1,7 +1,7 @@
 //! Reading the styles a textblock's inline source spells.
 //!
 //! In the inline source model a textblock's text *is* its Markdown inline
-//! source — delimiters, backslash escapes, entities and `<u>` tags included —
+//! source — delimiters, backslash escapes, entities and HTML tags included —
 //! and every style mark on it is a function of that text. [`derive()`] is that
 //! function. It knows nothing about the document tree: it takes the block's
 //! kind, its text and the context the text is read in, and answers which
@@ -34,9 +34,19 @@
 //!   other line ending is a soft break.
 //! * [`Derived::atoms`] — the runs of text a reader takes for something the
 //!   tree holds as an atom: an image, a wiki link (the `![[…]]` embed
-//!   included), a raw HTML tag other than `<u>`/`</u>`. Typed as text, they
-//!   are what the canonicalising correction turns into atoms. A `<u>` or
-//!   `</u>` with no partner stays text: it is half of a style being typed.
+//!   included), an `<img>` tag, a raw HTML tag read as nothing else. Typed as
+//!   text, they are what the canonicalising correction turns into atoms. A
+//!   `<u>` or `</u>` with no partner stays text: it is half of a style being
+//!   typed.
+//!
+//! # Inline HTML
+//!
+//! A tag a reader renders as a style is that style: a `<u>`, `<em>`,
+//! `<strong>`, `<del>` or `<a href>` paired with its closing tag among the
+//! same node's children styles what lies between, and the two tags are the
+//! span's concealed delimiters. A `<br>` a line ending follows is that line
+//! ending's hard-break spelling. Every other tag — a style tag without its
+//! partner included — is an atom.
 //!
 //! # Where comrak's positions need help
 //!
@@ -71,7 +81,7 @@
 
 use std::ops::Range;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use comrak::nodes::{AstNode, NodeValue, Sourcepos};
 use comrak::{Arena, Options, parse_document};
@@ -121,16 +131,16 @@ impl DeriveContext {
 /// A style a span of inline source spells.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Style {
-    /// `**…**` or `__…__`.
+    /// `**…**`, `__…__` or a paired `<strong>`…`</strong>`.
     Strong,
-    /// `*…*` or `_…_`.
+    /// `*…*`, `_…_` or a paired `<em>`…`</em>`.
     Emphasis,
-    /// `~~…~~` or `~…~`.
+    /// `~~…~~`, `~…~` or a paired `<del>`…`</del>`.
     Strikethrough,
     /// A code span.
     Code,
-    /// An inline, reference or autolink link, with its resolved destination
-    /// and title.
+    /// An inline, reference or autolink link, or a paired `<a href>`…`</a>`,
+    /// with its resolved destination and title.
     Link {
         /// The destination, with escapes and entities resolved.
         href: String,
@@ -253,6 +263,7 @@ pub fn derive(kind: BlockKind, text: &str, ctx: &DeriveContext) -> Derived {
         original: original_offsets(&guarded),
         out: Derived::default(),
         spans: 0,
+        read_html: HashSet::new(),
     };
     reader.blocks(root);
     if let Some(removed) = &source.removed_backslashes {
@@ -694,6 +705,10 @@ struct Reader<'s> {
     original: Vec<usize>,
     out: Derived,
     spans: u32,
+    /// The inline HTML nodes read as something other than an atom: a paired
+    /// style tag, or a `<br>` spelling the hard break after it. Keyed by
+    /// [`node_key`].
+    read_html: HashSet<usize>,
 }
 
 impl Reader<'_> {
@@ -758,7 +773,8 @@ impl Reader<'_> {
     }
 
     fn inlines<'a>(&mut self, parent: &'a AstNode<'a>) {
-        self.underlines(parent);
+        self.html_styles(parent);
+        self.html_breaks(parent);
         self.embeds(parent);
         for child in parent.children() {
             self.inline(child);
@@ -802,6 +818,9 @@ impl Reader<'_> {
             // An image and a wiki link are atoms in the tree. One spelled in
             // the text is reported as the atom it spells, with nothing styled
             // inside.
+            // An image by reference stays the text it is: the atom would write
+            // its destination inline and lose the reference.
+            NodeValue::Image(_) if self.text.get(whole.end - 1) != Some(&')') => {}
             NodeValue::Image(link) => {
                 let attrs = attrs! {
                     "src" => link.url.clone(),
@@ -817,13 +836,22 @@ impl Reader<'_> {
                     self.atom(whole, md::WIKI_LINK, wiki_attrs(link));
                 }
             }
-            // `<u>` pairs were handled with their parent, and a `<u>` or
-            // `</u>` without a partner is half of a style being typed. Any
-            // other tag is an atom in the tree, holding its source.
+            // Paired style tags and a `<br>` ending its line were read with
+            // their parent, and a `<u>` or `</u>` without a partner is half of
+            // a style being typed. An `<img>` is the image atom; any other tag
+            // is an atom in the tree, holding its source.
             NodeValue::HtmlInline(html) => {
-                if underline_tag(&html).is_none() {
-                    let source: String = self.text[whole.clone()].iter().collect();
-                    self.atom(whole, md::RAW_INLINE, attrs! {"source" => source});
+                if self.read_html.contains(&node_key(node)) {
+                    return;
+                }
+                let tag = HtmlTag::read(&html);
+                if tag.as_ref().is_some_and(|tag| tag.name == "u") {
+                    return;
+                }
+                let source: String = self.text[whole.clone()].iter().collect();
+                match tag.and_then(|tag| tag.image(&source)) {
+                    Some(attrs) => self.atom(whole, md::IMAGE, attrs),
+                    None => self.atom(whole, md::RAW_INLINE, attrs! {"source" => source}),
                 }
             }
             NodeValue::SoftBreak => {}
@@ -1090,13 +1118,18 @@ impl Reader<'_> {
         Some((start, last + 1))
     }
 
-    /// Underline every `<u>`…`</u>` pair among `parent`'s children.
+    /// Style every pair of style tags among `parent`'s children: `<u>`,
+    /// `<em>`, `<strong>`, `<del>` and `<a href>`, each closed by its own
+    /// closing tag.
     ///
     /// Only tags that pair up within one parent are a style: `<u>*a</u>*` has
     /// its tags in different nodes, and guessing a tree for them would change
-    /// what the source says. The tags themselves are the span's delimiters.
-    fn underlines<'a>(&mut self, parent: &'a AstNode<'a>) {
-        let mut open: Vec<Range<usize>> = Vec::new();
+    /// what the source says. The tags themselves are the span's delimiters. A
+    /// closing tag pairs with the latest unpaired opening tag of its name.
+    fn html_styles<'a>(&mut self, parent: &'a AstNode<'a>) {
+        let mut open: Vec<(String, Style, Range<usize>)> = Vec::new();
+        let mut paired: Vec<usize> = Vec::new();
+        let mut openers: Vec<usize> = Vec::new();
         for child in parent.children() {
             let (value, pos) = {
                 let data = child.data.borrow();
@@ -1105,22 +1138,207 @@ impl Reader<'_> {
             let NodeValue::HtmlInline(html) = value else {
                 continue;
             };
-            let Some(range) = self.range(pos) else {
+            let (Some(tag), Some(range)) = (HtmlTag::read(&html), self.range(pos)) else {
                 continue;
             };
-            match underline_tag(&html) {
-                Some(true) => open.push(range),
-                Some(false) => {
-                    if let Some(opening) = open.pop() {
-                        self.style(opening.start..range.end, Style::Underline);
-                        let span = self.conceal(opening, None, String::new());
-                        self.conceal(range, span, String::new());
-                    }
-                }
-                None => {}
+            if tag.closing {
+                let Some(at) = open.iter().rposition(|(name, ..)| *name == tag.name) else {
+                    continue;
+                };
+                let (_, style, opening) = open.remove(at);
+                paired.push(openers.remove(at));
+                paired.push(node_key(child));
+                self.style(opening.start..range.end, style);
+                let span = self.conceal(opening, None, String::new());
+                self.conceal(range, span, String::new());
+            } else if let Some(style) = tag.style() {
+                open.push((tag.name, style, range));
+                openers.push(node_key(child));
             }
         }
+        self.read_html.extend(paired);
     }
+
+    /// Read every `<br>` among `parent`'s children that ends its line as the
+    /// spelling of that line's hard break, the way a backslash would be.
+    ///
+    /// One in the middle of a line has no line ending in the text to spell,
+    /// and stays the atom it is.
+    fn html_breaks<'a>(&mut self, parent: &'a AstNode<'a>) {
+        for child in parent.children() {
+            let (value, pos) = {
+                let data = child.data.borrow();
+                (data.value.clone(), data.sourcepos)
+            };
+            let NodeValue::HtmlInline(html) = value else {
+                continue;
+            };
+            let is_break = HtmlTag::read(&html).is_some_and(|tag| tag.name == "br" && !tag.closing);
+            let soft_break_follows = child
+                .next_sibling()
+                .is_some_and(|next| matches!(next.data.borrow().value, NodeValue::SoftBreak));
+            let Some(range) = self.range(pos).filter(|_| is_break && soft_break_follows) else {
+                continue;
+            };
+            let mut newline = range.end;
+            while matches!(self.text.get(newline), Some(' ' | '\t')) {
+                newline += 1;
+            }
+            if self.text.get(newline) != Some(&'\n') {
+                continue;
+            }
+            self.conceal(range.start..newline, None, String::new());
+            self.out.hard_breaks.push(newline);
+            self.read_html.insert(node_key(child));
+        }
+    }
+}
+
+/// An inline HTML tag, read far enough to tell what it stands for.
+struct HtmlTag {
+    /// The element name, in lower case.
+    name: String,
+    closing: bool,
+    /// Whether the tag closes itself, `<br/>`.
+    empty: bool,
+    /// Its attributes as written, values with their character references
+    /// resolved. A name without a value has an empty one.
+    attrs: Vec<(String, String)>,
+}
+
+impl HtmlTag {
+    /// `html` read as an opening or closing tag. A comment, a processing
+    /// instruction or a declaration is none.
+    fn read(html: &str) -> Option<HtmlTag> {
+        let body = html.strip_prefix('<')?.strip_suffix('>')?;
+        let (body, closing) = match body.strip_prefix('/') {
+            Some(rest) => (rest, true),
+            None => (body, false),
+        };
+        let (body, empty) = match body.strip_suffix('/') {
+            Some(rest) => (rest, true),
+            None => (body, false),
+        };
+        let name_len = body
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .unwrap_or(body.len());
+        let name = &body[..name_len];
+        if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            return None;
+        }
+        let attrs = read_attributes(&body[name_len..])?;
+        if closing && (empty || !attrs.is_empty()) {
+            return None;
+        }
+        Some(HtmlTag {
+            name: name.to_ascii_lowercase(),
+            closing,
+            empty,
+            attrs,
+        })
+    }
+
+    fn attr(&self, name: &str) -> Option<&str> {
+        self.attrs
+            .iter()
+            .find(|(attr, _)| attr.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The style an opening tag starts, when it is a style tag.
+    fn style(&self) -> Option<Style> {
+        if self.closing || self.empty {
+            return None;
+        }
+        Some(match self.name.as_str() {
+            "u" => Style::Underline,
+            "em" => Style::Emphasis,
+            "strong" => Style::Strong,
+            "del" => Style::Strikethrough,
+            "a" => Style::Link {
+                href: self.attr("href")?.to_string(),
+                title: self.attr("title").unwrap_or_default().to_string(),
+            },
+            _ => return None,
+        })
+    }
+
+    /// The image atom's attributes, when this is an `<img>` with a source.
+    /// `source` is the tag as written, which the atom writes back.
+    fn image(&self, source: &str) -> Option<Attrs> {
+        if self.name != "img" || self.closing {
+            return None;
+        }
+        Some(attrs! {
+            "src" => self.attr("src")?.to_string(),
+            "alt" => self.attr("alt").unwrap_or_default().to_string(),
+            "title" => self.attr("title").unwrap_or_default().to_string(),
+            "source" => source.to_string(),
+        })
+    }
+}
+
+/// The attributes of a tag, from what follows its name. `None` when that is
+/// not a run of attributes.
+fn read_attributes(mut rest: &str) -> Option<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    loop {
+        let trimmed = rest.trim_start_matches([' ', '\t', '\n']);
+        if trimmed.is_empty() {
+            return Some(out);
+        }
+        // An attribute is separated from what precedes it by whitespace.
+        if trimmed.len() == rest.len() {
+            return None;
+        }
+        let name_len = trimmed
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-')))
+            .unwrap_or(trimmed.len());
+        if name_len == 0 {
+            return None;
+        }
+        let name = trimmed[..name_len].to_string();
+        let after = trimmed[name_len..].trim_start_matches([' ', '\t', '\n']);
+        let Some(value) = after.strip_prefix('=') else {
+            out.push((name, String::new()));
+            rest = &trimmed[name_len..];
+            continue;
+        };
+        let value = value.trim_start_matches([' ', '\t', '\n']);
+        let (raw, remainder) = match value.chars().next()? {
+            quote @ ('"' | '\'') => {
+                let close = value[1..].find(quote)? + 1;
+                (&value[1..close], &value[close + 1..])
+            }
+            _ => {
+                let end = value
+                    .find(|c: char| c.is_whitespace() || "\"'=<>`".contains(c))
+                    .unwrap_or(value.len());
+                (&value[..end], &value[end..])
+            }
+        };
+        out.push((name, decode_entities(raw)));
+        rest = remainder;
+    }
+}
+
+/// `text` with every character reference in it resolved.
+fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while at < text.len() {
+        if let Some(len) = entity_len(&text[at..])
+            && let Some(decoded) = decode_entity(&text[at..at + len])
+        {
+            out.push_str(&decoded);
+            at += len;
+            continue;
+        }
+        let character = text[at..].chars().next().unwrap_or_default();
+        out.push(character);
+        at += character.len_utf8();
+    }
+    out
 }
 
 /// The character an atom stands as in a textblock's text.
@@ -1167,17 +1385,6 @@ fn closing_run(text: &str, from: usize, ticks: usize) -> Option<usize> {
         at += run;
     }
     None
-}
-
-/// `Some(true)` for `<u>`, `Some(false)` for `</u>`, in any case and with
-/// whitespace before the `>`.
-fn underline_tag(html: &str) -> Option<bool> {
-    let body = html.strip_prefix('<')?.strip_suffix('>')?.trim_end();
-    let (name, opening) = match body.strip_prefix('/') {
-        Some(name) => (name, false),
-        None => (body, true),
-    };
-    name.eq_ignore_ascii_case("u").then_some(opening)
 }
 
 /// The byte length of the character reference `text` starts with, by shape

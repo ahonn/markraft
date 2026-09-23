@@ -14,12 +14,13 @@
 //! # Inline content is source
 //!
 //! A [`PARAGRAPH`]'s, a [`HEADING`]'s and a [`TABLE_CELL`]'s text *is* its
-//! Markdown inline source — delimiters, backslash escapes, entities and `<u>`
+//! Markdown inline source — delimiters, backslash escapes, entities and HTML
 //! tags included — exactly as a reader sees it once the block's own prefixes
 //! are stripped. Each line ending is one [`LINE_BREAK`] atom; a hard break's
-//! spelling (`\` or trailing spaces) is ordinary text before it. What the
-//! tree holds as an atom rather than as text is what a reader never shows as
-//! its characters: an [`IMAGE`], a [`WIKI_LINK`], a [`RAW_INLINE`] HTML tag.
+//! spelling (`\`, trailing spaces or `<br>`) is ordinary text before it.
+//! What the tree holds as an atom rather than as text is what a reader never
+//! shows as its characters: an [`IMAGE`], a [`WIKI_LINK`], a [`RAW_INLINE`]
+//! HTML tag.
 //!
 //! Every style mark is *derived* from that text by
 //! [`derive`](crate::derive::derive) and kept in step with it by the
@@ -376,7 +377,10 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                 .atom(true)
                 .attr(AttrSpec::required("src", AttrKind::Str))
                 .attr(str_attr("alt", ""))
-                .attr(str_attr("title", "")),
+                .attr(str_attr("title", ""))
+                // The `<img>` tag an image was read from, written back as it
+                // was; empty for a Markdown image.
+                .attr(str_attr("source", "")),
         )
         .node(
             NodeTypeSpec::leaf(LINE_BREAK)

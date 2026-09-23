@@ -212,9 +212,9 @@ fn html_and_markdown_agree_on_the_same_document() {
 
 #[test]
 fn both_flavours_read_the_same_inline_html_to_the_same_rendering() {
-    // The Markdown importer meets these as source and keeps each tag as an
-    // atom; this one meets them as elements and reads what they say. Either
-    // way the document renders what the fragment did.
+    // The Markdown importer meets these as source and reads each tag as the
+    // style, break or image it spells, or keeps it as an atom; this one meets
+    // them as elements. Either way the document renders what the fragment did.
     let codec = Codec::new();
     for fragment in [
         "a<br>b",

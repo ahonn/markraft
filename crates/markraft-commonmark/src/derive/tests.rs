@@ -268,6 +268,61 @@ fn paired_u_tags_underline_and_conceal_as_one_span() {
 }
 
 #[test]
+fn paired_style_tags_style_and_conceal_as_one_span() {
+    assert_eq!(para("<em>a</em>"), "em(0..10) 0..4@0 5..10@0");
+    assert_eq!(
+        para("<strong>a <del>b</del></strong>"),
+        "strong(0..31) strikethrough(10..22) 0..8@0 10..15@1 16..22@1 22..31@0"
+    );
+    assert_eq!(
+        para("<a href=\"/u?a&amp;b\" title='t'>x</a>"),
+        r#"link(0..36 "/u?a&b" "t") 0..31@0 32..36@0"#
+    );
+    // A closing tag pairs with the latest opening tag of its own name.
+    assert_eq!(para("<em>a<em>b</em>"), "em(5..15) 5..9@0 10..15@0");
+    // An anchor with no destination, a tag closing itself and tags split
+    // across a span boundary pair with nothing.
+    assert_eq!(para("<a>x</a>"), "");
+    assert_eq!(para("<em/>x</em>"), "");
+    assert_eq!(para("<em>*a</em>*"), "em(4..12) 4..5@0 11..12@0");
+}
+
+#[test]
+fn a_br_tag_ending_a_line_is_that_lines_hard_break() {
+    assert_eq!(para("a<br>\nb"), "1..5@0 br(5)");
+    assert_eq!(para("a<BR/> \nb"), "1..7@0 br(7)");
+    assert_eq!(para("a<br>  \nb"), "5..7@0 br(7)", "two spaces spell it");
+    // Mid-line, or before a break that is hard already, it is the atom.
+    assert_eq!(para("a<br>b"), "");
+    assert_eq!(para("a<br>\\\nb"), "5..6@0 br(6)");
+    assert_eq!(atoms("a<br>b"), [r#"raw_inline(1..5 source=Str("<br>"))"#]);
+    assert!(atoms("a<br>\nb").is_empty());
+}
+
+#[test]
+fn an_img_tag_is_the_image_it_shows() {
+    assert_eq!(
+        atoms("a <img src=\"i.png\" alt='b' title=t> c"),
+        [concat!(
+            r#"image(2..35 alt=Str("b") source=Str("<img src=\"i.png\" alt='b' title=t>") "#,
+            r#"src=Str("i.png") title=Str("t"))"#
+        )]
+    );
+    // With nothing to show it stays the raw tag.
+    assert_eq!(
+        atoms("a <img alt=x>"),
+        [r#"raw_inline(2..13 source=Str("<img alt=x>"))"#]
+    );
+}
+
+#[test]
+fn an_image_by_reference_is_no_atom() {
+    let ctx = DeriveContext::new().with_definitions("[r]: /i.png");
+    let derived = derive(BlockKind::Paragraph, "![a][r] ![r]", &ctx);
+    assert!(derived.atoms.is_empty(), "{:?}", derived.atoms);
+}
+
+#[test]
 fn a_spelled_image_or_wiki_link_styles_nothing_inside() {
     assert_eq!(para("*![a *b*](i.png)*"), "em(0..17) 0..1@0 16..17@0");
     assert_eq!(para("[[Note|*al*]]"), "");

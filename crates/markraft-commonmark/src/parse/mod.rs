@@ -19,8 +19,11 @@
 //!   lines in the source are separators, as CommonMark says, and produce
 //!   nothing.
 //! * **Inline HTML** is a `raw_inline` atom holding the tag as written, except
-//!   a `<u>`…`</u>` pair, which is underline spelled in the text, and a `<u>`
-//!   or `</u>` without its partner, which stays text.
+//!   what [`derive`](crate::derive) reads as something else: a paired `<u>`,
+//!   `<em>`, `<strong>`, `<del>` or `<a href>` is that style spelled in the
+//!   text, a `<br>` ending a line spells that line's hard break, an `<img>` is
+//!   an `image` atom that writes its tag back, and a `<u>` or `</u>` without
+//!   its partner stays text.
 //! * An **Obsidian wiki link** — `[[target]]`, `[[target|alias]]` or the embed
 //!   `![[target]]` — becomes a `wiki_link` atom holding the bytes the source
 //!   spelled. A spelling [`crate::wiki`] refuses stays the text a reader sees.

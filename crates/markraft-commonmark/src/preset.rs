@@ -40,9 +40,7 @@ use std::sync::Arc;
 
 use markraft_core::{Mark, Node, Schema};
 
-use crate::escape::{
-    code_span_delimiters, escape_label, escape_text, link_destination, link_title,
-};
+use crate::escape::{code_span_delimiters, escape_text, link_destination, link_title};
 use crate::schema as md;
 use crate::serialize::{
     MarkRule, MarkRules, MarkStringFn, MarkTarget, MarkdownSerializer, NodeRule, NodeRules,
@@ -144,13 +142,7 @@ pub fn commonmark_node_rules() -> NodeRules {
     rules.insert(
         md::IMAGE.to_string(),
         rule(|state, node, _, _| {
-            let written = format!(
-                "![{}]({}{})",
-                escape_label(attr_str(node, "alt", "")),
-                link_destination(attr_str(node, "src", "")),
-                link_title(attr_str(node, "title", "")),
-            );
-            state.text(&written, false);
+            state.text(&crate::textblock::image_spelling(node.attrs()), false);
         }),
     );
     rules.insert(

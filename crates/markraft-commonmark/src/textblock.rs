@@ -224,12 +224,7 @@ pub(crate) fn atom_spelling(schema: &Schema, node: &Node) -> String {
             .to_string()
     };
     match schema.node_type(node.type_id()).name() {
-        md::IMAGE => format!(
-            "![{}]({}{})",
-            crate::escape::escape_label(&attr("alt")),
-            crate::escape::link_destination(&attr("src")),
-            crate::escape::link_title(&attr("title")),
-        ),
+        md::IMAGE => image_spelling(node.attrs()),
         md::WIKI_LINK => crate::wiki::WikiLink {
             target: attr("target"),
             alias: attr("alias"),
@@ -243,6 +238,26 @@ pub(crate) fn atom_spelling(schema: &Schema, node: &Node) -> String {
         md::RAW_INLINE => attr("source"),
         _ => OBJECT_REPLACEMENT.to_string(),
     }
+}
+
+/// How an image atom is written: the `<img>` tag it was read from, or else a
+/// Markdown image.
+pub(crate) fn image_spelling(attrs: &Attrs) -> String {
+    let attr = |name: &str| {
+        attrs
+            .get(name)
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+    };
+    if !attr("source").is_empty() {
+        return attr("source").to_string();
+    }
+    format!(
+        "![{}]({}{})",
+        crate::escape::escape_label(attr("alt")),
+        crate::escape::link_destination(attr("src")),
+        crate::escape::link_title(attr("title")),
+    )
 }
 
 /// The atom nodes the reported spans stand for, with the item ranges they

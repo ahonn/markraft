@@ -238,7 +238,7 @@ fn collect_atoms<'a>(
     }
     let atom = match &value {
         comrak::nodes::NodeValue::Image(_) | comrak::nodes::NodeValue::WikiLink(_) => true,
-        comrak::nodes::NodeValue::HtmlInline(html) => !is_u_tag(html),
+        comrak::nodes::NodeValue::HtmlInline(html) => !is_u_tag(html) && !html_is_read(node),
         _ => false,
     };
     if atom {
@@ -252,8 +252,68 @@ fn collect_atoms<'a>(
     }
 }
 
-/// Whether an inline HTML tag is `<u>` or `</u>`, the one pair that is a
-/// style rather than an atom.
+/// An inline HTML tag's lower-case name, whether it closes, and whether it
+/// carries an `href`; `None` for anything that is not an opening or closing
+/// tag, or closes itself.
+fn tag_of(html: &str) -> Option<(String, bool, bool)> {
+    let body = html.strip_prefix('<')?.strip_suffix('>')?;
+    let (body, closing) = match body.strip_prefix('/') {
+        Some(rest) => (rest, true),
+        None => (body, false),
+    };
+    if body.ends_with('/') {
+        return None;
+    }
+    let len = body
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .unwrap_or(body.len());
+    let name = body[..len].to_ascii_lowercase();
+    let href = body[len..].to_ascii_lowercase().contains("href");
+    (!name.is_empty()).then_some((name, closing, href))
+}
+
+/// Whether an inline HTML node is read as something other than an atom: a
+/// style tag — `<u>`, `<em>`, `<strong>`, `<del>`, `<a href>` — paired with
+/// its partner among its siblings, or a `<br>` a soft break follows.
+pub fn html_is_read<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
+    use comrak::nodes::NodeValue;
+    let tag = |n: &'a comrak::nodes::AstNode<'a>| match &n.data.borrow().value {
+        NodeValue::HtmlInline(html) => tag_of(html),
+        _ => None,
+    };
+    let Some((name, _, _)) = tag(node) else {
+        return false;
+    };
+    if name == "br" {
+        return node
+            .next_sibling()
+            .is_some_and(|next| matches!(next.data.borrow().value, NodeValue::SoftBreak));
+    }
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    let style = ["u", "em", "strong", "del", "a"];
+    let mut open: Vec<(String, *const comrak::nodes::AstNode<'a>)> = Vec::new();
+    for sibling in parent.children() {
+        let Some((name, closing, href)) = tag(sibling) else {
+            continue;
+        };
+        if closing {
+            if let Some(at) = open.iter().rposition(|(open, _)| *open == name) {
+                let (_, opener) = open.remove(at);
+                if std::ptr::eq(opener, node) || std::ptr::eq(sibling, node) {
+                    return true;
+                }
+            }
+        } else if style.contains(&name.as_str()) && (name != "a" || href) {
+            open.push((name, sibling));
+        }
+    }
+    false
+}
+
+/// Whether an inline HTML tag is `<u>` or `</u>`, which stays text when it
+/// has no partner: half of a style being typed.
 pub fn is_u_tag(html: &str) -> bool {
     let body = html.trim_start_matches('<').trim_end_matches('>').trim();
     body.eq_ignore_ascii_case("u") || body.eq_ignore_ascii_case("/u")

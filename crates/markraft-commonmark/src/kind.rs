@@ -473,12 +473,7 @@ impl SourceSpelling for CommonMarkSpelling {
 
     fn atom_source(&self, node: &Node) -> Option<String> {
         match self.name(node.type_id()) {
-            schema::IMAGE => Some(format!(
-                "![{}]({}{})",
-                crate::escape::escape_label(attr_str(node.attrs(), "alt", "")),
-                crate::escape::link_destination(attr_str(node.attrs(), "src", "")),
-                crate::escape::link_title(attr_str(node.attrs(), "title", "")),
-            )),
+            schema::IMAGE => Some(crate::textblock::image_spelling(node.attrs())),
             schema::WIKI_LINK => Some(
                 crate::wiki::WikiLink {
                     target: attr_str(node.attrs(), "target", "").to_string(),

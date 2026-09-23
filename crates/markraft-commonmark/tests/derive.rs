@@ -31,7 +31,7 @@
 
 mod common;
 
-use common::{ATOM, is_u_tag, leading_definition_lines, options, with_atoms};
+use common::{ATOM, html_is_read, leading_definition_lines, options, with_atoms};
 
 use std::collections::BTreeMap;
 
@@ -751,8 +751,7 @@ fn unjudged(kind: BlockKind, markdown: &str) -> Option<&'static str> {
             // In the tree these are atoms, never text; typed as text they are
             // P2's to turn into atoms, not derive's to read.
             NodeValue::Image(_) | NodeValue::WikiLink(_) => return Some("atom"),
-            NodeValue::HtmlInline(html) if !is_u_tag(&html) => return Some("atom"),
-            NodeValue::HtmlInline(_) if !u_tags_pair(node) => return Some("atom"),
+            NodeValue::HtmlInline(_) if !html_is_read(node) => return Some("atom"),
             // comrak nests an autolink in a link's text, and an HTML reader
             // closes the outer `<a>` at the inner one, so the judge cannot see
             // what comrak meant.
@@ -767,22 +766,4 @@ fn unjudged(kind: BlockKind, markdown: &str) -> Option<&'static str> {
 
 fn is_link<'a>(node: &'a AstNode<'a>) -> bool {
     matches!(node.data.borrow().value, NodeValue::Link(_))
-}
-
-/// Whether the `<u>` tags among `node`'s siblings pair up, which is all
-/// `derive` reads as underline.
-fn u_tags_pair<'a>(node: &'a AstNode<'a>) -> bool {
-    let Some(parent) = node.parent() else {
-        return false;
-    };
-    let mut depth = 0i32;
-    for sibling in parent.children() {
-        if let NodeValue::HtmlInline(html) = &sibling.data.borrow().value {
-            depth += if html.contains('/') { -1 } else { 1 };
-            if depth < 0 {
-                return false;
-            }
-        }
-    }
-    depth == 0
 }
