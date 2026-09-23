@@ -54,7 +54,7 @@ impl NotesApp {
                 .child(self.format_button(
                     "link-remove",
                     "Unlink",
-                    Icon::Trash,
+                    Icon::Unlink,
                     Intent::Unlink,
                     None,
                     cx,
@@ -107,7 +107,7 @@ impl NotesApp {
                 .child(self.format_button(
                     "link-unlink",
                     "Unlink",
-                    Icon::Trash,
+                    Icon::Unlink,
                     Intent::Unlink,
                     None,
                     cx,

@@ -77,7 +77,9 @@ impl NotesApp {
                 .id("vim-mode-indicator")
                 .role(Role::Status)
                 .aria_label(format!("Vim: {}", mode.label()))
-                .tooltip(self.hint(mode.label()))
+                // The full mode name is already the badge's text. Only the
+                // abbreviation needs the hover label.
+                .when(compact, |s| s.tooltip(self.hint(mode.label())))
                 .flex_shrink_0()
                 .h(px(18.))
                 .px(px(6.))

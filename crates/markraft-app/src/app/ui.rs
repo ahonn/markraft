@@ -616,7 +616,9 @@ impl NotesApp {
                 .opacity(1.)
             })
             .active(|s| s.bg(pressed).opacity(1.))
-            .when(!showing, |s| s.tooltip(self.hint(label)))
+            .when(!showing && shows_tooltip(&intent), |s| {
+                s.tooltip(self.hint(label))
+            })
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
@@ -1770,7 +1772,14 @@ impl Render for NotesApp {
                     .rounded_full()
                     .opacity(1.),
             );
+        // Both bands are chrome, so the pointer is the window's own arrow and
+        // changes only over what can be clicked. A click on the title band stays
+        // there; a scroll still reaches the note under it. The footer stays
+        // clear, so both a click and a scroll reach the note.
         let toolbar = div()
+            .id("toolbar")
+            .cursor_default()
+            .block_mouse_except_scroll()
             .absolute()
             .top_0()
             .left_0()
@@ -1937,6 +1946,8 @@ impl Render for NotesApp {
             .child(toolbar)
             .child(
                 div()
+                    .id("footer-band")
+                    .cursor_default()
                     .absolute()
                     .bottom_0()
                     .left_0()
@@ -2109,6 +2120,27 @@ fn popover_enter(
                 s.mt(offset)
             }
         },
+    )
+}
+
+/// Whether hovering the control should name it. The glyph and its place already
+/// do for a pin and a trash can on a note, a checkmark beside a field, the link
+/// pill's pencil, clipboard, open arrow and eraser, and the alignment trio; and a
+/// format menu names its own entries as soon as it opens, right under it. The
+/// accessible name stays either way.
+fn shows_tooltip(intent: &Intent) -> bool {
+    !matches!(
+        intent,
+        Intent::PinNote(_)
+            | Intent::TrashNote(_)
+            | Intent::ApplyLink
+            | Intent::ApplyRename
+            | Intent::EditLink
+            | Intent::CopyLink
+            | Intent::OpenLink
+            | Intent::Unlink
+            | Intent::FormatMenu(FormatMenu::Block | FormatMenu::Inline | FormatMenu::List)
+            | Intent::Table(TableEdit::Align(_))
     )
 }
 

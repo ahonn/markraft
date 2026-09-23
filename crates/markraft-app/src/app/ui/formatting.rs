@@ -299,7 +299,9 @@ impl NotesApp {
             .cursor_pointer()
             .when(active || expanded, |s| s.bg(self.selected_color()))
             // A tooltip beside an open menu only covers the menu.
-            .when(!expanded, |s| s.tooltip(self.hint(label)))
+            .when(!expanded && super::shows_tooltip(&intent), |s| {
+                s.tooltip(self.hint(label))
+            })
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
@@ -396,7 +398,6 @@ impl NotesApp {
                         .cursor_pointer()
                         .hover(|s| s.bg(self.hover_color()))
                         .active(|s| s.bg(self.pressed_color()))
-                        .tooltip(self.hint("Toggle between character count and word count"))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.intent(Intent::ToggleCount, window, cx)
                         }))
@@ -653,11 +654,6 @@ impl NotesApp {
             .role(Role::Button)
             .aria_label(state.announced())
             .aria_expanded(self.interaction.file_status())
-            // The card opens right beside it, so a tooltip would be drawn over the
-            // card's own words.
-            .when(!self.interaction.file_status(), |s| {
-                s.tooltip(self.hint("Click for what to do about it"))
-            })
             .flex_shrink_0()
             .h(CAPSULE_HEIGHT)
             .pl(px(7.))

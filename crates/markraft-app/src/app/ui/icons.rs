@@ -37,6 +37,8 @@ define_icons! {
     Check => "checkmark",
     Pin => "pin",
     Trash => "trash",
+    // Taking a link off its text, which stays: erased, not thrown away.
+    Unlink => "eraser",
     Copy => "doc.on.clipboard",
     Export => "square.and.arrow.up",
     Document => "doc.text",
