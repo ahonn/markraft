@@ -469,6 +469,17 @@ impl LayoutLine {
         self.line_height * self.visual_rows() as f32
     }
 
+    /// The row a focused code block's closing fence takes under its text. The
+    /// fence is chrome, not a caret stop, so it is room the block reserves
+    /// below itself, as the header is room it reserves above.
+    fn code_footer_height(&self) -> Pixels {
+        if self.code_footer.is_some() {
+            self.line_height
+        } else {
+            px(0.)
+        }
+    }
+
     /// The display-text `char` offset a projection offset stands at.
     fn to_display(&self, offset: usize) -> usize {
         let mut shift: isize = 0;
@@ -1249,7 +1260,7 @@ fn shape_line(
             .fold(px(0.), |widest, width| widest.max(width));
         layout.min_width = min_content_width(&layout, &runs.code);
     }
-    layout.height = layout.text_height() + gap;
+    layout.height = layout.text_height() + layout.code_footer_height() + gap;
     shape_inline_code(&mut layout, &text.text, &runs.code, font_size, text_system);
     place_atoms(&mut layout, text.atoms);
     layout
@@ -2393,7 +2404,10 @@ fn text_runs(
             face = font(CODE_FONT);
         }
         let widened = placeholder == Some(AtomShape::Pill);
-        let ink = if source_atom {
+        // Revealed markup — a `**`, a link's `](…)`, an escape's `\` — is
+        // quieter than the text it styles, so the words still read first.
+        let markup = has(types.syntax, marks) && !code_block && !raw;
+        let ink = if source_atom || markup {
             style.muted_text
         } else if widening.is_some_and(|widening| widening.broken) {
             style.broken_link
@@ -2426,14 +2440,14 @@ fn text_runs(
             color,
             background_color: (has(types.highlight, marks) && !code_block)
                 .then_some(style.highlight),
-            underline: (!widened && (has(types.underline, marks) || is_link)).then_some(
+            underline: (!widened && !markup && (has(types.underline, marks) || is_link)).then_some(
                 UnderlineStyle {
                     thickness: px(1.),
                     color: Some(ink),
                     wavy: false,
                 },
             ),
-            strikethrough: has(types.strikethrough, marks)
+            strikethrough: (has(types.strikethrough, marks) && !markup)
                 .then_some(StrikethroughStyle {
                     thickness: px(1.),
                     color: Some(ink),
@@ -2795,8 +2809,10 @@ fn gap_below(
         return px(0.);
     }
     let next = input.projection.line(index + 1);
-    // The code fill reaches CODE_PADDING past the last row, so a code block keeps
-    // its own bottom padding whatever block follows it.
+    // The code fill reaches CODE_PADDING past the last row (past the closing
+    // fence, when a focused block shows one; `shape_line` adds that row on top
+    // of this gap), so a code block keeps its own bottom padding whatever block
+    // follows it.
     if code {
         return CODE_PADDING + style.paragraph_gap;
     }
@@ -3320,7 +3336,10 @@ impl Element for EditorSurface {
                                     ),
                                     size(
                                         row.width + CODE_PADDING * 2.,
-                                        row.text_height() + CODE_PADDING * 2. + CODE_HEADER_HEIGHT,
+                                        row.text_height()
+                                            + row.code_footer_height()
+                                            + CODE_PADDING * 2.
+                                            + CODE_HEADER_HEIGHT,
                                     ),
                                 ),
                                 style.code_background,
@@ -3350,6 +3369,22 @@ impl Element for EditorSurface {
                     let _ = header.label.paint(
                         point(row.origin.x, row.origin.y - CALLOUT_HEADER_HEIGHT),
                         CALLOUT_HEADER_HEIGHT,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                }
+                // A run's own fill (a `==highlight==`) is not drawn by the line's
+                // `paint`, which only lays down glyphs and their decorations. It
+                // goes down here, over the block's chrome and under the
+                // selection, so a selected highlight still reads as selected.
+                for inner in &row.rows {
+                    let origin =
+                        row.origin + point(px(0.), row.line_height * inner.visual_start as f32);
+                    let _ = inner.line.paint_background(
+                        origin,
+                        row.line_height,
                         TextAlign::Left,
                         None,
                         window,
@@ -4515,6 +4550,23 @@ mod tests {
         assert_eq!(run_over(&text, &runs, 'c').background_color, None);
     }
 
+    /// The fill is painted per run and joined where neighbouring runs carry the
+    /// same colour, so a highlight with other marks inside it must hand every
+    /// one of its runs the one fill, or it would be drawn broken into pieces.
+    #[test]
+    fn a_highlight_keeps_one_fill_across_the_marks_inside_it() {
+        let (text, runs, style) = runs_of("a ==b **c** d== e");
+        for needle in ['b', 'c', 'd'] {
+            assert_eq!(
+                run_over(&text, &runs, needle).background_color,
+                Some(style.highlight),
+                "{needle} sits in the highlight"
+            );
+        }
+        assert_eq!(run_over(&text, &runs, 'a').background_color, None);
+        assert_eq!(run_over(&text, &runs, 'e').background_color, None);
+    }
+
     #[test]
     fn a_formula_is_drawn_as_its_source_in_the_code_font() {
         let (text, runs, style) = runs_of("x $a+b$ y");
@@ -5371,6 +5423,35 @@ mod tests {
             matches!(rows[1].marker, Some(Marker::Bullet { .. })),
             "unfocused bullet stays a drawn marker"
         );
+    }
+
+    /// The closing fence a focused code block shows is a row of its own under
+    /// the text, so the block grows by exactly that row; the fence would
+    /// otherwise hang over the block's bottom edge into what follows.
+    #[test]
+    fn a_focused_code_block_makes_room_for_its_closing_fence() {
+        let source = "```rust\nfn main() {}\n```\n\nafter";
+        let projection = projection_of(&state_of(source));
+        let inside = projection.lines()[0].from() + 1;
+        let outside = projection.lines()[1].from() + 1;
+        let focused = shaped_revealing(source, inside..inside, None);
+        let unfocused = shaped_revealing(source, outside..outside, None);
+        let (code, plain) = (&focused[0], &unfocused[0]);
+        assert!(code.code_footer.is_some() && plain.code_footer.is_none());
+        assert_eq!(
+            code.top_gap, plain.top_gap,
+            "the header is there either way"
+        );
+        assert_eq!(code.text_height(), plain.text_height());
+        assert_eq!(code.height, plain.height + code.line_height);
+        assert_eq!(code.code_footer_height(), code.line_height);
+        assert_eq!(plain.code_footer_height(), px(0.));
+        let total = |lines: &[LayoutLine]| {
+            lines
+                .iter()
+                .fold(px(0.), |sum, line| sum + line.top_gap + line.height)
+        };
+        assert_eq!(total(&focused), total(&unfocused) + code.line_height);
     }
 
     #[test]
