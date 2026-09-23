@@ -1123,7 +1123,7 @@ impl EditorView {
         self.layout
             .iter()
             .find(|row| row.code_pos == Some(pos))?
-            .code_language_bounds()
+            .code_fence_bounds()
     }
 
     /// Set the language of the code block starting at `pos`.

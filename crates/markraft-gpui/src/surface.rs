@@ -66,11 +66,11 @@ const LOADING_FRAME_MAX_WIDTH: Pixels = px(480.);
 // SF Mono; Menlo is wider and heavier at this size.
 const CODE_FONT: &str = ".AppleSystemUIFontMonospaced";
 const CODE_PADDING: Pixels = px(12.);
-const CODE_HEADER_HEIGHT: Pixels = px(24.);
-// The header controls sit in the block's top padding rather than below it.
-const CODE_HEADER_LIFT: Pixels = px(8.);
-const CODE_CHEVRON_WIDTH: Pixels = px(14.);
-const CODE_COPY_WIDTH: Pixels = px(28.);
+/// The panel's edge beyond a fence row: a code block keeps a row above and one
+/// below its text for the fences, which it spells there while it is focused
+/// and leaves blank otherwise, so the caret coming or going never changes its
+/// height.
+const CODE_FENCE_INSET: Pixels = px(6.);
 const CODE_RADIUS: Pixels = px(12.);
 
 /// A table is a grid: the projection gives every cell a line of its own, and
@@ -250,8 +250,13 @@ enum Decoration {
         tones: [Option<Hsla>; QUOTE_TONES],
     },
     Divider,
-    /// A code block's rounded background, behind the whole line.
-    Code,
+    /// A code block's rounded background, behind the whole line, and the bars
+    /// of the quotes it sits in beside it, as a quote's would be.
+    Code {
+        levels: usize,
+        joined: usize,
+        tones: [Option<Hsla>; QUOTE_TONES],
+    },
 }
 
 /// A callout's header: the line drawn above its first block, saying what kind
@@ -372,16 +377,21 @@ pub(crate) struct LayoutLine {
     pub(crate) code_pos: Option<usize>,
     marker: Option<Marker>,
     decoration: Option<Decoration>,
-    /// The shaped language label of a code block's header.
+    /// The opening fence drawn above a focused code block's text.
     code_header: Option<Rc<ShapedLine>>,
-    /// Closing fence line drawn under a focused code block.
+    /// The closing fence drawn under a focused code block's text.
     code_footer: Option<Rc<ShapedLine>>,
+    /// The fence row a code block keeps above and below its text, focused or
+    /// not; zero on any other line.
+    code_fence_row: Pixels,
     /// The marker each quote level draws in the gutter while the line is
     /// focused, as the host's kind spells it.
     quote_marker: Option<Rc<ShapedLine>>,
+    /// How far left of the text each quote the line sits in draws its bar,
+    /// outermost first. See [`quote_bar_distances`].
+    quote_bars: Vec<Pixels>,
     /// The shaped header of a callout, on the line that opens it.
     callout_header: Option<CalloutHeader>,
-    code_hitboxes: Option<(Hitbox, Hitbox)>,
     /// Sorted by `source`; see [`Widening`].
     widenings: Vec<Widening>,
     atoms: Vec<InlineAtom>,
@@ -480,15 +490,28 @@ impl LayoutLine {
         self.line_height * self.visual_rows() as f32
     }
 
-    /// The row a focused code block's closing fence takes under its text. The
+    /// The row a code block keeps under its text for its closing fence. The
     /// fence is chrome, not a caret stop, so it is room the block reserves
-    /// below itself, as the header is room it reserves above.
+    /// below itself, as it reserves the opening fence's row above.
     fn code_footer_height(&self) -> Pixels {
-        if self.code_footer.is_some() {
-            self.line_height
-        } else {
-            px(0.)
+        self.code_fence_row
+    }
+
+    /// The x of the bar drawn for `level` of the innermost `levels` quotes the
+    /// line sits in.
+    fn quote_bar_x(&self, levels: usize, level: usize, style: &EditorStyle) -> Pixels {
+        let quotes = self.quote_bars.len();
+        match self.quote_bars.get(quotes.saturating_sub(levels) + level) {
+            Some(distance) => self.origin.x - *distance,
+            // A line shaped without its quotes' geometry keeps the plain
+            // spacing of one indent per level.
+            None => self.origin.x - style.quote_indent * (levels - level) as f32,
         }
+    }
+
+    /// How far a code block's panel reaches above and below its text.
+    fn code_panel_room(&self) -> Pixels {
+        self.code_fence_row + CODE_FENCE_INSET
     }
 
     /// The display-text `char` offset a projection offset stands at.
@@ -576,33 +599,13 @@ impl LayoutLine {
         ))
     }
 
-    /// Window-space bounds of the language button, available only on a code
-    /// line that is not showing its fence spelling.
-    pub(crate) fn code_language_bounds(&self) -> Option<Bounds<Pixels>> {
-        // Focused fences put the open fence on the left; the language chip
-        // stays off so a click does not open the picker over source text.
-        if self.code_footer.is_some() {
-            return None;
-        }
-        let label = self.code_header.as_ref()?;
-        let label_width = label.width + CODE_CHEVRON_WIDTH + px(12.);
+    /// Window-space bounds of the row above a code block's text where its
+    /// opening fence is spelled, for anchoring the host's language picker.
+    pub(crate) fn code_fence_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.code_pos?;
         Some(Bounds::new(
-            point(
-                self.origin.x + self.width - (CODE_COPY_WIDTH + px(2.)) - label_width,
-                self.origin.y - CODE_HEADER_HEIGHT - CODE_HEADER_LIFT,
-            ),
-            size(label_width, CODE_HEADER_HEIGHT),
-        ))
-    }
-
-    pub(crate) fn code_copy_bounds(&self) -> Option<Bounds<Pixels>> {
-        self.code_header.as_ref()?;
-        Some(Bounds::new(
-            point(
-                self.origin.x + self.width - CODE_COPY_WIDTH,
-                self.origin.y - CODE_HEADER_HEIGHT - CODE_HEADER_LIFT,
-            ),
-            size(CODE_COPY_WIDTH, CODE_HEADER_HEIGHT),
+            point(self.origin.x, self.origin.y - self.code_fence_row),
+            size(self.width, self.code_fence_row),
         ))
     }
 
@@ -615,12 +618,15 @@ impl LayoutLine {
 
     pub(crate) fn marker_bounds(&self) -> Option<Bounds<Pixels>> {
         let (offset, width, height) = match self.marker.as_ref()? {
-            Marker::Number(line) | Marker::Source(line) | Marker::Footnote(line) => {
+            Marker::Number(line) | Marker::Footnote(line) => {
                 (line.width + NUMBER_GAP, line.width, self.line_height)
             }
-            Marker::Task {
+            // A spelling ends in the space the writer typed after it, so it
+            // sits flush against the text, as typed characters would.
+            Marker::Source(line)
+            | Marker::Task {
                 source: Some(line), ..
-            } => (line.width + NUMBER_GAP, line.width, self.line_height),
+            } => (line.width, line.width, self.line_height),
             // Drawn markers share one center, 15px left of the text.
             Marker::Bullet { .. } => (px(17.5), px(5.), px(5.)),
             Marker::Task { .. } => (px(22.), px(14.), px(14.)),
@@ -1033,10 +1039,9 @@ struct LineKey {
     list_len: Option<usize>,
     /// How many of the line's quote bars join the line below.
     joined_quotes: usize,
-    /// Whether the line below is in a list item, and how many quotes it sits
-    /// in, which together set the gap below this one.
-    next_in_item: bool,
-    next_quote_depth: usize,
+    /// Whether the line below goes on with this line's list, which sets the
+    /// gap below this one.
+    list_continues: bool,
     /// Whether the line opens a callout, which depends on the line above.
     callout_header: bool,
     /// Whether the host can open each wiki link on the line, in order.
@@ -1072,8 +1077,7 @@ fn line_key(input: &ShapeInput<'_>, index: usize) -> Option<LineKey> {
         first: index == 0,
         list_len: ordered_list_len(input.doc, types, line),
         joined_quotes: joined_quote_levels(projection, index, types),
-        next_in_item: next.is_some_and(|next| types.item_of(next).is_some()),
-        next_quote_depth: next.map_or(0, |next| types.quote_depth(next)),
+        list_continues: list_continues(types, line, next),
         callout_header: crate::callout::header_of(types, line, above).is_some(),
         links,
     })
@@ -1132,10 +1136,12 @@ fn shape_line(
     // Headings park ATX hashes in a dedicated gutter. List source spellings
     // reuse the ordered-number reserve so `- `, `1. `, and `- [ ] ` all fit.
     let heading_gutter = match &marker {
-        Some(Marker::Source(label)) if heading.is_some() => label.width + NUMBER_GAP,
+        Some(Marker::Source(label)) if heading.is_some() => label.width,
         _ => px(0.),
     };
-    let marker_width = match &marker {
+    // The room left of the text the marker needs: a drawn ordinal stands off
+    // the text by a gap, a spelling ends in its own typed space.
+    let marker_reserve = match &marker {
         Some(Marker::Source(label)) if heading.is_none() => Some(label.width),
         Some(Marker::Task {
             source: Some(label),
@@ -1144,9 +1150,10 @@ fn shape_line(
         _ => number
             .as_ref()
             .or(footnote.as_ref())
-            .map(|(_, width)| *width),
+            .map(|(_, width)| *width + NUMBER_GAP),
     };
-    let indent = (indent_of(types, line, style, marker_width) + heading_gutter).min(max_indent);
+    let indent = (indent_of(types, line, style, marker_reserve) + heading_gutter).min(max_indent);
+    let quote_bars = quote_bar_distances(types, line, style, marker_reserve, heading_gutter);
 
     let wrap_width = match cell {
         Some(CellWidth::Column(content)) => content.max(px(16.)),
@@ -1191,8 +1198,13 @@ fn shape_line(
     // A code block's own top padding holds its header, at the top of the document
     // as anywhere else. Everything else starts flush and only a heading claims
     // space.
+    let code_fence_row = if code {
+        font_size * style.line_height_ratio
+    } else {
+        px(0.)
+    };
     let top_gap = if code {
-        CODE_PADDING + CODE_HEADER_HEIGHT
+        code_fence_row + CODE_FENCE_INSET
     } else if index == 0 {
         px(0.)
     } else if let Some(level) = heading {
@@ -1207,24 +1219,24 @@ fn shape_line(
                 .and_then(|spelling| spelling.verbatim_fence(line))
         })
         .flatten();
-    let code_header = code.then(|| {
-        let label = match &fence {
-            Some((open, _)) => open.clone(),
-            None => {
-                crate::syntax::language_label(types.code_language(line).unwrap_or("")).to_owned()
-            }
-        };
-        code_header(&label, width, style, text_system)
-    });
-    let code_footer = fence
-        .as_ref()
-        .map(|(_, close)| shape_source_label(close, font_size, style.muted_text, text_system));
+    let shape_fence = |spelling: &str| {
+        shape_source_label(
+            spelling,
+            font(CODE_FONT),
+            font_size,
+            style.muted_text,
+            text_system,
+        )
+    };
+    let code_header = fence.as_ref().map(|(open, _)| shape_fence(open));
+    let code_footer = fence.as_ref().map(|(_, close)| shape_fence(close));
     let quote_marker = (focused && matches!(decoration, Some(Decoration::Quote { .. })))
         .then(|| {
             let spelling = input.spelling?;
             let marker = spelling.container_marker(types.blockquote?)?;
             Some(shape_source_label(
                 &marker,
+                font(".SystemUIFont"),
                 style.body_size,
                 style.muted_text,
                 text_system,
@@ -1272,9 +1284,10 @@ fn shape_line(
         decoration,
         code_header,
         code_footer,
+        code_fence_row,
         quote_marker,
+        quote_bars,
         callout_header,
-        code_hitboxes: None,
         widenings: text.widenings,
         atoms: Vec::new(),
         table: None,
@@ -1321,26 +1334,31 @@ fn decoration_of(
         ..
     } = *input;
     let quote_levels = types.quote_depth(line);
+    let levels = quote_levels.min(visible_levels(style, max_indent));
+    // The bars drawn are the innermost `levels`, so the tones are too.
+    let beside = crate::callout::tones_beside(types, line);
+    let mut tones = [None; QUOTE_TONES];
+    for (slot, tone) in tones
+        .iter_mut()
+        .zip(beside.iter().skip(beside.len().saturating_sub(levels)))
+    {
+        *slot = tone.map(|tone| style.callout_tone(tone));
+    }
+    let joined = || joined_quote_levels(projection, index, types).min(quote_levels);
     if in_cell {
         None
     } else if types.is_code_block(line) {
-        Some(Decoration::Code)
+        Some(Decoration::Code {
+            levels,
+            joined: joined(),
+            tones,
+        })
     } else if types.horizontal_rule.is_some() && line.node_type() == types.horizontal_rule {
         Some(Decoration::Divider)
     } else if quote_levels > 0 {
-        let levels = quote_levels.min(visible_levels(style, max_indent));
-        // The bars drawn are the innermost `levels`, so the tones are too.
-        let beside = crate::callout::tones_beside(types, line);
-        let mut tones = [None; QUOTE_TONES];
-        for (slot, tone) in tones
-            .iter_mut()
-            .zip(beside.iter().skip(beside.len().saturating_sub(levels)))
-        {
-            *slot = tone.map(|tone| style.callout_tone(tone));
-        }
         Some(Decoration::Quote {
             levels,
-            joined: joined_quote_levels(projection, index, types).min(quote_levels),
+            joined: joined(),
             tones,
         })
     } else {
@@ -2478,7 +2496,9 @@ fn text_runs(
             len,
             font: face,
             color,
-            background_color: (has(types.highlight, marks) && !code_block)
+            // The fill goes down after the pills, over them: inside a
+            // highlight a code span keeps its pill and the fill stops at it.
+            background_color: (has(types.highlight, marks) && !code_block && !inline_code)
                 .then_some(style.highlight),
             underline: (!widened
                 && !markup
@@ -2597,32 +2617,70 @@ fn indent_of(
     types: &DocTypes,
     line: &Line,
     style: &EditorStyle,
-    number_width: Option<Pixels>,
+    marker_reserve: Option<Pixels>,
 ) -> Pixels {
-    let mut indent = px(0.);
-    for (index, ancestor) in line.ancestors().iter().enumerate() {
-        let ty = ancestor.node_type;
-        if Some(ty) == types.blockquote {
-            indent += style.quote_indent;
-        } else if types.is_list(ty) {
-            indent += style.list_indent;
-        } else if Some(ty) == types.task_item
-            && index > 0
-            && Some(line.ancestors()[index - 1].node_type) == types.ordered_list
-        {
-            // Nested blocks and lists keep the checkbox slot of every enclosing item.
-            indent += px(22.);
-        } else if Some(ty) == types.code_block {
-            indent += CODE_PADDING;
-        } else if Some(ty) == types.footnote_definition {
-            indent += style.list_indent;
-        }
-    }
-    if let Some(width) = number_width {
+    let mut indent = (0..line.ancestors().len())
+        .map(|index| ancestor_indent(types, line, index, style))
+        .fold(px(0.), |sum, step| sum + step);
+    if let Some(reserve) = marker_reserve {
         // An ordered list's items share the indent its widest number needs.
-        indent += (width + NUMBER_GAP - style.list_indent).max(px(0.));
+        indent += (reserve - style.list_indent).max(px(0.));
     }
     indent
+}
+
+/// The indent the line's `index`th ancestor adds to everything inside it.
+fn ancestor_indent(types: &DocTypes, line: &Line, index: usize, style: &EditorStyle) -> Pixels {
+    let ancestors = line.ancestors();
+    let ty = ancestors[index].node_type;
+    if Some(ty) == types.blockquote {
+        style.quote_indent
+    } else if types.is_list(ty) {
+        style.list_indent
+    } else if Some(ty) == types.task_item
+        && index > 0
+        && Some(ancestors[index - 1].node_type) == types.ordered_list
+    {
+        // Nested blocks and lists keep the checkbox slot of every enclosing item.
+        px(22.)
+    } else if Some(ty) == types.code_block {
+        CODE_PADDING
+    } else if Some(ty) == types.footnote_definition {
+        style.list_indent
+    } else {
+        px(0.)
+    }
+}
+
+/// How far left of the line's text each quote it sits in draws its bar,
+/// outermost first: the quote's own indent and all the indent nested inside
+/// it — a list's, a code panel's, a heading's hashes — so a bar stays at its
+/// quote's edge rather than at the text's, wherever in the quote the line is.
+fn quote_bar_distances(
+    types: &DocTypes,
+    line: &Line,
+    style: &EditorStyle,
+    marker_reserve: Option<Pixels>,
+    heading_gutter: Pixels,
+) -> Vec<Pixels> {
+    let ancestors = line.ancestors();
+    let reserve =
+        marker_reserve.map_or(px(0.), |reserve| (reserve - style.list_indent).max(px(0.)));
+    (0..ancestors.len())
+        .filter(|&index| Some(ancestors[index].node_type) == types.blockquote)
+        .map(|quote| {
+            let inside = (quote..ancestors.len())
+                .map(|index| ancestor_indent(types, line, index, style))
+                .fold(px(0.), |sum, step| sum + step);
+            // An ordinal's extra room belongs to the item it numbers, which is
+            // inside this quote when a list or a note is.
+            let numbered = ancestors[quote + 1..].iter().any(|ancestor| {
+                types.is_list(ancestor.node_type)
+                    || Some(ancestor.node_type) == types.footnote_definition
+            });
+            inside + if numbered { reserve } else { px(0.) } + heading_gutter
+        })
+        .collect()
 }
 
 /// The shaped ordinal and width every line of an ordered-list item reserves.
@@ -2765,8 +2823,13 @@ fn affinity_touches(input: &ShapeInput<'_>, from: usize, to: usize) -> bool {
     touches(&input.selection) || input.composition.as_ref().is_some_and(touches)
 }
 
+/// Shapes source the view shows in place of chrome — a heading's hashes, a
+/// list marker, a quote's `>`, a fence. It is drawn in `face`, the face the
+/// same characters would have if the writer had typed them into the line, so
+/// revealing a line's markup shows exactly what was typed and nothing else.
 fn shape_source_label(
     text: &str,
+    face: Font,
     font_size: Pixels,
     color: Hsla,
     text_system: &WindowTextSystem,
@@ -2776,7 +2839,7 @@ fn shape_source_label(
         font_size,
         &[TextRun {
             len: text.len(),
-            font: font(CODE_FONT),
+            font: face,
             color,
             background_color: None,
             underline: None,
@@ -2809,7 +2872,13 @@ fn chrome_marker(
                 .and_then(|spelling| spelling.line_prefix(line))
         })
         .flatten()
-        .map(|text| shape_source_label(&text, font_size, style.muted_text, text_system));
+        .map(|text| {
+            let mut face = font(".SystemUIFont");
+            if types.heading_level(line).is_some() {
+                face.weight = FontWeight::BOLD;
+            }
+            shape_source_label(&text, face, font_size, style.muted_text, text_system)
+        });
     if types.heading_level(line).is_some() {
         // A heading has nothing to draw when it is not showing its hashes.
         return source.map(Marker::Source);
@@ -2874,6 +2943,18 @@ fn joined_quote_levels(projection: &Projection, index: usize, types: &DocTypes) 
         .count()
 }
 
+/// Whether `next` is a line of the same list as `line` — of its outermost
+/// list, so a nested list's lines go on with their parent's.
+fn list_continues(types: &DocTypes, line: &Line, next: Option<&Line>) -> bool {
+    let outermost = |line: &Line| {
+        line.ancestors()
+            .iter()
+            .position(|ancestor| types.is_list(ancestor.node_type))
+            .map(|depth| line.ancestor_before(depth))
+    };
+    next.is_some_and(|next| types.item_of(next).is_some() && outermost(next) == outermost(line))
+}
+
 fn gap_below(
     input: &ShapeInput<'_>,
     index: usize,
@@ -2887,12 +2968,11 @@ fn gap_below(
         return px(0.);
     }
     let next = input.projection.line(index + 1);
-    // The code fill reaches CODE_PADDING past the last row (past the closing
-    // fence, when a focused block shows one; `shape_line` adds that row on top
-    // of this gap), so a code block keeps its own bottom padding whatever block
-    // follows it.
+    // The code fill reaches CODE_FENCE_INSET past the closing fence's row
+    // (`shape_line` adds that row on top of this gap), so a code block keeps
+    // its own bottom padding whatever block follows it.
     if code {
-        return CODE_PADDING + style.paragraph_gap;
+        return CODE_FENCE_INSET + style.paragraph_gap;
     }
     // A table is one block: its cells sit tight against each other, and only
     // the cell that closes the grid is spaced off what follows it.
@@ -2907,10 +2987,10 @@ fn gap_below(
         };
     }
     // The tighter list gap holds between the lines of a list. The block that
-    // closes one is spaced off it like any other pair of blocks.
+    // closes one is spaced off it like any other pair of blocks, and so is a
+    // second list that starts right after it.
     if marker.is_some() || input.types.item_of(line).is_some() {
-        let continues = next.is_some_and(|next| input.types.item_of(next).is_some());
-        return if continues {
+        return if list_continues(input.types, line, next) {
             style.list_gap
         } else {
             style.paragraph_gap
@@ -2919,30 +2999,11 @@ fn gap_below(
     if heading.is_some() {
         return style.heading_bottom_gap;
     }
-    // A quote is a block like any other: it is spaced off what surrounds it and
-    // only its own lines sit close together. A quote opening inside a quote is
-    // the exception — the bar already says where it starts, and a gap there
-    // would break the bar in two.
-    let depth = input.types.quote_depth(line);
-    let below = next.map_or(0, |next| input.types.quote_depth(next));
-    if depth > 0 || below > 0 {
-        return if below > depth {
-            if depth == 0 {
-                style.paragraph_gap
-            } else {
-                px(0.)
-            }
-        } else if below == depth {
-            style.list_gap
-        } else {
-            style.paragraph_gap
-        };
-    }
+    // A quote holds blocks like the note does, spaced the same: its bars reach
+    // over the gaps between them, so the spacing never breaks a bar.
     style.paragraph_gap
 }
 
-/// The shaped language label of a code block's header, trimmed to the room the
-/// picker and the copy button leave it.
 /// A callout's header label, shaped in the accent of its tone: the sentence
 /// face at the body size, in the weight that says it names the note rather
 /// than being part of it.
@@ -2968,37 +3029,6 @@ fn callout_label(
         }],
         None,
     ))
-}
-
-fn code_header(
-    label: &str,
-    width: Pixels,
-    style: &EditorStyle,
-    text_system: &WindowTextSystem,
-) -> Rc<ShapedLine> {
-    let shape_label = |label: String| {
-        Rc::new(text_system.shape_line(
-            label.clone().into(),
-            px(13.),
-            &[TextRun {
-                len: label.len(),
-                font: font(".SystemUIFont"),
-                color: style.text,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }],
-            None,
-        ))
-    };
-    let language_width = (width - CODE_COPY_WIDTH - CODE_CHEVRON_WIDTH - px(30.)).max(px(20.));
-    let mut label = label.graphemes(true).take(64).collect::<Vec<_>>();
-    let mut shaped = shape_label(label.concat());
-    while shaped.width > language_width && !label.is_empty() {
-        label.pop();
-        shaped = shape_label(format!("{}…", label.concat()));
-    }
-    shaped
 }
 
 /// Shape the smaller text drawn inside each inline-code pill and each superscript
@@ -3217,15 +3247,6 @@ impl Element for EditorSurface {
             {
                 row.origin.x -= entry.offset;
             }
-            if let Some(copy) = row.code_copy_bounds() {
-                let language = row
-                    .code_language_bounds()
-                    .unwrap_or_else(|| Bounds::from_corners(copy.origin, copy.origin));
-                row.code_hitboxes = Some((
-                    window.insert_hitbox(language, HitboxBehavior::Normal),
-                    window.insert_hitbox(copy, HitboxBehavior::Normal),
-                ));
-            }
         }
         if window.is_a11y_active() {
             view.accessible_text.borrow_mut().update(
@@ -3374,7 +3395,7 @@ impl Element for EditorSurface {
                                 row.text_height()
                             };
                             let (top, height) = (row.origin.y - lift, height + lift);
-                            let bar_x = row.origin.x - style.quote_indent * (levels - level) as f32;
+                            let bar_x = row.quote_bar_x(levels, level, &style);
                             window.paint_quad(fill(
                                 Bounds::new(point(bar_x, top), size(QUOTE_BAR, height)),
                                 tones.get(level).copied().flatten().unwrap_or(style.marker),
@@ -3386,8 +3407,7 @@ impl Element for EditorSurface {
                                 // — begins, so the space its spelling carries
                                 // is the gap the reader sees. A gutter too
                                 // narrow for it keeps it off the bar instead.
-                                let next =
-                                    row.origin.x - style.quote_indent * (levels - level - 1) as f32;
+                                let next = bar_x + style.quote_indent;
                                 let x = (next - marker.width).max(bar_x + QUOTE_BAR);
                                 let _ = marker.paint(
                                     point(x, row.origin.y),
@@ -3407,20 +3427,40 @@ impl Element for EditorSurface {
                         ),
                         style.rule,
                     )),
-                    Some(Decoration::Code) => {
+                    Some(Decoration::Code {
+                        levels,
+                        joined,
+                        tones,
+                    }) => {
+                        // The panel stands where a paragraph's text would in
+                        // the same quotes, so the bars keep their places; they
+                        // reach over the panel's fence rows and padding.
+                        let top = row.origin.y - row.top_gap;
+                        for level in 0..levels {
+                            let below = if level < joined {
+                                row.height
+                            } else {
+                                row.text_height() + row.code_panel_room()
+                            };
+                            let bar_x = row.quote_bar_x(levels, level, &style);
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    point(bar_x, top),
+                                    size(QUOTE_BAR, row.top_gap + below),
+                                ),
+                                tones.get(level).copied().flatten().unwrap_or(style.marker),
+                            ));
+                        }
                         window.paint_quad(
                             fill(
                                 Bounds::new(
                                     point(
                                         row.origin.x - CODE_PADDING,
-                                        row.origin.y - CODE_PADDING - CODE_HEADER_HEIGHT,
+                                        row.origin.y - row.code_panel_room(),
                                     ),
                                     size(
                                         row.width + CODE_PADDING * 2.,
-                                        row.text_height()
-                                            + row.code_footer_height()
-                                            + CODE_PADDING * 2.
-                                            + CODE_HEADER_HEIGHT,
+                                        row.text_height() + row.code_panel_room() * 2.,
                                     ),
                                 ),
                                 style.code_background,
@@ -3430,15 +3470,19 @@ impl Element for EditorSurface {
                     }
                     None => {}
                 }
-                if let Some(label) = &row.code_header {
-                    paint_code_header(self, row, label, &style, window, cx);
+                if let Some(header) = &row.code_header {
+                    let _ = header.paint(
+                        point(row.origin.x, row.origin.y - row.code_fence_row),
+                        row.line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
                 }
                 if let Some(footer) = &row.code_footer {
                     let _ = footer.paint(
-                        point(
-                            row.origin.x,
-                            row.origin.y + row.text_height() + CODE_PADDING * 0.25,
-                        ),
+                        point(row.origin.x, row.origin.y + row.text_height()),
                         row.line_height,
                         TextAlign::Left,
                         None,
@@ -4008,122 +4052,10 @@ fn paint_marker(
     }
 }
 
-fn paint_code_header(
-    surface: &EditorSurface,
-    row: &LayoutLine,
-    label: &ShapedLine,
-    style: &EditorStyle,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let Some(copy) = row.code_copy_bounds() else {
-        return;
-    };
-    // Focused fences spell ` ```lang ` on the left; unfocused keep the
-    // language chip on the right next to the copy control.
-    let focused_fence = row.code_footer.is_some();
-    let label_origin = if focused_fence {
-        point(
-            row.origin.x,
-            row.origin.y - CODE_HEADER_HEIGHT - CODE_HEADER_LIFT + px(3.),
-        )
-    } else {
-        let Some(language) = row.code_language_bounds() else {
-            return;
-        };
-        language.origin + point(px(6.), px(3.))
-    };
-    let _ = label.paint(label_origin, px(18.), TextAlign::Left, None, window, cx);
-    let mut icons = PathBuilder::stroke(px(1.2));
-    if !focused_fence {
-        let Some(language) = row.code_language_bounds() else {
-            return;
-        };
-        let chevron = point(
-            language.right() - CODE_CHEVRON_WIDTH,
-            language.top() + px(10.5),
-        );
-        icons.move_to(chevron + point(px(2.), px(0.)));
-        icons.line_to(chevron + point(px(5.), px(3.)));
-        icons.line_to(chevron + point(px(8.), px(0.)));
-    }
-    // Clipboard: a board with a clip on its top edge.
-    let board = copy.origin + point(px(9.), px(6.5));
-    let (w, h, r) = (px(10.), px(12.), px(2.));
-    icons.move_to(board + point(r, px(0.)));
-    icons.line_to(board + point(w - r, px(0.)));
-    icons.line_to(board + point(w, r));
-    icons.line_to(board + point(w, h - r));
-    icons.line_to(board + point(w - r, h));
-    icons.line_to(board + point(r, h));
-    icons.line_to(board + point(px(0.), h - r));
-    icons.line_to(board + point(px(0.), r));
-    icons.line_to(board + point(r, px(0.)));
-    icons.move_to(board + point(px(3.), px(1.5)));
-    icons.line_to(board + point(px(3.), px(-1.5)));
-    icons.line_to(board + point(px(7.), px(-1.5)));
-    icons.line_to(board + point(px(7.), px(1.5)));
-    if let Ok(path) = icons.build() {
-        window.paint_path(path, style.muted_text);
-    }
-    let Some((language_box, copy_box)) = &row.code_hitboxes else {
-        return;
-    };
-    if row.code_language_bounds().is_some() {
-        window.set_cursor_style(CursorStyle::PointingHand, language_box);
-    }
-    window.set_cursor_style(CursorStyle::PointingHand, copy_box);
-    let language_box = language_box.clone();
-    let copy_box = copy_box.clone();
-    let language_enabled = row.code_language_bounds().is_some();
-    let editor = surface.editor.clone();
-    let code_pos = row.code_pos;
-    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-        if !phase.bubble() || event.button != MouseButton::Left {
-            return;
-        }
-        let language_clicked =
-            language_enabled && language_box.is_hovered_at(event.position, window);
-        let copy_clicked = copy_box.is_hovered_at(event.position, window);
-        if (language_clicked || copy_clicked) && editor.read(cx).is_composing() {
-            editor.update(cx, |editor, cx| editor.cancel_composition(cx));
-            // Cancelling can restore a different document. The next click must use
-            // the freshly rendered hitboxes and positions.
-            cx.stop_propagation();
-            return;
-        }
-        if language_clicked {
-            if let Some(pos) = code_pos {
-                editor.update(cx, |editor, cx| {
-                    editor.run_control(
-                        crate::accessibility::ControlAction::CodeLanguage(pos),
-                        true,
-                        window,
-                        cx,
-                    );
-                });
-            }
-            cx.stop_propagation();
-        } else if copy_clicked {
-            if let Some(pos) = code_pos {
-                editor.update(cx, |editor, cx| {
-                    editor.run_control(
-                        crate::accessibility::ControlAction::CopyCode(pos),
-                        true,
-                        window,
-                        cx,
-                    );
-                });
-            }
-            cx.stop_propagation();
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        AtomShape, CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_FONT, CODE_PADDING,
+        AtomShape, CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_FENCE_INSET, CODE_FONT,
         Decoration, LayoutLine, LayoutRow, Marker, QUOTE_BAR, Runs, ShapeInput, TableScroll,
         Widening, atom_label, cell_under, chrome_marker_unfocused, column_demands, column_widths,
         decoration_of, display_text, drawn_image, file_name, gap_below, max_indent,
@@ -4165,7 +4097,8 @@ mod tests {
             code_footer: None,
             quote_marker: None,
             callout_header: None,
-            code_hitboxes: None,
+            code_fence_row: px(0.),
+            quote_bars: Vec::new(),
             widenings: Vec::new(),
             atoms: Vec::new(),
             table: None,
@@ -4401,27 +4334,52 @@ mod tests {
     fn a_code_block_keeps_its_bottom_padding_above_a_quote() {
         let style = spaced_style();
         let gaps = gaps_of("```\nx\n```\n\n> quote", &style);
-        assert_eq!(gaps[0], CODE_PADDING + style.paragraph_gap);
+        assert_eq!(gaps[0], CODE_FENCE_INSET + style.paragraph_gap);
     }
 
-    /// A quote is a block: spaced off what comes before and after it, close
-    /// only between its own lines and where one quote opens inside another.
+    /// A quote spaces the blocks it holds as the note does: off what comes
+    /// before and after it, between its own paragraphs, and around a quote
+    /// opening inside it.
     #[test]
-    fn a_quote_is_spaced_off_the_blocks_around_it() {
+    fn a_quote_spaces_its_blocks_as_the_note_does() {
         let style = spaced_style();
         let gaps = gaps_of("para\n\n> a\n>\n> b\n\npara", &style);
         assert_eq!(gaps[0], style.paragraph_gap, "above the quote");
-        assert_eq!(gaps[1], style.list_gap, "between the quote's own lines");
+        assert_eq!(
+            gaps[1], style.paragraph_gap,
+            "between the quote's paragraphs"
+        );
         assert_eq!(gaps[2], style.paragraph_gap, "below the quote");
+        let gaps = gaps_of("> a\n>\n> > b\n\npara", &style);
+        assert_eq!(gaps[0], style.paragraph_gap, "above the nested quote");
+        assert_eq!(gaps[1], style.paragraph_gap, "leaving both quotes");
     }
 
-    /// A quote opening inside a quote keeps the bar unbroken.
+    /// Two lists one after the other are two blocks, spaced apart as blocks
+    /// are, while a nested list's lines stay as close as its parent's.
     #[test]
-    fn a_nested_quote_still_sits_tight() {
+    fn a_list_right_after_another_is_spaced_off_it() {
         let style = spaced_style();
-        let gaps = gaps_of("> a\n>\n> > b\n\npara", &style);
-        assert_eq!(gaps[0], Pixels::ZERO, "above the nested quote");
-        assert_eq!(gaps[1], style.paragraph_gap, "leaving both quotes");
+        let gaps = gaps_of("- a\n  - b\n- c\n\n1. d\n2. e", &style);
+        assert_eq!(gaps[0], style.list_gap, "into the nested list");
+        assert_eq!(gaps[1], style.list_gap, "back out of it");
+        assert_eq!(gaps[2], style.paragraph_gap, "between the two lists");
+        assert_eq!(gaps[3], style.list_gap, "within the second list");
+    }
+
+    /// A list inside a quote draws the quote's bar at the quote's edge, where
+    /// the quote's paragraphs have it, not at the list's indent through its
+    /// bullets.
+    #[test]
+    fn a_list_in_a_quote_keeps_the_quote_bar_at_its_edge() {
+        let source = "> para\n>\n> - item\n>\n>   ```\n>   x\n>   ```";
+        let projection = projection_of(&state_of(source));
+        let away = projection.lines()[0].from();
+        let rows = shaped_revealing(source, away..away, None);
+        let style = EditorStyle::notes();
+        let bar = |row: &LayoutLine| row.quote_bar_x(1, 0, &style);
+        assert_eq!(bar(&rows[1]), bar(&rows[0]), "the item's bar");
+        assert_eq!(bar(&rows[2]), bar(&rows[0]), "the code block's bar");
     }
 
     /// The view keeps HTML verbatim and shows it as source, so a raw block is
@@ -4445,10 +4403,41 @@ mod tests {
         assert!(
             matches!(
                 decorations_of("```\nx\n```\n\npara", &style)[0],
-                Some(Decoration::Code)
+                Some(Decoration::Code { levels: 0, .. })
             ),
             "a code block keeps its own",
         );
+    }
+
+    /// A code block in a quote keeps the quote's bar beside its panel, joined
+    /// to the paragraph above it, and the panel stands where that paragraph's
+    /// text does, so the bars of both lines fall in one place.
+    #[test]
+    fn a_code_block_in_a_quote_keeps_the_quote_bar() {
+        let style = spaced_style();
+        let source = "> para\n>\n> ```\n> x\n> ```";
+        let decorations = decorations_of(source, &style);
+        assert!(matches!(
+            decorations[0],
+            Some(Decoration::Quote {
+                levels: 1,
+                joined: 1,
+                ..
+            })
+        ));
+        assert!(
+            matches!(
+                decorations[1],
+                Some(Decoration::Code {
+                    levels: 1,
+                    joined: 0,
+                    ..
+                })
+            ),
+            "the bar beside the panel"
+        );
+        let lines = shaped(source);
+        assert_eq!(lines[1].origin.x - super::CODE_PADDING, lines[0].origin.x);
     }
 
     /// A window-free text system, so the shaping pass can be run in a test.
@@ -4646,6 +4635,22 @@ mod tests {
         }
         assert_eq!(run_over(&text, &runs, 'a').background_color, None);
         assert_eq!(run_over(&text, &runs, 'e').background_color, None);
+    }
+
+    /// A code span inside a highlight keeps its pill: the fill, painted after
+    /// the pills, is left off the code's runs and stays on the text around it.
+    #[test]
+    fn a_highlight_leaves_the_code_pill_inside_it_uncovered() {
+        let (text, runs, style) = runs_of("x ==a `c` b== y");
+        for needle in ['a', 'b'] {
+            assert_eq!(
+                run_over(&text, &runs, needle).background_color,
+                Some(style.highlight),
+                "{needle} sits in the highlight"
+            );
+        }
+        assert_eq!(run_over(&text, &runs, 'c').background_color, None);
+        assert!(!runs.code.is_empty(), "the code keeps its pill");
     }
 
     #[test]
@@ -5488,6 +5493,26 @@ mod tests {
         );
     }
 
+    /// A revealed spelling reads as the characters the writer typed: in the
+    /// line's own face, and ending in the typed space, so it sits flush against
+    /// the text with no gap of its own — a heading's `# ` as a list's `- `.
+    #[test]
+    fn a_revealed_spelling_sits_flush_against_its_text() {
+        let source = "# Head\n\n- item";
+        let projection = projection_of(&state_of(source));
+        for index in 0..2 {
+            let pos = projection.lines()[index].from() + 1;
+            let rows = shaped_revealing(source, pos..pos, None);
+            let row = &rows[index];
+            let Some(Marker::Source(label)) = &row.marker else {
+                panic!("line {index} shows its spelling");
+            };
+            let bounds = row.marker_bounds().unwrap();
+            assert_eq!(bounds.right(), row.origin.x, "line {index}");
+            assert_eq!(bounds.size.width, label.width);
+        }
+    }
+
     #[test]
     fn focused_heading_and_list_draw_source_markers() {
         let text = text_system();
@@ -5540,11 +5565,11 @@ mod tests {
         );
     }
 
-    /// The closing fence a focused code block shows is a row of its own under
-    /// the text, so the block grows by exactly that row; the fence would
-    /// otherwise hang over the block's bottom edge into what follows.
+    /// A code block keeps a row above and below its text for its fences
+    /// whether or not the caret is in it, so focusing it spells the fences in
+    /// room it already had: nothing below it moves.
     #[test]
-    fn a_focused_code_block_makes_room_for_its_closing_fence() {
+    fn a_code_block_is_as_tall_focused_as_it_is_unfocused() {
         let source = "```rust\nfn main() {}\n```\n\nafter";
         let projection = projection_of(&state_of(source));
         let inside = projection.lines()[0].from() + 1;
@@ -5553,20 +5578,17 @@ mod tests {
         let unfocused = shaped_revealing(source, outside..outside, None);
         let (code, plain) = (&focused[0], &unfocused[0]);
         assert!(code.code_footer.is_some() && plain.code_footer.is_none());
-        assert_eq!(
-            code.top_gap, plain.top_gap,
-            "the header is there either way"
-        );
-        assert_eq!(code.text_height(), plain.text_height());
-        assert_eq!(code.height, plain.height + code.line_height);
+        assert!(code.code_header.is_some() && plain.code_header.is_none());
+        assert_eq!(code.top_gap, plain.top_gap);
+        assert_eq!(code.height, plain.height);
         assert_eq!(code.code_footer_height(), code.line_height);
-        assert_eq!(plain.code_footer_height(), px(0.));
+        assert_eq!(plain.code_footer_height(), plain.line_height);
         let total = |lines: &[LayoutLine]| {
             lines
                 .iter()
                 .fold(px(0.), |sum, line| sum + line.top_gap + line.height)
         };
-        assert_eq!(total(&focused), total(&unfocused) + code.line_height);
+        assert_eq!(total(&focused), total(&unfocused));
     }
 
     #[test]
@@ -5912,7 +5934,12 @@ mod tests {
                 tones,
             }) => format!("quote {levels} {joined} {tones:?}"),
             Some(Decoration::Divider) => "divider".to_owned(),
-            Some(Decoration::Code) => "code".to_owned(),
+            Some(Decoration::Code { levels: 0, .. }) => "code".to_owned(),
+            Some(Decoration::Code {
+                levels,
+                joined,
+                tones,
+            }) => format!("code quote {levels} {joined} {tones:?}"),
         };
         write!(
             out,
@@ -6026,8 +6053,8 @@ mod tests {
     }
 
     /// What a line reads from around it is part of what it is kept under: a
-    /// tenth item widens every number of the list, a quote opening below a
-    /// quoted line changes the gap under it, and a table and a picture are
+    /// tenth item widens every number of the list, a list's last item gets the
+    /// list gap when the list goes on below it, and a table and a picture are
     /// always shaped again.
     #[test]
     fn a_line_is_reshaped_when_what_it_reads_around_it_changes() {
@@ -6050,23 +6077,6 @@ mod tests {
             row_of(&after, "one").map(|line| line.origin.x),
             "the list's indent follows its widest number"
         );
-
-        // Quoting the paragraph under a quote: the quoted line above keeps its
-        // body but not its gap.
-        let state = at(&state, end_of(&state, "Outside"));
-        let (before, _) = reshaped(&state, &after);
-        let quote = state
-            .schema()
-            .node_id("blockquote")
-            .expect("a block quote type");
-        let state = run(
-            &state,
-            &markraft_core::commands::wrap_in(quote, Default::default()),
-        );
-        let (after, _) = reshaped(&state, &before);
-        let above = |lines: &[LayoutLine]| row_of(lines, "quote two").map(|line| line.height);
-        assert!(above(&before).is_some());
-        assert_ne!(above(&before), above(&after));
 
         // Listing the paragraph under a list: the gap under the list's last
         // item becomes the list's own.

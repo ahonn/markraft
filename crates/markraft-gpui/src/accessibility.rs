@@ -271,38 +271,6 @@ impl AccessibleText {
                     bounds: accessible_bounds(bounds, scale),
                 });
             }
-            if let Some(pos) = row.code_pos {
-                if let Some(bounds) = row.code_language_bounds() {
-                    let language = doc
-                        .node_at(pos)
-                        .and_then(|node| {
-                            node.attrs()
-                                .get("language")
-                                .and_then(|value| value.as_str())
-                                .map(str::to_owned)
-                        })
-                        .unwrap_or_default();
-                    self.controls.push(AccessibleControl {
-                        node_id: None,
-                        action: ControlAction::CodeLanguage(pos),
-                        label: format!(
-                            "Code language: {}",
-                            crate::syntax::language_label(&language)
-                        ),
-                        checked: None,
-                        bounds: accessible_bounds(bounds, scale),
-                    });
-                }
-                if let Some(bounds) = row.code_copy_bounds() {
-                    self.controls.push(AccessibleControl {
-                        node_id: None,
-                        action: ControlAction::CopyCode(pos),
-                        label: "Copy code".into(),
-                        checked: None,
-                        bounds: accessible_bounds(bounds, scale),
-                    });
-                }
-            }
             for (visual, inner) in row.accessible_rows().into_iter().enumerate() {
                 let (mut value, mut before) = shown_row(&pieces, inner.clone());
                 if inner.end == line.len() && row.index < last_line {
@@ -622,7 +590,7 @@ mod tests {
         );
         let mut text = AccessibleText::default();
         text.update(&projection, &state, &types, &rows, 2.);
-        assert_eq!(text.controls.len(), 6);
+        assert_eq!(text.controls.len(), 4);
         for (control, checked) in text.controls[..2].iter().zip([false, true]) {
             let node = control.node();
             assert_eq!(node.role(), Role::CheckBox);
@@ -638,19 +606,10 @@ mod tests {
             assert!(node.supports_action(accesskit::Action::Focus));
             assert!(matches!(control.action, ControlAction::ToggleTask(_)));
         }
-        let code_pos = rows[2].code_pos.unwrap();
-        assert_eq!(
-            text.controls[2].action,
-            ControlAction::CodeLanguage(code_pos)
-        );
-        assert_eq!(text.controls[3].action, ControlAction::CopyCode(code_pos));
+        // A code block has no controls of its own on screen; its language and
+        // copy are commands.
+        assert!(rows[2].code_pos.is_some());
         for control in &text.controls[2..] {
-            assert_eq!(control.node().role(), Role::Button);
-            assert!(control.node().supports_action(accesskit::Action::Click));
-        }
-        assert_eq!(text.controls[2].label, "Code language: Rust");
-        assert_eq!(text.controls[3].label, "Copy code");
-        for control in &text.controls[4..] {
             let ControlAction::EditHtml(pos) = control.action else {
                 panic!("HTML control")
             };
