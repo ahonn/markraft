@@ -88,6 +88,9 @@ pub struct Preferences {
     pub always_on_top: bool,
     /// The global shortcut that opens a new note. Empty turns it off.
     pub new_note_hotkey: String,
+    /// Whether the emoji menu and `:name:` write the emoji character rather than its
+    /// shortcode. Off by default, as Typora writes shortcodes.
+    pub emoji_characters: bool,
 }
 
 impl Preferences {
@@ -108,6 +111,7 @@ impl Default for Preferences {
             hide_on_deactivate: false,
             always_on_top: true,
             new_note_hotkey: String::new(),
+            emoji_characters: false,
         }
     }
 }

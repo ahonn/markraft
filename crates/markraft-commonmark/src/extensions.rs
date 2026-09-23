@@ -584,12 +584,12 @@ fn selection_ends(cx: &CorrectionContext<'_>) -> Vec<usize> {
 }
 
 /// Whether the block's text could hold the spelling of an atom — a picture,
-/// a wiki link, a raw HTML tag — that a caret may have been let into. A
+/// a wiki link, a raw HTML tag, an emoji shortcode — that a caret may have been let into. A
 /// cheap test, so a caret moving along a line of plain prose derives
 /// nothing.
 fn may_spell_an_atom(items: &Items) -> bool {
     let text = items.text();
-    text.contains("![") || text.contains("[[") || text.contains('<')
+    text.contains("![") || text.contains("[[") || text.contains('<') || text.contains(':')
 }
 
 /// The lines of the block a caret or either end of a selection stands on

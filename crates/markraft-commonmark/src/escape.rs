@@ -19,6 +19,8 @@
 //! * `<` is escaped only when what follows could start a tag or an autolink.
 //! * `&` is escaped only when it would be read as a character reference, so
 //!   `R&D` stays `R&D` and `&amp;` comes back as itself.
+//! * `:` is escaped only where it opens an emoji shortcode, `:smile:`, so
+//!   `10:30` and `note: x` stay as they are.
 //! * `#`, `>`, `-`, `+`, `=` and `1.` are escaped only at the start of a line,
 //!   and only in the shapes that actually open a block there.
 //! * `.`, `(`, `)`, `!`, `|`, `{` and `}` are never escaped: none of them opens
@@ -77,6 +79,7 @@ fn escape(text: &str, at_line_start: bool, unlinked: bool) -> String {
             || (ch == '$' && !chars.get(index + 1).is_some_and(|c| c.is_whitespace()))
             || (ch == '<' && opens_tag(&chars, index))
             || (ch == '&' && opens_reference(&chars, index))
+            || (ch == ':' && opens_shortcode(&chars, index))
             || (unlinked && opens_autolink(&chars, index));
         if escape {
             out.push('\\');
@@ -161,6 +164,19 @@ fn dotted_host(rest: &[char]) -> bool {
 /// What a reader takes for part of a host name.
 fn host_char(c: char) -> bool {
     !(c.is_whitespace() || c.is_punctuation() || c.is_symbol())
+}
+
+/// Whether `:` at `index` opens an emoji shortcode a reader would take it
+/// for. Only the opening colon needs the backslash: an escaped one opens
+/// nothing, and a closing one that could open the next shortcode is asked
+/// the same question in its turn.
+fn opens_shortcode(chars: &[char], index: usize) -> bool {
+    let rest: String = chars[index..]
+        .iter()
+        .take_while(|c| c.is_ascii())
+        .take(128)
+        .collect();
+    crate::shortcode::read_shortcode(&rest).is_some()
 }
 
 /// Whether `_` at `index` sits between two alphanumerics, where CommonMark's

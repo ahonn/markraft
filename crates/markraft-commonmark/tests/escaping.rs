@@ -151,3 +151,19 @@ fn spelled_text_keeps_highlight_superscript_and_math_delimiters_literal() {
         assert!(!codec.describe(&doc).contains("math"), "{text:?}");
     }
 }
+
+#[test]
+fn a_colon_is_escaped_only_where_it_opens_a_shortcode() {
+    let cases = [
+        ("at 10:30: done", "at 10:30: done"),
+        ("note: :nope_not_one:", "note: :nope_not_one:"),
+        ("say :smile: now", "say \\:smile: now"),
+        (":smile:smile:", "\\:smile\\:smile:"),
+    ];
+    for (text, written) in cases {
+        let codec = Codec::new();
+        let doc = spell_document(&codec.serializer, &paragraph(&codec, text));
+        assert_eq!(codec.write(&doc), written, "{text:?}");
+        assert!(!shape(written).contains("emoji"), "{written:?}");
+    }
+}

@@ -773,3 +773,40 @@ fn a_spelling_folds_when_the_caret_leaves_along_its_line() {
         )
     );
 }
+
+/// A shortcode is an emoji once the caret has left it, and its spelling while
+/// the caret is in it — typed or reached — as in Typora. The file keeps the
+/// shortcode either way.
+#[test]
+fn a_shortcode_reads_as_its_emoji_once_the_caret_leaves() {
+    // Typed: the spelling while the caret is at its closing colon.
+    assert_eq!(typed("hi :smile:"), r#"doc(paragraph("hi :smile:"))"#);
+    assert_eq!(
+        typed_and_left("hi :smile:"),
+        r#"doc(paragraph("hi ", emoji[code=Str("smile")]), paragraph("x"))"#
+    );
+
+    // Read, reached and left.
+    let source = "a :tada: b\n\nafter";
+    let (schema, state) = opened(source);
+    let away = moved(&state, state.doc().content_size() - 1);
+    assert_eq!(
+        schema.describe(away.doc()),
+        r#"doc(paragraph("a ", emoji[code=Str("tada")], " b"), paragraph("after"))"#
+    );
+    let reached = moved(&away, 3);
+    assert_eq!(
+        schema.describe(reached.doc()),
+        r#"doc(paragraph("a :tada: b"), paragraph("after"))"#
+    );
+    assert_eq!(
+        markraft_commonmark::to_markdown(&schema, reached.doc()),
+        source
+    );
+    let left = moved(&reached, reached.doc().content_size() - 1);
+    assert_eq!(left.doc(), away.doc());
+    assert_eq!(
+        markraft_commonmark::to_markdown(&schema, left.doc()),
+        source
+    );
+}

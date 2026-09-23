@@ -14,6 +14,7 @@ use markraft_core::{Attrs, EditorState, MarkTypeId, NodeTypeId, Schema, kind::Do
 /// entry for.
 const RAW_INLINE: &str = "raw_inline";
 const WIKI_LINK: &str = "wiki_link";
+const EMOJI: &str = "emoji";
 
 /// Which attributes of a block quote make it a callout, and where its header
 /// reads from.
@@ -106,6 +107,10 @@ pub struct DocTypes {
     /// Without it such an atom is drawn as a bare object-replacement character,
     /// which is blank.
     pub wiki_link: Option<NodeTypeId>,
+    /// An emoji shortcode, carrying the `code` between its colons. The view
+    /// draws the emoji the code names. Without it such an atom is drawn as a
+    /// bare object-replacement character, which is blank.
+    pub emoji: Option<NodeTypeId>,
     /// Strong emphasis. Without it ⌘B does nothing.
     pub strong: Option<MarkTypeId>,
     /// Emphasis. Without it ⌘I does nothing.
@@ -156,7 +161,8 @@ impl DocTypes {
     /// Resolve every name in `names` against `schema`. A name the schema does
     /// not declare leaves its role unset.
     ///
-    /// [`DocTypes::raw_inline`] and [`DocTypes::wiki_link`] have no entry in
+    /// [`DocTypes::raw_inline`], [`DocTypes::wiki_link`] and [`DocTypes::emoji`]
+    /// have no entry in
     /// [`DocTypeNames`], so they are
     /// looked up under the names the CommonMark preset gives them. A schema
     /// that spells them differently sets those fields itself; leaving
@@ -188,6 +194,7 @@ impl DocTypes {
             image: node(names.image),
             raw_inline: node(Some(RAW_INLINE)),
             wiki_link: node(Some(WIKI_LINK)),
+            emoji: node(Some(EMOJI)),
             strong: mark(names.strong),
             em: mark(names.em),
             code: mark(names.code),

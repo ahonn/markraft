@@ -700,3 +700,35 @@ fn a_cell_guards_its_own_pipes() {
     assert_eq!(read(C, "# *a*"), "em(2..5) 2..3@0 4..5@0");
     assert_eq!(read(C, "- a"), "");
 }
+
+#[test]
+fn a_shortcode_the_table_knows_is_an_emoji() {
+    assert_eq!(
+        atoms("a :smile: b :+1:"),
+        [
+            r#"emoji(2..9 code=Str("smile"))"#,
+            r#"emoji(12..16 code=Str("+1"))"#,
+        ]
+    );
+    // Inside emphasis and a link's label too.
+    assert_eq!(atoms("*:tada:*"), [r#"emoji(1..7 code=Str("tada"))"#]);
+    assert_eq!(atoms("[:tada:](u)"), [r#"emoji(1..7 code=Str("tada"))"#]);
+    // A colon that opens nothing leaves the next one free to.
+    assert_eq!(atoms(":xyz:smile:"), [r#"emoji(4..11 code=Str("smile"))"#]);
+}
+
+#[test]
+fn anything_else_between_colons_stays_text() {
+    for text in [
+        ":nope_not_one:",
+        "10:30:45",
+        "\\:smile:",
+        "`:smile:`",
+        "$:smile:$",
+        "https://example.com/:smile:",
+        "<https://example.com/:smile:>",
+        ":smi*le*:",
+    ] {
+        assert!(atoms(text).is_empty(), "{text:?}");
+    }
+}

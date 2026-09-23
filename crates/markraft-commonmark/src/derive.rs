@@ -926,14 +926,18 @@ impl Reader<'_> {
         }
     }
 
-    /// Record the `![[…]]` embeds among `parent`'s children.
+    /// Record the `![[…]]` embeds and the `:shortcode:` emoji among
+    /// `parent`'s children.
     ///
     /// comrak has no embed syntax: the `!` opens an image label, which stops
     /// the wiki link inside from being seen, so the whole run arrives as text —
-    /// split wherever an escape stands. Each run of text and escapes is read
-    /// as the source it covers, and only an embed that lies wholly inside one
-    /// is an embed.
+    /// split wherever an escape stands. Nor does it read shortcodes here; see
+    /// [`crate::shortcode`]. Each run of text and escapes is read as the source
+    /// it covers, and only an embed or a shortcode that lies wholly inside one
+    /// is one. The text of an autolink is its destination, where a colon is
+    /// the URL's.
     fn embeds<'a>(&mut self, parent: &'a AstNode<'a>) {
+        let shortcodes = !self.is_autolink(parent);
         let mut run: Option<(usize, usize)> = None;
         for child in parent.children() {
             let (textual, pos) = {
@@ -956,33 +960,48 @@ impl Reader<'_> {
                 }
                 (true, Some(bytes), _) => {
                     if let Some(run) = run {
-                        self.embeds_in(run);
+                        self.embeds_in(run, shortcodes);
                     }
                     run = Some(bytes);
                 }
                 _ => {
                     if let Some(run) = run.take() {
-                        self.embeds_in(run);
+                        self.embeds_in(run, shortcodes);
                     }
                 }
             }
         }
         if let Some(run) = run {
-            self.embeds_in(run);
+            self.embeds_in(run, shortcodes);
         }
     }
 
-    fn embeds_in(&mut self, (first, end): (usize, usize)) {
+    /// Whether `node` is a link written as its own destination: a GFM or an
+    /// angle-bracket autolink rather than one with a `[label]`.
+    fn is_autolink<'a>(&self, node: &'a AstNode<'a>) -> bool {
+        let data = node.data.borrow();
+        matches!(data.value, NodeValue::Link(_))
+            && self
+                .source
+                .byte(data.sourcepos.start.line, data.sourcepos.start.column)
+                .and_then(|byte| self.source.coordinates.as_bytes().get(byte))
+                .is_some_and(|byte| *byte != b'[')
+    }
+
+    fn embeds_in(&mut self, (first, end): (usize, usize), shortcodes: bool) {
         let Some(slice) = self.source.coordinates.get(first..end) else {
             return;
         };
-        if !slice.contains("![[") {
+        let opens = |c: char| c == '!' || (shortcodes && c == ':');
+        let wanted = slice.contains("![[") || (shortcodes && slice.contains(':'));
+        if !wanted {
             return;
         }
         let slice = slice.to_string();
         let mut at = 0;
-        while let Some(offset) = slice[at..].find("![[").map(|index| at + index) {
-            // An escaped `\!` is not an embed's.
+        while let Some(offset) = slice[at..].find(opens).map(|index| at + index) {
+            // An escaped `\!` is not an embed's, nor an escaped `\:` a
+            // shortcode's.
             let escaped = slice[..offset]
                 .chars()
                 .rev()
@@ -990,13 +1009,25 @@ impl Reader<'_> {
                 .count()
                 % 2
                 == 1;
-            match crate::wiki::read_wiki_link(&slice[offset..]).filter(|_| !escaped) {
-                Some((link, len)) => {
+            let rest = &slice[offset..];
+            let found = if escaped {
+                None
+            } else if rest.starts_with("![[") {
+                crate::wiki::read_wiki_link(rest)
+                    .map(|(link, len)| (len, md::WIKI_LINK, wiki_attrs(link)))
+            } else if rest.starts_with(':') {
+                crate::shortcode::read_shortcode(rest)
+                    .map(|(name, len)| (len, md::EMOJI, attrs! {"code" => name.to_string()}))
+            } else {
+                None
+            };
+            match found {
+                Some((len, node_type, attrs)) => {
                     if let Some((from, to)) =
                         self.coordinate_range(first + offset, first + offset + len)
                     {
                         let range = self.guarded_range(from, to);
-                        self.atom(range, md::WIKI_LINK, wiki_attrs(link));
+                        self.atom(range, node_type, attrs);
                     }
                     at = offset + len;
                 }

@@ -169,7 +169,7 @@ impl InlineCode {
 /// What an inline atom is drawn as.
 ///
 /// A [`AtomShape::Pill`] is chrome the row cannot shape, so it is painted over
-/// a run of fillers reserving its slot. The other two *are* text, so the row
+/// a run of fillers reserving its slot. The others *are* text, so the row
 /// shapes their label itself: a placeholder rounded up to a whole number of
 /// fillers would leave a gap after the label, and punctuation after a wiki link
 /// has to sit where it would after any other word.
@@ -183,6 +183,9 @@ enum AtomShape {
     /// A wiki link's label, shaped as the prose it stands in, in the link
     /// colour. Its brackets and its target are source the view does not show.
     Link,
+    /// An emoji shortcode's emoji, shaped as a character of the prose around
+    /// it. Its colons and its name are source the view does not show.
+    Glyph,
 }
 
 impl AtomShape {
@@ -191,14 +194,14 @@ impl AtomShape {
     fn chrome(self) -> Pixels {
         match self {
             AtomShape::Pill => PILL_PADDING * 2. + PILL_ICON + PILL_ICON_GAP,
-            AtomShape::Source | AtomShape::Link => px(0.),
+            AtomShape::Source | AtomShape::Link | AtomShape::Glyph => px(0.),
         }
     }
 
     /// Whether the row shapes the atom's own label in place of a placeholder,
     /// so it takes exactly the width its glyphs advance.
     fn is_own_text(self) -> bool {
-        matches!(self, AtomShape::Source | AtomShape::Link)
+        matches!(self, AtomShape::Source | AtomShape::Link | AtomShape::Glyph)
     }
 }
 
@@ -2315,8 +2318,8 @@ fn attr<'a>(node: &'a Node, name: &str) -> &'a str {
 }
 
 /// What an inline atom is drawn as, for the atoms the view draws itself: an
-/// image's label, the verbatim source of an inline HTML primitive, or a wiki
-/// link's label. Every other atom keeps the object-replacement character the
+/// image's label, the verbatim source of an inline HTML primitive, a wiki
+/// link's label, or the emoji a shortcode names. Every other atom keeps the object-replacement character the
 /// projection gave it, which is blank.
 fn atom_label<'a>(types: &DocTypes, node: &'a Node) -> Option<(AtomShape, &'a str)> {
     let ty = node.type_id();
@@ -2346,6 +2349,14 @@ fn atom_label<'a>(types: &DocTypes, node: &'a Node) -> Option<(AtomShape, &'a st
         // target stands in, with whatever `#heading` or `^block` it names,
         // because that is what the link says.
         Some((AtomShape::Link, crate::wiki::wiki_link_label(node)))
+    } else if Some(ty) == types.emoji {
+        // A code the table does not know was never read as one, but an atom
+        // built by hand could hold one: it reads as its name.
+        let code = attr(node, "code");
+        match emojis::get_by_shortcode(code) {
+            Some(emoji) => Some((AtomShape::Glyph, emoji.as_str())),
+            None => Some((AtomShape::Source, code)),
+        }
     } else {
         None
     }
@@ -2462,7 +2473,7 @@ fn atom_of(
     let (face, size) = match shape {
         AtomShape::Pill => (font(".SystemUIFont"), font_size * PILL_SCALE),
         AtomShape::Source => (font(CODE_FONT), font_size),
-        AtomShape::Link => (font(".SystemUIFont"), font_size),
+        AtomShape::Link | AtomShape::Glyph => (font(".SystemUIFont"), font_size),
     };
     // A link the host says it cannot open is still drawn as a link, because that is
     // what the source says it is — but not in the colour that invites a click, since
@@ -2474,6 +2485,7 @@ fn atom_of(
     let ink = match shape {
         AtomShape::Link if broken => style.broken_link,
         AtomShape::Link => style.link,
+        AtomShape::Glyph => style.text,
         AtomShape::Pill | AtomShape::Source => style.muted_text,
     };
     let room = (column * PILL_MAX_RATIO - shape.chrome()).max(px(16.));
@@ -2674,6 +2686,8 @@ fn text_runs(
             face = font(CODE_FONT);
         }
         let widened = placeholder == Some(AtomShape::Pill);
+        // An emoji is a character of the sentence, not something to follow.
+        let glyph = placeholder == Some(AtomShape::Glyph);
         // Revealed markup — a `**`, a link's `](…)`, an escape's `\` — is
         // quieter than the text it styles, so the words still read first.
         let markup = has(types.syntax, marks) && !code_block && !raw;
@@ -2681,7 +2695,7 @@ fn text_runs(
             style.muted_text
         } else if widening.is_some_and(|widening| widening.broken) {
             style.broken_link
-        } else if is_link || (atom && !code_block) {
+        } else if is_link || (atom && !code_block && !glyph) {
             style.link
         } else if has(types.code, marks) || is_math {
             style.inline_code_text

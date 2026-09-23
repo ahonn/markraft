@@ -121,6 +121,7 @@ mod preset;
 pub mod rules;
 pub mod schema;
 pub mod serialize;
+pub mod shortcode;
 pub mod source;
 pub mod table;
 mod text;

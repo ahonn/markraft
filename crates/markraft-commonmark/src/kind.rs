@@ -415,6 +415,11 @@ impl SourceSpelling for CommonMarkSpelling {
                 }
                 .source(),
             ),
+            schema::EMOJI => Some(crate::shortcode::spelling(attr_str(
+                node.attrs(),
+                "code",
+                "",
+            ))),
             _ => None,
         }
     }

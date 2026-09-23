@@ -536,6 +536,23 @@ pub fn commonmark_html_node_rules() -> HtmlNodeRules {
         }),
     );
     rules.insert(
+        md::EMOJI.to_string(),
+        rule(|state, node, _| {
+            // A reader outside this editor sees the emoji; a paste back into
+            // it takes the shortcode from the data attribute.
+            let code = attr_str(node, "code", "");
+            state.write("<span");
+            state.attr("data-type", "emoji");
+            state.attr("data-code", code);
+            state.write(">");
+            match crate::shortcode::emoji(code) {
+                Some(emoji) => state.text(emoji),
+                None => state.text(&crate::shortcode::spelling(code)),
+            }
+            state.write("</span>");
+        }),
+    );
+    rules.insert(
         md::RAW_INLINE.to_string(),
         rule(|state, node, _| {
             // Keep the source opaque in clipboard HTML. Pasting must not execute

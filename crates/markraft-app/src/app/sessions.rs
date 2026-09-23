@@ -191,8 +191,8 @@ impl NotesApp {
             [
                 editor.add_extension(menu, cx),
                 editor.add_extension(links, cx),
-                editor.add_extension(markraft_gpui::emoji_menu(), cx),
-                editor.add_extension(markraft_gpui::EmojiShortcodes, cx),
+                editor.add_extension(markraft_gpui::emoji_menu(self.emoji.clone()), cx),
+                editor.add_extension(markraft_gpui::EmojiShortcodes::new(self.emoji.clone()), cx),
             ]
         });
         let vim = self
@@ -343,6 +343,18 @@ impl NotesApp {
             .preferences
             .remote_images
             .then(crate::remote_images::shared)
+    }
+
+    /// Write emoji characters rather than shortcodes, or back, in every open note at
+    /// once: their menus and auto-replace share [`NotesApp::emoji`].
+    pub(super) fn set_emoji_characters(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.library.preferences.emoji_characters == enabled {
+            return;
+        }
+        self.library.preferences.emoji_characters = enabled;
+        self.emoji.set_characters(enabled);
+        self.schedule_save(cx);
+        cx.notify();
     }
 
     /// Turn fetching remote images on or off in every open note at once.

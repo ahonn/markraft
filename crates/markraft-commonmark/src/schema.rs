@@ -20,7 +20,7 @@
 //! spelling (`\`, trailing spaces or `<br>`) is ordinary text before it.
 //! What the tree holds as an atom rather than as text is what a reader never
 //! shows as its characters: an [`IMAGE`], a [`WIKI_LINK`], a [`RAW_INLINE`]
-//! HTML tag.
+//! HTML tag, an [`EMOJI`] shortcode.
 //!
 //! Every style mark is *derived* from that text by
 //! [`derive`](crate::derive::derive) and kept in step with it by the
@@ -227,6 +227,10 @@ pub const RAW_INLINE: &str = "raw_inline";
 /// size — is Obsidian's sub-syntax, which this codec never interprets.
 /// [`crate::wiki`] says which spellings are read as one.
 pub const WIKI_LINK: &str = "wiki_link";
+/// A GitHub emoji shortcode, `:smile:`: an inline atom with `code` (`Str`,
+/// required), the name between the colons, written back as `:code:`.
+/// [`crate::shortcode`] says which spellings are read as one.
+pub const EMOJI: &str = "emoji";
 
 /// A link, `inclusive: false`, with `href` (`Str`, required) and `title`
 /// (`Str`, default `""`).
@@ -418,6 +422,14 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                     AttrKind::Bool,
                     AttrValue::Bool(false),
                 )),
+        )
+        .node(
+            NodeTypeSpec::leaf(EMOJI)
+                .inline(true)
+                .group(INLINE_GROUP)
+                .selectable(true)
+                .atom(true)
+                .attr(AttrSpec::required("code", AttrKind::Str)),
         )
         .node(
             NodeTypeSpec::leaf(IMAGE)

@@ -1,8 +1,9 @@
 //! An atom the caret reaches, spelled out as the source it was read from.
 //!
-//! A picture, a wiki link and a raw HTML tag are atoms: the canonicalising
-//! correction folds the text that spells one into a single node, which is one
-//! position wide, so a caret could only stand before or after it. As in
+//! A picture, a wiki link, a raw HTML tag and an emoji shortcode are atoms:
+//! the canonicalising correction folds the text that spells one into a single
+//! node, which is one position wide, so a caret could only stand before or
+//! after it. As in
 //! Typora, a caret that reaches one — an arrow key onto it, a click beside it
 //! — now finds its source instead: a transaction that moves the selection,
 //! and changes nothing else, and puts an end of it against an atom replaces
@@ -75,7 +76,7 @@ pub(crate) fn keeps_spelling_at_caret(tr: &Transaction) -> bool {
 pub(crate) fn is_spelled_atom(schema: &Schema, node: &Node) -> bool {
     matches!(
         schema.node_type(node.type_id()).name(),
-        md::IMAGE | md::WIKI_LINK | md::RAW_INLINE
+        md::IMAGE | md::WIKI_LINK | md::RAW_INLINE | md::EMOJI
     )
 }
 

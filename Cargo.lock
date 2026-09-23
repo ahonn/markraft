@@ -3959,6 +3959,7 @@ name = "markraft-commonmark"
 version = "0.1.0"
 dependencies = [
  "comrak",
+ "emojis",
  "finl_unicode",
  "markraft-core",
  "scraper",

@@ -325,6 +325,18 @@ pub fn commonmark_html_rules() -> HtmlRules {
             },
         )
         .matching(
+            "span",
+            html_match_fn(|t| {
+                t.attr("data-type") == Some("emoji")
+                    && t.attr("data-code")
+                        .is_some_and(|code| crate::shortcode::emoji(code).is_some())
+            }),
+            HtmlRule::Atom {
+                node_type: md::EMOJI.to_string(),
+                attrs: html_attrs_fn(|t| attrs! {"code" => t.attr("data-code").unwrap_or("")}),
+            },
+        )
+        .matching(
             "a",
             html_match_fn(|t| t.attr("data-type") == Some("wikiLink")),
             HtmlRule::Atom {

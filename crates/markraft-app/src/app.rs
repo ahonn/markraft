@@ -123,6 +123,9 @@ pub struct NotesApp {
     /// What the `[[` menu offers and what the editor asks about each link it
     /// draws, and whether either is out of date.
     links: ui::wiki::Links,
+    /// What every note editor's emoji menu and `:name:` write, shared so the
+    /// preference reaches them all at once.
+    emoji: markraft_gpui::EmojiInsertion,
     /// Whether someone is at the window, which is what the chrome follows.
     presence: Presence,
     /// The window's own size, and the one resize the app asked for.
@@ -231,6 +234,7 @@ impl NotesApp {
         if let Some(platform) = &platform {
             platform.set_traffic_lights_alpha(window, if pointer_inside { 1. } else { 0. }, false);
         }
+        let emoji = markraft_gpui::EmojiInsertion::new(library.preferences.emoji_characters);
         let mut app = Self {
             library,
             persistence: store.map(Persistence::new),
@@ -252,6 +256,7 @@ impl NotesApp {
             quitting: QuitState::default(),
             trashed: Vec::new(),
             links: Default::default(),
+            emoji,
             toolbar: Toolbar::default(),
             format: Cursor::default(),
             dark,

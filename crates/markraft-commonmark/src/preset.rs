@@ -150,6 +150,15 @@ pub fn commonmark_node_rules() -> NodeRules {
         }),
     );
     rules.insert(
+        md::EMOJI.to_string(),
+        rule(|state, node, _, _| {
+            state.text(
+                &crate::shortcode::spelling(attr_str(node, "code", "")),
+                false,
+            );
+        }),
+    );
+    rules.insert(
         md::RAW_INLINE.to_string(),
         rule(|state, node, _, _| {
             state.text(attr_str(node, "source", ""), false);

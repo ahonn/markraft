@@ -77,6 +77,7 @@ enum Change {
     Theme(Option<bool>),
     AutoHeight(bool),
     VimMode(bool),
+    EmojiCharacters(bool),
     RemoteImages(bool),
     LaunchAtLogin(bool),
     /// Empty turns that global shortcut off.
@@ -100,6 +101,7 @@ struct Snapshot {
     theme: Option<bool>,
     auto_height: bool,
     vim: bool,
+    emoji_characters: bool,
     remote_images: bool,
     /// None without the platform layer, which is what answers the question.
     login: Option<bool>,
@@ -156,6 +158,7 @@ impl NotesApp {
             theme: self.library.preferences.dark_mode,
             auto_height: self.library.preferences.auto_height,
             vim: self.library.preferences.vim_mode,
+            emoji_characters: self.library.preferences.emoji_characters,
             remote_images: self.library.preferences.remote_images,
             login: self
                 .platform
@@ -188,6 +191,7 @@ impl NotesApp {
                 self.schedule_save(cx);
             }
             Change::VimMode(enabled) => self.set_vim(enabled, cx),
+            Change::EmojiCharacters(enabled) => self.set_emoji_characters(enabled, cx),
             Change::RemoteImages(enabled) => self.set_remote_images(enabled, cx),
             Change::LaunchAtLogin(enabled) => {
                 if let Some(platform) = &mut self.platform {
@@ -944,6 +948,20 @@ impl SettingsView {
                         self.sender(Change::VimMode),
                     )
                     .into_any_element(),
+                    checkbox(
+                        "emoji-characters",
+                        "Insert emoji as characters",
+                        s.emoji_characters,
+                        false,
+                        p,
+                        self.sender(Change::EmojiCharacters),
+                    )
+                    .into_any_element(),
+                    help(
+                        "Off, the : menu writes shortcodes such as :smile:, as Typora does. \
+                         Obsidian shows those as text.",
+                        p,
+                    ),
                 ],
                 p,
             ),

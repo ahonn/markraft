@@ -1,7 +1,9 @@
 //! Emoji by GitHub shortcode: a `:` menu and `:name:` auto-replace.
 //!
 //! Both read the [`emojis`] table and nothing else, so they carry no host resources and
-//! a host only has to register them.
+//! a host only has to register them. What they write is the host's
+//! [`EmojiInsertion`]: the shortcode, as Typora writes it, which the document kind
+//! draws as its emoji, or the emoji character itself.
 
 use crate::types::DocTypes;
 use crate::{
@@ -11,7 +13,9 @@ use emojis::Emoji;
 use markraft_core::commands::{Command, command, insert_text};
 use markraft_core::projection::Projection;
 use markraft_core::{EditorState, Node};
+use std::cell::Cell;
 use std::ops::Range;
+use std::rc::Rc;
 
 /// The extension id of the `:` menu; it names the edits it makes.
 const EMOJI_MENU: &str = "emoji-menu";
@@ -30,12 +34,44 @@ const LIMIT: usize = 30;
 /// never opens the menu.
 const MIN_QUERY: usize = 2;
 
-/// The `:` emoji menu.
-pub fn emoji_menu() -> Typeahead {
-    Typeahead::new(EMOJI_MENU, COLONS.to_vec(), EmojiProvider).min_query(MIN_QUERY)
+/// What the `:` menu and `:name:` auto-replace write: the shortcode, `:smile:`, or
+/// the emoji character. One value is shared by every editor a host hands it to, so
+/// changing it reaches them all at their next keystroke. Shortcodes by default.
+#[derive(Clone, Default)]
+pub struct EmojiInsertion(Rc<Cell<bool>>);
+
+impl EmojiInsertion {
+    /// Writing emoji characters when `characters` is set, shortcodes otherwise.
+    pub fn new(characters: bool) -> Self {
+        Self(Rc::new(Cell::new(characters)))
+    }
+
+    /// Switch every editor sharing this value between the two.
+    pub fn set_characters(&self, characters: bool) {
+        self.0.set(characters);
+    }
+
+    /// Whether the emoji character is written rather than its shortcode.
+    pub fn characters(&self) -> bool {
+        self.0.get()
+    }
+
+    /// What is written for `emoji`, named by `shortcode`.
+    fn text(&self, emoji: &Emoji, shortcode: &str) -> String {
+        if self.characters() {
+            emoji.as_str().to_owned()
+        } else {
+            format!(":{shortcode}:")
+        }
+    }
 }
 
-struct EmojiProvider;
+/// The `:` emoji menu, writing what `insertion` says.
+pub fn emoji_menu(insertion: EmojiInsertion) -> Typeahead {
+    Typeahead::new(EMOJI_MENU, COLONS.to_vec(), EmojiProvider(insertion)).min_query(MIN_QUERY)
+}
+
+struct EmojiProvider(EmojiInsertion);
 
 impl TypeaheadProvider for EmojiProvider {
     fn items(&self, query: &str) -> Vec<TypeaheadItem> {
@@ -49,9 +85,10 @@ impl TypeaheadProvider for EmojiProvider {
 
     fn accept(&self, item: &TypeaheadItem) -> Command {
         // The trigger run is already gone, so this is the whole of the edit: the caret
-        // lands after the emoji, on a grapheme boundary, with no trailing space.
+        // lands after the emoji or its closing colon, on a grapheme boundary, with no
+        // trailing space.
         match emojis::get_by_shortcode(&item.id) {
-            Some(emoji) => insert_text(emoji.as_str()),
+            Some(emoji) => insert_text(&self.0.text(emoji, &item.id)),
             None => command(|_| None),
         }
     }
@@ -61,7 +98,19 @@ impl TypeaheadProvider for EmojiProvider {
 /// extension rather than part of the menu: it must also fire for a name the menu never
 /// offered, such as the one-letter `:o:`, and the generic typeahead stays free of emoji
 /// knowledge.
-pub struct EmojiShortcodes;
+///
+/// Where the [`EmojiInsertion`] writes shortcodes, it only puts right what a reader
+/// would not take for one — the full-width `：` a Chinese input method types, a name
+/// in the wrong case or with `-` for `_` — and leaves a shortcode already written as
+/// the table spells it alone.
+pub struct EmojiShortcodes(EmojiInsertion);
+
+impl EmojiShortcodes {
+    /// Auto-replace writing what `insertion` says.
+    pub fn new(insertion: EmojiInsertion) -> Self {
+        Self(insertion)
+    }
+}
 
 impl Extension for EmojiShortcodes {
     fn id(&self) -> &'static str {
@@ -78,13 +127,18 @@ impl Extension for EmojiShortcodes {
         }
         let spec = {
             let state = cx.state();
-            let Some((run, emoji)) =
-                closing_shortcode(state, &cx.projection(), cx.types(), cx.head())
+            let projection = cx.projection();
+            let Some((run, emoji, shortcode)) =
+                closing_shortcode(state, &projection, cx.types(), cx.head())
             else {
                 return;
             };
+            let text = self.0.text(emoji, shortcode);
+            if projection.text_between(run.start, run.end) == Some(text.as_str()) {
+                return;
+            }
             let slice = markraft_core::Slice::from_fragment(markraft_core::Fragment::from_node(
-                state.schema().text(emoji),
+                state.schema().text(&text),
             ));
             markraft_core::commands::changes_spec(
                 state,
@@ -101,8 +155,8 @@ impl Extension for EmojiShortcodes {
     }
 }
 
-/// The `:shortcode:` whose closing colon `caret` sits after, and the emoji it stands
-/// for. The opening colon must open the line or follow whitespace, so `10:30:` and
+/// The `:shortcode:` whose closing colon `caret` sits after, the emoji it stands
+/// for, and the shortcode as the table spells it. The opening colon must open the line or follow whitespace, so `10:30:` and
 /// `a:b:` are text; the name must be a whole shortcode; and no part of the run may be
 /// inline code or lie in a verbatim block.
 fn closing_shortcode(
@@ -110,7 +164,7 @@ fn closing_shortcode(
     projection: &Projection,
     types: &DocTypes,
     caret: usize,
-) -> Option<(Range<usize>, &'static str)> {
+) -> Option<(Range<usize>, &'static Emoji, &'static str)> {
     if types.in_verbatim_block_at(state) {
         return None;
     }
@@ -129,29 +183,31 @@ fn closing_shortcode(
     if !is_trigger(open, &COLONS) {
         return None;
     }
-    let emoji = shortcode(projection.text_between(opening + open.chars().count(), closing)?)?;
+    let (emoji, shortcode) =
+        shortcode(projection.text_between(opening + open.chars().count(), closing)?)?;
     let range = opening..caret;
-    (!is_code(state, types, range.start, range.end)).then_some((range, emoji))
+    (!is_code(state, types, range.start, range.end)).then_some((range, emoji, shortcode))
 }
 
-/// The emoji `name` spells exactly, case- and `-`/`_`-insensitively.
-fn shortcode(name: &str) -> Option<&'static str> {
+/// The emoji `name` spells exactly, case- and `-`/`_`-insensitively, and the
+/// shortcode it matched as the table spells it.
+fn shortcode(name: &str) -> Option<(&'static Emoji, &'static str)> {
     if name.is_empty() {
         return None;
     }
     if let Some(emoji) = emojis::get_by_shortcode(name) {
-        return Some(emoji.as_str());
+        let spelled = emoji.shortcodes().find(|shortcode| *shortcode == name)?;
+        return Some((emoji, spelled));
     }
     // Folding costs a scan of the table, which only a name that is not already written
     // the way gemoji writes it pays.
     let query: Vec<u8> = name.bytes().map(fold).collect();
-    emojis::iter()
-        .find(|emoji| {
-            emoji
-                .shortcodes()
-                .any(|shortcode| rank(shortcode, &query) == Some(0))
-        })
-        .map(Emoji::as_str)
+    emojis::iter().find_map(|emoji| {
+        let spelled = emoji
+            .shortcodes()
+            .find(|shortcode| rank(shortcode, &query) == Some(0))?;
+        Some((emoji, spelled))
+    })
 }
 
 /// Whether any of `from..to` carries the code or the math mark: an emoji must not
@@ -262,6 +318,7 @@ mod tests {
         let types = crate::typeahead::tests::types_of(state);
         let state = at(state, caret);
         closing_shortcode(&state, &projection_of(&state), &types, caret)
+            .map(|(range, emoji, _)| (range, emoji.as_str()))
     }
 
     fn found(text: &str) -> Option<String> {
@@ -376,21 +433,26 @@ mod tests {
             .offset_to_pos("<div>\n:smile:".chars().count())
             .expect("an offset inside the block");
         assert!(found_in(&state, caret).is_none());
-        // Code that merely abuts the run does not stop it.
-        let state = state_of("`x` :smile:");
+        // Code that merely abuts the run does not stop it. Typed, since a shortcode
+        // read from a file is the emoji's atom rather than text.
+        let state = run(&state_of(""), &insert_text("`x` :smile:"));
         let caret = projection_of(&state).lines()[0].to();
         assert_eq!(found_in(&state, caret).map(|(_, emoji)| emoji), Some("😄"));
     }
 
-    /// The transaction [`EmojiShortcodes`] runs, driven directly on the state.
+    /// The transaction [`EmojiShortcodes`] runs where it writes characters, driven
+    /// directly on the state.
     fn replace(text: &str) -> EditorState {
         let state = run(&state_of(""), &insert_text(text));
         let types = crate::typeahead::tests::types_of(&state);
         let caret = state.selection().head(state.doc());
-        let (run_range, emoji) = closing_shortcode(&state, &projection_of(&state), &types, caret)
-            .expect("a shortcode at the caret");
+        let (run_range, emoji, shortcode) =
+            closing_shortcode(&state, &projection_of(&state), &types, caret)
+                .expect("a shortcode at the caret");
         let slice = markraft_core::Slice::from_fragment(markraft_core::Fragment::from_node(
-            state.schema().text(emoji),
+            state
+                .schema()
+                .text(&EmojiInsertion::new(true).text(emoji, shortcode)),
         ));
         let spec = markraft_core::commands::changes_spec(
             &state,
@@ -408,12 +470,16 @@ mod tests {
             .clone()
     }
 
+    fn markdown(state: &EditorState) -> String {
+        markraft_commonmark::to_markdown(state.schema(), state.doc())
+    }
+
     #[test]
     fn auto_replace_is_one_undo_step_that_restores_the_literal_text() {
         let state = replace("hi :smile:");
         assert_eq!(projection_of(&state).plain_text(), "hi 😄");
         let state = run(&state, &command(markraft_core::history::undo));
-        assert_eq!(projection_of(&state).plain_text(), "hi :smile:");
+        assert_eq!(markdown(&state), "hi :smile:");
         // The entry before it is the typing itself, so exactly one step was added.
         let state = run(&state, &command(markraft_core::history::undo));
         assert_eq!(projection_of(&state).plain_text(), "");
@@ -434,7 +500,7 @@ mod tests {
         }
     }
 
-    /// The literal text is back after an undo, so only the user event keeps the
+    /// The shortcode is back after an undo, so only the user event keeps the
     /// replacement from firing again on the undo's own change.
     #[test]
     fn undoing_is_not_typing_and_leaves_no_shortcode_to_replace_again() {
@@ -443,9 +509,7 @@ mod tests {
         let tr = state.update([spec]).expect("the undo applies");
         assert!(tr.is_user_event("undo"));
         assert!(!tr.is_user_event("input.type"));
-        let state = tr.state().clone();
-        let caret = state.selection().head(state.doc());
-        assert!(found_in(&state, caret).is_some());
+        assert_eq!(markdown(tr.state()), ":smile:");
     }
 
     /// The replacement's own change must not arm it again.
@@ -509,6 +573,29 @@ mod tests {
         assert!(is_code(&state, &types, 4, 6));
         assert!(is_code(&state, &types, 6, 7));
         assert!(!is_code(&state, &types, 7, 9));
+    }
+
+    /// Where shortcodes are written, what the closing colon puts right is the
+    /// spelling alone.
+    #[test]
+    fn a_shortcode_is_written_as_the_table_spells_it() {
+        let shortcodes = EmojiInsertion::default();
+        let written = |name: &str| {
+            let (emoji, shortcode) = shortcode(name).expect("a shortcode");
+            shortcodes.text(emoji, shortcode)
+        };
+        assert_eq!(written("smile"), ":smile:");
+        assert_eq!(written("SMILE"), ":smile:");
+        assert_eq!(written("T_REX"), ":t-rex:");
+        // An alias stays the alias it is.
+        assert_eq!(written("satisfied"), ":satisfied:");
+        let characters = EmojiInsertion::new(true);
+        let (emoji, code) = shortcode("smile").unwrap();
+        assert_eq!(characters.text(emoji, code), "😄");
+        // The value is shared: switching one handle switches its clones.
+        let clone = shortcodes.clone();
+        shortcodes.set_characters(true);
+        assert!(clone.characters());
     }
 
     #[test]

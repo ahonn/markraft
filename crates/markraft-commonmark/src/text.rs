@@ -154,6 +154,13 @@ fn leaf_text(schema: &Schema, node: &Node) -> String {
             let (target, alias) = (attr("target"), attr("alias"));
             crate::wiki::label(target.trim(), alias.trim()).to_string()
         }
+        // What a reader sees; an unknown name, which the reader never makes
+        // an atom of, reads as its spelling.
+        md::EMOJI => {
+            let code = attr("code");
+            crate::shortcode::emoji(&code)
+                .map_or_else(|| crate::shortcode::spelling(&code), str::to_string)
+        }
         _ => String::new(),
     }
 }

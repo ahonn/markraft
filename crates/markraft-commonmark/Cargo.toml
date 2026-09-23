@@ -10,6 +10,7 @@ license.workspace = true
 [dependencies]
 markraft-core = { workspace = true }
 comrak = { version = "0.55.0", default-features = false }
+emojis = "0.9"
 scraper = { version = "0.24", default-features = false }
 finl_unicode = { version = "1.4.0", default-features = false, features = ["categories"] }
 unicode-width = { version = "0.2", default-features = false }

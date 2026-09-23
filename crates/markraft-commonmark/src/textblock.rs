@@ -293,6 +293,7 @@ pub(crate) fn atom_spelling(schema: &Schema, node: &Node) -> String {
         }
         .source(),
         md::RAW_INLINE => attr("source"),
+        md::EMOJI => crate::shortcode::spelling(&attr("code")),
         _ => OBJECT_REPLACEMENT.to_string(),
     }
 }
