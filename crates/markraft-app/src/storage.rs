@@ -80,6 +80,19 @@ pub struct Preferences {
     /// Whether notes fetch the remote images they show. Settings files written
     /// before it existed deserialize to the default, on.
     pub remote_images: bool,
+    /// The note's body text size in points; headings and spacing scale with it.
+    pub text_size: f32,
+    /// Hide the note when another app becomes active, for quick capture.
+    pub hide_on_deactivate: bool,
+    /// Keep the note above other apps' windows.
+    pub always_on_top: bool,
+    /// The global shortcut that opens a new note. Empty turns it off.
+    pub new_note_hotkey: String,
+}
+
+impl Preferences {
+    pub const DEFAULT_TEXT_SIZE: f32 = 14.;
+    pub const TEXT_SIZES: std::ops::RangeInclusive<f32> = 11.0..=24.0;
 }
 
 impl Default for Preferences {
@@ -91,6 +104,10 @@ impl Default for Preferences {
             window_bounds: None,
             vim_mode: false,
             remote_images: true,
+            text_size: Self::DEFAULT_TEXT_SIZE,
+            hide_on_deactivate: false,
+            always_on_top: true,
+            new_note_hotkey: String::new(),
         }
     }
 }

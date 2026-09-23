@@ -1,6 +1,7 @@
-//! The Settings window: an ordinary, resizable window of its own beside the floating
-//! note. Pages are chosen from a row of icons under the title, the way macOS settings
-//! windows have it; each page is cards of rows, laid out like cmdspace's.
+//! The Settings window: a window of its own beside the floating note, drawn the way a
+//! classic macOS settings window is. Pages are chosen from a row of icons under the
+//! title; each page is a form of right-aligned labels; the window keeps its width and
+//! takes the height of the page on screen.
 //!
 //! The preferences still belong to [`NotesApp`]: the window holds no copy of them. It
 //! reads what the app holds each frame and hands every change back as a [`Change`],
@@ -18,11 +19,15 @@ mod controls;
 mod shortcut;
 
 use super::*;
+use crate::platform::Shortcut;
+use crate::storage::Preferences;
 use controls::{
-    ChordFace, Palette, Row, button, chord_face, metrics::*, section, segmented, switch,
+    ChordFace, Palette, button, checkbox, chord_face, divider, error, help, line, metrics::*, row,
+    segmented, stepper, value,
 };
 use gpui_base::{Tab, Tabs};
 use shortcut::Recorded;
+use std::{cell::Cell, rc::Rc};
 
 actions!(
     markraft_settings,
@@ -35,10 +40,11 @@ actions!(
     ]
 );
 
-const WIDTH: f32 = 560.;
-const HEIGHT: f32 = 480.;
-const MIN_WIDTH: f32 = 480.;
-const MIN_HEIGHT: f32 = 360.;
+const WIDTH: f32 = 520.;
+/// Where the window starts before the first page has been measured.
+const HEIGHT: f32 = 420.;
+/// Past this the page scrolls rather than the window growing.
+const MAX_HEIGHT: f32 = 720.;
 const KEY_CONTEXT: &str = "MarkraftSettings";
 const TOOLBAR_CONTEXT: &str = "MarkraftSettingsToolbar";
 const DEFAULT_SHORTCUT: &str = "Alt+N";
@@ -59,7 +65,8 @@ pub(in crate::app) fn bind_keys(cx: &mut App) {
 /// that asked can say so. Cleared as each one is asked again, and when the window goes.
 #[derive(Clone, Default)]
 pub(in crate::app) struct SettingsErrors {
-    shortcut: Option<String>,
+    /// By [`Shortcut`]: the shortcut that shows the note, then the one for a new note.
+    shortcuts: [Option<String>; 2],
     login: Option<String>,
     new_notes: Option<String>,
     images: Option<String>,
@@ -72,10 +79,13 @@ enum Change {
     VimMode(bool),
     RemoteImages(bool),
     LaunchAtLogin(bool),
-    /// Empty turns the global shortcut off.
-    Shortcut(String),
-    /// The recorder opening or closing: the running shortcut is let go of meanwhile.
+    /// Empty turns that global shortcut off.
+    Shortcut(Shortcut, String),
+    /// A recorder opening or closing: the running shortcuts are let go of meanwhile.
     Recording(bool),
+    TextSize(f32),
+    HideOnDeactivate(bool),
+    AlwaysOnTop(bool),
     ChooseFolder,
     NewNoteLocation,
     ResetNewNoteLocation,
@@ -93,7 +103,10 @@ struct Snapshot {
     remote_images: bool,
     /// None without the platform layer, which is what answers the question.
     login: Option<bool>,
-    shortcut: String,
+    shortcuts: [String; 2],
+    text_size: f32,
+    hide_on_deactivate: bool,
+    always_on_top: bool,
     folder: Option<PathBuf>,
     /// Where new notes and images go, and whether that is other than the default.
     new_notes: Option<(String, bool)>,
@@ -149,7 +162,13 @@ impl NotesApp {
                 .as_ref()
                 .filter(|_| login)
                 .map(|platform| platform.launch_at_login_enabled()),
-            shortcut: self.library.preferences.hotkey.clone(),
+            shortcuts: [
+                self.library.preferences.hotkey.clone(),
+                self.library.preferences.new_note_hotkey.clone(),
+            ],
+            text_size: self.library.preferences.text_size,
+            hide_on_deactivate: self.library.preferences.hide_on_deactivate,
+            always_on_top: self.library.preferences.always_on_top,
             folder: self.path.clone(),
             new_notes,
             images,
@@ -175,31 +194,50 @@ impl NotesApp {
                     self.settings_errors.login = platform.set_launch_at_login(enabled).err();
                 }
             }
-            Change::Shortcut(shortcut) => {
+            Change::Shortcut(which, shortcut) => {
                 if let Some(platform) = &mut self.platform {
-                    match platform.set_shortcut(&shortcut) {
+                    let index = which as usize;
+                    match platform.set_shortcut(which, &shortcut) {
                         Ok(()) => {
-                            self.library.preferences.hotkey = shortcut;
-                            self.settings_errors.shortcut = None;
+                            let preferences = &mut self.library.preferences;
+                            match which {
+                                Shortcut::Toggle => preferences.hotkey = shortcut,
+                                Shortcut::NewNote => preferences.new_note_hotkey = shortcut,
+                            }
+                            self.settings_errors.shortcuts[index] = None;
                             self.feedback.set_platform_error(None);
                             self.schedule_save(cx);
                         }
-                        Err(error) => self.settings_errors.shortcut = Some(error),
+                        Err(error) => self.settings_errors.shortcuts[index] = Some(error),
                     }
                 }
             }
             Change::Recording(true) => {
-                self.settings_errors.shortcut = None;
+                self.settings_errors.shortcuts = Default::default();
                 if let Some(platform) = &mut self.platform {
-                    platform.suspend_shortcut();
+                    platform.suspend_shortcuts();
                 }
             }
             Change::Recording(false) => {
                 if let Some(platform) = &mut self.platform
-                    && let Err(error) = platform.resume_shortcut()
+                    && let Err(error) = platform.resume_shortcuts()
                 {
-                    self.settings_errors.shortcut = Some(error);
+                    self.settings_errors.shortcuts[0] = Some(error);
                 }
+            }
+            Change::TextSize(size) => self.set_text_size(size, cx),
+            Change::HideOnDeactivate(enabled) => {
+                self.library.preferences.hide_on_deactivate = enabled;
+                self.schedule_save(cx);
+            }
+            Change::AlwaysOnTop(enabled) => {
+                self.library.preferences.always_on_top = enabled;
+                if let Some(platform) = &self.platform
+                    && let Err(error) = platform.set_always_on_top(window, enabled)
+                {
+                    self.feedback.set_platform_error(Some(error));
+                }
+                self.schedule_save(cx);
             }
             Change::ChooseFolder => self.choose_folder(window, cx),
             Change::NewNoteLocation => {
@@ -234,7 +272,7 @@ impl NotesApp {
     fn settings_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_errors = SettingsErrors::default();
         if let Some(platform) = &mut self.platform {
-            if let Err(error) = platform.resume_shortcut() {
+            if let Err(error) = platform.resume_shortcuts() {
                 self.feedback.set_platform_error(Some(error));
             }
             if !platform.is_visible(window) {
@@ -347,9 +385,9 @@ fn create(
         show: true,
         kind: WindowKind::Normal,
         is_movable: true,
-        is_resizable: true,
+        // A settings window keeps its width; its height follows the page.
+        is_resizable: false,
         is_minimizable: true,
-        window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
         window_background: WindowBackgroundAppearance::Opaque,
         ..Default::default()
     };
@@ -452,24 +490,38 @@ pub(in crate::app) struct SettingsView {
     page: Page,
     /// The toolbar, which the window opens on, so ← and → move between pages.
     toolbar: FocusHandle,
-    recorder: FocusHandle,
-    recording: bool,
+    /// One field for each global shortcut, by [`Shortcut`].
+    recorders: [FocusHandle; 2],
+    /// The shortcut whose field is listening.
+    recording: Option<Shortcut>,
     /// Why the chord just pressed cannot be a global shortcut. Said under the field,
     /// which stays open for another try.
     refusal: Option<&'static str>,
-    /// Set between a press on the title band or toolbar and the first drag; the move blocks
-    /// until the drag ends, so it must not start on the press itself.
+    /// Set between a press on the title band or toolbar and the first drag; the move
+    /// blocks until the drag ends, so it must not start on the press itself.
     moving: bool,
     scroll: ScrollHandle,
+    /// The page's own height as last laid out, and the window height last asked for,
+    /// so the window follows the page without asking twice for the same height.
+    page_height: Rc<Cell<f32>>,
+    fitted: Rc<Cell<f32>>,
+    /// Set while AppKit animates the window to a new height. GPUI draws each step of
+    /// it, so a page chosen meanwhile is measured mid-animation; its fit waits for the
+    /// frame drawn once this one has settled rather than starting a second animation
+    /// inside the first.
+    fitting: Rc<Cell<bool>>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl SettingsView {
     fn new(app: Entity<NotesApp>, link: Link, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let recorder = cx.focus_handle().tab_stop(true);
+        let recorders = [
+            cx.focus_handle().tab_stop(true),
+            cx.focus_handle().tab_stop(true),
+        ];
         let own = window.window_handle();
         let this = cx.entity().downgrade();
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.observe(&app, |_, _, cx| cx.notify()),
             // Ahead of every binding, so a listening recorder hears ⌘W or Tab as part
             // of a chord rather than as the window's own command.
@@ -484,7 +536,6 @@ impl SettingsView {
                     cx.stop_propagation();
                 }
             }),
-            cx.on_focus_out(&recorder, window, |view, _, _, cx| view.stop_recording(cx)),
             cx.observe_window_activation(window, |view, window, cx| {
                 if !window.is_window_active() {
                     view.stop_recording(cx);
@@ -492,26 +543,29 @@ impl SettingsView {
             }),
             // However the view goes, a shortcut it let go of comes back.
             cx.on_release(|view, cx| {
-                if view.recording {
+                if view.recording.is_some() {
                     view.link.send(Change::Recording(false), cx);
                 }
             }),
         ];
+        for recorder in &recorders {
+            subscriptions
+                .push(cx.on_focus_out(recorder, window, |view, _, _, cx| view.stop_recording(cx)));
+        }
         Self {
             link,
             page: Page::General,
             toolbar: cx.focus_handle().tab_stop(true),
-            recorder,
-            recording: false,
+            recorders,
+            recording: None,
             refusal: None,
             moving: false,
             scroll: ScrollHandle::new(),
+            page_height: Rc::default(),
+            fitted: Rc::default(),
+            fitting: Rc::default(),
             _subscriptions: subscriptions,
         }
-    }
-
-    fn send(&self, change: Change, cx: &mut App) {
-        self.link.send(change, cx);
     }
 
     /// A listener for a control: the change it makes, from the value it reports.
@@ -538,45 +592,47 @@ impl SettingsView {
         }
     }
 
-    /// One keystroke while the recorder listens; false leaves it to the window.
+    /// One keystroke while a recorder listens; false leaves it to the window.
     fn intercept(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> bool {
-        if !self.recording {
+        let Some(which) = self.recording else {
             return false;
-        }
+        };
         match shortcut::record(keystroke) {
             Recorded::Waiting => {}
             Recorded::Cancelled => self.stop_recording(cx),
-            Recorded::Cleared => self.commit(String::new(), cx),
-            Recorded::Bound(chord) => self.commit(chord, cx),
+            Recorded::Cleared => self.commit(which, String::new(), cx),
+            Recorded::Bound(chord) => self.commit(which, chord, cx),
             Recorded::Refused(reason) => self.refusal = Some(reason),
         }
         cx.notify();
         true
     }
 
-    fn start_recording(&mut self, cx: &mut Context<Self>) {
-        if !self.recording {
-            self.recording = true;
-            self.refusal = None;
-            self.send(Change::Recording(true), cx);
-            cx.notify();
+    fn start_recording(&mut self, which: Shortcut, cx: &mut Context<Self>) {
+        if self.recording == Some(which) {
+            return;
         }
+        let already = self.recording.replace(which).is_some();
+        self.refusal = None;
+        if !already {
+            self.link.send(Change::Recording(true), cx);
+        }
+        cx.notify();
     }
 
     fn stop_recording(&mut self, cx: &mut Context<Self>) {
-        if self.recording {
-            self.recording = false;
+        if self.recording.take().is_some() {
             self.refusal = None;
-            self.send(Change::Recording(false), cx);
+            self.link.send(Change::Recording(false), cx);
             cx.notify();
         }
     }
 
-    /// Registering the chord is also what takes the suspended shortcut back.
-    fn commit(&mut self, shortcut: String, cx: &mut Context<Self>) {
-        self.recording = false;
+    /// Registering the chord is also what takes the suspended shortcuts back.
+    fn commit(&mut self, which: Shortcut, shortcut: String, cx: &mut Context<Self>) {
+        self.recording = None;
         self.refusal = None;
-        self.send(Change::Shortcut(shortcut), cx);
+        self.link.send(Change::Shortcut(which, shortcut), cx);
     }
 
     /// Escape and ⌘W. Removed from a later turn: this runs inside the dispatch of the
@@ -685,227 +741,343 @@ impl SettingsView {
             }))
     }
 
-    fn general(&self, s: &Snapshot, p: Palette, cx: &mut Context<Self>) -> Vec<Div> {
-        let appearance = Row::new("Theme")
-            .description("Follow the system, or keep one look.")
-            .trailing(segmented(
-                "appearance",
-                "Appearance",
-                &[("Auto", None), ("Light", Some(false)), ("Dark", Some(true))],
-                s.theme,
-                p,
-                self.sender(Change::Theme),
-            ))
-            .render(p);
-
-        let bound = !s.shortcut.trim().is_empty();
-        let face = if self.recording {
+    /// The field for one global shortcut: its chord, or the recorder listening for one.
+    /// A click or Space starts it; the next chord pressed replaces the shortcut.
+    fn shortcut_field(
+        &self,
+        which: Shortcut,
+        chord: &str,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let bound = !chord.trim().is_empty();
+        let face = if self.recording == Some(which) {
             ChordFace::Recording
         } else if bound {
-            ChordFace::Bound(shortcut::glyphs(&s.shortcut))
+            ChordFace::Bound(shortcut::glyphs(chord))
         } else {
             ChordFace::Unbound
         };
-        let field = div()
-            .id("shortcut-field")
-            .track_focus(&self.recorder)
+        let name = match which {
+            Shortcut::Toggle => "Show and hide shortcut",
+            Shortcut::NewNote => "New note shortcut",
+        };
+        div()
+            .id(SharedString::from(format!("shortcut-{}", which as usize)))
+            .track_focus(&self.recorders[which as usize])
             .role(Role::Button)
             .aria_label(if bound {
-                format!("Global shortcut, {}", s.shortcut)
+                format!("{name}, {chord}")
             } else {
-                "Global shortcut, none".to_owned()
+                format!("{name}, none")
             })
             .cursor_pointer()
-            .on_click(cx.listener(|view, _, window, cx| {
-                window.focus(&view.recorder, cx);
-                view.start_recording(cx);
+            .on_click(cx.listener(move |view, _, window, cx| {
+                window.focus(&view.recorders[which as usize], cx);
+                view.start_recording(which, cx);
             }))
-            .child(chord_face(face, p));
-        let hint = if self.recording {
-            Some("Press the new shortcut. Esc cancels; ⌫ turns it off.")
-        } else {
-            None
-        };
-        let error = self
-            .refusal
-            .map(ToOwned::to_owned)
-            .or_else(|| s.errors.shortcut.clone());
-        let mut shortcut = Row::new("Show and hide Markraft")
-            .description("Works from any app.")
-            .hint(hint)
-            .error(error);
-        if s.shortcut != DEFAULT_SHORTCUT && !self.recording {
-            shortcut = shortcut.trailing(button(
-                "reset-shortcut",
-                "Reset",
-                p,
-                self.on_click(Change::Shortcut(DEFAULT_SHORTCUT.into())),
-            ));
-        }
-        let shortcut = shortcut.trailing(field).render(p);
+            .child(chord_face(face, p))
+            .into_any_element()
+    }
 
-        let login = Row::new("Launch at login")
-            .description("Keep Markraft in the menu bar after you log in.")
-            .error(s.errors.login.clone())
-            .disabled(s.login.is_none())
-            .trailing(switch(
+    /// The lines under a shortcut field: while it listens, how to answer it; after a
+    /// refusal, why.
+    fn shortcut_notes(&self, which: Shortcut, s: &Snapshot, p: Palette) -> Vec<AnyElement> {
+        let mut notes = Vec::new();
+        if self.recording == Some(which) {
+            notes.push(help(
+                "Press the new shortcut. Esc cancels; ⌫ turns it off.",
+                p,
+            ));
+            if let Some(refusal) = self.refusal {
+                notes.push(error(refusal, p));
+            }
+        } else if let Some(refused) = &s.errors.shortcuts[which as usize] {
+            notes.push(error(refused.clone(), p));
+        }
+        notes
+    }
+
+    fn general(&self, s: &Snapshot, p: Palette, cx: &mut Context<Self>) -> Vec<Div> {
+        let theme = segmented(
+            "appearance",
+            "Appearance",
+            &[("Auto", None), ("Light", Some(false)), ("Dark", Some(true))],
+            s.theme,
+            p,
+            self.sender(Change::Theme),
+        );
+
+        let [toggle, new_note] = &s.shortcuts;
+        let mut toggle_line = vec![self.shortcut_field(Shortcut::Toggle, toggle, p, cx)];
+        if toggle != DEFAULT_SHORTCUT && self.recording != Some(Shortcut::Toggle) {
+            toggle_line.push(
+                button(
+                    "reset-shortcut",
+                    "Reset",
+                    p,
+                    self.on_click(Change::Shortcut(Shortcut::Toggle, DEFAULT_SHORTCUT.into())),
+                )
+                .into_any_element(),
+            );
+        }
+        let mut toggle_lines = vec![line(toggle_line)];
+        toggle_lines.extend(self.shortcut_notes(Shortcut::Toggle, s, p));
+
+        let mut new_note_line = vec![self.shortcut_field(Shortcut::NewNote, new_note, p, cx)];
+        if !new_note.is_empty() && self.recording != Some(Shortcut::NewNote) {
+            new_note_line.push(
+                button(
+                    "clear-new-note-shortcut",
+                    "Clear",
+                    p,
+                    self.on_click(Change::Shortcut(Shortcut::NewNote, String::new())),
+                )
+                .into_any_element(),
+            );
+        }
+        let mut new_note_lines = vec![line(new_note_line)];
+        new_note_lines.extend(self.shortcut_notes(Shortcut::NewNote, s, p));
+        new_note_lines.push(help("Both work from any app.", p));
+
+        let mut startup = vec![
+            checkbox(
                 "launch-at-login",
                 "Launch at login",
                 s.login.unwrap_or(false),
+                s.login.is_none(),
                 p,
-                cx,
                 self.sender(Change::LaunchAtLogin),
-            ))
-            .render(p);
+            )
+            .into_any_element(),
+        ];
+        if let Some(refused) = &s.errors.login {
+            startup.push(error(refused.clone(), p));
+        }
+        startup.push(help(
+            "Markraft stays in the menu bar while the note is hidden.",
+            p,
+        ));
 
         vec![
-            section("Appearance", vec![appearance], None, p),
-            section("Global shortcut", vec![shortcut], None, p),
-            section(
-                "Startup",
-                vec![login],
-                Some(
-                    "Settings are kept on this Mac. Closing the note keeps Markraft running."
-                        .into(),
-                ),
+            row(
+                Some("Appearance"),
+                vec![line(vec![theme.into_any_element()])],
                 p,
             ),
+            divider(p),
+            row(Some("Show and hide"), toggle_lines, p),
+            row(Some("New note"), new_note_lines, p),
+            divider(p),
+            row(
+                Some("Note window"),
+                vec![
+                    checkbox(
+                        "always-on-top",
+                        "Keep above other windows",
+                        s.always_on_top,
+                        false,
+                        p,
+                        self.sender(Change::AlwaysOnTop),
+                    )
+                    .into_any_element(),
+                    checkbox(
+                        "hide-on-deactivate",
+                        "Hide when another app is used",
+                        s.hide_on_deactivate,
+                        false,
+                        p,
+                        self.sender(Change::HideOnDeactivate),
+                    )
+                    .into_any_element(),
+                ],
+                p,
+            ),
+            row(Some("Startup"), startup, p),
         ]
     }
 
-    fn editor(&self, s: &Snapshot, p: Palette, cx: &mut Context<Self>) -> Vec<Div> {
-        let vim = Row::new("Vim mode")
-            .description("Modal editing in every note.")
-            .trailing(switch(
-                "vim-mode",
-                "Vim mode",
-                s.vim,
+    fn editor(&self, s: &Snapshot, p: Palette) -> Vec<Div> {
+        let range = Preferences::TEXT_SIZES;
+        let size = s.text_size;
+        let link = self.link.clone();
+        let mut size_line = vec![
+            stepper(
+                "text-size",
+                format!("{size:.0} pt"),
+                (size > *range.start(), size < *range.end()),
                 p,
-                cx,
-                self.sender(Change::VimMode),
-            ))
-            .render(p);
-        let grow = Row::new("Grow with content")
-            .description("The note's window grows with what you write.")
-            .trailing(switch(
-                "auto-height",
-                "Grow with content",
-                s.auto_height,
-                p,
-                cx,
-                self.sender(Change::AutoHeight),
-            ))
-            .render(p);
-        let remote = Row::new("Load remote images")
-            .description(
-                "Show pictures a note links from the web. Opening the note tells their server.",
+                move |delta, _, cx| link.send(Change::TextSize(size + delta as f32), cx),
             )
-            .trailing(switch(
-                "remote-images",
-                "Load remote images",
-                s.remote_images,
-                p,
-                cx,
-                self.sender(Change::RemoteImages),
-            ))
-            .render(p);
+            .into_any_element(),
+        ];
+        if size != Preferences::DEFAULT_TEXT_SIZE {
+            size_line.push(
+                button(
+                    "reset-text-size",
+                    "Default",
+                    p,
+                    self.on_click(Change::TextSize(Preferences::DEFAULT_TEXT_SIZE)),
+                )
+                .into_any_element(),
+            );
+        }
         vec![
-            section(
-                "Editing",
-                vec![vim, grow],
-                Some("Resizing the note by hand turns growing off.".into()),
+            row(
+                Some("Text size"),
+                vec![
+                    line(size_line),
+                    help("⌘+ and ⌘− change it from the note; ⌘0 puts it back.", p),
+                ],
                 p,
             ),
-            section("Images", vec![remote], None, p),
+            divider(p),
+            row(
+                Some("Editing"),
+                vec![
+                    checkbox(
+                        "vim-mode",
+                        "Vim mode",
+                        s.vim,
+                        false,
+                        p,
+                        self.sender(Change::VimMode),
+                    )
+                    .into_any_element(),
+                ],
+                p,
+            ),
+            row(
+                Some("Window height"),
+                vec![
+                    checkbox(
+                        "auto-height",
+                        "Grow with the note",
+                        s.auto_height,
+                        false,
+                        p,
+                        self.sender(Change::AutoHeight),
+                    )
+                    .into_any_element(),
+                    help("Resizing the note by hand turns this off.", p),
+                ],
+                p,
+            ),
+            divider(p),
+            row(
+                Some("Web images"),
+                vec![
+                    checkbox(
+                        "remote-images",
+                        "Load images linked from the web",
+                        s.remote_images,
+                        false,
+                        p,
+                        self.sender(Change::RemoteImages),
+                    )
+                    .into_any_element(),
+                    help("Loading one tells the server it comes from.", p),
+                ],
+                p,
+            ),
         ]
     }
 
     fn notes(&self, s: &Snapshot, p: Palette) -> Vec<Div> {
         let click = |change: Change| self.on_click(change);
         let folder = match &s.folder {
-            Some(path) => Row::new(
-                path.file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string()),
-            )
-            .description(home_relative(path))
-            .single_line()
-            .trailing(button(
-                "reveal-folder",
-                "Show in Finder",
-                p,
-                click(Change::RevealFolder),
-            ))
-            .trailing(button(
-                "change-folder",
-                "Change…",
-                p,
-                click(Change::ChooseFolder),
-            )),
-            None => Row::new("No folder")
-                .description("Editing individual files.")
-                .trailing(button(
-                    "change-folder",
-                    "Open Folder…",
+            Some(path) => vec![
+                value(
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string()),
+                    false,
                     p,
-                    click(Change::ChooseFolder),
-                )),
-        }
-        .render(p);
-        let mut sections = vec![section(
-            "Notes folder",
-            vec![folder],
-            Some("Documents/Markraft by default. Any Markdown folder works, an Obsidian vault included.".into()),
+                ),
+                value(home_relative(path), true, p),
+                line(vec![
+                    button("change-folder", "Change…", p, click(Change::ChooseFolder))
+                        .into_any_element(),
+                    button(
+                        "reveal-folder",
+                        "Show in Finder",
+                        p,
+                        click(Change::RevealFolder),
+                    )
+                    .into_any_element(),
+                ]),
+            ],
+            None => vec![
+                value("None — editing individual files", false, p),
+                line(vec![
+                    button(
+                        "change-folder",
+                        "Open Folder…",
+                        p,
+                        click(Change::ChooseFolder),
+                    )
+                    .into_any_element(),
+                ]),
+            ],
+        };
+        let mut folder = folder;
+        folder.push(help(
+            "Documents/Markraft by default. Any Markdown folder works, an Obsidian vault \
+             included.",
             p,
-        )];
+        ));
+        let mut page = vec![row(Some("Notes folder"), folder, p)];
 
-        let location = |label: &'static str,
-                        id: &'static str,
+        let location = |id: &'static str,
                         (place, custom): &(String, bool),
                         change: Change,
                         reset: Change,
-                        error: &Option<String>| {
-            let mut row = Row::new(label)
-                .description(place.clone())
-                .single_line()
-                .error(error.clone());
+                        refused: &Option<String>| {
+            let mut controls = vec![
+                value(place.clone(), false, p),
+                button(id, "Change…", p, click(change)).into_any_element(),
+            ];
             if *custom {
-                row = row.trailing(button(
-                    SharedString::from(format!("reset-{id}")),
-                    "Reset",
-                    p,
-                    click(reset),
-                ));
+                controls.push(
+                    button(
+                        SharedString::from(format!("reset-{id}")),
+                        "Reset",
+                        p,
+                        click(reset),
+                    )
+                    .into_any_element(),
+                );
             }
-            row.trailing(button(id, "Change…", p, click(change)))
-                .render(p)
+            let mut lines = vec![line(controls)];
+            if let Some(refused) = refused {
+                lines.push(error(refused.clone(), p));
+            }
+            lines
         };
         if let (Some(new_notes), Some(images)) = (&s.new_notes, &s.images) {
-            sections.push(section(
-                "Locations",
-                vec![
-                    location(
-                        "New notes",
-                        "new-note-location",
-                        new_notes,
-                        Change::NewNoteLocation,
-                        Change::ResetNewNoteLocation,
-                        &s.errors.new_notes,
-                    ),
-                    location(
-                        "Images",
-                        "image-location",
-                        images,
-                        Change::ImageLocation,
-                        Change::ResetImageLocation,
-                        &s.errors.images,
-                    ),
-                ],
-                Some("Both are folders inside the notes folder.".into()),
+            page.push(divider(p));
+            page.push(row(
+                Some("New notes"),
+                location(
+                    "new-note-location",
+                    new_notes,
+                    Change::NewNoteLocation,
+                    Change::ResetNewNoteLocation,
+                    &s.errors.new_notes,
+                ),
                 p,
             ));
+            let mut images = location(
+                "image-location",
+                images,
+                Change::ImageLocation,
+                Change::ResetImageLocation,
+                &s.errors.images,
+            );
+            images.push(help("Both are folders inside the notes folder.", p));
+            page.push(row(Some("Images"), images, p));
         }
-        sections
+        page
     }
 }
 
@@ -920,11 +1092,15 @@ impl Render for SettingsView {
             return div();
         };
         let p = Palette::new(snapshot.dark);
-        let sections = match self.page {
+        let rows = match self.page {
             Page::General => self.general(&snapshot, p, cx),
-            Page::Editor => self.editor(&snapshot, p, cx),
+            Page::Editor => self.editor(&snapshot, p),
             Page::Notes => self.notes(&snapshot, p),
         };
+        let page_height = self.page_height.clone();
+        let measured = page_height.clone();
+        let fitted = self.fitted.clone();
+        let fitting = self.fitting.clone();
         div()
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::close))
@@ -936,6 +1112,39 @@ impl Render for SettingsView {
             .bg(p.surface)
             .text_color(p.text)
             .font_family(".SystemUIFont")
+            // The header and the page have both been laid out by now: the window takes
+            // their height, from a later turn because AppKit resizes it.
+            .on_children_prepainted(move |bounds, window, cx| {
+                let Some(header) = bounds.first() else {
+                    return;
+                };
+                let wanted = (f32::from(header.size.height) + measured.get())
+                    .round()
+                    .min(MAX_HEIGHT);
+                if measured.get() <= 0. || (wanted - fitted.get()).abs() < 1. || fitting.get() {
+                    return;
+                }
+                let animate = fitted.get() > 0. && !cx.reduce_motion();
+                fitted.set(wanted);
+                fitting.set(true);
+                let fitting = fitting.clone();
+                let handle = window.window_handle();
+                // From a task rather than inside an update: AppKit resizes the window
+                // on the spot, and GPUI only hears of each size while the app is free.
+                cx.spawn(async move |cx| {
+                    let native = handle
+                        .update(cx, |_, window, _| crate::platform::NativeWindow::of(window))
+                        .ok()
+                        .flatten();
+                    if let Some(native) = native {
+                        native.fit_height(wanted, animate);
+                    }
+                    fitting.set(false);
+                    // A page chosen while the window moved is fitted from this frame.
+                    let _ = handle.update(cx, |_, window, _| window.refresh());
+                })
+                .detach();
+            })
             .child(self.header(p, cx))
             .child(
                 div()
@@ -946,15 +1155,21 @@ impl Render for SettingsView {
                     .min_h_0()
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .w_full()
-                            .max_w(px(PAGE_MAX_WIDTH + PAGE_PADDING * 2.))
-                            .mx_auto()
-                            .px(px(PAGE_PADDING))
-                            .pt(px(PAGE_TOP))
-                            .pb(px(PAGE_BOTTOM))
-                            .children(sections),
+                            .on_children_prepainted(move |bounds, _, _| {
+                                if let Some(page) = bounds.first() {
+                                    page_height.set(f32::from(page.size.height));
+                                }
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(ROW_GAP))
+                                    .px(px(PAGE_PAD_X))
+                                    .pt(px(PAGE_TOP))
+                                    .pb(px(PAGE_BOTTOM))
+                                    .children(rows),
+                            ),
                     ),
             )
     }

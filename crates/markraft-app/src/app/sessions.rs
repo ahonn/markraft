@@ -137,7 +137,7 @@ impl NotesApp {
             .zip(note.path.as_ref())
             .map(|(source, path)| assets::image_root(source.source(), path))
             .unwrap_or(Ok(None));
-        let style = notes_style(self.dark);
+        let style = self.editor_style();
         let editor = cx.new(|cx| {
             EditorView::new(
                 Setup::new(doc::schema().clone())

@@ -23,7 +23,7 @@ use crate::doc;
 use crate::{
     instance::Instance,
     persistence::{Event, Persistence, Saved},
-    platform::{Platform, PlatformEvent},
+    platform::{Platform, PlatformEvent, Shortcut},
     storage::Library,
     updater::Updater,
     vault::{External, Store},
@@ -55,7 +55,10 @@ actions!(
         Settings,
         Link,
         Export,
-        OpenMarkdown
+        OpenMarkdown,
+        IncreaseTextSize,
+        DecreaseTextSize,
+        ResetTextSize
     ]
 );
 
@@ -102,6 +105,9 @@ pub struct NotesApp {
     feedback: Feedback,
     /// What the Settings window's rows say was refused.
     settings_errors: ui::settings::SettingsErrors,
+    /// Whether Markraft was the active app at the last poll, so the note hides once
+    /// when another app takes over rather than on every poll after.
+    app_active: bool,
     /// Whether the quit question is already on screen, so a second ⌘Q cannot stack
     /// another one behind it.
     quitting: QuitState,
@@ -150,7 +156,7 @@ impl NotesApp {
             Ok(mut p) => {
                 if let Err(e) = p
                     .configure_window(window)
-                    .and_then(|_| p.set_shortcut(&library.preferences.hotkey))
+                    .and_then(|_| apply_platform_preferences(&mut p, &library.preferences, window))
                 {
                     platform_error = Some(e);
                 }
@@ -242,6 +248,7 @@ impl NotesApp {
             save: SaveState::default(),
             feedback,
             settings_errors: Default::default(),
+            app_active: true,
             quitting: QuitState::default(),
             trashed: Vec::new(),
             links: Default::default(),
@@ -532,6 +539,18 @@ impl NotesApp {
         // than only where its inputs change.
         if self.presence.chrome_changed(self.chrome_visible()) {
             cx.notify();
+        }
+        // Quick capture: another app taking over puts the note away, as a menu bar
+        // app's panel does. A Markraft window taking the keyboard is not that.
+        let deactivated = self.platform.as_ref().is_some_and(|platform| {
+            let active = platform.app_is_active();
+            std::mem::replace(&mut self.app_active, active)
+                && !active
+                && self.library.preferences.hide_on_deactivate
+                && platform.is_visible(window)
+        });
+        if deactivated {
+            self.hide(window, cx);
         }
         for request in self.instance.requests() {
             match request {
@@ -943,12 +962,33 @@ impl NotesApp {
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         ));
+        self.restyle_editors(cx);
+        self.style_input(cx);
+        cx.notify();
+    }
+    /// The note editors' style: the theme's, at the text size the preferences ask for.
+    fn editor_style(&self) -> EditorStyle {
+        scaled(notes_style(self.dark), self.library.preferences.text_size)
+    }
+    fn restyle_editors(&self, cx: &mut Context<Self>) {
+        let style = self.editor_style();
         for session in self.sessions.values() {
             session
                 .editor()
-                .update(cx, |e, cx| e.set_style(notes_style(self.dark), cx));
+                .update(cx, |e, cx| e.set_style(style.clone(), cx));
         }
-        self.style_input(cx);
+    }
+    /// ⌘+, ⌘− and ⌘0, and the Settings window's stepper. The size stays in the range
+    /// the stepper offers, so the two never disagree.
+    pub(in crate::app) fn set_text_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        let range = crate::storage::Preferences::TEXT_SIZES;
+        let size = size.round().clamp(*range.start(), *range.end());
+        if size == self.library.preferences.text_size {
+            return;
+        }
+        self.library.preferences.text_size = size;
+        self.restyle_editors(cx);
+        self.schedule_save(cx);
         cx.notify();
     }
     /// ⌘L: a link under the caret shows its actions, anything else asks for an address.
@@ -1070,10 +1110,9 @@ impl NotesApp {
                 self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
                 self.apply_theme(window, cx);
-                let refused = self
-                    .platform
-                    .as_mut()
-                    .and_then(|p| p.set_shortcut(&self.library.preferences.hotkey).err());
+                let refused = self.platform.as_mut().and_then(|p| {
+                    apply_platform_preferences(p, &self.library.preferences, window).err()
+                });
                 self.feedback.set_platform_error(refused);
                 self.notes_changed(cx);
             }
@@ -1192,7 +1231,8 @@ impl NotesApp {
                                 this.focus_editor(window, cx);
                                 this.apply_theme(window, cx);
                                 let refused = this.platform.as_mut().and_then(|p| {
-                                    p.set_shortcut(&this.library.preferences.hotkey).err()
+                                    apply_platform_preferences(p, &this.library.preferences, window)
+                                        .err()
                                 });
                                 this.feedback.set_platform_error(refused);
                             }
@@ -1826,6 +1866,42 @@ const LIVE_META_CHARS: usize = 38;
 /// this the chrome has nowhere to sit, so a window with less room than this keeps the
 /// height and lets the editor scroll instead.
 const MINIMUM_HEIGHT: Pixels = px(220.);
+/// What the preferences ask of the platform: both global shortcuts, and whether the
+/// note floats above other apps. A shortcut that cannot be had does not stop the rest.
+fn apply_platform_preferences(
+    platform: &mut Platform,
+    preferences: &crate::storage::Preferences,
+    window: &Window,
+) -> Result<(), String> {
+    let on_top = platform.set_always_on_top(window, preferences.always_on_top);
+    let toggle = platform.set_shortcut(Shortcut::Toggle, &preferences.hotkey);
+    let new_note = platform.set_shortcut(Shortcut::NewNote, &preferences.new_note_hotkey);
+    on_top.and(toggle).and(new_note)
+}
+
+/// `style` with its text at `size` points: every size and gap the body sets grows with
+/// it, so a larger note reads as the same page brought closer rather than re-set.
+fn scaled(mut style: EditorStyle, size: f32) -> EditorStyle {
+    let factor = size / f32::from(style.body_size);
+    if (factor - 1.).abs() < f32::EPSILON {
+        return style;
+    }
+    let scale = |value: Pixels| px((f32::from(value) * factor).round());
+    style.body_size = px(size);
+    for heading in &mut style.heading_sizes {
+        *heading = scale(*heading);
+    }
+    for gap in &mut style.heading_top_gaps {
+        *gap = scale(*gap);
+    }
+    style.paragraph_gap = scale(style.paragraph_gap);
+    style.list_gap = scale(style.list_gap);
+    style.heading_bottom_gap = scale(style.heading_bottom_gap);
+    style.list_indent = scale(style.list_indent);
+    style.quote_indent = scale(style.quote_indent);
+    style
+}
+
 fn notes_style(dark: bool) -> EditorStyle {
     let mut style = if dark {
         EditorStyle::notes_dark()
@@ -1869,6 +1945,10 @@ pub fn bind_app_keys(cx: &mut App) {
         KeyBinding::new("cmd-l", Link, Some("MarkraftApp")),
         KeyBinding::new("cmd-shift-e", Export, Some("MarkraftApp")),
         KeyBinding::new("cmd-o", OpenMarkdown, Some("MarkraftApp")),
+        KeyBinding::new("cmd-=", IncreaseTextSize, Some("MarkraftApp")),
+        KeyBinding::new("cmd-shift-=", IncreaseTextSize, Some("MarkraftApp")),
+        KeyBinding::new("cmd--", DecreaseTextSize, Some("MarkraftApp")),
+        KeyBinding::new("cmd-0", ResetTextSize, Some("MarkraftApp")),
     ]);
     ui::settings::bind_keys(cx);
     cx.set_menus([
@@ -1905,8 +1985,8 @@ mod tests {
     // Not a glob: `gpui::prelude` carries a `test` attribute of its own, and these
     // are ordinary unit tests.
     use super::{
-        classify_drop, folder_label, linked_file, location_budget, note_location, refusal_message,
-        resolve_wiki_link, shorten_location, wiki_link_page,
+        classify_drop, folder_label, linked_file, location_budget, note_location, notes_style,
+        refusal_message, resolve_wiki_link, scaled, shorten_location, wiki_link_page,
     };
     use std::{
         collections::HashSet,
@@ -2223,5 +2303,20 @@ mod tests {
             folder_label(root, Path::new("Inbox/Daily")),
             "Notes/Inbox/Daily"
         );
+    }
+
+    #[test]
+    fn a_larger_text_size_scales_the_whole_page() {
+        let base = notes_style(false);
+        let same = scaled(notes_style(false), f32::from(base.body_size));
+        assert_eq!(same.heading_sizes, base.heading_sizes);
+
+        let large = scaled(notes_style(false), 21.);
+        assert_eq!(large.body_size, gpui::px(21.));
+        assert_eq!(large.heading_sizes[0], gpui::px(36.));
+        assert_eq!(large.paragraph_gap, gpui::px(11.));
+        assert_eq!(large.list_indent, gpui::px(33.));
+        // Colours are the theme's whatever the size.
+        assert_eq!(large.text, base.text);
     }
 }

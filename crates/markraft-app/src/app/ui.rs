@@ -1725,6 +1725,15 @@ impl Render for NotesApp {
             )
             .on_action(cx.listener(|this, _: &Link, w, cx| this.intent(Intent::Link, w, cx)))
             .on_action(cx.listener(|this, _: &Export, w, cx| this.intent(Intent::Export, w, cx)))
+            .on_action(cx.listener(|this, _: &IncreaseTextSize, _, cx| {
+                this.set_text_size(this.library.preferences.text_size + 1., cx)
+            }))
+            .on_action(cx.listener(|this, _: &DecreaseTextSize, _, cx| {
+                this.set_text_size(this.library.preferences.text_size - 1., cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResetTextSize, _, cx| {
+                this.set_text_size(crate::storage::Preferences::DEFAULT_TEXT_SIZE, cx)
+            }))
             .on_action(cx.listener(|this, _: &OpenMarkdown, w, cx| {
                 this.intent(Intent::OpenMarkdown, w, cx)
             }));

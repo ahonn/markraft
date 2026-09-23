@@ -63,6 +63,28 @@ pub fn local_utc_offset() -> i64 {
     }
 }
 
+/// The two global shortcuts: one shows and hides the note, the other opens a new one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Shortcut {
+    Toggle,
+    NewNote,
+}
+
+impl Shortcut {
+    const ALL: [Shortcut; 2] = [Shortcut::Toggle, Shortcut::NewNote];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn event(self) -> PlatformEvent {
+        match self {
+            Shortcut::Toggle => PlatformEvent::Toggle,
+            Shortcut::NewNote => PlatformEvent::NewNote,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlatformEvent {
     Toggle,
@@ -75,9 +97,10 @@ pub enum PlatformEvent {
 pub struct Platform {
     _tray: TrayIcon,
     hotkeys: GlobalHotKeyManager,
-    shortcut: Option<HotKey>,
-    /// Whether `shortcut` has been let go of while the Settings window records a new
-    /// one, so the chord being recorded is not taken by the running shortcut.
+    /// The registered chord of each [`Shortcut`], by its index.
+    shortcuts: [Option<HotKey>; 2],
+    /// Whether the shortcuts have been let go of while the Settings window records a
+    /// new one, so the chord being recorded is not taken by a running shortcut.
     suspended: bool,
     menu_actions: Vec<(MenuId, PlatformEvent)>,
     // Retained NSRunningApplication; None when no previous app is known.
@@ -120,7 +143,7 @@ impl Platform {
         let mut platform = Self {
             _tray: tray,
             hotkeys,
-            shortcut: None,
+            shortcuts: [None; 2],
             suspended: false,
             menu_actions,
             previous_app: None,
@@ -137,9 +160,9 @@ impl Platform {
 
     /// Register before replacing, so an unavailable shortcut preserves the old one.
     /// An empty string explicitly disables the global shortcut.
-    pub fn set_shortcut(&mut self, shortcut: &str) -> Result<(), String> {
-        // The swap below assumes the current shortcut is registered.
-        self.resume_shortcut()?;
+    pub fn set_shortcut(&mut self, which: Shortcut, shortcut: &str) -> Result<(), String> {
+        // The swap below assumes the current shortcuts are registered.
+        self.resume_shortcuts()?;
         let next = if shortcut.trim().is_empty() {
             None
         } else {
@@ -151,8 +174,18 @@ impl Platform {
                 )
             })?)
         };
-        if self.shortcut == next {
+        let current = self.shortcuts[which.index()];
+        if current == next {
             return Ok(());
+        }
+        if next.is_some()
+            && Shortcut::ALL
+                .iter()
+                .any(|other| *other != which && self.shortcuts[other.index()] == next)
+        {
+            return Err(format!(
+                "“{shortcut}” is already Markraft's other shortcut. Choose a different one."
+            ));
         }
         if let Some(next) = next {
             self.hotkeys.register(next).map_err(|error| {
@@ -163,7 +196,7 @@ impl Platform {
                 )
             })?;
         }
-        if let Some(previous) = self.shortcut
+        if let Some(previous) = current
             && let Err(error) = self.hotkeys.unregister(previous)
         {
             if let Some(next) = next {
@@ -174,37 +207,63 @@ impl Platform {
                         Quit and reopen Markraft, then set it again."
                 .into());
         }
-        self.shortcut = next;
+        self.shortcuts[which.index()] = next;
         Ok(())
     }
 
-    /// Let go of the shortcut without forgetting it, so a recorder can hear the chord.
-    pub fn suspend_shortcut(&mut self) {
+    /// Let go of the shortcuts without forgetting them, so a recorder can hear a chord
+    /// either of them holds.
+    pub fn suspend_shortcuts(&mut self) {
         if self.suspended {
             return;
         }
-        if let Some(shortcut) = self.shortcut
-            && let Err(error) = self.hotkeys.unregister(shortcut)
-        {
-            eprintln!("Markraft: the shortcut could not be suspended: {error}");
-            return;
+        for shortcut in self.shortcuts.into_iter().flatten() {
+            if let Err(error) = self.hotkeys.unregister(shortcut) {
+                eprintln!("Markraft: a shortcut could not be suspended: {error}");
+            }
         }
         self.suspended = true;
     }
 
-    /// Take the suspended shortcut back. Another app may have claimed it meanwhile.
-    pub fn resume_shortcut(&mut self) -> Result<(), String> {
+    /// Take the suspended shortcuts back. Another app may have claimed one meanwhile.
+    pub fn resume_shortcuts(&mut self) -> Result<(), String> {
         if !std::mem::take(&mut self.suspended) {
             return Ok(());
         }
-        if let Some(shortcut) = self.shortcut
-            && let Err(error) = self.hotkeys.register(shortcut)
-        {
-            eprintln!("Markraft: the shortcut could not be resumed: {error}");
-            self.shortcut = None;
-            return Err("The shortcut was taken by another app while it was being \
+        let mut lost = false;
+        for slot in &mut self.shortcuts {
+            if let Some(shortcut) = *slot
+                && let Err(error) = self.hotkeys.register(shortcut)
+            {
+                eprintln!("Markraft: a shortcut could not be resumed: {error}");
+                *slot = None;
+                lost = true;
+            }
+        }
+        if lost {
+            return Err("A shortcut was taken by another app while it was being \
                         changed. Choose a different shortcut."
                 .into());
+        }
+        Ok(())
+    }
+
+    /// Whether Markraft is the active app, rather than one of its windows being key.
+    pub fn app_is_active(&self) -> bool {
+        unsafe {
+            let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            let active: Bool = msg_send![app, isActive];
+            active.as_bool()
+        }
+    }
+
+    /// Keep the note above other apps' windows, or let it sit among them.
+    pub fn set_always_on_top(&self, window: &gpui::Window, on_top: bool) -> Result<(), String> {
+        let native = native_window(window)?;
+        unsafe {
+            let _: () = msg_send![native, setFloatingPanel: Bool::new(on_top)];
+            // NSFloatingWindowLevel, or NSNormalWindowLevel.
+            let _: () = msg_send![native, setLevel: if on_top { 3_isize } else { 0_isize }];
         }
         Ok(())
     }
@@ -355,10 +414,14 @@ impl Platform {
     pub fn poll_events(&self) -> Vec<PlatformEvent> {
         let mut events = Vec::new();
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            if event.state == HotKeyState::Pressed
-                && self.shortcut.is_some_and(|key| key.id() == event.id)
+            if event.state != HotKeyState::Pressed {
+                continue;
+            }
+            if let Some(which) = Shortcut::ALL
+                .into_iter()
+                .find(|which| self.shortcuts[which.index()].is_some_and(|key| key.id() == event.id))
             {
-                events.push(PlatformEvent::Toggle);
+                events.push(which.event());
             }
         }
         while let Ok(event) = MenuEvent::receiver().try_recv() {
@@ -437,7 +500,7 @@ impl Platform {
 
 impl Drop for Platform {
     fn drop(&mut self) {
-        if let Some(shortcut) = self.shortcut {
+        for shortcut in self.shortcuts.into_iter().flatten() {
             let _ = self.hotkeys.unregister(shortcut);
         }
     }
@@ -455,7 +518,73 @@ fn menu_bar_failure(detail: impl std::fmt::Display) -> String {
         .to_owned()
 }
 
+/// A window's AppKit side, taken out of GPUI so it can be changed outside GPUI's own
+/// update. AppKit tells GPUI of every size a resize passes through, and GPUI can only
+/// hear it while nothing else is updating the app: a resize made inside an update
+/// leaves GPUI drawing at the size the window had before.
+pub struct NativeWindow {
+    window: *mut AnyObject,
+    view: *mut AnyObject,
+}
+
+impl NativeWindow {
+    /// Only for use within the same turn of the run loop, while the window is open.
+    pub fn of(window: &gpui::Window) -> Option<Self> {
+        Some(Self {
+            window: native_window(window).ok()?,
+            view: native_view(window).ok()?,
+        })
+    }
+
+    /// Give the window a content height of `height`, keeping its top edge where it
+    /// is, the way a settings window grows and shrinks from its title bar as its
+    /// pages change. An animation runs to its end inside this call.
+    pub fn fit_height(&self, height: f32, animate: bool) {
+        unsafe {
+            // Should a step of the animation come before GPUI has drawn at its size,
+            // the last frame is pinned under the title bar rather than stretched.
+            const NS_VIEW_LAYER_CONTENTS_PLACEMENT_TOP: isize = 4;
+            let _: () = msg_send![
+                self.view,
+                setLayerContentsPlacement: NS_VIEW_LAYER_CONTENTS_PLACEMENT_TOP
+            ];
+            let frame: NSRect = msg_send![self.window, frame];
+            let content: NSRect = msg_send![self.window, contentRectForFrameRect: frame];
+            let chrome = frame.size.y - content.size.y;
+            let next_height = f64::from(height) + chrome;
+            let next = NSRect {
+                origin: NSPoint {
+                    x: frame.origin.x,
+                    // AppKit's origin is the bottom-left corner: moving it keeps the top.
+                    y: frame.origin.y + frame.size.y - next_height,
+                },
+                size: NSPoint {
+                    x: frame.size.x,
+                    y: next_height,
+                },
+            };
+            let _: () = msg_send![
+                self.window,
+                setFrame: next,
+                display: Bool::YES,
+                animate: Bool::new(animate)
+            ];
+        }
+    }
+}
+
 fn native_window(window: &gpui::Window) -> Result<*mut AnyObject, String> {
+    let view = native_view(window)?;
+    let native: *mut AnyObject = unsafe { msg_send![view, window] };
+    if native.is_null() {
+        Err(NO_NATIVE_WINDOW.into())
+    } else {
+        Ok(native)
+    }
+}
+
+/// GPUI's own view, which draws the window: a subview of the content view.
+fn native_view(window: &gpui::Window) -> Result<*mut AnyObject, String> {
     let handle = HasWindowHandle::window_handle(window).map_err(|error| {
         eprintln!("Markraft: the window handle is unavailable: {error}");
         NO_NATIVE_WINDOW.to_owned()
@@ -467,13 +596,7 @@ fn native_window(window: &gpui::Window) -> Result<*mut AnyObject, String> {
                 .into(),
         );
     };
-    let native: *mut AnyObject =
-        unsafe { msg_send![handle.ns_view.as_ptr().cast::<AnyObject>(), window] };
-    if native.is_null() {
-        Err(NO_NATIVE_WINDOW.into())
-    } else {
-        Ok(native)
-    }
+    Ok(handle.ns_view.as_ptr().cast::<AnyObject>())
 }
 
 // Dynamic class lookup keeps startup safe on macOS versions before 13, while
