@@ -64,7 +64,7 @@
 //! write.
 //!
 //! An emptied item of either kind is repaired by the
-//! [`fill_required_content`](markraft_core::fill_required_content) correction
+//! [`fill_required_content`](markraft_core::corrections::fill_required_content) correction
 //! that [`commonmark_extensions`](crate::commonmark_extensions) registers.
 //!
 //! # Why a table has no header type
@@ -80,8 +80,12 @@
 //! deletion at a cell boundary must not merge two cells, and a table's
 //! structure is not something the text around it may dissolve.
 
+use markraft_core::kind::{
+    CODE_BLOCK_LANGUAGE_ATTR, HEADING_LEVEL_ATTR, LINK_HREF_ATTR, SYNTAX_DISPLAY_ATTR,
+    SYNTAX_SPAN_ATTR, TABLE_ALIGNMENTS_ATTR, TASK_CHECKED_ATTR,
+};
 use markraft_core::{
-    AttrKind, AttrSpec, AttrValue, MarkTypeSpec, NodeTypeSpec, Schema, SchemaSpec,
+    AttrKind, AttrSpec, AttrValue, BreakKind, MarkTypeSpec, NodeTypeSpec, Schema, SchemaSpec,
 };
 
 /// The top node type: `block+`.
@@ -175,9 +179,9 @@ pub const TEXT: &str = "text";
 /// image is flattened to plain text, which is what CommonMark's `alt`
 /// attribute holds anyway.
 pub const IMAGE: &str = "image";
-/// A line ending inside a paragraph or a heading: an inline atom in the group
-/// [`LINE_BREAK_GROUP`](markraft_core::projection::LINE_BREAK_GROUP) and not in
-/// `inline`, so a table cell, which is one source line, cannot hold one.
+/// A line ending inside a paragraph or a heading: an inline atom declared a
+/// [`BreakKind::Hard`] break and not in `inline`, so a table cell, which is
+/// one source line, cannot hold one.
 ///
 /// Whether it is a hard break is the text's to say: `\` or two spaces before
 /// it make it one, as they do in the source, and
@@ -266,7 +270,11 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
             NodeTypeSpec::new(HEADING, TEXTBLOCK_CONTENT)
                 .group(BLOCK_GROUP)
                 .defining(true)
-                .attr(AttrSpec::new("level", AttrKind::Int, AttrValue::Int(1))),
+                .attr(AttrSpec::new(
+                    HEADING_LEVEL_ATTR,
+                    AttrKind::Int,
+                    AttrValue::Int(1),
+                )),
         )
         .node(
             NodeTypeSpec::new(BLOCKQUOTE, "block+")
@@ -282,7 +290,7 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                 .code(true)
                 .defining(true)
                 .marks("")
-                .attr(str_attr("language", ""))
+                .attr(str_attr(CODE_BLOCK_LANGUAGE_ATTR, ""))
                 .attr(str_attr("fence_char", "`"))
                 .attr(AttrSpec::new(
                     "fence_length",
@@ -321,7 +329,7 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                 .group(ITEM_GROUP)
                 .defining(true)
                 .attr(AttrSpec::new(
-                    "checked",
+                    TASK_CHECKED_ATTR,
                     AttrKind::Bool,
                     AttrValue::Bool(false),
                 )),
@@ -342,7 +350,7 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
             NodeTypeSpec::new(TABLE, "table_row+")
                 .group(BLOCK_GROUP)
                 .isolating(true)
-                .attr(str_attr("alignments", "")),
+                .attr(str_attr(TABLE_ALIGNMENTS_ATTR, "")),
         )
         .node(NodeTypeSpec::new(TABLE_ROW, "table_cell+"))
         .node(NodeTypeSpec::new(TABLE_CELL, "inline*").isolating(true))
@@ -385,13 +393,13 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
         .node(
             NodeTypeSpec::leaf(LINE_BREAK)
                 .inline(true)
-                .group(markraft_core::projection::LINE_BREAK_GROUP),
+                .break_kind(BreakKind::Hard),
         )
         .mark(
             MarkTypeSpec::new(LINK)
                 .rank(10)
                 .inclusive(false)
-                .attr(AttrSpec::required("href", AttrKind::Str))
+                .attr(AttrSpec::required(LINK_HREF_ATTR, AttrKind::Str))
                 .attr(str_attr("title", "")),
         )
         .mark(MarkTypeSpec::new(UNDERLINE).rank(20).group(STYLE_GROUP))
@@ -403,8 +411,12 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
             MarkTypeSpec::new(SYNTAX)
                 .rank(70)
                 .inclusive(false)
-                .attr(str_attr("display", ""))
-                .attr(AttrSpec::new("span", AttrKind::Int, AttrValue::Int(0))),
+                .attr(str_attr(SYNTAX_DISPLAY_ATTR, ""))
+                .attr(AttrSpec::new(
+                    SYNTAX_SPAN_ATTR,
+                    AttrKind::Int,
+                    AttrValue::Int(0),
+                )),
         )
 }
 

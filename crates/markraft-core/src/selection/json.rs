@@ -1,19 +1,19 @@
 //! JSON serialisation of selections.
 //!
 //! ```json
-//! {"type": "text", "anchor": 1, "head": 4, "marks": [{"type": "strong"}]}
+//! {"type": "text", "anchor": 1, "head": 4}
 //! {"type": "node", "pos": 0}
 //! {"type": "all"}
 //! ```
 //!
-//! A custom kind serialises under its own [`SelectionKind::tag`]. Reading one
+//! A custom kind serialises under its own
+//! [`SelectionKind::tag`](super::SelectionKind::tag). Reading one
 //! back needs the extension that defines it, so [`Selection::from_json`] only
 //! understands the built-in kinds and reports anything else as unknown.
 
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::error::NodeError;
-use crate::mark::{Mark, MarkSet};
 use crate::schema::Schema;
 
 use super::Selection;
@@ -22,22 +22,8 @@ impl Selection {
     /// Serialise this selection.
     pub fn to_json(&self, schema: &Schema) -> Value {
         match self {
-            Selection::Text {
-                anchor,
-                head,
-                marks,
-            } => {
-                let mut map = Map::new();
-                map.insert("type".into(), Value::String("text".into()));
-                map.insert("anchor".into(), Value::from(*anchor));
-                map.insert("head".into(), Value::from(*head));
-                if let Some(marks) = marks {
-                    map.insert(
-                        "marks".into(),
-                        Value::Array(marks.iter().map(|m| m.to_json(schema)).collect()),
-                    );
-                }
-                Value::Object(map)
+            Selection::Text { anchor, head } => {
+                json!({"type": "text", "anchor": anchor, "head": head})
             }
             Selection::Node { pos } => json!({"type": "node", "pos": pos}),
             Selection::All => json!({"type": "all"}),
@@ -52,7 +38,10 @@ impl Selection {
     }
 
     /// Read a built-in selection from its JSON representation.
-    pub fn from_json(schema: &Schema, value: &Value) -> Result<Selection, NodeError> {
+    ///
+    /// The built-in kinds hold only positions, so the schema goes unused; it
+    /// is taken for symmetry with [`Selection::to_json`].
+    pub fn from_json(_schema: &Schema, value: &Value) -> Result<Selection, NodeError> {
         let object = value
             .as_object()
             .ok_or_else(|| NodeError::Json("a selection must be an object".into()))?;
@@ -75,22 +64,7 @@ impl Selection {
                     .and_then(Value::as_u64)
                     .and_then(|n| usize::try_from(n).ok())
                     .unwrap_or(anchor);
-                let marks = match object.get("marks") {
-                    None => None,
-                    Some(Value::Array(items)) => {
-                        let mut marks = Vec::with_capacity(items.len());
-                        for item in items {
-                            marks.push(Mark::from_json(schema, item)?);
-                        }
-                        Some(MarkSet::from_marks(schema, marks))
-                    }
-                    Some(_) => return Err(NodeError::Json("`marks` must be an array".into())),
-                };
-                Ok(Selection::Text {
-                    anchor,
-                    head,
-                    marks,
-                })
+                Ok(Selection::Text { anchor, head })
             }
             "node" => Ok(Selection::Node {
                 pos: number("pos")?,

@@ -7,12 +7,14 @@ use serde_json::Value;
 
 use super::support::*;
 use crate::error::NodeError;
+use crate::mark::MarkSet;
 use crate::selection::Selection;
+use crate::state::protocol::{append_config, reconfigure, user_event};
 use crate::state::{
     ChangeFilterFn, ChangeFilterResult, Compartment, Dep, EditorState, EditorStateConfig,
     Extension, Facet, FacetConfig, Prec, StateField, StateFieldConfig, StateJsonFields,
-    TransactionExtenderFn, TransactionFilterFn, TransactionSpec, append_config, change_filter,
-    reconfigure, transaction_extender, transaction_filter, user_event,
+    TransactionExtenderFn, TransactionFilterFn, TransactionSpec, change_filter,
+    transaction_extender, transaction_filter,
 };
 
 fn counter() -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
@@ -548,4 +550,142 @@ fn extenders_run_from_the_lowest_precedence_to_the_highest() {
         .update([TransactionSpec::new().changes([insert_text(&schema, 2, "A")])])
         .unwrap();
     assert_eq!(&*order.lock().unwrap(), &["low", "default", "high"]);
+}
+
+fn strong_marks(schema: &crate::schema::Schema) -> MarkSet {
+    MarkSet::from_marks(schema, [m(schema, "strong")])
+}
+
+fn after(state: &EditorState, spec: TransactionSpec) -> EditorState {
+    state.update([spec]).unwrap().state().clone()
+}
+
+#[test]
+fn stored_marks_are_kept_only_by_transactions_that_leave_doc_and_selection_alone() {
+    let schema = shared_schema();
+    let start = state(sample_doc(&schema), Extension::none());
+    assert_eq!(start.stored_marks(), None);
+    let armed = after(
+        &start,
+        TransactionSpec::new().stored_marks(Some(strong_marks(&schema))),
+    );
+    assert_eq!(armed.stored_marks(), Some(&strong_marks(&schema)));
+    assert_eq!(armed.selection(), start.selection());
+
+    // An annotation-only transaction keeps them.
+    let annotated = after(&armed, TransactionSpec::new().user_event("noop"));
+    assert_eq!(annotated.stored_marks(), Some(&strong_marks(&schema)));
+
+    // A document change clears them.
+    let edited = after(
+        &armed,
+        TransactionSpec::new().changes([insert_text(&schema, 6, "!")]),
+    );
+    assert_eq!(edited.stored_marks(), None);
+
+    // An explicit selection clears them, even one equal to the current one.
+    let reselected = after(
+        &armed,
+        TransactionSpec::new().selection(armed.selection().clone()),
+    );
+    assert_eq!(reselected.stored_marks(), None);
+
+    // An explicit `None` clears them without any other change.
+    let cleared = after(&armed, TransactionSpec::new().stored_marks(None));
+    assert_eq!(cleared.stored_marks(), None);
+    assert_eq!(cleared.doc(), armed.doc());
+
+    // An explicit setting wins over the default clearing.
+    let kept = after(
+        &armed,
+        TransactionSpec::new()
+            .changes([insert_text(&schema, 6, "!")])
+            .selection(Selection::cursor(7))
+            .stored_marks(armed.stored_marks().cloned()),
+    );
+    assert_eq!(kept.stored_marks(), Some(&strong_marks(&schema)));
+}
+
+#[test]
+fn a_later_spec_decides_the_stored_marks() {
+    let schema = shared_schema();
+    let start = state(sample_doc(&schema), Extension::none());
+    let tr = start
+        .update([
+            TransactionSpec::new().stored_marks(Some(strong_marks(&schema))),
+            TransactionSpec::new().user_event("noop"),
+        ])
+        .unwrap();
+    assert_eq!(tr.stored_marks(), Some(&Some(strong_marks(&schema))));
+    assert_eq!(tr.state().stored_marks(), Some(&strong_marks(&schema)));
+
+    let tr = start
+        .update([
+            TransactionSpec::new().stored_marks(Some(strong_marks(&schema))),
+            TransactionSpec::new().stored_marks(None),
+        ])
+        .unwrap();
+    assert_eq!(tr.stored_marks(), Some(&None));
+    assert_eq!(tr.state().stored_marks(), None);
+
+    // `as_spec` carries the explicit setting, so a filter that amends the
+    // transaction keeps it.
+    let tr = start
+        .update([TransactionSpec::new().stored_marks(Some(strong_marks(&schema)))])
+        .unwrap();
+    let again = start.update([tr.as_spec()]).unwrap();
+    assert_eq!(again.state().stored_marks(), Some(&strong_marks(&schema)));
+}
+
+#[test]
+fn setting_stored_marks_counts_as_a_selection_dependency() {
+    let schema = shared_schema();
+    let (count, probe) = counter();
+    let facet: Facet<usize, usize> =
+        Facet::define(FacetConfig::new(|inputs: &[usize]| inputs.iter().sum()));
+    let start = state(
+        sample_doc(&schema),
+        facet.compute([Dep::Selection], move |state| {
+            count.fetch_add(1, Ordering::SeqCst);
+            state.stored_marks().map_or(0, |marks| marks.iter().count())
+        }),
+    );
+    assert_eq!(probe.load(Ordering::SeqCst), 1);
+    let annotated = after(&start, TransactionSpec::new().user_event("noop"));
+    assert_eq!(probe.load(Ordering::SeqCst), 1);
+    let armed = after(
+        &annotated,
+        TransactionSpec::new().stored_marks(Some(strong_marks(&schema))),
+    );
+    assert_eq!(probe.load(Ordering::SeqCst), 2);
+    assert_eq!(armed.facet(&facet), &1);
+}
+
+#[test]
+fn stored_marks_round_trip_through_json() {
+    let schema = shared_schema();
+    let fields = StateJsonFields::new();
+    let plain = state(sample_doc(&schema), Extension::none());
+    let json = plain.to_json(&fields);
+    assert!(json.get("storedMarks").is_none());
+    let restored =
+        EditorState::from_json(&json, EditorStateConfig::new(schema.clone()), &fields).unwrap();
+    assert_eq!(restored.stored_marks(), None);
+
+    for marks in [strong_marks(&schema), MarkSet::empty()] {
+        let armed = after(
+            &plain,
+            TransactionSpec::new().stored_marks(Some(marks.clone())),
+        );
+        let json = armed.to_json(&fields);
+        assert!(json.get("storedMarks").is_some_and(Value::is_array));
+        let restored =
+            EditorState::from_json(&json, EditorStateConfig::new(schema.clone()), &fields).unwrap();
+        assert_eq!(restored.stored_marks(), Some(&marks));
+        assert_eq!(restored.selection(), armed.selection());
+    }
+
+    let mut bad = plain.to_json(&fields);
+    bad["storedMarks"] = Value::from(1);
+    assert!(EditorState::from_json(&bad, EditorStateConfig::new(schema.clone()), &fields).is_err());
 }

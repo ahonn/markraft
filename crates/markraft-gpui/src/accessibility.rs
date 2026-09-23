@@ -186,7 +186,7 @@ impl AccessibleText {
         // as what it displays, and as its source while the caret reveals it.
         let reveal = Reveal::at(
             state.selection().from(doc)..state.selection().to(doc),
-            markraft_core::composition_range(state).map(|range| range.from..range.to),
+            markraft_core::composition::composition_range(state).map(|range| range.from..range.to),
         );
         self.runs.clear();
         self.controls.clear();

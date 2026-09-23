@@ -7,7 +7,7 @@ use markraft_core::{Attrs, EditorState, MarkSet, MarkTypeId, NodeTypeId};
 /// The marks every part of the selection carries, or the marks new text would
 /// get at a cursor.
 ///
-/// A cursor answers its stored marks when it has them and the marks of the
+/// A cursor answers the state's stored marks when it has them and the marks of the
 /// content it sits in otherwise, which is what makes a toolbar light up the
 /// moment ⌘B is pressed in an empty paragraph. A range answers the intersection
 /// of the mark sets of the inline content it actually covers: a block whose
@@ -26,7 +26,7 @@ pub(crate) fn active_marks(state: &EditorState, syntax: Option<MarkTypeId>) -> M
     let doc = state.doc();
     let selection = state.selection();
     if selection.is_cursor() {
-        if let Some(marks) = selection.stored_marks() {
+        if let Some(marks) = state.stored_marks() {
             return without_role(marks.clone());
         }
         return doc
@@ -113,7 +113,7 @@ mod tests {
             EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
                 Extension::all([
                     markraft_core::projection::projection(),
-                    markraft_core::history(Default::default()),
+                    markraft_core::history::history(Default::default()),
                 ]),
             ))
             .expect("a valid state");
@@ -142,7 +142,7 @@ mod tests {
             EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
                 Extension::all([
                     markraft_core::projection::projection(),
-                    markraft_core::history(Default::default()),
+                    markraft_core::history::history(Default::default()),
                 ]),
             ))
             .expect("a valid state");

@@ -23,7 +23,7 @@ use crate::node::Node;
 use crate::schema::Schema;
 use crate::slice::Slice;
 
-use super::{LineKind, OBJECT_REPLACEMENT, Projection, is_line_break};
+use super::{LineKind, Projection, atom_filler};
 
 /// The byte index of the `n`th `char` of `text`, clamped to its length.
 fn char_to_byte(text: &str, n: usize) -> usize {
@@ -391,8 +391,9 @@ impl Projection {
 
 /// The text of a slice, using the same conventions as
 /// [`Projection::plain_text`]: blocks are joined by `'\n'`, hard breaks become
-/// `'\n'`, and every other inline atom becomes [`OBJECT_REPLACEMENT`], one per
-/// token it occupies.
+/// `'\n'`, soft breaks a space, and every other inline atom becomes
+/// [`OBJECT_REPLACEMENT`](super::OBJECT_REPLACEMENT), one per token it
+/// occupies.
 pub fn slice_to_plain_text(schema: &Schema, slice: &Slice) -> String {
     let mut out = String::new();
     let mut first = true;
@@ -441,13 +442,7 @@ fn append_inline_node(schema: &Schema, node: &Node, out: &mut String) {
         append_inline(schema, node.content(), out);
         return;
     }
-    let filler = if is_line_break(schema, node.type_id()) {
-        '\n'
-    } else if schema.node_type(node.type_id()).in_group("soft_break") {
-        ' '
-    } else {
-        OBJECT_REPLACEMENT
-    };
+    let filler = atom_filler(schema, node.type_id());
     for _ in 0..node.node_size() {
         out.push(filler);
     }

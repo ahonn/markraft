@@ -9,7 +9,7 @@ mod content;
 mod spec;
 
 pub use content::{ContentExpr, ContentMatch};
-pub use spec::{MarkTypeSpec, NodeTypeSpec, SchemaSpec};
+pub use spec::{BreakKind, MarkTypeSpec, NodeTypeSpec, SchemaSpec};
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -60,6 +60,7 @@ pub struct NodeType {
     defining: bool,
     isolating: bool,
     code: bool,
+    break_kind: Option<BreakKind>,
     /// Whether the compiled content expression only mentions inline types.
     inline_content: bool,
     is_leaf: bool,
@@ -141,6 +142,11 @@ impl NodeType {
     /// Whether the node holds code.
     pub fn is_code(&self) -> bool {
         self.code
+    }
+
+    /// The kind of line break nodes of this type stand for, if any.
+    pub fn break_kind(&self) -> Option<BreakKind> {
+        self.break_kind
     }
 
     /// The attribute declarations of this type.
@@ -715,6 +721,7 @@ fn compile_nodes(
             defining: node.defining,
             isolating: node.isolating,
             code: node.code,
+            break_kind: node.break_kind,
             inline_content: false,
             is_leaf: true,
             default_attrs,

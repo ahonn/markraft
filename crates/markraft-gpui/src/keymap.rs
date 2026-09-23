@@ -410,9 +410,9 @@ pub(crate) fn outdent(types: &DocTypes) -> Command {
 pub(crate) fn history(undo: bool) -> Command {
     command(move |state| {
         if undo {
-            markraft_core::undo(state)
+            markraft_core::history::undo(state)
         } else {
-            markraft_core::redo(state)
+            markraft_core::history::redo(state)
         }
     })
 }

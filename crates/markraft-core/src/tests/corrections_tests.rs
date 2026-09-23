@@ -6,11 +6,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::support::*;
 use crate::change::Change;
 use crate::corrections::{
-    Correction, CorrectionContext, MAX_CORRECTION_ROUNDS, corrections, corrections_diverged,
-    fill_required_content,
+    Correction, CorrectionContext, MAX_CORRECTION_ROUNDS, corrections, fill_required_content,
 };
 use crate::fragment::Fragment;
 use crate::node::Node;
+use crate::protocol::corrections_diverged;
 use crate::schema::Schema;
 use crate::slice::Slice;
 use crate::state::{Extension, TransactionSpec};

@@ -80,13 +80,15 @@ pub enum NodeError {
     /// A text node holds text that the model forbids (currently: empty text).
     #[error("invalid text node: {0}")]
     InvalidText(String),
-    /// A position was outside of `0..=doc.content_size()`, or fell inside a
-    /// non-text leaf.
-    #[error("position {pos} is out of range (document size {size})")]
+    /// A position was outside the range an operation accepts — for example
+    /// `0..=doc.content_size()` when resolving, or the content or text length
+    /// when cutting — or fell inside a non-text leaf. A reversed range reports
+    /// its start.
+    #[error("position {pos} is out of range (size {size})")]
     PosOutOfRange {
         /// The requested position.
         pos: usize,
-        /// The size of the node the position was resolved in.
+        /// The size of the content or text the position was checked against.
         size: usize,
     },
     /// JSON input did not describe a node in this schema.

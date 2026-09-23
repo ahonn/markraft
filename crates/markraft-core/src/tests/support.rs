@@ -5,7 +5,7 @@ use crate::change::Change;
 use crate::fragment::Fragment;
 use crate::mark::{Mark, MarkSet};
 use crate::node::{Markup, Node};
-use crate::schema::{MarkTypeSpec, NodeTypeSpec, Schema, SchemaSpec};
+use crate::schema::{BreakKind, MarkTypeSpec, NodeTypeSpec, Schema, SchemaSpec};
 use crate::slice::{Slice, Token};
 
 /// A schema with the building blocks the tests exercise: paragraphs, headings,
@@ -66,7 +66,8 @@ pub fn test_schema() -> Schema {
             .node(
                 NodeTypeSpec::leaf("hard_break")
                     .inline(true)
-                    .group("inline line_break"),
+                    .group("inline")
+                    .break_kind(BreakKind::Hard),
             )
             .node(
                 NodeTypeSpec::new("inline_span", "inline*")

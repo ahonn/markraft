@@ -21,6 +21,35 @@ use crate::projection::Line;
 use crate::schema::NodeTypeId;
 use crate::slice::Slice;
 
+/// The integer attribute of the [`DocTypeNames::syntax`] mark naming the span
+/// a run belongs to. Runs that open and close one span share it.
+pub const SYNTAX_SPAN_ATTR: &str = "span";
+
+/// The string attribute of the [`DocTypeNames::syntax`] mark holding what a
+/// reader sees in the run's place while it is concealed.
+pub const SYNTAX_DISPLAY_ATTR: &str = "display";
+
+/// The integer attribute of a [`DocTypeNames::heading`] holding its level.
+pub const HEADING_LEVEL_ATTR: &str = "level";
+
+/// The string attribute of a [`DocTypeNames::code_block`] holding its
+/// language, empty when none is given.
+pub const CODE_BLOCK_LANGUAGE_ATTR: &str = "language";
+
+/// The boolean attribute of a [`DocTypeNames::task_item`] saying whether its
+/// box is checked.
+pub const TASK_CHECKED_ATTR: &str = "checked";
+
+/// The string attribute of a [`DocTypeNames::link`] holding its destination.
+pub const LINK_HREF_ATTR: &str = "href";
+
+/// The string attribute of a [`DocTypeNames::table`] holding its column
+/// alignments: one entry per column, comma-separated, each `left`, `center`,
+/// `right` or `none`. This is the name to hand
+/// [`TableTypes`](crate::commands::TableTypes) for a kind that follows this
+/// table.
+pub const TABLE_ALIGNMENTS_ATTR: &str = "alignments";
+
 /// The name a schema gives each role an editing surface and its key bindings
 /// need.
 ///
@@ -32,11 +61,11 @@ use crate::slice::Slice;
 pub struct DocTypeNames {
     /// The default textblock, which a block toggle returns to.
     pub paragraph: Option<&'static str>,
-    /// A heading, carrying a `level` attribute.
+    /// A heading, carrying a [`HEADING_LEVEL_ATTR`] attribute.
     pub heading: Option<&'static str>,
     /// A block quote.
     pub blockquote: Option<&'static str>,
-    /// A code block, carrying a `language` attribute.
+    /// A code block, carrying a [`CODE_BLOCK_LANGUAGE_ATTR`] attribute.
     pub code_block: Option<&'static str>,
     /// A bullet list.
     pub bullet_list: Option<&'static str>,
@@ -44,14 +73,15 @@ pub struct DocTypeNames {
     pub ordered_list: Option<&'static str>,
     /// A plain list item.
     pub list_item: Option<&'static str>,
-    /// A list item with a check box, carrying a `checked` attribute.
+    /// A list item with a check box, carrying a [`TASK_CHECKED_ATTR`]
+    /// attribute.
     pub task_item: Option<&'static str>,
     /// A thematic break: a block-level leaf.
     pub horizontal_rule: Option<&'static str>,
     /// Source text kept verbatim as the block's own text, edited in place.
     pub raw_block: Option<&'static str>,
-    /// A table, carrying an `alignments` attribute: one entry per column,
-    /// comma-separated, each `left`, `center`, `right` or `none`.
+    /// A table, carrying a [`TABLE_ALIGNMENTS_ATTR`] attribute: one entry per
+    /// column, comma-separated, each `left`, `center`, `right` or `none`.
     pub table: Option<&'static str>,
     /// One row of a table. The first row of a table is its header row.
     pub table_row: Option<&'static str>,
@@ -73,7 +103,7 @@ pub struct DocTypeNames {
     pub strikethrough: Option<&'static str>,
     /// Underline.
     pub underline: Option<&'static str>,
-    /// A link, carrying an `href` attribute.
+    /// A link, carrying a [`LINK_HREF_ATTR`] attribute.
     pub link: Option<&'static str>,
     /// The mark a kind puts on the characters that *spell* rather than say —
     /// a run that marks up the text around it, or stands for something else,
@@ -85,17 +115,18 @@ pub struct DocTypeNames {
     ///
     /// The mark carries two attributes:
     ///
-    /// * `span` (an integer) — which span the run belongs to. The runs that
-    ///   open and close one span share it, so a view reveals them together;
-    ///   a run that stands alone has one of its own. Ids are unique within a
-    ///   textblock, not across the document.
-    /// * `display` (a string) — what a reader sees in the run's place while it
-    ///   is concealed: empty for a run that shows nothing, otherwise the text
-    ///   it stands for.
+    /// * [`SYNTAX_SPAN_ATTR`] (an integer) — which span the run belongs to.
+    ///   The runs that open and close one span share it, so a view reveals
+    ///   them together; a run that stands alone has one of its own. Ids are
+    ///   unique within a textblock, not across the document.
+    /// * [`SYNTAX_DISPLAY_ATTR`] (a string) — what a reader sees in the run's
+    ///   place while it is concealed: empty for a run that shows nothing,
+    ///   otherwise the text it stands for.
     ///
     /// A plain-text rendering of the content — a clipboard's, an accessibility
-    /// tree's — reads each such run as its `display`. A kind that writes its
-    /// marks some other way leaves this `None` and nothing is concealed.
+    /// tree's — reads each such run as its [`SYNTAX_DISPLAY_ATTR`]. A kind that
+    /// writes its marks some other way leaves this `None` and nothing is
+    /// concealed.
     pub syntax: Option<&'static str>,
 }
 

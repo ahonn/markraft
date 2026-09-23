@@ -46,6 +46,7 @@ fn types() -> TableTypes {
         schema.node_id("table").expect("known"),
         schema.node_id("table_row").expect("known"),
         schema.node_id("table_cell").expect("known"),
+        "alignments",
     )
 }
 
@@ -357,7 +358,7 @@ fn set_column_alignment_rewrites_one_entry() {
         r#"doc(table[alignments=Str("none,center")](table_row(table_cell("a"), table_cell("b")), table_row(table_cell("c"), table_cell("d"))))"#
     );
     assert_eq!(
-        column_alignments(after.doc().child(0), 2),
+        column_alignments(after.doc().child(0), "alignments", 2),
         vec![ColumnAlignment::None, ColumnAlignment::Center]
     );
     // Setting the alignment it already has does not apply.
@@ -636,5 +637,86 @@ fn the_guard_stops_an_edit_that_spans_two_cells() {
     assert_eq!(
         shape(&after),
         r#"doc(table[alignments=Str("none,none")](table_row(table_cell("c"), table_cell("d"))))"#
+    );
+}
+
+/// A table whose alignments live under a name other than the kind default.
+fn custom_attr_schema() -> Schema {
+    Schema::new(
+        SchemaSpec::new()
+            .node(NodeTypeSpec::new("doc", "block+"))
+            .node(NodeTypeSpec::new("paragraph", "inline*").group("block"))
+            .node(
+                NodeTypeSpec::new("table", "table_row+")
+                    .group("block")
+                    .attr(AttrSpec::new(
+                        "align",
+                        AttrKind::Str,
+                        AttrValue::Str(String::new()),
+                    )),
+            )
+            .node(NodeTypeSpec::new("table_row", "table_cell+"))
+            .node(NodeTypeSpec::new("table_cell", "inline*"))
+            .node(NodeTypeSpec::text("text").group("inline")),
+    )
+    .expect("the table schema is valid")
+}
+
+#[test]
+fn column_alignments_read_the_named_attribute() {
+    let schema = custom_attr_schema();
+    let cell = |text: &str| {
+        schema
+            .node("table_cell", [schema.text(text)])
+            .expect("a valid cell")
+    };
+    let row = schema
+        .node("table_row", [cell("a"), cell("b")])
+        .expect("a valid row");
+    let table = schema
+        .node_with("table", crate::attrs! {"align" => "right,left"}, [row])
+        .expect("a valid table");
+    assert_eq!(
+        column_alignments(&table, "align", 2),
+        vec![ColumnAlignment::Right, ColumnAlignment::Left]
+    );
+    // An attribute the table does not carry reads as unaligned.
+    assert_eq!(
+        column_alignments(&table, "alignments", 2),
+        vec![ColumnAlignment::None, ColumnAlignment::None]
+    );
+}
+
+#[test]
+fn set_column_alignment_writes_the_named_attribute() {
+    let schema = custom_attr_schema();
+    let types = TableTypes::new(
+        schema.node_id("table").expect("known"),
+        schema.node_id("table_row").expect("known"),
+        schema.node_id("table_cell").expect("known"),
+        "align",
+    );
+    let cell = |text: &str| {
+        schema
+            .node("table_cell", [schema.text(text)])
+            .expect("a valid cell")
+    };
+    let row = schema
+        .node("table_row", [cell("a"), cell("b")])
+        .expect("a valid row");
+    let table = schema
+        .node_with("table", crate::attrs! {"align" => "none,none"}, [row])
+        .expect("a valid table");
+    let document = schema.node("doc", [table]).expect("a valid doc");
+    let state = EditorState::create(EditorStateConfig::new(schema.clone()).doc(document))
+        .expect("a valid state");
+    // Cell content starts at 3 and 6, as in `grid`.
+    let after = run(
+        &at(&state, 6),
+        &set_column_alignment(types, ColumnAlignment::Center),
+    );
+    assert_eq!(
+        column_alignments(after.doc().child(0), "align", 2),
+        vec![ColumnAlignment::None, ColumnAlignment::Center]
     );
 }

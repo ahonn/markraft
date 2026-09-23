@@ -46,7 +46,7 @@ pub(crate) type AnyValue = Arc<dyn Any + Send + Sync>;
 pub enum Dep {
     /// The document.
     Doc,
-    /// The selection.
+    /// The selection, including the state's stored marks.
     Selection,
     /// A state field, by id.
     Field(u64),

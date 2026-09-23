@@ -57,11 +57,12 @@ fn the_preset_compiles_and_names_everything_it_documents() {
     let task = schema.node_id(md::TASK_ITEM).expect("task_item");
     let bullet = schema.node_id(md::BULLET_LIST).expect("bullet_list");
     assert!(schema.can_contain(bullet, item) && schema.can_contain(bullet, task));
-    // A hard break is tagged for the projection by its group, not a flag.
+    // A hard break is declared to the projection by its break kind.
     let hard_break = schema.node_id(md::LINE_BREAK).expect("hard_break");
-    assert!(markraft_core::projection::is_line_break(
-        &schema, hard_break
-    ));
+    assert_eq!(
+        schema.node_type(hard_break).break_kind(),
+        Some(markraft_core::BreakKind::Hard)
+    );
 }
 
 #[test]

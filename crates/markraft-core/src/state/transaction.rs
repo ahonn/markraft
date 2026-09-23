@@ -12,7 +12,9 @@
 //! two non-sequential specs rebases each set over the other
 //! ([`ChangeSet::transform`]) and composes; combining a sequential one simply
 //! composes. Selections and effects are mapped through whichever side they did
-//! not travel with, so a spec's own positions always mean what it wrote.
+//! not travel with, so a spec's own positions always mean what it wrote. Stored
+//! marks hold no positions; a later spec's setting replaces an earlier one's,
+//! like its selection.
 //!
 //! # Annotations
 //!
@@ -27,13 +29,17 @@ use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::change::{Change, ChangeDesc, ChangeSet};
+use crate::mark::MarkSet;
 use crate::node::Node;
 use crate::selection::Selection;
 use crate::slice::Slice;
 
-use super::annotation::{self, Annotation, matches_user_event};
-use super::effect::{StateEffect, append_config, compartment_reconfigure, reconfigure};
+use super::annotation::Annotation;
+use super::effect::StateEffect;
 use super::filters::{self, ChangeFilterResult};
+use super::protocol::{
+    self, append_config, compartment_reconfigure, matches_user_event, reconfigure,
+};
 use super::{AnnotationType, EditorState, StateEffectType, StateError};
 
 #[derive(Clone)]
@@ -50,6 +56,7 @@ enum SpecChanges {
 pub struct TransactionSpec {
     changes: Option<SpecChanges>,
     selection: Option<Selection>,
+    stored_marks: Option<Option<MarkSet>>,
     effects: Vec<StateEffect>,
     annotations: Vec<Annotation>,
     scroll_into_view: bool,
@@ -62,6 +69,7 @@ impl Default for TransactionSpec {
         TransactionSpec {
             changes: None,
             selection: None,
+            stored_marks: None,
             effects: Vec::new(),
             annotations: Vec::new(),
             scroll_into_view: false,
@@ -76,6 +84,7 @@ impl std::fmt::Debug for TransactionSpec {
         f.debug_struct("TransactionSpec")
             .field("has_changes", &self.changes.is_some())
             .field("selection", &self.selection)
+            .field("stored_marks", &self.stored_marks)
             .field("effects", &self.effects.len())
             .field("annotations", &self.annotations.len())
             .field("sequential", &self.sequential)
@@ -109,6 +118,15 @@ impl TransactionSpec {
         self
     }
 
+    /// Set the state's stored marks explicitly; `None` clears them.
+    ///
+    /// Without this a transaction that changes the document or sets a
+    /// selection clears the stored marks, and any other transaction keeps them.
+    pub fn stored_marks(mut self, marks: Option<MarkSet>) -> Self {
+        self.stored_marks = Some(marks);
+        self
+    }
+
     /// Add an effect.
     pub fn effect(mut self, effect: StateEffect) -> Self {
         self.effects.push(effect);
@@ -127,26 +145,26 @@ impl TransactionSpec {
         self
     }
 
-    /// Shorthand for annotating with [`user_event`](super::user_event).
+    /// Shorthand for annotating with [`user_event`](super::protocol::user_event).
     pub fn user_event(self, event: &str) -> Self {
-        self.annotate(annotation::user_event().of(event.to_string()))
+        self.annotate(protocol::user_event().of(event.to_string()))
     }
 
     /// Shorthand for annotating with
-    /// [`add_to_history`](super::add_to_history).
+    /// [`add_to_history`](super::protocol::add_to_history).
     pub fn add_to_history(self, add: bool) -> Self {
-        self.annotate(annotation::add_to_history().of(add))
+        self.annotate(protocol::add_to_history().of(add))
     }
 
-    /// Shorthand for annotating with [`time`](super::time). Without this the
+    /// Shorthand for annotating with [`time`](super::protocol::time). Without this the
     /// transaction is stamped with the current wall-clock time.
     pub fn time(self, millis: u64) -> Self {
-        self.annotate(annotation::time().of(millis))
+        self.annotate(protocol::time().of(millis))
     }
 
-    /// Shorthand for annotating with [`remote`](super::remote).
+    /// Shorthand for annotating with [`remote`](super::protocol::remote).
     pub fn remote(self, remote: bool) -> Self {
-        self.annotate(annotation::remote().of(remote))
+        self.annotate(protocol::remote().of(remote))
     }
 
     /// Ask the view to scroll the selection into view.
@@ -189,6 +207,7 @@ impl Selection {
 pub(crate) struct Resolved {
     pub(crate) changes: ChangeSet,
     pub(crate) selection: Option<Selection>,
+    pub(crate) stored_marks: Option<Option<MarkSet>>,
     pub(crate) effects: Vec<StateEffect>,
     pub(crate) annotations: Vec<Annotation>,
     pub(crate) scroll_into_view: bool,
@@ -199,6 +218,7 @@ struct TransactionData {
     changes: ChangeSet,
     new_doc: Node,
     selection: Option<Selection>,
+    stored_marks: Option<Option<MarkSet>>,
     effects: Vec<StateEffect>,
     annotations: Vec<Annotation>,
     scroll_into_view: bool,
@@ -229,8 +249,8 @@ impl Transaction {
     ) -> Result<Transaction, StateError> {
         let new_doc = resolved.changes.apply(state.doc())?;
         let mut annotations = resolved.annotations;
-        if !annotations.iter().any(|a| a.is(annotation::time())) {
-            annotations.push(annotation::time().of(now_millis()));
+        if !annotations.iter().any(|a| a.is(protocol::time())) {
+            annotations.push(protocol::time().of(now_millis()));
         }
         let reconfigured = resolved.effects.iter().any(|effect| {
             effect.is(reconfigure())
@@ -242,6 +262,7 @@ impl Transaction {
             changes: resolved.changes,
             new_doc,
             selection: resolved.selection,
+            stored_marks: resolved.stored_marks,
             effects: resolved.effects,
             annotations,
             scroll_into_view: resolved.scroll_into_view,
@@ -292,6 +313,23 @@ impl Transaction {
         }
     }
 
+    /// The stored marks the transaction set explicitly, if it set them:
+    /// `Some(None)` is an explicit clear.
+    pub fn stored_marks(&self) -> Option<&Option<MarkSet>> {
+        self.0.stored_marks.as_ref()
+    }
+
+    /// The resulting stored marks: the explicit setting when there is one;
+    /// otherwise none when the transaction changes the document or sets a
+    /// selection, and the start state's stored marks when it does neither.
+    pub fn new_stored_marks(&self) -> Option<MarkSet> {
+        match &self.0.stored_marks {
+            Some(marks) => marks.clone(),
+            None if self.doc_changed() || self.selection().is_some() => None,
+            None => self.0.start_state.stored_marks().cloned(),
+        }
+    }
+
     /// The effects attached to this transaction.
     pub fn effects(&self) -> &[StateEffect] {
         &self.0.effects
@@ -318,8 +356,7 @@ impl Transaction {
 
     /// The transaction's user event, if it has one.
     pub fn user_event_name(&self) -> Option<&str> {
-        self.annotation(annotation::user_event())
-            .map(String::as_str)
+        self.annotation(protocol::user_event()).map(String::as_str)
     }
 
     /// Whether the transaction's user event is `prefix` or a dotted refinement
@@ -360,6 +397,9 @@ impl Transaction {
         if let Some(selection) = &self.0.selection {
             spec = spec.selection(selection.clone());
         }
+        if let Some(marks) = &self.0.stored_marks {
+            spec = spec.stored_marks(marks.clone());
+        }
         for annotation in &self.0.annotations {
             spec = spec.annotate(annotation.clone());
         }
@@ -373,6 +413,7 @@ impl Transaction {
         Resolved {
             changes: self.0.changes.clone(),
             selection: self.0.selection.clone(),
+            stored_marks: self.0.stored_marks.clone(),
             effects: self.0.effects.clone(),
             annotations: self.0.annotations.clone(),
             scroll_into_view: self.0.scroll_into_view,
@@ -413,6 +454,7 @@ fn resolve_inner(
     Ok(Resolved {
         changes,
         selection: spec.selection.clone(),
+        stored_marks: spec.stored_marks.clone(),
         effects: spec.effects.clone(),
         annotations: spec.annotations.clone(),
         scroll_into_view: spec.scroll_into_view,
@@ -442,6 +484,7 @@ fn merge(
             .selection
             .map(|selection| selection.map(state.schema(), &doc, &map_for_a)),
     };
+    let stored_marks = b.stored_marks.or(a.stored_marks);
     let mut effects = StateEffect::map_all(&a.effects, &map_for_a);
     effects.extend(StateEffect::map_all(&b.effects, &map_for_b));
     // A later spec has the last word on any annotation it sets, so a spec can
@@ -458,6 +501,7 @@ fn merge(
     Ok(Resolved {
         changes,
         selection,
+        stored_marks,
         effects,
         annotations,
         scroll_into_view: a.scroll_into_view || b.scroll_into_view,
@@ -559,6 +603,7 @@ fn apply_change_filters(tr: Transaction) -> Result<Transaction, StateError> {
         Resolved {
             changes: filtered,
             selection,
+            stored_marks: tr.stored_marks().cloned(),
             effects,
             annotations: tr.annotations().to_vec(),
             scroll_into_view: tr.scroll_into_view(),
@@ -572,7 +617,7 @@ fn apply_change_filters(tr: Transaction) -> Result<Transaction, StateError> {
 /// transaction, and what they return is merged sequentially: their positions
 /// refer to the document produced so far, and the changes they add are composed
 /// exactly. Wordgard's extenders may only add effects and annotations; allowing
-/// changes is what lets [`Correction`](crate::Correction) be one.
+/// changes is what lets [`Correction`](crate::corrections::Correction) be one.
 fn extend_transaction(tr: Transaction) -> Result<Transaction, StateError> {
     let state = tr.start_state().clone();
     let extenders = state.facet(filters::transaction_extender()).clone();

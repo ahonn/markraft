@@ -128,12 +128,12 @@ mod tests {
         );
         assert!(replace_source(changed.state(), ty, pos, &node, "lost").is_none());
         assert!(replace_source(&state, ty, 1, &node, "lost").is_none());
-        let undo = markraft_core::undo(changed.state()).unwrap();
+        let undo = markraft_core::history::undo(changed.state()).unwrap();
         let restored = changed.state().update([undo]).unwrap();
         assert_eq!(restored.new_doc(), state.doc());
         let redone = restored
             .state()
-            .update([markraft_core::redo(restored.state()).unwrap()])
+            .update([markraft_core::history::redo(restored.state()).unwrap()])
             .unwrap();
         assert_eq!(redone.new_doc(), changed.new_doc());
         assert_eq!(

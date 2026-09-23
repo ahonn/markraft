@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use markraft_core::kind::TABLE_ALIGNMENTS_ATTR;
 use markraft_core::{Attrs, Schema, attrs};
 use scraper::ElementRef;
 
@@ -360,7 +361,7 @@ pub fn commonmark_html_rules() -> HtmlRules {
             "table",
             HtmlRule::block_with(
                 md::TABLE,
-                html_attrs_fn(|target| attrs! {"alignments" => table_alignments(target)}),
+                html_attrs_fn(|target| attrs! {TABLE_ALIGNMENTS_ATTR => table_alignments(target)}),
             ),
         )
         // A table's sections are not part of the model: the first row is the

@@ -32,7 +32,7 @@
 //! * A composition folds its successive replacements: a transaction with the
 //!   `input.type.compose` user event joins the entry an earlier one started,
 //!   until a transaction that is not a composition, or an
-//!   [`end_composition`](crate::end_composition) effect, closes it.
+//!   [`end_composition`] effect, closes it.
 //!
 //! A transaction a [`transaction_appender`](crate::transaction_appender)
 //! produced also folds into the entry of the transaction that triggered it, and
@@ -41,10 +41,17 @@
 //!
 //! Undo and redo close both an open group and an open composition.
 //!
+//! # Rolling back
+//!
+//! A transaction carrying [`restore_fields_from`] puts the history back to the
+//! value it had in the carried state, open groups and composition grouping
+//! included, instead of recording anything. Cancelling a composition uses it to
+//! forget the entries the composition's own transactions grew.
+//!
 //! # Transactions the history should not record
 //!
-//! A transaction annotated [`add_to_history(false)`](crate::add_to_history)
-//! is not recorded. When it changes the document, every stored entry is rebased
+//! A transaction annotated
+//! [`add_to_history(false)`](crate::protocol::add_to_history) is not recorded. When it changes the document, every stored entry is rebased
 //! over it instead, so an undo after a remote edit still applies. Only the top
 //! entry of each branch is rebased eagerly; what the rest still owe is carried
 //! with that entry and paid when it is popped.
@@ -56,21 +63,23 @@
 //! That maps onto user events and adjacency: `Typed` is `input.type`,
 //! `Composition` is `input.type.compose`, `Paste` is `input.paste`, `History`
 //! is `undo`/`redo` with `add_to_history: false`, `Command` is no user event at
-//! all, and `Extension(name)` is the [`origin`](crate::origin) annotation. The
-//! old "a block kind changed, so start a new entry" guard becomes
-//! [`isolate_history`] at the site that performs the conversion.
+//! all, and `Extension(name)` is the [`origin`](crate::protocol::origin)
+//! annotation. The old "a block kind changed, so start a new entry" guard
+//! becomes [`isolate_history`] at the site that performs the conversion.
 
 mod json;
 mod state;
 
 use std::sync::{Arc, LazyLock};
 
-use crate::composition::{COMPOSE_USER_EVENT, end_composition};
 use crate::selection::Selection;
+use crate::state::protocol::{
+    COMPOSE_USER_EVENT, IsolateHistory, add_to_history, appended, end_composition,
+    fold_into_previous, isolate_history, matches_user_event, restore_fields_from, time,
+};
 use crate::state::{
-    Annotation, AnnotationType, EditorState, Extension, Facet, FacetConfig, StateEffect,
-    StateEffectType, StateField, StateFieldConfig, Transaction, TransactionSpec, add_to_history,
-    matches_user_event, time,
+    AnnotationType, EditorState, Extension, Facet, FacetConfig, StateEffect, StateEffectType,
+    StateField, StateFieldConfig, Transaction, TransactionSpec,
 };
 
 pub use state::HistoryState;
@@ -79,17 +88,6 @@ use state::{Branch, HistEvent, MergeHints, add_selection, pop_selection, updated
 
 /// A function registered with [`inverted_effects`].
 pub type InvertedEffectsFn = Arc<dyn Fn(&Transaction) -> Vec<StateEffect> + Send + Sync>;
-
-/// Which side of a transaction a boundary is forced on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IsolateHistory {
-    /// Do not merge with earlier transactions.
-    Before,
-    /// Do not let later transactions merge with this one.
-    After,
-    /// Both.
-    Both,
-}
 
 /// How the history behaves.
 #[derive(Clone)]
@@ -137,8 +135,6 @@ static HISTORY_CONFIG: LazyLock<Facet<HistoryConfig, HistoryConfig>> = LazyLock:
 });
 static INVERTED_EFFECTS: LazyLock<Facet<InvertedEffectsFn>> = LazyLock::new(Facet::list);
 static FROM_HISTORY: LazyLock<AnnotationType<FromHistory>> = LazyLock::new(AnnotationType::define);
-static ISOLATE: LazyLock<AnnotationType<IsolateHistory>> = LazyLock::new(AnnotationType::define);
-static FOLD: LazyLock<AnnotationType<bool>> = LazyLock::new(AnnotationType::define);
 static BEGIN_GROUP: LazyLock<StateEffectType<()>> = LazyLock::new(StateEffectType::define);
 static END_GROUP: LazyLock<StateEffectType<()>> = LazyLock::new(StateEffectType::define);
 static HISTORY_FIELD: LazyLock<StateField<HistoryState>> = LazyLock::new(|| {
@@ -160,20 +156,6 @@ pub fn history_config() -> &'static Facet<HistoryConfig, HistoryConfig> {
 /// history should replay when that transaction is undone.
 pub fn inverted_effects() -> &'static Facet<InvertedEffectsFn> {
     &INVERTED_EFFECTS
-}
-
-/// Force an undo boundary around a transaction.
-pub fn isolate_history() -> &'static AnnotationType<IsolateHistory> {
-    &ISOLATE
-}
-
-/// Fold a transaction into the entry below it, the way an appended one is.
-///
-/// For a change that finishes the edit recorded there rather than being an
-/// edit of its own — a correction that a selection change set off, settling
-/// what the previous edit left unsettled. Undoing the entry undoes both.
-pub fn fold_into_previous() -> &'static AnnotationType<bool> {
-    &FOLD
 }
 
 /// Open an explicit undo group. Every entry made until the matching
@@ -298,8 +280,15 @@ fn pop(state: &EditorState, side: Branch, only_selection: bool) -> Option<Transa
 }
 
 fn update_history(value: &HistoryState, tr: &Transaction) -> HistoryState {
-    if let Some(previous) = crate::composition::cancelled_history(tr) {
-        return previous.clone();
+    if let Some(from) = tr
+        .effects()
+        .iter()
+        .find_map(|effect| effect.value(restore_fields_from()))
+    {
+        return from
+            .field(history_field())
+            .cloned()
+            .unwrap_or_else(|| value.clone());
     }
     // The configuration is read from the *start* state: reading it from the
     // resulting state would ask for the state this update is producing.
@@ -375,7 +364,7 @@ fn update_history(value: &HistoryState, tr: &Transaction) -> HistoryState {
     let at = tr.annotation(time()).copied().unwrap_or(0);
     let hints = MergeHints {
         was_composing,
-        appended: tr.annotation(crate::state::appended()).is_some()
+        appended: tr.annotation(appended()).is_some()
             || tr.annotation(fold_into_previous()) == Some(&true),
     };
     match HistEvent::from_transaction(tr, None) {
@@ -408,9 +397,4 @@ fn composing_after(state: &HistoryState, user_event: Option<&str>, tr: &Transact
         Some(_) => false,
         None => state.composing && !tr.doc_changed(),
     }
-}
-
-/// An annotation shorthand for [`isolate_history`].
-pub fn isolate(kind: IsolateHistory) -> Annotation {
-    isolate_history().of(kind)
 }

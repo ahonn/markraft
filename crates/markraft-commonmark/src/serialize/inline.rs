@@ -13,8 +13,7 @@
 //! reordered rather than closed and reopened, and whitespace at the edges of a
 //! run moves out from under the marks that could not carry it.
 
-use markraft_core::projection::is_line_break;
-use markraft_core::{Mark, Node};
+use markraft_core::{BreakKind, Mark, Node};
 
 use super::{MarkTarget, SerializerState};
 use crate::derive::BlockKind;
@@ -191,7 +190,7 @@ impl SerializerState<'_> {
             .filter(|mark| self.serializer.mark_rule(mark.ty).is_some())
             .cloned()
             .collect();
-        if is_line_break(self.schema(), node.type_id()) {
+        if self.schema().node_type(node.type_id()).break_kind() == Some(BreakKind::Hard) {
             marks.retain(|mark| {
                 parent.maybe_child(index + 1).is_some_and(|next| {
                     next.marks().contains(mark)

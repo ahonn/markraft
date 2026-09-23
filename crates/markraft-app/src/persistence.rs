@@ -397,8 +397,10 @@ mod tests {
     #[test]
     fn composition_candidates_never_enter_saved_snapshots() {
         use markraft_core::{
-            EditorState, EditorStateConfig, Selection, committed_document, composition,
-            finish_composition, update_composition,
+            EditorState, EditorStateConfig, Selection,
+            composition::{
+                committed_document, composition, finish_composition, update_composition,
+            },
         };
 
         let directory = tempfile::tempdir().unwrap();

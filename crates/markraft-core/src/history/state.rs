@@ -15,7 +15,8 @@ use crate::change::{ChangeRange, ChangeSet};
 use crate::node::Node;
 use crate::schema::Schema;
 use crate::selection::Selection;
-use crate::state::{StateEffect, Transaction, matches_user_event};
+use crate::state::protocol::{COMPOSE_USER_EVENT, matches_user_event};
+use crate::state::{StateEffect, Transaction};
 
 use super::inverted_effects;
 
@@ -29,7 +30,7 @@ pub(crate) struct MergeHints {
     /// A composition was folding into the top entry before this transaction.
     pub(crate) was_composing: bool,
     /// This transaction was produced by a transaction appender, or is
-    /// annotated [`fold_into_previous`](super::fold_into_previous).
+    /// annotated [`fold_into_previous`](crate::protocol::fold_into_previous).
     pub(crate) appended: bool,
 }
 
@@ -226,7 +227,7 @@ impl HistoryState {
             return true;
         }
         // A composition folds its successive replacements.
-        if hints.was_composing && user_event == Some(crate::composition::COMPOSE_USER_EVENT) {
+        if hints.was_composing && user_event == Some(COMPOSE_USER_EVENT) {
             return true;
         }
         if !last.selections_after.is_empty() {

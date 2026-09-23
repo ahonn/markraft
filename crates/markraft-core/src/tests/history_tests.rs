@@ -6,10 +6,11 @@ use crate::composition::CompositionRange;
 use crate::composition::{composition, finish_composition, start_composition, update_composition};
 use crate::fit::Fit;
 use crate::history::{
-    HistoryConfig, IsolateHistory, begin_undo_group, end_undo_group, history, isolate, redo,
-    redo_depth, redo_selection, undo, undo_depth, undo_selection,
+    HistoryConfig, begin_undo_group, end_undo_group, history, redo, redo_depth, redo_selection,
+    undo, undo_depth, undo_selection,
 };
 use crate::node::{Markup, Node};
+use crate::protocol::{IsolateHistory, isolate};
 use crate::schema::Schema;
 use crate::selection::Selection;
 use crate::slice::{Slice, Token};
@@ -451,7 +452,7 @@ fn a_composition_committed_inside_an_explicit_group_undoes_with_it() {
     let state = run(
         &state,
         finish_composition()
-            .user_event(crate::composition::COMPOSE_USER_EVENT)
+            .user_event(crate::protocol::COMPOSE_USER_EVENT)
             .time(3),
     );
     let state = run(&state, typed(&schema, 6, "!", 4));
@@ -496,7 +497,10 @@ fn a_later_spec_has_the_last_word_on_an_annotation() {
             typed(&schema, 3, "C", 0).add_to_history(true).sequential(),
         ])
         .expect("a valid transaction");
-    assert_eq!(tr.annotation(crate::state::add_to_history()), Some(&true));
+    assert_eq!(
+        tr.annotation(crate::protocol::add_to_history()),
+        Some(&true)
+    );
     let state = tr.state().clone();
     assert_eq!(undo_depth(&state), 1);
     let undone = run(&state, undo(&state).expect("something to undo"));

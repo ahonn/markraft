@@ -6,8 +6,10 @@
 //!
 //! # Built-in kinds
 //!
-//! * [`Selection::Text`] — a range inside inline content, carrying the optional
-//!   *stored marks* that content typed at a cursor should get.
+//! * [`Selection::Text`] — a range inside inline content. The *stored marks*
+//!   that content typed at a cursor should get live on the state
+//!   ([`EditorState::stored_marks`](crate::EditorState::stored_marks)), not
+//!   here.
 //! * [`Selection::Node`] — one selectable node, addressed by the position
 //!   directly before it.
 //! * [`Selection::All`] — the whole document.
@@ -29,7 +31,6 @@ pub use custom::SelectionKind;
 use crate::change::ChangeDesc;
 use crate::error::NodeError;
 use crate::fragment::Fragment;
-use crate::mark::MarkSet;
 use crate::node::Node;
 use crate::schema::Schema;
 use crate::slice::Slice;
@@ -70,9 +71,6 @@ pub enum Selection {
         anchor: usize,
         /// The moving side of the selection.
         head: usize,
-        /// Marks to apply to content typed here, overriding the marks the
-        /// surrounding content would give it. Only meaningful for a cursor.
-        marks: Option<MarkSet>,
     },
     /// One node, addressed by the position directly before it.
     Node {
@@ -88,14 +86,9 @@ pub enum Selection {
 impl Clone for Selection {
     fn clone(&self) -> Selection {
         match self {
-            Selection::Text {
-                anchor,
-                head,
-                marks,
-            } => Selection::Text {
+            Selection::Text { anchor, head } => Selection::Text {
                 anchor: *anchor,
                 head: *head,
-                marks: marks.clone(),
             },
             Selection::Node { pos } => Selection::Node { pos: *pos },
             Selection::All => Selection::All,
@@ -111,14 +104,12 @@ impl PartialEq for Selection {
                 Selection::Text {
                     anchor: a1,
                     head: h1,
-                    marks: m1,
                 },
                 Selection::Text {
                     anchor: a2,
                     head: h2,
-                    marks: m2,
                 },
-            ) => a1 == a2 && h1 == h2 && m1 == m2,
+            ) => a1 == a2 && h1 == h2,
             (Selection::Node { pos: a }, Selection::Node { pos: b }) => a == b,
             (Selection::All, Selection::All) => true,
             (Selection::Custom(a), Selection::Custom(b)) => a.eq_kind(b.as_ref()),
@@ -141,26 +132,12 @@ impl Selection {
         Selection::Text {
             anchor: pos,
             head: pos,
-            marks: None,
         }
     }
 
     /// A text selection from `anchor` to `head`.
     pub fn text(anchor: usize, head: usize) -> Selection {
-        Selection::Text {
-            anchor,
-            head,
-            marks: None,
-        }
-    }
-
-    /// A cursor carrying stored marks.
-    pub fn cursor_with_marks(pos: usize, marks: MarkSet) -> Selection {
-        Selection::Text {
-            anchor: pos,
-            head: pos,
-            marks: Some(marks),
-        }
+        Selection::Text { anchor, head }
     }
 
     /// A node selection on the node starting at `pos`.
@@ -224,14 +201,6 @@ impl Selection {
         }
     }
 
-    /// The stored marks of a text selection, if it carries any.
-    pub fn stored_marks(&self) -> Option<&MarkSet> {
-        match self {
-            Selection::Text { marks, .. } => marks.as_ref(),
-            _ => None,
-        }
-    }
-
     /// The range replaced when content is typed or pasted over this selection.
     pub fn replacement_range(&self, doc: &Node) -> SelectionRange {
         match self {
@@ -275,11 +244,7 @@ impl Selection {
     /// mapped position is still valid.
     pub fn map(&self, schema: &Schema, doc: &Node, changes: &ChangeDesc) -> Selection {
         match self {
-            Selection::Text {
-                anchor,
-                head,
-                marks,
-            } => {
+            Selection::Text { anchor, head } => {
                 let size = doc.content_size();
                 let mapped_head = changes
                     .map_pos(*head, 1, Default::default())
@@ -298,9 +263,6 @@ impl Selection {
                 Selection::Text {
                     anchor,
                     head: mapped_head,
-                    // Stored marks describe a cursor; a mapped range keeps them
-                    // only while it stays empty.
-                    marks: marks.clone().filter(|_| anchor == mapped_head),
                 }
             }
             Selection::Node { pos } => {

@@ -246,10 +246,9 @@ fn a_custom_kind_maps_compares_and_serialises() {
 #[test]
 fn built_in_selections_round_trip_through_json() {
     let schema = shared_schema();
-    let marks = crate::mark::MarkSet::from_marks(&schema, [m(&schema, "strong")]);
     for selection in [
         Selection::text(1, 3),
-        Selection::cursor_with_marks(2, marks),
+        Selection::cursor(2),
         Selection::node(2),
         Selection::All,
     ] {

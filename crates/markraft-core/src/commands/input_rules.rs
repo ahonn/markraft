@@ -17,7 +17,7 @@
 //! still there.
 //!
 //! The combined transaction is annotated
-//! [`isolate_history(Both)`](crate::isolate_history), so an automatic
+//! [`isolate_history(Both)`](crate::protocol::isolate_history), so an automatic
 //! conversion is always an undo step of its own — the behaviour the old core's
 //! block conversions relied on.
 //!
@@ -33,14 +33,14 @@
 use std::sync::{Arc, LazyLock};
 
 use crate::change::ChangeSet;
-use crate::history::{IsolateHistory, isolate};
 use crate::node::Node;
-use crate::projection::{OBJECT_REPLACEMENT, is_line_break};
+use crate::projection::atom_filler;
 use crate::schema::Schema;
 use crate::selection::Selection;
+use crate::state::protocol::{IsolateHistory, isolate, remote};
 use crate::state::{
     AnnotationType, EditorState, Extension, Facet, StateField, StateFieldConfig, Transaction,
-    TransactionFilterFn, TransactionSpec, remote, transaction_filter,
+    TransactionFilterFn, TransactionSpec, transaction_filter,
 };
 
 use super::{Command, command};
@@ -279,7 +279,8 @@ fn run_input_rules(tr: &Transaction) -> Option<Vec<TransactionSpec>> {
 
 /// The first `upto` tokens of `block`'s content as text, one `char` per token.
 ///
-/// Atoms become [`OBJECT_REPLACEMENT`] and line breaks `'\n'`, exactly as
+/// Atoms become [`OBJECT_REPLACEMENT`](crate::projection::OBJECT_REPLACEMENT),
+/// hard breaks `'\n'` and soft breaks a space, exactly as
 /// [`Projection`](crate::projection::Projection) renders them, so a matched
 /// `char` count is also a token count.
 fn block_text(schema: &Schema, block: &Node, upto: usize) -> String {
@@ -294,11 +295,7 @@ fn block_text(schema: &Schema, block: &Node, upto: usize) -> String {
         match child.text() {
             Some(text) => out.extend(text.chars().take(take)),
             None => {
-                let filler = if is_line_break(schema, child.type_id()) {
-                    '\n'
-                } else {
-                    OBJECT_REPLACEMENT
-                };
+                let filler = atom_filler(schema, child.type_id());
                 for _ in 0..take {
                     out.push(filler);
                 }

@@ -84,43 +84,58 @@
 //!   *container* type allows and that container straddles the insertion, the
 //!   composed result marks the inner nodes where sequential application would
 //!   have marked the container.
+//!
 //! # Editor state
 //!
 //! [`EditorState`] adds the editing layer on top of the model: a selection, a
 //! configuration built from [`Extension`]s, [`Facet`]s and [`StateField`]s, and
-//! [`Transaction`]s that produce the next state. [`history`] records the
-//! inverted change sets, [`composition`] tracks IME marked text, and
-//! [`corrections`] repair shapes the schema alone cannot forbid — running until
-//! they have nothing left to ask for. A
+//! [`Transaction`]s that produce the next state. A
 //! [`transaction_appender`] reacts to a finished transaction with another one;
 //! [`EditorState::update_with_appended`] is what returns the whole chain.
 //!
-//! [`history`] and [`composition`] are configured separately but are not
-//! independent of each other: cancelling a composition has to put back the undo
-//! history the composition's own transactions grew, so a composition snapshot
-//! carries the [`HistoryState`] from before it started and the history reads
-//! that snapshot back when a composition is cancelled. Configure composition
-//! without history and the snapshot simply holds nothing; the two cannot be
-//! given *different* implementations of each other's job.
+//! # The crate root and its modules
 //!
-//! # Editing, presentation and layout
+//! The crate root holds three layers of types and nothing else: the model
+//! ([`Node`], [`Schema`], [`Slice`] and their parts), changes ([`ChangeSet`]
+//! and what it is built from) and the state machine ([`EditorState`],
+//! [`Transaction`], [`Extension`], [`Facet`], [`StateField`], the annotation
+//! and effect types and the transaction hooks). Everything built *on* those
+//! layers lives in a module of its own:
 //!
-//! Three namespaced modules sit on top of that:
-//!
+//! * [`protocol`] — the vocabulary extensions share: the annotations,
+//!   effect types and constants that the state machine itself writes or that
+//!   more than one extension reads, such as [`protocol::user_event`],
+//!   [`protocol::add_to_history`], [`protocol::end_composition`] and
+//!   [`protocol::restore_fields_from`].
+//! * [`history`] — the undo history, recording inverted change sets.
+//! * [`composition`] — IME marked text, as state.
+//! * [`corrections`] — per-node-type repairs for shapes the schema alone
+//!   cannot forbid, run until they have nothing left to ask for.
 //! * [`commands`] — the catalogue of editing operations, as pure functions
 //!   from a state to a [`TransactionSpec`], plus input rules.
 //! * [`decorations`] — presentation attached to ranges, points and node types
 //!   without changing the document.
 //! * [`projection`] — a flat, line-oriented view of a document for renderers
 //!   and for the platform text APIs that think in lines and UTF-16.
+//! * [`kind`] — what a view needs of a concrete document kind (see below).
+//!
+//! The extensions depend on the three layers and on [`protocol`], never on
+//! one another. Where one has to affect another, it does so through the
+//! protocol: cancelling a composition has to put back the undo history the
+//! composition's own transactions grew, so a composition snapshot keeps the
+//! whole [`EditorState`] from before it started, and
+//! [`composition::cancel_composition`] carries that state in a
+//! [`protocol::restore_fields_from`] effect. The history — like any field that
+//! honours the effect — reads its old value back out of it. Neither module
+//! names the other, so either can be configured, or replaced, alone.
 //!
 //! # A document kind, as an editing surface sees it
 //!
-//! [`DocTypeNames`] and [`Codecs`] are the two things a view needs of a
-//! concrete document kind: the names its schema gives the roles the view knows
-//! about, and how a [`Slice`] becomes text, markup or HTML and reads back.
-//! Neither names a document kind or a platform, so a view is written against
-//! them and a host supplies the implementations.
+//! [`kind::DocTypeNames`] and [`kind::Codecs`] are the two things a view needs
+//! of a concrete document kind: the names its schema gives the roles the view
+//! knows about, and how a [`Slice`] becomes text, markup or HTML and reads
+//! back. Neither names a document kind or a platform, so a view is written
+//! against them and a host supplies the implementations.
 //!
 //! These two are a **presentation contract, not part of the document model**.
 //! Nothing in this crate reads either of them: the model, the change system and
@@ -128,7 +143,7 @@
 //! never consult a role table. They live here so that a view crate and a
 //! document-kind crate can be written against the same vocabulary without
 //! depending on one another — and that vocabulary, the roles
-//! [`DocTypeNames`] enumerates, is the shape rich text has taken since
+//! [`kind::DocTypeNames`] enumerates, is the shape rich text has taken since
 //! CommonMark and GFM. A kind with roles of its own resolves its ids itself and
 //! leaves the unfilled entries `None`; it is not made to pretend it has
 //! headings.
@@ -144,15 +159,15 @@ mod attr;
 mod build;
 mod change;
 pub mod commands;
-mod composition;
-mod corrections;
+pub mod composition;
+pub mod corrections;
 pub mod decorations;
 mod error;
 mod fit;
 mod fragment;
-mod history;
+pub mod history;
 mod json;
-mod kind;
+pub mod kind;
 mod mark;
 mod node;
 mod pos;
@@ -172,37 +187,21 @@ pub use change::{
 pub use error::{ChangeError, NodeError, SchemaError};
 pub use fit::Fit;
 pub use fragment::Fragment;
-pub use kind::{Codecs, DocTypeNames, SourceSpelling};
 pub use mark::{Mark, MarkSet};
 pub use node::{Markup, Node, NodeVisitor};
 pub use pos::{NodeRange, ResolvedPos};
 pub use schema::{
-    ContentExpr, ContentMatch, MarkType, MarkTypeId, MarkTypeSpec, NodeType, NodeTypeId,
+    BreakKind, ContentExpr, ContentMatch, MarkType, MarkTypeId, MarkTypeSpec, NodeType, NodeTypeId,
     NodeTypeSpec, Schema, SchemaSpec,
 };
 pub use slice::{Slice, Token, min_prefix_delta, node_tokens, tokens_cut, tokens_size};
 
-pub use composition::{
-    COMPOSE_USER_EVENT, CompositionRange, cancel_composition, committed_document, composition,
-    composition_field, composition_range, end_composition, finish_composition, is_composing,
-    set_composition_range, start_composition, update_composition,
-};
-pub use corrections::{
-    Correction, CorrectionContext, CorrectionTrigger, MAX_CORRECTION_ROUNDS, collect_corrections,
-    correction, corrections, corrections_diverged, fill_required_content,
-};
-pub use history::{
-    HistoryConfig, HistoryState, InvertedEffectsFn, IsolateHistory, begin_undo_group,
-    end_undo_group, fold_into_previous, history, history_config, history_field, inverted_effects,
-    isolate, isolate_history, redo, redo_depth, redo_selection, undo, undo_depth, undo_selection,
-};
 pub use selection::{Selection, SelectionKind, SelectionRange};
+pub use state::protocol;
 pub use state::{
-    Annotation, AnnotationType, Appended, ChangeFilterFn, ChangeFilterResult, Compartment,
-    Configuration, Dep, EditorState, EditorStateConfig, Extension, Facet, FacetConfig,
-    MAX_APPENDED_TRANSACTIONS, Prec, StateEffect, StateEffectType, StateError, StateField,
-    StateFieldConfig, StateJsonFields, Transaction, TransactionAppenderFn, TransactionExtenderFn,
-    TransactionFilterFn, TransactionSpec, add_to_history, append_config, appended,
-    appenders_diverged, change_filter, compartment_reconfigure, origin, reconfigure, remote, time,
-    transaction_appender, transaction_extender, transaction_filter, user_event,
+    Annotation, AnnotationType, ChangeFilterFn, ChangeFilterResult, Compartment, Configuration,
+    Dep, EditorState, EditorStateConfig, Extension, Facet, FacetConfig, MAX_APPENDED_TRANSACTIONS,
+    Prec, StateEffect, StateEffectType, StateError, StateField, StateFieldConfig, StateJsonFields,
+    Transaction, TransactionAppenderFn, TransactionExtenderFn, TransactionFilterFn,
+    TransactionSpec, change_filter, transaction_appender, transaction_extender, transaction_filter,
 };

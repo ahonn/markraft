@@ -410,10 +410,10 @@ mod tests {
     fn auto_replace_is_one_undo_step_that_restores_the_literal_text() {
         let state = replace("hi :smile:");
         assert_eq!(projection_of(&state).plain_text(), "hi 😄");
-        let state = run(&state, &command(markraft_core::undo));
+        let state = run(&state, &command(markraft_core::history::undo));
         assert_eq!(projection_of(&state).plain_text(), "hi :smile:");
         // The entry before it is the typing itself, so exactly one step was added.
-        let state = run(&state, &command(markraft_core::undo));
+        let state = run(&state, &command(markraft_core::history::undo));
         assert_eq!(projection_of(&state).plain_text(), "");
     }
 
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn undoing_is_not_typing_and_leaves_no_shortcode_to_replace_again() {
         let state = replace(":smile:");
-        let spec = markraft_core::undo(&state).expect("an undo");
+        let spec = markraft_core::history::undo(&state).expect("an undo");
         let tr = state.update([spec]).expect("the undo applies");
         assert!(tr.is_user_event("undo"));
         assert!(!tr.is_user_event("input.type"));

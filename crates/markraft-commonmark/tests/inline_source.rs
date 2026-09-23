@@ -27,9 +27,12 @@ use markraft_core::commands::{
     Command, Direction, delete_by_grapheme, delete_selection, insert_text, run_command, split_block,
 };
 use markraft_core::{
-    Attrs, Change, CompositionRange, EditorState, EditorStateConfig, Extension, HistoryConfig,
-    Selection, Slice, TransactionSpec, composition, corrections_diverged, finish_composition,
-    history, start_composition, undo, update_composition,
+    Attrs, Change, EditorState, EditorStateConfig, Extension, Selection, Slice, TransactionSpec,
+    composition::{
+        CompositionRange, composition, finish_composition, start_composition, update_composition,
+    },
+    history::{HistoryConfig, history, undo},
+    protocol::corrections_diverged,
 };
 use serde::Deserialize;
 

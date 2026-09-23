@@ -72,7 +72,7 @@ pub fn range_has_mark(doc: &Node, from: usize, to: usize, ty: MarkTypeId) -> boo
 ///
 /// With a non-empty selection the mark is removed when any of the selected
 /// content already carries it and added otherwise. With a cursor nothing is
-/// changed in the document: the mark is toggled in the selection's *stored
+/// changed in the document: the mark is toggled in the state's *stored
 /// marks*, which [`insert_text`](super::insert_text) then applies to whatever
 /// is typed next.
 pub fn toggle_mark(mark_type: MarkTypeId, attrs: Attrs) -> Command {
@@ -90,7 +90,7 @@ pub fn toggle_mark(mark_type: MarkTypeId, attrs: Attrs) -> Command {
         if selection.is_cursor() {
             let pos = selection.head(doc);
             let resolved = doc.resolve(pos).ok()?;
-            let current = selection
+            let current = state
                 .stored_marks()
                 .cloned()
                 .unwrap_or_else(|| resolved.marks(schema));
@@ -102,7 +102,7 @@ pub fn toggle_mark(mark_type: MarkTypeId, attrs: Attrs) -> Command {
             };
             return Some(
                 TransactionSpec::new()
-                    .selection(Selection::cursor_with_marks(pos, next))
+                    .stored_marks(Some(next))
                     .user_event(if present { "mark.remove" } else { "mark.add" }),
             );
         }
@@ -142,7 +142,6 @@ fn change_mark_spec(
     if state.selection().is_cursor() {
         let resolved = doc.resolve(state.selection().head(doc)).ok()?;
         let marks = state
-            .selection()
             .stored_marks()
             .cloned()
             .unwrap_or_else(|| resolved.marks(schema));
@@ -152,7 +151,7 @@ fn change_mark_spec(
         };
         return Some(
             TransactionSpec::new()
-                .selection(Selection::cursor_with_marks(resolved.pos(), marks))
+                .stored_marks(Some(marks))
                 .user_event("mark"),
         );
     }

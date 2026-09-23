@@ -12,9 +12,10 @@
 use std::sync::Arc;
 
 use super::EditorState;
-use super::effect::{StateEffect, compartment_reconfigure};
+use super::effect::StateEffect;
 use super::facet::{FacetProvider, next_id};
 use super::field::AnyField;
+use super::protocol::compartment_reconfigure;
 
 /// How early an extension is placed in the configuration order.
 ///

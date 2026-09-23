@@ -470,8 +470,8 @@ pub(crate) mod tests {
         EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
             DocExtension::all([
                 markraft_core::projection::projection(),
-                markraft_core::composition(),
-                markraft_core::history(Default::default()),
+                markraft_core::composition::composition(),
+                markraft_core::history::history(Default::default()),
                 commonmark_extensions(&schema),
             ]),
         ))
@@ -678,7 +678,7 @@ pub(crate) mod tests {
 
         let state = run(
             &state,
-            &markraft_core::commands::command(markraft_core::undo),
+            &markraft_core::commands::command(markraft_core::history::undo),
         );
         assert_eq!(projection_of(&state).plain_text(), "/head");
         assert_eq!(
@@ -688,7 +688,7 @@ pub(crate) mod tests {
         // The entry before it is the typing itself, so exactly one step was added.
         let state = run(
             &state,
-            &markraft_core::commands::command(markraft_core::undo),
+            &markraft_core::commands::command(markraft_core::history::undo),
         );
         assert_eq!(projection_of(&state).plain_text(), "");
     }

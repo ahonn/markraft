@@ -58,8 +58,9 @@
 use markraft_core::commands::structure::markup_of;
 use markraft_core::commands::{InputRule, InputRuleMatch, input_rules};
 use markraft_core::{
-    Attrs, Change, ChangeRange, Correction, CorrectionContext, Extension, Fragment, MarkSet,
-    Markup, Node, NodeTypeId, Schema, Slice, Token, attrs, corrections, fill_required_content,
+    Attrs, Change, ChangeRange, Extension, Fragment, MarkSet, Markup, Node, NodeTypeId, Schema,
+    Slice, Token, attrs,
+    corrections::{Correction, CorrectionContext, corrections, fill_required_content},
 };
 
 use crate::derive::{BlockKind, Derived, derive};
@@ -114,7 +115,7 @@ pub fn commonmark_corrections(schema: &Schema) -> Vec<Correction> {
 ///
 /// Only one pair per round: two merges of neighbouring pairs would overlap, and
 /// the correction loop runs to a fixed point anyway.
-fn merge_adjacent_lists(cx: &markraft_core::CorrectionContext<'_>) -> Vec<Change> {
+fn merge_adjacent_lists(cx: &markraft_core::corrections::CorrectionContext<'_>) -> Vec<Change> {
     let list_types = [md::BULLET_LIST, md::ORDERED_LIST];
     let schema = cx.start_state.schema();
     let ids: Vec<NodeTypeId> = list_types

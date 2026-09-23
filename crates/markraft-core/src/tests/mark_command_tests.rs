@@ -67,17 +67,68 @@ fn toggle_mark_at_a_cursor_sets_stored_marks_that_typing_uses() {
     );
     let armed = run(&at(&start, 3), &toggle_mark(strong, Attrs::empty()));
     assert_eq!(schema.describe(armed.doc()), r#"doc(paragraph("ab"))"#);
-    assert!(armed.selection().stored_marks().is_some());
+    assert!(
+        armed
+            .stored_marks()
+            .is_some_and(|marks| marks.contains_type(strong))
+    );
+    // Arming a mark leaves the selection alone.
+    assert_eq!(armed.selection(), &Selection::cursor(3));
     let typed = run(&armed, &insert_text("X"));
     assert_eq!(
         schema.describe(typed.doc()),
         r#"doc(paragraph("ab", "X"{strong}))"#
+    );
+    assert!(
+        typed
+            .stored_marks()
+            .is_some_and(|marks| marks.contains_type(strong))
     );
     // The stored marks survive, so the next character is bold too.
     let again = run(&typed, &insert_text("Y"));
     assert_eq!(
         schema.describe(again.doc()),
         r#"doc(paragraph("ab", "XY"{strong}))"#
+    );
+    assert!(
+        again
+            .stored_marks()
+            .is_some_and(|marks| marks.contains_type(strong))
+    );
+    // Moving the cursor drops them.
+    let moved = at(&again, 1);
+    assert_eq!(moved.stored_marks(), None);
+}
+
+#[test]
+fn set_and_remove_mark_at_a_cursor_only_store_marks() {
+    let schema = shared_schema();
+    let strong = schema.mark_id("strong").expect("known");
+    let start = at(
+        &state(
+            doc(
+                &schema,
+                [n(&schema, "paragraph", [tm(&schema, "ab", &["strong"])])],
+            ),
+            Extension::none(),
+        ),
+        2,
+    );
+    let removed = run(&start, &remove_mark(strong));
+    assert_eq!(removed.doc(), start.doc());
+    assert_eq!(removed.selection(), start.selection());
+    assert_eq!(removed.stored_marks(), Some(&MarkSet::empty()));
+    let typed = run(&removed, &insert_text("X"));
+    assert_eq!(
+        schema.describe(typed.doc()),
+        r#"doc(paragraph("a"{strong}, "X", "b"{strong}))"#
+    );
+
+    let set = run(&removed, &set_mark(strong, Attrs::empty()));
+    assert_eq!(set.selection(), start.selection());
+    assert!(
+        set.stored_marks()
+            .is_some_and(|marks| marks.contains_type(strong))
     );
 }
 
@@ -118,7 +169,9 @@ fn insert_text_inside_a_code_block_ignores_stored_marks() {
     );
     let marks = MarkSet::from_marks(&schema, [m(&schema, "strong")]);
     let armed = start
-        .update([TransactionSpec::new().selection(Selection::cursor_with_marks(3, marks))])
+        .update([TransactionSpec::new()
+            .selection(Selection::cursor(3))
+            .stored_marks(Some(marks))])
         .expect("valid")
         .state()
         .clone();

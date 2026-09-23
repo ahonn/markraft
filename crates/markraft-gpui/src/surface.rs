@@ -780,7 +780,7 @@ pub(crate) struct ShapeInput<'a> {
     pub wiki: Option<&'a crate::WikiResolver>,
     /// How the host's kind spells the parts of itself a focused line shows as
     /// source. Without it a line is drawn the same focused or not.
-    pub spelling: Option<&'a dyn markraft_core::SourceSpelling>,
+    pub spelling: Option<&'a dyn markraft_core::kind::SourceSpelling>,
     /// Document selection range, which is what reveals a syntax run. Inclusive
     /// of both ends in the ProseMirror sense (`from`..`to`).
     pub selection: Range<usize>,
@@ -2941,7 +2941,8 @@ impl Element for EditorSurface {
         let selection = state.selection();
         let (a, b) = (selection.from(doc), selection.to(doc));
         let caret_pos = selection.head(doc);
-        let marked = markraft_core::composition_range(state).map(|range| (range.from, range.to));
+        let marked = markraft_core::composition::composition_range(state)
+            .map(|range| (range.from, range.to));
         let focused = editor.focus.is_focused(window);
         let caret_visible = editor.caret_blink.visible && window.is_window_active();
         let caret_shape = editor.extension_caret();
@@ -4965,7 +4966,7 @@ mod tests {
         let rows = shape(&input, px(400.), &text);
         // Whatever the kind spells a quote level with, marker and all — the
         // view draws that and nothing of its own.
-        let expected = markraft_core::SourceSpelling::container_marker(
+        let expected = markraft_core::kind::SourceSpelling::container_marker(
             &spelling,
             types.blockquote.expect("the quote type"),
         )

@@ -13,6 +13,7 @@
 use crate::motion;
 use markraft_core::Slice;
 use markraft_core::commands::TableTypes;
+use markraft_core::kind::TABLE_ALIGNMENTS_ATTR;
 use markraft_core::projection::{Line, Projection};
 use markraft_gpui::DocTypes;
 use std::ops::Range;
@@ -39,6 +40,7 @@ pub(crate) fn types(types: &DocTypes) -> Option<TableTypes> {
         types.table?,
         types.table_row?,
         types.table_cell?,
+        TABLE_ALIGNMENTS_ATTR,
     ))
 }
 

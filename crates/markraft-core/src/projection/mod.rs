@@ -12,10 +12,9 @@
 //!   its own block node — enough to draw list markers, quote bars and nesting —
 //!   and the [`Run`]s its inline content breaks into.
 //! * A [`Run`] is a stretch of text with one mark set, or one inline atom.
-//! * A [`Row`] is the part of a line between two hard breaks. A node type
-//!   counts as a hard break when it belongs to the [`LINE_BREAK_GROUP`] group.
-//!   A group is used rather than a new schema flag so that P0 stays untouched
-//!   and the convention remains pure schema data.
+//! * A [`Row`] is the part of a line between two hard breaks: atoms whose type
+//!   declares [`BreakKind::Hard`]. An atom of a [`BreakKind::Soft`] type stays
+//!   within its row and reads as a space.
 //!
 //! # Offsets
 //!
@@ -41,18 +40,21 @@ use std::sync::{Arc, LazyLock};
 use crate::attr::Attrs;
 use crate::mark::MarkSet;
 use crate::node::Node;
-use crate::schema::{NodeTypeId, Schema};
+use crate::schema::{BreakKind, NodeTypeId, Schema};
 use crate::state::{EditorState, Extension, StateField, StateFieldConfig, Transaction};
 
 /// The character that stands in for one token of an inline atom.
 pub const OBJECT_REPLACEMENT: char = '\u{fffc}';
 
-/// Node types in this group are treated as hard line breaks.
-pub const LINE_BREAK_GROUP: &str = "line_break";
-
-/// Whether `ty` is a hard line break, per [`LINE_BREAK_GROUP`].
-pub fn is_line_break(schema: &Schema, ty: NodeTypeId) -> bool {
-    schema.node_type(ty).in_group(LINE_BREAK_GROUP)
+/// The character each token of a non-text inline leaf of type `ty` reads as:
+/// `'\n'` for a hard break, a space for a soft one, and
+/// [`OBJECT_REPLACEMENT`] for anything else.
+pub(crate) fn atom_filler(schema: &Schema, ty: NodeTypeId) -> char {
+    match schema.node_type(ty).break_kind() {
+        Some(BreakKind::Hard) => '\n',
+        Some(BreakKind::Soft) => ' ',
+        None => OBJECT_REPLACEMENT,
+    }
 }
 
 /// What kind of block a [`Line`] stands for.
@@ -329,7 +331,8 @@ impl Builder<'_> {
         let mut rows = Vec::new();
         let mut row_offset = 0;
         for run in &runs {
-            if matches!(&run.content, RunContent::Atom(node) if is_line_break(self.schema, node.type_id()))
+            if matches!(&run.content, RunContent::Atom(node)
+                if self.schema.node_type(node.type_id()).break_kind() == Some(BreakKind::Hard))
             {
                 rows.push(Row {
                     from: positions[row_offset],
@@ -381,17 +384,7 @@ impl Builder<'_> {
             } else {
                 let offset = positions.len() - 1;
                 let text = child.text().map(str::to_string).unwrap_or_else(|| {
-                    let filler = if is_line_break(self.schema, child.type_id()) {
-                        '\n'
-                    } else if self
-                        .schema
-                        .node_type(child.type_id())
-                        .in_group("soft_break")
-                    {
-                        ' '
-                    } else {
-                        OBJECT_REPLACEMENT
-                    };
+                    let filler = atom_filler(self.schema, child.type_id());
                     std::iter::repeat_n(filler, size).collect()
                 });
                 self.utf16_len += text.encode_utf16().count();

@@ -42,7 +42,7 @@ fn source_setup(source: &str) -> Setup {
 }
 
 fn source_to_save(state: &markraft_core::EditorState) -> Option<String> {
-    if markraft_core::is_composing(state) {
+    if markraft_core::composition::is_composing(state) {
         return None;
     }
     Some(
@@ -322,7 +322,7 @@ mod tests {
             EditorStateConfig::new(setup.schema)
                 .doc(setup.doc.unwrap())
                 .extensions(Extension::all([
-                    markraft_core::composition(),
+                    markraft_core::composition::composition(),
                     markraft_core::projection::projection(),
                 ])),
         )
@@ -346,17 +346,18 @@ mod tests {
     fn saving_waits_for_input_method_completion() {
         let (state, _) = state_of("<span>");
         let started = state
-            .update([markraft_core::start_composition(
-                markraft_core::CompositionRange::new(2, 2),
+            .update([markraft_core::composition::start_composition(
+                markraft_core::composition::CompositionRange::new(2, 2),
             )])
             .unwrap();
-        let candidate = markraft_core::update_composition(started.state(), "你", 1).unwrap();
+        let candidate =
+            markraft_core::composition::update_composition(started.state(), "你", 1).unwrap();
         let composing = started.state().update([candidate]).unwrap();
         assert_eq!(source_to_save(composing.state()), None);
-        assert!(markraft_core::is_composing(composing.state()));
+        assert!(markraft_core::composition::is_composing(composing.state()));
         let committed = composing
             .state()
-            .update([markraft_core::finish_composition()])
+            .update([markraft_core::composition::finish_composition()])
             .unwrap();
         assert_eq!(
             source_to_save(committed.state()).as_deref(),

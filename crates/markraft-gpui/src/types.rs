@@ -5,9 +5,10 @@
 //! none of them and draws plain text. What a missing role costs is written on
 //! the field.
 
-use markraft_core::commands::{ALIGNMENTS_ATTR, ColumnAlignment, TableTypes};
+use markraft_core::commands::{ColumnAlignment, TableTypes};
+use markraft_core::kind::TABLE_ALIGNMENTS_ATTR;
 use markraft_core::projection::{Ancestor, Line};
-use markraft_core::{Attrs, DocTypeNames, EditorState, MarkTypeId, NodeTypeId, Schema};
+use markraft_core::{Attrs, EditorState, MarkTypeId, NodeTypeId, Schema, kind::DocTypeNames};
 
 /// The conventional schema names of the two roles [`DocTypeNames`] has no
 /// entry for.
@@ -82,9 +83,10 @@ pub struct DocTypes {
     pub table_row: Option<NodeTypeId>,
     /// One cell of a table row, which is a textblock. See [`DocTypes::table`].
     pub table_cell: Option<NodeTypeId>,
-    /// A line break. The view finds breaks through the projection's
-    /// `line_break` group rather than here, so this names the type for hosts
-    /// and extensions that insert one.
+    /// A line break. The view finds breaks through the projection, which reads
+    /// each type's declared [`BreakKind`](markraft_core::BreakKind), rather
+    /// than here, so this names the type for hosts and extensions that insert
+    /// one.
     pub hard_break: Option<NodeTypeId>,
     /// An image, carrying `src`, `alt` and `title` attributes. Without it an
     /// image is drawn as a bare object-replacement character, which is blank.
@@ -286,6 +288,7 @@ impl DocTypes {
             self.table?,
             self.table_row?,
             self.table_cell?,
+            TABLE_ALIGNMENTS_ATTR,
         ))
     }
 
@@ -327,7 +330,7 @@ impl DocTypes {
             .iter()
             .nth_back(2)
             .filter(|table| Some(table.node_type) == self.table)
-            .and_then(|table| table.attrs.get(ALIGNMENTS_ATTR))
+            .and_then(|table| table.attrs.get(TABLE_ALIGNMENTS_ATTR))
             .and_then(|value| value.as_str())
             .unwrap_or_default();
         let mut alignments: Vec<ColumnAlignment> = declared

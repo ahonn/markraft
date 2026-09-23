@@ -12,8 +12,10 @@
 //! * [`finish_composition`] clears the mark, which also closes the history's
 //!   composition grouping.
 //!
-//! [`cancel_composition`] restores the document, selection and history from
-//! before the composition. [`committed_document`] excludes uncommitted text
+//! [`cancel_composition`] restores the document and selection from before the
+//! composition, and asks every field that honours
+//! [`restore_fields_from`] — the undo history among them — to return to its
+//! value from then. [`committed_document`] excludes uncommitted text
 //! for persistence. A document edit without the composition user event commits
 //! the current candidate and ends the composition before that edit takes over.
 //!
@@ -28,15 +30,11 @@ use crate::error::NodeError;
 use crate::fit::Fit;
 use crate::node::Node;
 use crate::selection::Selection;
+use crate::state::protocol::{COMPOSE_USER_EVENT, end_composition, restore_fields_from};
 use crate::state::{
     EditorState, Extension, StateEffectType, StateError, StateField, StateFieldConfig, Transaction,
     TransactionSpec,
 };
-
-/// The user event every composition update carries.
-///
-/// The history groups transactions with this event into one undo entry.
-pub const COMPOSE_USER_EVENT: &str = "input.type.compose";
 
 /// The range of the document that is currently marked as composing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,23 +61,21 @@ static SET_RANGE: LazyLock<StateEffectType<CompositionRange>> = LazyLock::new(||
         Some(CompositionRange::new(mapped.from, mapped.to))
     })
 });
-static END: LazyLock<StateEffectType<()>> = LazyLock::new(StateEffectType::define);
 static FIELD: LazyLock<StateField<Option<CompositionRange>>> = LazyLock::new(|| {
     StateField::define(
         StateFieldConfig::new(|_| None, update_composition_field).compare(|a, b| a == b),
     )
 });
 
+/// What a composition started from, and how far it has moved away from it.
 #[derive(Clone)]
 struct CompositionSnapshot {
-    doc: Node,
-    selection: Selection,
+    /// The state before the composition's first transaction.
+    state: EditorState,
+    /// Every change the composition made since, composed, in the coordinates
+    /// of `state`'s document.
     changes: ChangeSet,
-    history: Option<crate::history::HistoryState>,
 }
-
-static CANCEL: LazyLock<StateEffectType<CompositionSnapshot>> =
-    LazyLock::new(StateEffectType::define);
 static SNAPSHOT: LazyLock<StateField<Option<CompositionSnapshot>>> = LazyLock::new(|| {
     StateField::define(StateFieldConfig::new(
         |_| None,
@@ -96,13 +92,8 @@ static SNAPSHOT: LazyLock<StateField<Option<CompositionSnapshot>>> = LazyLock::n
                 Some(snapshot)
             } else if tr.has_effect(set_composition_range()) {
                 Some(CompositionSnapshot {
-                    doc: tr.start_state().doc().clone(),
-                    selection: tr.start_state().selection().clone(),
+                    state: tr.start_state().clone(),
                     changes: tr.changes().clone(),
-                    history: tr
-                        .start_state()
-                        .field(crate::history::history_field())
-                        .cloned(),
                 })
             } else {
                 None
@@ -123,43 +114,33 @@ pub fn committed_document(state: &EditorState) -> &Node {
     state
         .field(&SNAPSHOT)
         .and_then(Option::as_ref)
-        .map_or_else(|| state.doc(), |snapshot| &snapshot.doc)
+        .map_or_else(|| state.doc(), |snapshot| snapshot.state.doc())
 }
 
 /// Restore the content and selection from before the active composition.
 ///
-/// The inverse changes preserve unaffected positions and extension state. The
-/// history returns to its pre-composition value, including any open undo group.
+/// The inverse changes preserve unaffected positions. The spec carries
+/// [`restore_fields_from`] with the state from before the composition, so every
+/// field that honours it — the undo history, including any open undo group —
+/// returns to its pre-composition value; other fields see an ordinary
+/// transaction.
 pub fn cancel_composition(state: &EditorState) -> Option<TransactionSpec> {
     let snapshot = state.field(&SNAPSHOT)?.as_ref()?;
+    let before = &snapshot.state;
     Some(
         TransactionSpec::new()
-            .change_set(snapshot.changes.invert(&snapshot.doc).ok()?)
-            .selection(snapshot.selection.clone())
-            .effect(CANCEL.of(snapshot.clone()))
+            .change_set(snapshot.changes.invert(before.doc()).ok()?)
+            .selection(before.selection().clone())
+            .stored_marks(before.stored_marks().cloned())
+            .effect(restore_fields_from().of(before.clone()))
             .effect(end_composition().of(()))
             .add_to_history(false),
     )
 }
 
-pub(crate) fn cancelled_history(tr: &Transaction) -> Option<&crate::history::HistoryState> {
-    tr.effects()
-        .iter()
-        .find_map(|effect| effect.value(&CANCEL))
-        .and_then(|snapshot| snapshot.history.as_ref())
-}
-
 /// Mark a range as composing, or re-mark it after a replacement.
 pub fn set_composition_range() -> &'static StateEffectType<CompositionRange> {
     &SET_RANGE
-}
-
-/// Clear the composition.
-///
-/// The history also treats this as the end of a composition, so the next edit
-/// starts a new undo entry.
-pub fn end_composition() -> &'static StateEffectType<()> {
-    &END
 }
 
 /// The field holding the composition range.
@@ -256,11 +237,9 @@ pub fn update_composition(
         // document change is used; the composition remains one transaction.
         let selected = if composition_range(state).is_some() {
             state
-                .update([TransactionSpec::new().selection(Selection::Text {
-                    anchor: from,
-                    head: to,
-                    marks: state.selection().stored_marks().cloned(),
-                })])?
+                .update([TransactionSpec::new()
+                    .selection(Selection::text(from, to))
+                    .stored_marks(state.stored_marks().cloned())])?
                 .state()
                 .clone()
         } else {
@@ -280,10 +259,8 @@ pub fn update_composition(
     let range = CompositionRange::new(from, end);
     Ok(TransactionSpec::new()
         .change_set(changes)
-        .selection(Selection::cursor_with_marks(
-            from + caret.min(length),
-            marks,
-        ))
+        .selection(Selection::cursor(from + caret.min(length)))
+        .stored_marks(Some(marks))
         .effect(set_composition_range().of(range))
         .user_event(COMPOSE_USER_EVENT)
         .scroll_into_view())

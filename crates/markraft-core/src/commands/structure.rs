@@ -212,7 +212,7 @@ fn split_rest(parent: &Node, resolved: &crate::pos::ResolvedPos) -> Vec<Node> {
     let mut out: Vec<Node> = Vec::new();
     if offset > 0 {
         let child = parent.child(index);
-        out.push(child.cut_text(offset, child.text_len()));
+        out.push(child.cut_text_unchecked(offset, child.text_len()));
         out.extend(parent.content().as_slice()[index + 1..].iter().cloned());
     } else {
         out.extend(parent.content().as_slice()[index..].iter().cloned());

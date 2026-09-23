@@ -27,7 +27,7 @@
 //!
 //! # Annotations
 //!
-//! Every command annotates its spec with the [`user_event`](crate::user_event)
+//! Every command annotates its spec with the [`user_event`](crate::protocol::user_event)
 //! that describes it, so the undo history groups edits the way the P1
 //! documentation describes, and asks the view to scroll where a user would
 //! expect the caret to be visible.
@@ -77,9 +77,9 @@ pub use list::{lift_list_item, sink_list_item, split_list_item, wrap_in_list};
 pub use marks::{mark_applies, range_has_mark, remove_mark, set_mark, toggle_mark};
 pub use motion::{Direction, delete_by_grapheme, delete_by_word, move_by_grapheme, move_by_word};
 pub use table::{
-    ALIGNMENTS_ATTR, CellPos, ColumnAlignment, TableTypes, add_column_after, add_column_before,
-    add_row_after, add_row_before, cell_at, column_alignments, delete_column, delete_empty_table,
-    delete_row, delete_table, goto_cell_above, goto_cell_below, goto_next_cell, goto_prev_cell,
+    CellPos, ColumnAlignment, TableTypes, add_column_after, add_column_before, add_row_after,
+    add_row_before, cell_at, column_alignments, delete_column, delete_empty_table, delete_row,
+    delete_table, goto_cell_above, goto_cell_below, goto_next_cell, goto_prev_cell,
     guard_cell_boundary, guard_cell_range, guard_cell_split, insert_table, set_column_alignment,
 };
 pub use text::{

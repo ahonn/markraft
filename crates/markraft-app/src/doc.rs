@@ -13,8 +13,8 @@ use markraft_commonmark::{
     CommandRefusal, CommonMarkCodecs, CommonMarkSpelling, commonmark_doc_type_names,
     commonmark_extensions, commonmark_schema, holds_definitions, schema as md,
 };
-use markraft_core::Codecs;
 use markraft_core::commands::{Command, command, replace_selection};
+use markraft_core::kind::Codecs;
 use markraft_core::projection::{Line, Projection};
 use markraft_core::{
     Attrs, EditorState, Extension, Fragment, MarkSet, MarkTypeId, Node, NodeTypeId, Schema, Slice,
@@ -36,7 +36,7 @@ static TYPES: LazyLock<DocTypes> = LazyLock::new(|| DocTypes {
 });
 static CODECS: LazyLock<Arc<dyn Codecs>> =
     LazyLock::new(|| Arc::new(CommonMarkCodecs::new(schema().clone())));
-static SPELLING: LazyLock<Arc<dyn markraft_core::SourceSpelling>> =
+static SPELLING: LazyLock<Arc<dyn markraft_core::kind::SourceSpelling>> =
     LazyLock::new(|| Arc::new(CommonMarkSpelling::new(schema().clone())));
 
 /// The document kind every note is written in.
@@ -61,7 +61,7 @@ pub fn extensions() -> Extension {
 }
 
 /// How this document kind spells the parts of itself a focused line reveals.
-pub fn spelling() -> Arc<dyn markraft_core::SourceSpelling> {
+pub fn spelling() -> Arc<dyn markraft_core::kind::SourceSpelling> {
     SPELLING.clone()
 }
 
@@ -444,7 +444,7 @@ mod tests {
                 .doc(from_markdown(source))
                 .extensions(Extension::all([
                     markraft_core::projection::projection(),
-                    markraft_core::history(Default::default()),
+                    markraft_core::history::history(Default::default()),
                     extensions(),
                 ])),
         )

@@ -59,7 +59,7 @@ pub use serialize::{
     escape_attr, escape_text,
 };
 
-use markraft_core::{Attrs, Fragment, Mark, MarkSet, Node, NodeTypeId, Schema, Slice};
+use markraft_core::{Attrs, BreakKind, Fragment, Mark, MarkSet, Node, NodeTypeId, Schema, Slice};
 use scraper::{ElementRef, Html, Node as HtmlNode};
 
 use crate::fit::{fit, fit_document};
@@ -526,5 +526,5 @@ fn ends_in_space(schema: &Schema, node: &Node) -> bool {
     if let Some(child) = node.last_child() {
         return ends_in_space(schema, child);
     }
-    markraft_core::projection::is_line_break(schema, node.type_id())
+    schema.node_type(node.type_id()).break_kind() == Some(BreakKind::Hard)
 }

@@ -275,7 +275,7 @@ fn split_block_keep_marks_carries_the_marks_at_the_cursor() {
         Extension::none(),
     );
     let after = run(&at(&start, 3), &split_block_keep_marks());
-    let marks = after.selection().stored_marks().expect("stored marks");
+    let marks = after.stored_marks().expect("stored marks");
     assert!(marks.contains_type(schema.mark_id("strong").expect("known")));
 }
 

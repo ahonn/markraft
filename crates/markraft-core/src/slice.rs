@@ -92,7 +92,7 @@ pub fn tokens_cut(tokens: &[Token], from: usize, to: usize) -> Vec<Token> {
                         let start = from.saturating_sub(pos);
                         let stop = (to - pos).min(node.text_len());
                         if stop > start {
-                            out.push(Token::Node(node.cut_text(start, stop)));
+                            out.push(Token::Node(node.cut_text_unchecked(start, stop)));
                         }
                     }
                     Token::Node(node) if node.is_container() => {

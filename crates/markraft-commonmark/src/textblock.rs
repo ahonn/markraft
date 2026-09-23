@@ -11,6 +11,7 @@
 //! through here, so a freshly read block and a freshly corrected one are built
 //! by the same function and cannot disagree.
 
+use markraft_core::kind::{SYNTAX_DISPLAY_ATTR, SYNTAX_SPAN_ATTR};
 use markraft_core::projection::OBJECT_REPLACEMENT;
 use markraft_core::{
     AttrValue, Attrs, Fragment, Mark, MarkSet, MarkTypeId, Node, NodeTypeId, Schema, attrs,
@@ -332,8 +333,8 @@ pub(crate) fn style_mark(schema: &Schema, style: &Style) -> Option<Mark> {
 pub(crate) fn syntax_mark(schema: &Schema, span: u32, display: &str) -> Option<Mark> {
     let ty = schema.mark_id(md::SYNTAX)?;
     let given = attrs! {
-        "span" => AttrValue::Int(i64::from(span)),
-        "display" => display.to_string(),
+        SYNTAX_SPAN_ATTR => AttrValue::Int(i64::from(span)),
+        SYNTAX_DISPLAY_ATTR => display.to_string(),
     };
     let attrs = schema.build_mark_attrs(ty, &given).ok()?;
     Some(Mark::with_attrs(ty, attrs))

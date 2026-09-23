@@ -45,8 +45,8 @@ use gpui::{prelude::*, *};
 use markraft_core::commands::{Command, Direction};
 use markraft_core::projection::{Projection, projection_of};
 use markraft_core::{
-    Attrs, EditorState, EditorStateConfig, HistoryConfig, MarkSet, MarkTypeId, Node, NodeTypeId,
-    Schema, Selection, Transaction, TransactionSpec,
+    Attrs, EditorState, EditorStateConfig, MarkSet, MarkTypeId, Node, NodeTypeId, Schema,
+    Selection, Transaction, TransactionSpec, history::HistoryConfig,
 };
 use std::collections::HashMap;
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -260,7 +260,7 @@ pub struct TableInfo {
 /// The view is schema-agnostic. Everything that names a concrete document kind
 /// comes in here: the compiled [`Schema`], the [`DocTypes`] that say which of
 /// its types play the roles the view draws and binds keys to, and the
-/// [`Codecs`](markraft_core::Codecs) the clipboard reads and writes with.
+/// [`Codecs`](markraft_core::kind::Codecs) the clipboard reads and writes with.
 pub struct Setup {
     /// The document kind's compiled schema.
     pub schema: Schema,
@@ -272,11 +272,11 @@ pub struct Setup {
     pub extensions: markraft_core::Extension,
     /// How the clipboard reads and writes this document kind. Without it a copy
     /// writes plain text and a paste is inserted literally.
-    pub codecs: Option<Arc<dyn markraft_core::Codecs>>,
+    pub codecs: Option<Arc<dyn markraft_core::kind::Codecs>>,
     /// How this document kind spells the parts of itself a reader may be shown
     /// as source — a heading's `##`, a code fence, a link's `](…)`. Without it
     /// the view draws only what it renders, never the characters behind it.
-    pub spelling: Option<Arc<dyn markraft_core::SourceSpelling>>,
+    pub spelling: Option<Arc<dyn markraft_core::kind::SourceSpelling>>,
     /// How this document kind toggles an inline mark. A kind that keeps the
     /// characters spelling a mark in the document edits *those*, which the
     /// model's own [`toggle_mark`](markraft_core::commands::toggle_mark) knows
@@ -316,11 +316,11 @@ impl Setup {
         self.extensions = extensions;
         self
     }
-    pub fn codecs(mut self, codecs: Arc<dyn markraft_core::Codecs>) -> Setup {
+    pub fn codecs(mut self, codecs: Arc<dyn markraft_core::kind::Codecs>) -> Setup {
         self.codecs = Some(codecs);
         self
     }
-    pub fn spelling(mut self, spelling: Arc<dyn markraft_core::SourceSpelling>) -> Setup {
+    pub fn spelling(mut self, spelling: Arc<dyn markraft_core::kind::SourceSpelling>) -> Setup {
         self.spelling = Some(spelling);
         self
     }
@@ -431,9 +431,9 @@ pub struct EditorView {
     projection: Arc<Projection>,
     pub(crate) types: DocTypes,
     /// The host's clipboard codecs, absent for an editor that only holds text.
-    pub(crate) codecs: Option<Arc<dyn markraft_core::Codecs>>,
+    pub(crate) codecs: Option<Arc<dyn markraft_core::kind::Codecs>>,
     /// How the host's document kind spells itself; see [`Setup::spelling`].
-    pub(crate) spelling: Option<Arc<dyn markraft_core::SourceSpelling>>,
+    pub(crate) spelling: Option<Arc<dyn markraft_core::kind::SourceSpelling>>,
     /// How the host's document kind toggles a mark; see [`Setup::mark_toggle`].
     mark_toggle: Option<MarkToggle>,
     /// How the host's document kind links; see [`Setup::link_setter`].
@@ -495,11 +495,11 @@ impl Focusable for EditorView {
 /// The extensions every view configures, whatever the host adds.
 fn base_extensions() -> markraft_core::Extension {
     markraft_core::Extension::all([
-        markraft_core::history(HistoryConfig {
+        markraft_core::history::history(HistoryConfig {
             new_group_delay: TYPING_GROUP_DELAY,
             ..HistoryConfig::default()
         }),
-        markraft_core::composition(),
+        markraft_core::composition::composition(),
         markraft_core::projection::projection(),
     ])
 }
@@ -697,7 +697,7 @@ impl EditorView {
     }
     /// The persistent document, excluding the input method’s uncommitted candidate.
     pub fn committed_document(&self) -> &Node {
-        markraft_core::committed_document(&self.state)
+        markraft_core::composition::committed_document(&self.state)
     }
     pub fn schema(&self) -> &Schema {
         self.state.schema()
@@ -737,7 +737,7 @@ impl EditorView {
             wiki: self.shaping.wiki(),
             spelling: self.spelling.as_deref(),
             selection: selection.from(doc)..selection.to(doc),
-            composition: markraft_core::composition_range(&self.state)
+            composition: markraft_core::composition::composition_range(&self.state)
                 .map(|range| range.from..range.to),
         }
     }
@@ -757,7 +757,7 @@ impl EditorView {
         self.state.selection().head(self.state.doc())
     }
     pub fn is_composing(&self) -> bool {
-        markraft_core::is_composing(&self.state)
+        markraft_core::composition::is_composing(&self.state)
     }
 
     /// Whether an extension's popup — the `/` menu, the emoji list — is on screen.
@@ -903,7 +903,7 @@ impl EditorView {
     /// Fold every undo entry made until [`EditorView::end_undo_group`] into one.
     pub fn begin_undo_group(&mut self) {
         let _ = self.apply([TransactionSpec::new()
-            .effect(markraft_core::begin_undo_group().of(()))
+            .effect(markraft_core::history::begin_undo_group().of(()))
             .add_to_history(false)]);
         self.undo_group_depth += 1;
     }
@@ -912,14 +912,14 @@ impl EditorView {
         while self.undo_group_depth > 0 {
             self.undo_group_depth -= 1;
             let _ = self.apply([TransactionSpec::new()
-                .effect(markraft_core::end_undo_group().of(()))
+                .effect(markraft_core::history::end_undo_group().of(()))
                 .add_to_history(false)]);
         }
     }
 
     /// Restore the content and selection from before the input method started.
     pub fn cancel_composition(&mut self, cx: &mut Context<Self>) {
-        if let Some(spec) = markraft_core::cancel_composition(&self.state) {
+        if let Some(spec) = markraft_core::composition::cancel_composition(&self.state) {
             self.edit(cx, true, vec![spec]);
         }
     }
@@ -1297,7 +1297,7 @@ impl EditorView {
                 .scroll_into_view(),
         ];
         if self.is_composing() {
-            specs.push(markraft_core::finish_composition().sequential());
+            specs.push(markraft_core::composition::finish_composition().sequential());
         }
         self.edit(cx, false, specs);
     }
@@ -2089,9 +2089,14 @@ mod document_guard_tests {
     use crate::typeahead::tests::{at, state_of, types_of};
     use markraft_commonmark::{CommonMarkCodecs, commonmark_schema, from_markdown};
     use markraft_core::{
-        Attrs, EditorState, Selection, TransactionAppenderFn, TransactionSpec, appended,
-        cancel_composition, commands, committed_document, composition_range, is_composing, origin,
-        redo, redo_depth, transaction_appender, undo, undo_depth, update_composition,
+        Attrs, EditorState, Selection, TransactionAppenderFn, TransactionSpec, commands,
+        composition::{
+            cancel_composition, committed_document, composition_range, is_composing,
+            update_composition,
+        },
+        history::{redo, redo_depth, undo, undo_depth},
+        protocol::{appended, origin},
+        transaction_appender,
     };
     use std::sync::Arc;
 

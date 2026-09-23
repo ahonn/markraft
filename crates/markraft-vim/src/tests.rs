@@ -92,9 +92,9 @@ impl Host for Editing {
     }
     fn history(&mut self, undo: bool) -> bool {
         let spec = if undo {
-            markraft_core::undo(&self.state)
+            markraft_core::history::undo(&self.state)
         } else {
-            markraft_core::redo(&self.state)
+            markraft_core::history::redo(&self.state)
         };
         match spec {
             Some(spec) => self.dispatch(vec![spec]),
@@ -105,7 +105,7 @@ impl Host for Editing {
         self.group_depth += 1;
         self.dispatch(vec![
             TransactionSpec::new()
-                .effect(markraft_core::begin_undo_group().of(()))
+                .effect(markraft_core::history::begin_undo_group().of(()))
                 .add_to_history(false),
         ]);
     }
@@ -114,7 +114,7 @@ impl Host for Editing {
             self.group_depth -= 1;
             self.dispatch(vec![
                 TransactionSpec::new()
-                    .effect(markraft_core::end_undo_group().of(()))
+                    .effect(markraft_core::history::end_undo_group().of(()))
                     .add_to_history(false),
             ]);
         }
@@ -136,8 +136,8 @@ impl Keys {
             EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
                 Extension::all([
                     markraft_core::projection::projection(),
-                    markraft_core::composition(),
-                    markraft_core::history(Default::default()),
+                    markraft_core::composition::composition(),
+                    markraft_core::history::history(Default::default()),
                     commonmark_extensions(&schema),
                 ]),
             ))
@@ -176,8 +176,8 @@ impl Keys {
             EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
                 Extension::all([
                     markraft_core::projection::projection(),
-                    markraft_core::composition(),
-                    markraft_core::history(Default::default()),
+                    markraft_core::composition::composition(),
+                    markraft_core::history::history(Default::default()),
                     commonmark_extensions(&schema),
                 ]),
             ))
@@ -197,18 +197,22 @@ impl Keys {
     /// are the ones the view's own input handler builds.
     fn composed(&mut self, text: &str) -> &mut Self {
         let head = host::head(&self.host);
-        let start =
-            markraft_core::start_composition(markraft_core::CompositionRange::new(head, head));
+        let start = markraft_core::composition::start_composition(
+            markraft_core::composition::CompositionRange::new(head, head),
+        );
         self.external(vec![start]);
-        let update =
-            markraft_core::update_composition(self.host.state(), text, text.chars().count())
-                .expect("a composition update");
+        let update = markraft_core::composition::update_composition(
+            self.host.state(),
+            text,
+            text.chars().count(),
+        )
+        .expect("a composition update");
         self.external(vec![update]);
-        assert!(markraft_core::is_composing(self.host.state()));
+        assert!(markraft_core::composition::is_composing(self.host.state()));
         let types = crate::host::Host::types(&self.host).clone();
         let specs = markraft_gpui::ime::commit_specs(self.host.state(), &types, None, text);
         self.external(specs);
-        assert!(!markraft_core::is_composing(self.host.state()));
+        assert!(!markraft_core::composition::is_composing(self.host.state()));
         self
     }
 

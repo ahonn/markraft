@@ -58,7 +58,7 @@
 //!   whole document. See [`fragment`] for what an open slice means here.
 //! * [`html::HtmlParser`] with [`html::commonmark_html_rules`] — the rich
 //!   flavour, over a rule table of the same shape as the Markdown one.
-//! * [`CommonMarkCodecs`] gathers all three behind [`markraft_core::Codecs`],
+//! * [`CommonMarkCodecs`] gathers all three behind [`markraft_core::kind::Codecs`],
 //!   which is what an editing surface takes, and
 //!   [`commonmark_doc_type_names`] names this schema's roles for it.
 //!

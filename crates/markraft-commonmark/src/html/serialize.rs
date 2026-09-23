@@ -42,6 +42,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use markraft_core::kind::SYNTAX_DISPLAY_ATTR;
 use markraft_core::{Mark, MarkTypeId, Node, NodeTypeId, Schema, Slice};
 
 use crate::schema as md;
@@ -253,7 +254,7 @@ impl HtmlState<'_> {
         for (index, child) in parent.children().enumerate() {
             let display = syntax.and_then(|ty| child.marks().get(ty)).map(|mark| {
                 mark.attrs
-                    .get("display")
+                    .get(SYNTAX_DISPLAY_ATTR)
                     .and_then(|value| value.as_str())
                     .unwrap_or_default()
                     .to_string()

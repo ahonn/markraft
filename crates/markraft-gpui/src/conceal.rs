@@ -3,7 +3,7 @@
 //!
 //! A document kind that keeps its markup in the text marks the characters
 //! that spell it with the conceal role
-//! ([`DocTypeNames::syntax`](markraft_core::DocTypeNames::syntax)): each such
+//! ([`DocTypeNames::syntax`](markraft_core::kind::DocTypeNames::syntax)): each such
 //! run carries the id of the span it belongs to and what it displays while
 //! concealed. This module is the view's one reading of that contract. The
 //! surface, the accessibility tree, the plain-text fallbacks and the
@@ -18,6 +18,7 @@
 
 use std::ops::Range;
 
+use markraft_core::kind::{SYNTAX_DISPLAY_ATTR, SYNTAX_SPAN_ATTR};
 use markraft_core::projection::{Line, RunContent};
 use markraft_core::{Fragment, MarkSet, MarkTypeId, Node, Schema, Slice};
 
@@ -35,8 +36,10 @@ pub(crate) fn concealed(syntax: Option<MarkTypeId>, marks: &MarkSet) -> Option<C
     let mark = marks.get(syntax?)?;
     let attr = |name: &str| mark.attrs.get(name);
     Some(Concealed {
-        span: attr("span").and_then(|value| value.as_int()).unwrap_or(0),
-        display: attr("display")
+        span: attr(SYNTAX_SPAN_ATTR)
+            .and_then(|value| value.as_int())
+            .unwrap_or(0),
+        display: attr(SYNTAX_DISPLAY_ATTR)
             .and_then(|value| value.as_str())
             .unwrap_or_default(),
     })

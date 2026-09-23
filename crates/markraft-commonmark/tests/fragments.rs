@@ -232,7 +232,7 @@ fn a_node_selection_copies_the_whole_node() {
 #[test]
 fn pasted_plain_text_stays_literal() {
     use markraft_commonmark::CommonMarkCodecs;
-    use markraft_core::Codecs;
+    use markraft_core::kind::Codecs;
     let codec = Codec::new();
     let codecs = CommonMarkCodecs::new(codec.schema.clone());
     let doc = codec.parse("x");
@@ -246,7 +246,7 @@ fn pasted_plain_text_stays_literal() {
 #[test]
 fn pasted_markdown_and_html_arrive_as_source() {
     use markraft_commonmark::CommonMarkCodecs;
-    use markraft_core::Codecs;
+    use markraft_core::kind::Codecs;
     let codec = Codec::new();
     let codecs = CommonMarkCodecs::new(codec.schema.clone());
     let doc = codec.parse("x");
@@ -270,7 +270,7 @@ fn pasted_markdown_and_html_arrive_as_source() {
 #[test]
 fn a_copy_of_a_spans_inside_carries_its_delimiters() {
     use markraft_commonmark::CommonMarkCodecs;
-    use markraft_core::Codecs;
+    use markraft_core::kind::Codecs;
     let codec = Codec::new();
     let codecs = CommonMarkCodecs::new(codec.schema.clone());
     let doc = codec.parse("a *b **c** d* e\n\nf");

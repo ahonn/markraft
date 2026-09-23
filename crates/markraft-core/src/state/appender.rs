@@ -6,14 +6,14 @@
 //! view layer sees both steps and an undo folds them together.
 
 use super::StateError;
-use super::annotation;
 use super::filters;
+use super::protocol::{self, Appended};
 use super::transaction::{Transaction, TransactionSpec, resolve};
 
 /// The largest number of transactions one dispatch may append.
 ///
 /// The chain stops there and the last appended transaction is annotated
-/// [`appenders_diverged`](super::appenders_diverged), whether or not the
+/// [`appenders_diverged`](super::protocol::appenders_diverged), whether or not the
 /// appenders would have stopped on their own.
 pub const MAX_APPENDED_TRANSACTIONS: usize = 8;
 
@@ -43,16 +43,16 @@ pub(crate) fn append(primary: Transaction) -> Result<Vec<Transaction>, StateErro
         }
         // A transaction the history ignores must not become undoable by way of
         // something an appender added to it.
-        let off_history = trigger.annotation(annotation::add_to_history()) == Some(&false);
-        let info = filters::Appended {
+        let off_history = trigger.annotation(protocol::add_to_history()) == Some(&false);
+        let info = Appended {
             trigger_user_event: trigger.user_event_name().map(str::to_string),
-            trigger_origin: trigger.annotation(annotation::origin()).cloned(),
+            trigger_origin: trigger.annotation(protocol::origin()).cloned(),
             depth: 0,
         };
         for spec in specs {
             produced += 1;
             let cut = produced >= MAX_APPENDED_TRANSACTIONS;
-            let mut spec = spec.annotate(filters::appended().of(filters::Appended {
+            let mut spec = spec.annotate(protocol::appended().of(Appended {
                 depth: produced,
                 ..info.clone()
             }));
@@ -60,7 +60,7 @@ pub(crate) fn append(primary: Transaction) -> Result<Vec<Transaction>, StateErro
                 spec = spec.add_to_history(false);
             }
             if cut {
-                spec = spec.annotate(filters::appenders_diverged().of(true));
+                spec = spec.annotate(protocol::appenders_diverged().of(true));
             }
             let tr = resolve(&state, vec![spec], true, true)?;
             state = tr.state().clone();

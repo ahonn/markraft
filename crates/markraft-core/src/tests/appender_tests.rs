@@ -5,9 +5,10 @@ use std::sync::Arc;
 use super::support::*;
 use crate::history::{HistoryConfig, history, undo, undo_depth};
 use crate::schema::Schema;
+use crate::state::protocol::{appended, appenders_diverged};
 use crate::state::{
     EditorState, Extension, MAX_APPENDED_TRANSACTIONS, TransactionAppenderFn, TransactionSpec,
-    appended, appenders_diverged, transaction_appender,
+    transaction_appender,
 };
 
 /// An appender that adds `text` at the end of the first paragraph, optionally

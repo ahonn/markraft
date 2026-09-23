@@ -4,19 +4,21 @@
 //!
 //! # The invariant
 //!
-//! [`ALIGNMENTS_ATTR`] is a comma-separated list with one entry per column —
-//! `left`, `center`, `right` or `none`, as in `"none,center,right"` — so its
-//! length *is* the column count, and every row holds exactly that many cells.
-//! It is the same attribute the table commands in [`markraft_core::commands`]
-//! keep, read through the same [`Alignment`] type, so neither side can spell it
-//! differently from the other.
+//! [`TABLE_ALIGNMENTS_ATTR`] is a comma-separated list with one entry per
+//! column — `left`, `center`, `right` or `none`, as in `"none,center,right"` —
+//! so its length *is* the column count, and every row holds exactly that many
+//! cells. It is the attribute this kind hands the table commands in
+//! [`markraft_core::commands`] through
+//! [`TableTypes`](markraft_core::commands::TableTypes), read through the same
+//! [`Alignment`] type, so neither side can spell it differently from the other.
 //!
 //! GFM normalises a ragged table the way a reader does: a cell past the last
 //! column is dropped, and a row that stops short is filled with empty cells.
 //! [`normalize_tables`] puts an imported tree in that shape, so no serialiser,
 //! view or command has to cope with a ragged one.
 
-use markraft_core::commands::{ALIGNMENTS_ATTR, ColumnAlignment};
+use markraft_core::commands::ColumnAlignment;
+use markraft_core::kind::TABLE_ALIGNMENTS_ATTR;
 use markraft_core::{Attrs, Fragment, MarkSet, Node, NodeTypeId, Schema, attrs};
 use unicode_width::UnicodeWidthStr;
 
@@ -55,7 +57,7 @@ pub fn format_alignments(alignments: &[Alignment]) -> String {
 pub fn alignments_of(table: &Node) -> Vec<Alignment> {
     let declared = table
         .attrs()
-        .get(ALIGNMENTS_ATTR)
+        .get(TABLE_ALIGNMENTS_ATTR)
         .and_then(|value| value.as_str())
         .map(parse_alignments)
         .unwrap_or_default();
@@ -127,7 +129,7 @@ fn square(schema: &Schema, table: &Node, cell: NodeTypeId) -> Option<Node> {
     let spelled = format_alignments(&alignments);
     let attrs_match = table
         .attrs()
-        .get(ALIGNMENTS_ATTR)
+        .get(TABLE_ALIGNMENTS_ATTR)
         .and_then(|value| value.as_str())
         == Some(spelled.as_str());
     if attrs_match && table.children().all(|row| row.child_count() == columns) {
@@ -151,7 +153,7 @@ fn square(schema: &Schema, table: &Node, cell: NodeTypeId) -> Option<Node> {
         rows.push(row.copy(Fragment::from_nodes(cells)));
     }
     let attrs = schema
-        .build_node_attrs(table.type_id(), &attrs! {ALIGNMENTS_ATTR => spelled})
+        .build_node_attrs(table.type_id(), &attrs! {TABLE_ALIGNMENTS_ATTR => spelled})
         .ok()?;
     Some(table.with_attrs(attrs).copy(Fragment::from_nodes(rows)))
 }

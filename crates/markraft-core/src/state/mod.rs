@@ -43,27 +43,22 @@ mod facet;
 mod field;
 mod filters;
 mod json;
+pub mod protocol;
 mod transaction;
 
-pub use annotation::{
-    Annotation, AnnotationType, add_to_history, origin, remote, time, user_event,
-};
+pub use annotation::{Annotation, AnnotationType};
 pub use appender::MAX_APPENDED_TRANSACTIONS;
 pub use config::Configuration;
-pub use effect::{
-    StateEffect, StateEffectType, append_config, compartment_reconfigure, reconfigure,
-};
+pub use effect::{StateEffect, StateEffectType};
 pub use extension::{Compartment, Extension, Prec};
 pub use facet::{Dep, Facet, FacetConfig};
 pub use field::{StateField, StateFieldConfig, StateJsonFields};
 pub use filters::{
-    Appended, ChangeFilterFn, ChangeFilterResult, TransactionAppenderFn, TransactionExtenderFn,
-    TransactionFilterFn, appended, appenders_diverged, change_filter, transaction_appender,
-    transaction_extender, transaction_filter,
+    ChangeFilterFn, ChangeFilterResult, TransactionAppenderFn, TransactionExtenderFn,
+    TransactionFilterFn, change_filter, transaction_appender, transaction_extender,
+    transaction_filter,
 };
 pub use transaction::{Transaction, TransactionSpec};
-
-pub(crate) use annotation::matches_user_event;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -81,6 +76,7 @@ use crate::selection::Selection;
 
 use config::{Address, Slot};
 use facet::{AnyValue, ProviderKind};
+use protocol::{append_config, compartment_reconfigure, reconfigure};
 
 /// Failure while creating or updating an [`EditorState`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -107,6 +103,8 @@ pub struct EditorStateConfig {
     /// The starting selection. Defaults to a cursor at the start of the
     /// document.
     pub selection: Option<Selection>,
+    /// The starting stored marks. Defaults to none.
+    pub stored_marks: Option<MarkSet>,
     /// The extensions to configure.
     pub extensions: Extension,
 }
@@ -118,6 +116,7 @@ impl EditorStateConfig {
             schema,
             doc: None,
             selection: None,
+            stored_marks: None,
             extensions: Extension::none(),
         }
     }
@@ -131,6 +130,12 @@ impl EditorStateConfig {
     /// Start with `selection`.
     pub fn selection(mut self, selection: Selection) -> Self {
         self.selection = Some(selection);
+        self
+    }
+
+    /// Start with `marks` stored for the next insertion.
+    pub fn stored_marks(mut self, marks: MarkSet) -> Self {
+        self.stored_marks = Some(marks);
         self
     }
 
@@ -179,6 +184,7 @@ struct StateData {
     config: Arc<Configuration>,
     doc: Node,
     selection: Selection,
+    stored_marks: Option<MarkSet>,
     slots: Vec<OnceLock<SlotValue>>,
     /// What the slots are computed from. Dropped once every slot is resolved,
     /// so a state never keeps the transaction that produced it alive.
@@ -201,6 +207,7 @@ impl std::fmt::Debug for EditorState {
         f.debug_struct("EditorState")
             .field("doc_size", &self.0.doc.content_size())
             .field("selection", &self.0.selection)
+            .field("stored_marks", &self.0.stored_marks)
             .finish()
     }
 }
@@ -222,6 +229,7 @@ impl EditorState {
             schema,
             doc,
             selection,
+            stored_marks,
             extensions,
         } = config;
         let doc = match doc {
@@ -247,6 +255,7 @@ impl EditorState {
             configuration,
             doc,
             selection,
+            stored_marks,
             ResolveSource::Create(overrides),
         ))
     }
@@ -256,6 +265,7 @@ impl EditorState {
         config: Arc<Configuration>,
         doc: Node,
         selection: Selection,
+        stored_marks: Option<MarkSet>,
         source: ResolveSource,
     ) -> EditorState {
         let slots = (0..config.slot_count()).map(|_| OnceLock::new()).collect();
@@ -264,6 +274,7 @@ impl EditorState {
             config,
             doc,
             selection,
+            stored_marks,
             slots,
             source: Mutex::new(Some(Arc::new(source))),
         }));
@@ -294,6 +305,17 @@ impl EditorState {
     /// The selection.
     pub fn selection(&self) -> &Selection {
         &self.0.selection
+    }
+
+    /// The marks content typed next should get, overriding the marks the
+    /// surrounding content would give it.
+    ///
+    /// Set by a transaction through [`TransactionSpec::stored_marks`]. A
+    /// transaction that does not set them keeps them only when it neither
+    /// changes the document nor sets a selection; see
+    /// [`Transaction::new_stored_marks`].
+    pub fn stored_marks(&self) -> Option<&MarkSet> {
+        self.0.stored_marks.as_ref()
     }
 
     /// The resolved configuration.
@@ -386,6 +408,7 @@ impl EditorState {
                 config.clone(),
                 self.0.doc.clone(),
                 self.0.selection.clone(),
+                self.0.stored_marks.clone(),
                 ResolveSource::Reconfigure(self.clone()),
             );
             let values = intermediate.slot_values();
@@ -398,6 +421,7 @@ impl EditorState {
             config,
             tr.new_doc().clone(),
             tr.new_selection(),
+            tr.new_stored_marks(),
             ResolveSource::Update {
                 tr: tr.clone(),
                 start,
@@ -538,7 +562,11 @@ impl EditorState {
     fn deps_changed(&self, deps: &[Dep], tr: &Transaction) -> bool {
         deps.iter().any(|dep| match dep {
             Dep::Doc => tr.doc_changed(),
-            Dep::Selection => tr.doc_changed() || tr.selection().is_some(),
+            // Stored marks are part of what a selection-dependent slot sees
+            // (they decide what typing at the cursor produces).
+            Dep::Selection => {
+                tr.doc_changed() || tr.selection().is_some() || tr.stored_marks().is_some()
+            }
             Dep::Field(id) | Dep::Facet(id) => {
                 matches!(self.0.config.address_of(*id), Some(Address::Dynamic(at)) if self.ensure(at).changed)
             }

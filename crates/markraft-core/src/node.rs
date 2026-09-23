@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::attr::Attrs;
 use crate::error::NodeError;
-use crate::fragment::Fragment;
+use crate::fragment::{Fragment, check_range};
 use crate::mark::{Mark, MarkSet};
 use crate::schema::{NodeTypeId, Schema};
 use crate::slice::Slice;
@@ -320,12 +320,34 @@ impl Node {
 
     /// A text leaf holding the characters in `from..to` of this text leaf.
     ///
-    /// The range is clamped to the text's length and never runs backwards.
+    /// # Errors
+    ///
+    /// Returns [`NodeError::PosOutOfRange`] when the range is reversed
+    /// (reporting `from`) or reaches past [`Node::text_len`] (reporting `to`).
     ///
     /// # Panics
     ///
     /// Panics when called on a node that is not a text leaf.
-    pub fn cut_text(&self, from: usize, to: usize) -> Node {
+    pub fn cut_text(&self, from: usize, to: usize) -> Result<Node, NodeError> {
+        assert!(self.is_text(), "cut_text on a non-text node");
+        check_range(from, to, self.text_len())?;
+        Ok(self.cut_text_unchecked(from, to))
+    }
+
+    /// [`Node::cut_text`] without the range check: the range is clamped to
+    /// the text's length and never runs backwards.
+    ///
+    /// The clamp is kept for the crate-internal callers — [`tokens_cut`] and
+    /// the mark helpers behind [`Node::add_mark`] — which compute split points
+    /// against the surrounding run: an overshooting end yields a shorter piece
+    /// instead of a panic, in release and debug builds alike.
+    ///
+    /// [`tokens_cut`]: crate::tokens_cut
+    ///
+    /// # Panics
+    ///
+    /// Panics when called on a node that is not a text leaf.
+    pub(crate) fn cut_text_unchecked(&self, from: usize, to: usize) -> Node {
         let text = self.text().expect("cut_text on a non-text node");
         let len = self.text_len();
         let from = from.min(len);
@@ -338,19 +360,39 @@ impl Node {
         Node::text_leaf(self.0.markup.clone(), &text[start..end])
     }
 
-    /// A copy of this container holding only the content between the two
-    /// content offsets.
+    /// A copy of this node holding only the content between two offsets.
     ///
-    /// # Panics
+    /// For a container the offsets are content offsets and the content is cut
+    /// as [`Fragment::cut`] does; for a text leaf they are character offsets
+    /// and the text is cut as [`Node::cut_text`] does. A non-text leaf has no
+    /// content, so only `0..0` is in range and it returns the leaf itself.
     ///
-    /// Panics when the range is reversed or reaches past
-    /// [`Node::content_size`]. Text leaves clamp instead, as
-    /// [`Node::cut_text`] does.
-    pub fn cut(&self, from: usize, to: usize) -> Node {
+    /// # Errors
+    ///
+    /// Returns [`NodeError::PosOutOfRange`] when the range is reversed
+    /// (reporting `from`) or reaches past [`Node::content_size`], or
+    /// [`Node::text_len`] for a text leaf (reporting `to`).
+    pub fn cut(&self, from: usize, to: usize) -> Result<Node, NodeError> {
+        let size = if self.is_text() {
+            self.text_len()
+        } else {
+            self.content_size()
+        };
+        check_range(from, to, size)?;
+        Ok(self.cut_unchecked(from, to))
+    }
+
+    /// [`Node::cut`] for a range the caller has already bounded. A reversed
+    /// or out-of-range cut is a bug: it trips a debug assertion.
+    pub(crate) fn cut_unchecked(&self, from: usize, to: usize) -> Node {
         if self.is_text() {
-            return self.cut_text(from, to);
+            debug_assert!(
+                from <= to && to <= self.text_len(),
+                "cut {from}..{to} out of range"
+            );
+            return self.cut_text_unchecked(from, to);
         }
-        self.copy(self.content().cut(from, to))
+        self.copy(self.content().cut_unchecked(from, to))
     }
 
     /// The innermost node starting at content offset `pos`.
@@ -363,7 +405,7 @@ impl Node {
         let mut node = self.clone();
         let mut pos = pos;
         loop {
-            let (index, offset) = node.content().find_index(pos);
+            let (index, offset) = node.content().find_index_unchecked(pos);
             let child = node.content().maybe_child(index)?.clone();
             if offset == pos || child.is_text() {
                 return Some(child);
@@ -378,7 +420,7 @@ impl Node {
         if pos == 0 || pos > self.content_size() {
             return None;
         }
-        let (index, offset) = self.content().find_index(pos);
+        let (index, offset) = self.content().find_index_unchecked(pos);
         if offset != pos {
             return None;
         }
@@ -390,7 +432,7 @@ impl Node {
         if pos > self.content_size() {
             return None;
         }
-        let (index, offset) = self.content().find_index(pos);
+        let (index, offset) = self.content().find_index_unchecked(pos);
         if offset != pos {
             return None;
         }
@@ -467,7 +509,7 @@ impl Node {
         let depth = resolved_from.shared_depth(to);
         let start = resolved_from.start(depth);
         let node = resolved_from.node(depth);
-        let content = node.content().cut(from - start, to - start);
+        let content = node.content().cut_unchecked(from - start, to - start);
         Ok(Slice::new(
             content,
             resolved_from.depth() - depth,
@@ -496,7 +538,10 @@ impl Node {
             depth -= 1;
         }
         let offset = start.start(depth);
-        let content = start.node(depth).content().cut(from - offset, to - offset);
+        let content = start
+            .node(depth)
+            .content()
+            .cut_unchecked(from - offset, to - offset);
         let open_start = (depth + 1..=start.depth())
             .filter(|&d| !schema.node_type(start.node(d).type_id()).is_inline())
             .count();
@@ -654,16 +699,16 @@ impl Node {
                 let split_from = from.saturating_sub(pos);
                 let split_to = (to - pos).min(child.text_len());
                 if split_from > 0 {
-                    out.push(child.cut_text(0, split_from));
+                    out.push(child.cut_text_unchecked(0, split_from));
                 }
                 out.push(apply_marks_under(
                     schema,
                     self.type_id(),
-                    &child.cut_text(split_from, split_to),
+                    &child.cut_text_unchecked(split_from, split_to),
                     f,
                 ));
                 if split_to < child.text_len() {
-                    out.push(child.cut_text(split_to, child.text_len()));
+                    out.push(child.cut_text_unchecked(split_to, child.text_len()));
                 }
             } else if child.is_container() {
                 let inner_from = from.saturating_sub(pos + 1);

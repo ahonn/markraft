@@ -15,7 +15,7 @@
 //! which document kind it is editing.
 
 use gpui::{App, ClipboardItem};
-use markraft_core::{Codecs, Schema, Slice};
+use markraft_core::{Schema, Slice, kind::Codecs};
 
 #[derive(Clone, Copy)]
 pub(crate) enum PasteMode {

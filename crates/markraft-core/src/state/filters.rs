@@ -27,7 +27,6 @@ use std::sync::{Arc, LazyLock};
 
 use crate::change::{ChangeSet, SectionBuilder, SectionOp};
 
-use super::annotation::AnnotationType;
 use super::facet::Facet;
 use super::transaction::{Transaction, TransactionSpec};
 
@@ -50,21 +49,9 @@ pub type ChangeFilterFn = Arc<dyn Fn(&Transaction) -> ChangeFilterResult + Send 
 /// It receives a transaction that has already been resolved and returns the
 /// spec of a transaction to apply after it, or `None` to stay out of the way.
 /// An appender that reacts to every transaction must check
-/// [`Transaction::annotation`] for [`appended`] so it does not react to its own
-/// output.
+/// [`Transaction::annotation`] for [`appended`](super::protocol::appended) so
+/// it does not react to its own output.
 pub type TransactionAppenderFn = Arc<dyn Fn(&Transaction) -> Option<TransactionSpec> + Send + Sync>;
-
-/// What an appended transaction is reacting to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Appended {
-    /// The user event of the transaction that triggered this one.
-    pub trigger_user_event: Option<String>,
-    /// The [`origin`](super::origin) of the transaction that triggered this one.
-    pub trigger_origin: Option<String>,
-    /// How far this transaction is from the primary one: `1` for a transaction
-    /// appended directly to it.
-    pub depth: usize,
-}
 
 /// What a [`change_filter`] allows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,8 +68,6 @@ static TRANSACTION_FILTER: LazyLock<Facet<TransactionFilterFn>> = LazyLock::new(
 static TRANSACTION_EXTENDER: LazyLock<Facet<TransactionExtenderFn>> = LazyLock::new(Facet::list);
 static CHANGE_FILTER: LazyLock<Facet<ChangeFilterFn>> = LazyLock::new(Facet::list);
 static TRANSACTION_APPENDER: LazyLock<Facet<TransactionAppenderFn>> = LazyLock::new(Facet::list);
-static APPENDED: LazyLock<AnnotationType<Appended>> = LazyLock::new(AnnotationType::define);
-static APPENDERS_DIVERGED: LazyLock<AnnotationType<bool>> = LazyLock::new(AnnotationType::define);
 
 /// Register a hook that may replace or block a transaction.
 pub fn transaction_filter() -> &'static Facet<TransactionFilterFn> {
@@ -103,20 +88,6 @@ pub fn change_filter() -> &'static Facet<ChangeFilterFn> {
 /// Register a hook that reacts to a transaction with another transaction.
 pub fn transaction_appender() -> &'static Facet<TransactionAppenderFn> {
     &TRANSACTION_APPENDER
-}
-
-/// Set on every transaction an appender produced, naming what it reacts to.
-///
-/// The undo history folds an appended transaction into the entry of the
-/// transaction that triggered it, so the pair undoes as one step.
-pub fn appended() -> &'static AnnotationType<Appended> {
-    &APPENDED
-}
-
-/// Set on the last appended transaction when the chain was cut at
-/// [`MAX_APPENDED_TRANSACTIONS`](super::MAX_APPENDED_TRANSACTIONS).
-pub fn appenders_diverged() -> &'static AnnotationType<bool> {
-    &APPENDERS_DIVERGED
 }
 
 /// Sort and merge overlapping or touching ranges.

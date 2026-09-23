@@ -42,10 +42,110 @@ fn text_counts_unicode_scalar_values() {
     let schema = test_schema();
     let text = t(&schema, "aé漢🙂");
     assert_eq!(text.node_size(), 4);
-    assert_eq!(text.cut_text(1, 3).text(), Some("é漢"));
+    assert_eq!(text.cut_text(1, 3).unwrap().text(), Some("é漢"));
     let p = n(&schema, "paragraph", [text]);
     assert_eq!(p.content_size(), 4);
     assert_eq!(p.text_between(&schema, 1, 3, None, None), "é漢".to_string());
+}
+
+#[test]
+fn cuts_inside_the_range_return_the_covered_content() {
+    let schema = test_schema();
+    let d = sample(&schema);
+    let expected = Fragment::from_node(n(&schema, "paragraph", [t(&schema, "hi")]));
+    assert_eq!(d.content().cut(1, 3), Ok(expected.clone()));
+    assert_eq!(d.cut(1, 3).unwrap().content(), &expected);
+    assert_eq!(d.cut(0, 13).unwrap(), d);
+    let text = t(&schema, "abc");
+    assert_eq!(text.cut(1, 3).unwrap().text(), Some("bc"));
+    assert_eq!(text.cut_text(3, 3).unwrap().text(), Some(""));
+    // A non-text leaf has no content: only the empty range is in bounds.
+    let image = img(&schema, "a.png");
+    assert_eq!(image.cut(0, 0), Ok(image.clone()));
+}
+
+fn out_of_range<T>(pos: usize, size: usize) -> Result<T, NodeError> {
+    Err(NodeError::PosOutOfRange { pos, size })
+}
+
+#[test]
+fn cuts_past_the_end_report_the_end() {
+    let schema = test_schema();
+    let d = sample(&schema);
+    assert_eq!(d.content().cut(0, 14), out_of_range(14, 13));
+    assert_eq!(d.cut(2, 20), out_of_range(20, 13));
+    let text = t(&schema, "abc");
+    assert_eq!(text.cut_text(1, 4), out_of_range(4, 3));
+    assert_eq!(text.cut(0, 9), out_of_range(9, 3));
+    assert_eq!(img(&schema, "a.png").cut(0, 1), out_of_range(1, 0));
+}
+
+#[test]
+fn reversed_cuts_report_their_start() {
+    let schema = test_schema();
+    let d = sample(&schema);
+    assert_eq!(d.content().cut(3, 1), out_of_range(3, 13));
+    assert_eq!(d.cut(5, 4), out_of_range(5, 13));
+    // Reversed and past the end at once still reports the start.
+    assert_eq!(d.cut(30, 20), out_of_range(30, 13));
+    let text = t(&schema, "abc");
+    assert_eq!(text.cut_text(2, 1), out_of_range(2, 3));
+    assert_eq!(text.cut(3, 0), out_of_range(3, 3));
+}
+
+#[test]
+fn find_index_is_none_past_the_end() {
+    let schema = test_schema();
+    let content = sample(&schema).content().clone();
+    assert_eq!(content.find_index(0), Some((0, 0)));
+    assert_eq!(content.find_index(3), Some((0, 0)));
+    assert_eq!(content.find_index(5), Some((1, 5)));
+    assert_eq!(content.find_index(13), Some((2, 13)));
+    assert_eq!(content.find_index(14), None);
+    assert_eq!(Fragment::empty().find_index(0), Some((0, 0)));
+    assert_eq!(Fragment::empty().find_index(1), None);
+    for pos in 0..=content.size() {
+        assert_eq!(
+            content.find_index(pos),
+            Some(content.find_index_unchecked(pos))
+        );
+    }
+}
+
+#[test]
+fn unchecked_cuts_agree_with_checked_ones_in_range() {
+    let schema = test_schema();
+    let d = sample(&schema);
+    let size = d.content_size();
+    for from in 0..=size {
+        for to in from..=size {
+            assert_eq!(
+                d.content().cut(from, to),
+                Ok(d.content().cut_unchecked(from, to))
+            );
+            assert_eq!(d.cut(from, to), Ok(d.cut_unchecked(from, to)));
+        }
+    }
+    let text = t(&schema, "aé漢");
+    for from in 0..=3 {
+        for to in from..=3 {
+            assert_eq!(
+                text.cut_text(from, to),
+                Ok(text.cut_text_unchecked(from, to))
+            );
+        }
+    }
+}
+
+#[test]
+fn unchecked_text_cuts_clamp_to_the_text() {
+    let schema = test_schema();
+    let text = t(&schema, "abc");
+    assert_eq!(text.cut_text_unchecked(1, 10).text(), Some("bc"));
+    assert_eq!(text.cut_text_unchecked(0, 10), text);
+    assert_eq!(text.cut_text_unchecked(7, 9).text(), Some(""));
+    // A reversed range collapses at its start instead of running backwards.
+    assert_eq!(text.cut_text_unchecked(2, 1).text(), Some(""));
 }
 
 #[test]

@@ -5,6 +5,7 @@ use comrak::nodes::{
     NodeFootnoteReference, NodeHeading, NodeHtmlBlock, NodeLink, NodeList, NodeTable, NodeTaskItem,
     NodeValue, NodeWikiLink, Sourcepos, TableAlignment,
 };
+use markraft_core::kind::TABLE_ALIGNMENTS_ATTR;
 use markraft_core::{Attrs, attrs};
 
 use super::{
@@ -173,7 +174,7 @@ fn table_attrs(target: ParseTarget<'_>) -> Attrs {
             TableAlignment::None => Alignment::None,
         })
         .collect();
-    attrs! {"alignments" => format_alignments(&alignments)}
+    attrs! {TABLE_ALIGNMENTS_ATTR => format_alignments(&alignments)}
 }
 
 /// A block quote's callout marker, read from the source of its first line.

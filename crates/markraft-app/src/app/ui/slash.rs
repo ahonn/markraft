@@ -246,7 +246,7 @@ mod tests {
                 .doc(doc::from_markdown(source))
                 .extensions(Extension::all([
                     markraft_core::projection::projection(),
-                    markraft_core::history(Default::default()),
+                    markraft_core::history::history(Default::default()),
                     doc::extensions(),
                 ])),
         )

@@ -14,8 +14,8 @@ use markraft_commonmark::{
 };
 use markraft_core::commands::{insert_text, run_command};
 use markraft_core::{
-    EditorState, EditorStateConfig, Extension, HistoryConfig, Node, Selection, history, undo,
-    undo_depth,
+    EditorState, EditorStateConfig, Extension, Node, Selection,
+    history::{HistoryConfig, history, undo, undo_depth},
 };
 
 /// The document position of source character `offset` in the first block.

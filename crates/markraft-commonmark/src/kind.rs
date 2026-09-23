@@ -7,9 +7,11 @@
 //! contracts declared by [`markraft_core`], so the editor's GPUI layer consumes
 //! them without depending on this crate.
 
+use markraft_core::kind::SYNTAX_DISPLAY_ATTR;
 use markraft_core::projection::{Ancestor, Line};
 use markraft_core::{
-    Attrs, Codecs, DocTypeNames, Fragment, MarkSet, Node, NodeTypeId, Schema, Slice, SourceSpelling,
+    Attrs, Fragment, MarkSet, Node, NodeTypeId, Schema, Slice,
+    kind::{Codecs, DocTypeNames, SourceSpelling},
 };
 
 pub use crate::commands::{
@@ -198,7 +200,7 @@ fn shown_content(schema: &Schema, block: &Node, hard_breaks: &[usize]) -> Fragme
                 Some(mark) => {
                     let display = mark
                         .attrs
-                        .get("display")
+                        .get(SYNTAX_DISPLAY_ATTR)
                         .and_then(|value| value.as_str())
                         .unwrap_or_default();
                     if !display.is_empty() {

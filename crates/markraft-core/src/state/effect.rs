@@ -5,11 +5,10 @@
 //! the right content. An effect without a `map` function is carried through
 //! unchanged.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use crate::change::ChangeDesc;
 
-use super::extension::{Compartment, Extension};
 use super::facet::{AnyValue, next_id};
 
 type MapFn<T> = Box<dyn Fn(&T, &ChangeDesc) -> Option<T> + Send + Sync>;
@@ -159,29 +158,4 @@ impl<T: Send + Sync + 'static> AnyEffectType for EffectTypeData<T> {
             mapped
         })
     }
-}
-
-static RECONFIGURE: LazyLock<StateEffectType<Extension>> = LazyLock::new(StateEffectType::define);
-static APPEND_CONFIG: LazyLock<StateEffectType<Extension>> = LazyLock::new(StateEffectType::define);
-static COMPARTMENT: LazyLock<StateEffectType<(Compartment, Extension)>> =
-    LazyLock::new(StateEffectType::define);
-
-/// Replace the root extensions of the configuration.
-///
-/// Extensions added with [`append_config`] are discarded; the content of
-/// compartments is kept, so a compartment that still appears in the new tree
-/// keeps whatever it was last reconfigured to.
-pub fn reconfigure() -> &'static StateEffectType<Extension> {
-    &RECONFIGURE
-}
-
-/// Append extensions to the root configuration.
-pub fn append_config() -> &'static StateEffectType<Extension> {
-    &APPEND_CONFIG
-}
-
-/// Replace the content of one compartment. Produced by
-/// [`Compartment::reconfigure`].
-pub fn compartment_reconfigure() -> &'static StateEffectType<(Compartment, Extension)> {
-    &COMPARTMENT
 }

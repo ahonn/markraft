@@ -11,6 +11,7 @@
 //! tabs and its rows by line endings, which is what a spreadsheet reads and
 //! what every other application writes.
 
+use markraft_core::kind::SYNTAX_DISPLAY_ATTR;
 use markraft_core::{Fragment, MarkSet, Node, Schema, Slice};
 
 use crate::schema as md;
@@ -107,7 +108,7 @@ fn concealed<'n>(schema: &Schema, node: &'n Node) -> Option<&'n str> {
     let mark = node.marks().get(syntax)?;
     Some(
         mark.attrs
-            .get("display")
+            .get(SYNTAX_DISPLAY_ATTR)
             .and_then(|value| value.as_str())
             .unwrap_or_default(),
     )

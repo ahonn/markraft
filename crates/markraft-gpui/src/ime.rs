@@ -2,13 +2,13 @@
 //! replacement calls, all over the projection's UTF-16 conversions.
 //!
 //! A composition lives in the document as ordinary content with a marked range
-//! the [`composition`](markraft_core::composition) extension keeps; nothing here
+//! the [`composition`](markraft_core::composition::composition) extension keeps; nothing here
 //! holds an uncommitted buffer of its own.
 
 use crate::types::DocTypes;
 use crate::{EditorView, keymap, single_line};
 use gpui::{prelude::*, *};
-use markraft_core::{CompositionRange, EditorState, Selection, TransactionSpec};
+use markraft_core::{EditorState, Selection, TransactionSpec, composition::CompositionRange};
 use std::borrow::Cow;
 use std::ops::Range;
 
@@ -51,16 +51,14 @@ pub fn commit_specs(
     let text = printable(text);
     let doc = state.doc();
     let (from, to) = range
-        .or_else(|| markraft_core::composition_range(state).map(|r| (r.from, r.to)))
+        .or_else(|| markraft_core::composition::composition_range(state).map(|r| (r.from, r.to)))
         .unwrap_or_else(|| {
             let replacement = state.selection().replacement_range(doc);
             (replacement.from, replacement.to)
         });
-    let select = TransactionSpec::new().selection(Selection::Text {
-        anchor: from,
-        head: to,
-        marks: state.selection().stored_marks().cloned(),
-    });
+    let select = TransactionSpec::new()
+        .selection(Selection::text(from, to))
+        .stored_marks(state.stored_marks().cloned());
     // The insertion is computed against the selection it replaces, which is
     // what the first spec establishes; the two travel as one transaction.
     let insert = state
@@ -71,10 +69,10 @@ pub fn commit_specs(
     if let Some(insert) = insert {
         specs.push(insert.sequential());
     }
-    let mut finish = markraft_core::finish_composition().sequential();
-    if markraft_core::is_composing(state) {
+    let mut finish = markraft_core::composition::finish_composition().sequential();
+    if markraft_core::composition::is_composing(state) {
         // The last spec has the last word on the user event.
-        finish = finish.user_event(markraft_core::COMPOSE_USER_EVENT);
+        finish = finish.user_event(markraft_core::protocol::COMPOSE_USER_EVENT);
     }
     specs.push(finish);
     specs
@@ -183,12 +181,12 @@ impl EntityInputHandler for EditorView {
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        let range = markraft_core::composition_range(self.state())?;
+        let range = markraft_core::composition::composition_range(self.state())?;
         self.utf16_of(range.from, range.to)
     }
 
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.dispatch([markraft_core::finish_composition()], cx);
+        self.dispatch([markraft_core::composition::finish_composition()], cx);
     }
 
     fn replace_text_in_range(
@@ -241,9 +239,9 @@ impl EntityInputHandler for EditorView {
         if let Some(range) = range.as_ref()
             && let Some((from, to)) = self.positions_of(range)
         {
-            specs.push(markraft_core::start_composition(CompositionRange::new(
-                from, to,
-            )));
+            specs.push(markraft_core::composition::start_composition(
+                CompositionRange::new(from, to),
+            ));
         }
         // A caret expressed in UTF-16 units of the candidate, as `char`s of it.
         let caret = selected
@@ -272,7 +270,7 @@ impl EntityInputHandler for EditorView {
             .as_ref()
             .map(|tr| tr.state())
             .unwrap_or_else(|| self.state());
-        let Ok(spec) = markraft_core::update_composition(base, &text, caret) else {
+        let Ok(spec) = markraft_core::composition::update_composition(base, &text, caret) else {
             return;
         };
         let spec = if specs.is_empty() {
@@ -325,7 +323,9 @@ mod tests {
     use crate::types::DocTypes;
     use markraft_core::projection::projection_of;
     use markraft_core::{
-        CompositionRange, EditorState, TransactionSpec, begin_undo_group, end_undo_group,
+        EditorState, TransactionSpec,
+        composition::CompositionRange,
+        history::{begin_undo_group, end_undo_group},
     };
 
     fn apply(state: &EditorState, specs: Vec<TransactionSpec>) -> EditorState {
@@ -355,7 +355,7 @@ mod tests {
     }
 
     fn undo(state: &EditorState) -> EditorState {
-        match markraft_core::undo(state) {
+        match markraft_core::history::undo(state) {
             Some(spec) => apply(state, vec![spec]),
             None => state.clone(),
         }
@@ -364,21 +364,22 @@ mod tests {
     /// One `setMarkedText`, as the platform sends it.
     fn mark(state: &EditorState, types: &DocTypes, text: &str) -> EditorState {
         let _ = types;
-        let range = markraft_core::composition_range(state);
+        let range = markraft_core::composition::composition_range(state);
         let mut specs = Vec::new();
         if range.is_none() {
             let head = state.selection().head(state.doc());
-            specs.push(markraft_core::start_composition(CompositionRange::new(
-                head, head,
-            )));
+            specs.push(markraft_core::composition::start_composition(
+                CompositionRange::new(head, head),
+            ));
         }
         let base = if specs.is_empty() {
             state.clone()
         } else {
             apply(state, specs.clone())
         };
-        let spec = markraft_core::update_composition(&base, text, text.chars().count())
-            .expect("a composition update");
+        let spec =
+            markraft_core::composition::update_composition(&base, text, text.chars().count())
+                .expect("a composition update");
         if specs.is_empty() {
             apply(state, vec![spec])
         } else {
@@ -392,12 +393,12 @@ mod tests {
         let marked = mark(state, types, "h");
         let marked = mark(&marked, types, candidate);
         assert!(
-            markraft_core::is_composing(&marked),
+            markraft_core::composition::is_composing(&marked),
             "the candidate is live"
         );
         let specs = commit_specs(&marked, types, None, candidate);
         let committed = apply(&marked, specs);
-        assert!(!markraft_core::is_composing(&committed));
+        assert!(!markraft_core::composition::is_composing(&committed));
         committed
     }
 
@@ -438,7 +439,7 @@ mod tests {
         let committed = compose_and_commit(&start, &types, "hi");
         assert_eq!(text_of(&committed), "ahi");
         // The commit is an ordinary typing transaction, so undo takes it back.
-        assert!(markraft_core::undo_depth(&committed) > 0);
+        assert!(markraft_core::history::undo_depth(&committed) > 0);
         // The caret rests after the committed text, which is where a modal
         // editor's Escape steps back from onto its last grapheme.
         assert_eq!(caret(&committed), (0, 3));
@@ -463,7 +464,7 @@ mod tests {
         assert_eq!(text_of(&session), "end\nhi- /");
         let closed = group(&session, false);
         assert_eq!(
-            markraft_core::undo_depth(&closed),
+            markraft_core::history::undo_depth(&closed),
             1,
             "one entry for the session"
         );
@@ -483,7 +484,10 @@ mod tests {
         // Cancelling takes back only the uncommitted candidate.
         let cancelled = apply(
             &marked,
-            vec![markraft_core::cancel_composition(&marked).expect("an active composition")],
+            vec![
+                markraft_core::composition::cancel_composition(&marked)
+                    .expect("an active composition"),
+            ],
         );
         assert_eq!(text_of(&cancelled), "endx");
         let closed = group(&cancelled, false);

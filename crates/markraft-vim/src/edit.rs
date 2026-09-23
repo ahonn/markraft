@@ -401,7 +401,7 @@ mod tests {
         EditorState::create(EditorStateConfig::new(schema.clone()).doc(doc).extensions(
             Extension::all([
                 markraft_core::projection::projection(),
-                markraft_core::history(Default::default()),
+                markraft_core::history::history(Default::default()),
                 commonmark_extensions(&schema),
             ]),
         ))

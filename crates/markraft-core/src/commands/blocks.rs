@@ -134,29 +134,25 @@ fn split_block_impl(state: &EditorState, keep_marks: bool) -> Option<Transaction
 
     let (set, new_doc) = super::resolve_changes(state, changes)?;
     let caret = from + 2 * split_depth;
-    let selection = if keep_marks {
+    let selection = Selection::cursor(caret);
+    selection.check(&new_doc, schema).ok()?;
+    let mut spec = TransactionSpec::new()
+        .change_set(set)
+        .selection(selection)
+        .user_event("split")
+        .scroll_into_view();
+    if keep_marks {
         let marks = marks_at(state, &resolved_from);
         let parent_ty = schema.node_type(open_markup.ty);
-        Selection::cursor_with_marks(
-            caret,
+        spec = spec.stored_marks(Some(
             marks.filter(|mark| parent_ty.allows_mark_in_content(mark.ty)),
-        )
-    } else {
-        Selection::cursor(caret)
-    };
-    selection.check(&new_doc, schema).ok()?;
-    Some(
-        TransactionSpec::new()
-            .change_set(set)
-            .selection(selection)
-            .user_event("split")
-            .scroll_into_view(),
-    )
+        ));
+    }
+    Some(spec)
 }
 
 fn marks_at(state: &EditorState, resolved: &crate::pos::ResolvedPos) -> MarkSet {
     state
-        .selection()
         .stored_marks()
         .cloned()
         .unwrap_or_else(|| resolved.marks(state.schema()))
@@ -429,12 +425,7 @@ pub fn set_block_type(node_type: NodeTypeId, attrs: Attrs) -> Command {
             .change_set(set)
             .user_event("settype")
             .scroll_into_view();
-        if let Selection::Text {
-            anchor,
-            head,
-            marks,
-        } = state.selection()
-        {
+        if let Selection::Text { anchor, head } = state.selection() {
             let before = crate::projection::Projection::of(doc, schema);
             let after = crate::projection::Projection::of(&next_doc, schema);
             if let (Some((a_line, a_offset)), Some((h_line, h_offset))) = (
@@ -444,11 +435,9 @@ pub fn set_block_type(node_type: NodeTypeId, attrs: Attrs) -> Command {
                 after.line_offset_to_pos(a_line, a_offset),
                 after.line_offset_to_pos(h_line, h_offset),
             ) {
-                spec = spec.selection(Selection::Text {
-                    anchor,
-                    head,
-                    marks: marks.clone(),
-                });
+                spec = spec
+                    .selection(Selection::text(anchor, head))
+                    .stored_marks(state.stored_marks().cloned());
             }
         }
         Some(spec)

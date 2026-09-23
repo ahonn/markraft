@@ -426,3 +426,63 @@ fn an_empty_inline_container_has_one_editable_position() {
     assert!(!projection.is_caret_position(1));
     assert!(!projection.is_caret_position(3));
 }
+
+/// A schema with one break type of each kind, so the two can be told apart.
+fn break_schema() -> crate::schema::Schema {
+    use crate::schema::{BreakKind, NodeTypeSpec, Schema, SchemaSpec};
+    Schema::new(
+        SchemaSpec::new()
+            .node(NodeTypeSpec::new("doc", "block+"))
+            .node(NodeTypeSpec::new("paragraph", "inline*").group("block"))
+            .node(NodeTypeSpec::text("text").group("inline"))
+            .node(
+                NodeTypeSpec::leaf("hard")
+                    .inline(true)
+                    .group("inline")
+                    .break_kind(BreakKind::Hard),
+            )
+            .node(
+                NodeTypeSpec::leaf("soft")
+                    .inline(true)
+                    .group("inline")
+                    .break_kind(BreakKind::Soft),
+            )
+            .node(NodeTypeSpec::leaf("atom").inline(true).group("inline")),
+    )
+    .expect("the break schema is valid")
+}
+
+#[test]
+fn a_soft_break_reads_as_a_space_and_a_hard_one_as_a_newline() {
+    let schema = break_schema();
+    let document = doc(
+        &schema,
+        [n(
+            &schema,
+            "paragraph",
+            [
+                t(&schema, "a"),
+                n(&schema, "soft", []),
+                t(&schema, "b"),
+                n(&schema, "hard", []),
+                t(&schema, "c"),
+                n(&schema, "atom", []),
+            ],
+        )],
+    );
+    let projection = Projection::of(&document, &schema);
+    assert_eq!(projection.plain_text(), "a b\nc\u{fffc}");
+    // Only the hard break ends a row; the soft one stays inside the first.
+    let line = projection.line(0).expect("line");
+    assert_eq!(line.rows.len(), 2);
+    assert_eq!((line.rows[0].char_from, line.rows[0].char_to), (0, 3));
+    assert_eq!((line.rows[1].char_from, line.rows[1].char_to), (4, 6));
+
+    let whole = document
+        .slice(0, document.content_size())
+        .expect("whole document");
+    assert_eq!(
+        slice_to_plain_text(&schema, &whole),
+        projection.plain_text()
+    );
+}

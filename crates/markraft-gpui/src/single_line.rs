@@ -8,7 +8,7 @@
 //! through on their own because the schema offers them nothing to do.
 
 use gpui::{Pixels, px};
-use markraft_core::{Codecs, MarkTypeId, Node, NodeTypeSpec, Schema, SchemaSpec, Slice};
+use markraft_core::{MarkTypeId, Node, NodeTypeSpec, Schema, SchemaSpec, Slice, kind::Codecs};
 use std::sync::LazyLock;
 use std::{borrow::Cow, ops::Range};
 

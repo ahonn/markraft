@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::error::NodeError;
 use crate::node::Node;
 
 /// An immutable sequence of sibling nodes with a cached total token size.
@@ -122,15 +123,20 @@ impl Fragment {
     /// boundary, `offset == pos` and `index` is the index of the following
     /// child.
     ///
-    /// # Panics
-    ///
-    /// Panics when `pos` is greater than [`Fragment::size`].
-    pub fn find_index(&self, pos: usize) -> (usize, usize) {
-        assert!(pos <= self.size, "offset {pos} out of range");
+    /// Returns `None` when `pos` is greater than [`Fragment::size`].
+    pub fn find_index(&self, pos: usize) -> Option<(usize, usize)> {
+        (pos <= self.size).then(|| self.find_index_unchecked(pos))
+    }
+
+    /// [`Fragment::find_index`] for a `pos` the caller has already bounded by
+    /// [`Fragment::size`]. An out-of-range `pos` is a bug: it trips a debug
+    /// assertion, and release builds report the end of the fragment.
+    pub(crate) fn find_index_unchecked(&self, pos: usize) -> (usize, usize) {
+        debug_assert!(pos <= self.size, "offset {pos} out of range");
         if pos == 0 {
             return (0, 0);
         }
-        if pos == self.size {
+        if pos >= self.size {
             return (self.child_count(), self.size);
         }
         let mut offset = 0;
@@ -152,11 +158,19 @@ impl Fragment {
     /// Partially covered containers keep their markup and are cut recursively;
     /// partially covered text nodes are split on character boundaries.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics when the range is reversed or reaches past [`Fragment::size`].
-    pub fn cut(&self, from: usize, to: usize) -> Fragment {
-        assert!(
+    /// Returns [`NodeError::PosOutOfRange`] when the range is reversed
+    /// (reporting `from`) or reaches past [`Fragment::size`] (reporting `to`).
+    pub fn cut(&self, from: usize, to: usize) -> Result<Fragment, NodeError> {
+        check_range(from, to, self.size)?;
+        Ok(self.cut_unchecked(from, to))
+    }
+
+    /// [`Fragment::cut`] for a range the caller has already bounded. A
+    /// reversed or out-of-range cut is a bug: it trips a debug assertion.
+    pub(crate) fn cut_unchecked(&self, from: usize, to: usize) -> Fragment {
+        debug_assert!(
             from <= to && to <= self.size,
             "cut {from}..{to} out of range"
         );
@@ -171,14 +185,14 @@ impl Fragment {
                 if child.is_text() {
                     let start = from.saturating_sub(pos);
                     let stop = (to - pos).min(child.text_len());
-                    out.push(child.cut_text(start, stop));
+                    out.push(child.cut_text_unchecked(start, stop));
                 } else if pos >= from && end <= to {
                     out.push(child.clone());
                 } else {
                     // A container overlapping one of the ends: cut its content.
                     let inner_from = from.saturating_sub(pos + 1);
                     let inner_to = (to - pos - 1).min(child.content_size());
-                    out.push(child.copy(child.content().cut(inner_from, inner_to)));
+                    out.push(child.copy(child.content().cut_unchecked(inner_from, inner_to)));
                 }
             }
             pos = end;
@@ -219,6 +233,17 @@ impl Fragment {
             _ => false,
         }
     }
+}
+
+/// Check that `from..to` is a forward range inside `0..=size`.
+pub(crate) fn check_range(from: usize, to: usize, size: usize) -> Result<(), NodeError> {
+    if from > to {
+        return Err(NodeError::PosOutOfRange { pos: from, size });
+    }
+    if to > size {
+        return Err(NodeError::PosOutOfRange { pos: to, size });
+    }
+    Ok(())
 }
 
 impl PartialEq for Fragment {

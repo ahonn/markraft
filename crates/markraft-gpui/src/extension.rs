@@ -26,7 +26,7 @@ use std::{any::Any, cell::Cell, collections::VecDeque, rc::Rc};
 /// stops a runaway.
 const ROUNDS: usize = 8;
 
-/// The [`origin`](markraft_core::origin) annotation every extension edit carries,
+/// The [`origin`](markraft_core::protocol::origin) annotation every extension edit carries,
 /// so an extension can tell its own edits from the user's.
 pub const EXTENSION_ORIGIN_PREFIX: &str = "extension:";
 
@@ -79,7 +79,7 @@ impl Update {
     pub fn origin(&self) -> Option<&str> {
         self.transactions
             .iter()
-            .find_map(|tr| tr.annotation(markraft_core::origin()))
+            .find_map(|tr| tr.annotation(markraft_core::protocol::origin()))
             .map(String::as_str)
     }
 }
@@ -302,7 +302,7 @@ impl<'a> EditorCx<'a> {
         let origin = format!("{EXTENSION_ORIGIN_PREFIX}{}", self.id);
         let specs: Vec<TransactionSpec> = specs
             .into_iter()
-            .map(|spec| spec.annotate(markraft_core::origin().of(origin.clone())))
+            .map(|spec| spec.annotate(markraft_core::protocol::origin().of(origin.clone())))
             .collect();
         let applied = self.view.apply(specs)?;
         self.view.upstream = false;
@@ -320,11 +320,11 @@ impl<'a> EditorCx<'a> {
     /// Undo one entry, as ⌘Z does. `None` while a composition is live or when there is
     /// nothing left to undo.
     pub fn undo(&mut self) -> Option<Transaction> {
-        let spec = markraft_core::undo(self.view.state())?;
+        let spec = markraft_core::history::undo(self.view.state())?;
         self.dispatch([spec])
     }
     pub fn redo(&mut self) -> Option<Transaction> {
-        let spec = markraft_core::redo(self.view.state())?;
+        let spec = markraft_core::history::redo(self.view.state())?;
         self.dispatch([spec])
     }
     /// Set the selection, collapsed or ranged, without changing the document. It goes

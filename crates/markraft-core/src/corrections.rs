@@ -36,15 +36,16 @@
 //! record, such as an undo, which restores a selection rather than moving it.
 //! [`CorrectionContext::selection_left`] says that is why it runs. What it asks for joins the transaction that moved
 //! the selection; when that transaction did not change the document itself,
-//! it is annotated [`fold_into_previous`](crate::fold_into_previous), so the
-//! history keeps the settling with the edit that left the content unsettled.
+//! it is annotated [`fold_into_previous`], so the history keeps the settling
+//! with the edit that left the content unsettled.
 //!
 //! They do **not** run for a transaction annotated
-//! [`remote(true)`](crate::remote): correcting another peer's edit makes every
+//! [`remote(true)`](crate::protocol::remote): correcting another peer's edit makes every
 //! peer correct the same thing, which cascades.
 //!
 //! ```
 //! # use markraft_core::*;
+//! use markraft_core::corrections::{corrections, fill_required_content};
 //! # let schema = Schema::new(SchemaSpec::new()
 //! #     .node(NodeTypeSpec::new("doc", "block+"))
 //! #     .node(NodeTypeSpec::new("paragraph", "inline*").group("block"))
@@ -62,9 +63,10 @@ use crate::mark::MarkSet;
 use crate::node::Node;
 use crate::schema::NodeTypeId;
 use crate::slice::Slice;
+use crate::state::protocol::{add_to_history, corrections_diverged, fold_into_previous, remote};
 use crate::state::{
-    AnnotationType, EditorState, Extension, Facet, Transaction, TransactionExtenderFn,
-    TransactionSpec, remote, transaction_extender,
+    EditorState, Extension, Facet, Transaction, TransactionExtenderFn, TransactionSpec,
+    transaction_extender,
 };
 
 /// How many times corrections are re-run against their own output before the
@@ -215,7 +217,6 @@ impl Correction {
 }
 
 static CORRECTION: LazyLock<Facet<Correction>> = LazyLock::new(Facet::list);
-static DIVERGED: LazyLock<AnnotationType<bool>> = LazyLock::new(AnnotationType::define);
 static RUNNER: LazyLock<Extension> = LazyLock::new(|| {
     let run: TransactionExtenderFn = Arc::new(run_corrections);
     transaction_extender().of(run)
@@ -227,12 +228,6 @@ static RUNNER: LazyLock<Extension> = LazyLock::new(|| {
 /// that wants to place one at a specific precedence.
 pub fn correction() -> &'static Facet<Correction> {
     &CORRECTION
-}
-
-/// Set on a transaction whose corrections still wanted to change something
-/// after [`MAX_CORRECTION_ROUNDS`] rounds.
-pub fn corrections_diverged() -> &'static AnnotationType<bool> {
-    &DIVERGED
 }
 
 /// An extension that runs `corrections` on every local transaction.
@@ -302,7 +297,7 @@ fn run_corrections(tr: &Transaction) -> Option<TransactionSpec> {
         spec = spec.annotate(corrections_diverged().of(true));
     }
     if !tr.doc_changed() {
-        spec = spec.annotate(crate::history::fold_into_previous().of(true));
+        spec = spec.annotate(fold_into_previous().of(true));
     }
     Some(spec)
 }
@@ -317,7 +312,7 @@ fn run_corrections(tr: &Transaction) -> Option<TransactionSpec> {
 fn selection_left(corrections: &[Correction], tr: &Transaction) -> Vec<usize> {
     if tr.selection().is_none()
         || tr.annotation(remote()) == Some(&true)
-        || tr.annotation(crate::state::add_to_history()) == Some(&false)
+        || tr.annotation(add_to_history()) == Some(&false)
         || !corrections.iter().any(|c| c.on_selection_leave)
     {
         return Vec::new();

@@ -16,7 +16,7 @@ use super::{Command, command, resolve_changes};
 
 /// Type `text` over the selection.
 ///
-/// The inserted text carries the selection's stored marks when it has any and
+/// The inserted text carries the state's stored marks when it has any and
 /// the marks at the insertion point otherwise, in both cases filtered to the
 /// marks the destination allows — which is why typing into a code block whose
 /// type declares no marks never carries emphasis in.
@@ -37,7 +37,7 @@ pub(crate) fn insert_text_spec(state: &EditorState, text: &str) -> Option<Transa
     let resolved = doc.resolve(from).ok()?;
     let marks = marks_for_insertion(state, &resolved);
     let inherited = resolved.inherited_marks(schema);
-    let leave_scope = state.selection().stored_marks().is_some()
+    let leave_scope = state.stored_marks().is_some()
         && inherited.iter().any(|mark| !marks.contains(mark))
         && from == to;
     let (slice, explicit_caret) = if leave_scope {
@@ -99,20 +99,18 @@ pub(crate) fn insert_text_spec(state: &EditorState, text: &str) -> Option<Transa
     // Fitting may wrap text in a paragraph. Its closing token is not a text
     // caret position, so find the end of the inserted inline content.
     let caret = Selection::find_from(schema, &new_doc, caret, -1, true)?.head(&new_doc);
-    // Stored marks survive typing, so several characters in a row share them.
-    let selection = if state.selection().stored_marks().is_some() {
-        Selection::cursor_with_marks(caret, marks)
-    } else {
-        Selection::cursor(caret)
-    };
+    let selection = Selection::cursor(caret);
     selection.check(&new_doc, schema).ok()?;
-    Some(
-        TransactionSpec::new()
-            .change_set(set)
-            .selection(selection)
-            .user_event("input.type")
-            .scroll_into_view(),
-    )
+    let mut spec = TransactionSpec::new()
+        .change_set(set)
+        .selection(selection)
+        .user_event("input.type")
+        .scroll_into_view();
+    // Stored marks survive typing, so several characters in a row share them.
+    if state.stored_marks().is_some() {
+        spec = spec.stored_marks(Some(marks));
+    }
+    Some(spec)
 }
 
 /// The marks content inserted at `resolved` should carry.
@@ -120,7 +118,6 @@ pub(crate) fn marks_for_insertion(state: &EditorState, resolved: &ResolvedPos) -
     let schema = state.schema();
     let parent_ty = schema.node_type(resolved.parent().type_id());
     state
-        .selection()
         .stored_marks()
         .cloned()
         .unwrap_or_else(|| resolved.marks(schema))

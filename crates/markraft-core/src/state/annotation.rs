@@ -6,7 +6,7 @@
 //! the transaction's changes and therefore has to be mapped through them.
 
 use std::marker::PhantomData;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use super::facet::{AnyValue, next_id};
 
@@ -92,65 +92,4 @@ impl std::fmt::Debug for Annotation {
             .field("type", &self.ty)
             .finish()
     }
-}
-
-static USER_EVENT: LazyLock<AnnotationType<String>> = LazyLock::new(AnnotationType::define);
-static ADD_TO_HISTORY: LazyLock<AnnotationType<bool>> = LazyLock::new(AnnotationType::define);
-static TIME: LazyLock<AnnotationType<u64>> = LazyLock::new(AnnotationType::define);
-static REMOTE: LazyLock<AnnotationType<bool>> = LazyLock::new(AnnotationType::define);
-static ORIGIN: LazyLock<AnnotationType<String>> = LazyLock::new(AnnotationType::define);
-
-/// What the user did, as a dotted hierarchy.
-///
-/// The vocabulary the rest of this crate uses: `input`, `input.type`,
-/// `input.type.compose`, `input.paste`, `input.drop`, `delete`,
-/// `delete.selection`, `delete.forward`, `delete.backward`, `delete.cut`,
-/// `move`, `move.drop`, `select`, `select.pointer`, `select.all`, `undo`,
-/// `redo`, `insert`, `mark`, `mark.add`, `mark.remove`, `split`, `wrap`,
-/// `unwrap`, `settype`.
-///
-/// [`Transaction::is_user_event`](super::Transaction::is_user_event) matches on
-/// dotted prefixes, so `select` matches `select.pointer`.
-pub fn user_event() -> &'static AnnotationType<String> {
-    &USER_EVENT
-}
-
-/// Whether the undo history should record this transaction.
-///
-/// Absent means "yes". With `false`, the history maps its entries through the
-/// change instead of recording it, which is how a remote or programmatic edit
-/// keeps the local history valid.
-pub fn add_to_history() -> &'static AnnotationType<bool> {
-    &ADD_TO_HISTORY
-}
-
-/// When the transaction was created, in milliseconds.
-///
-/// Added automatically by [`EditorState::update`](super::EditorState::update)
-/// when a spec does not supply it. Tests that care about grouping supply it.
-pub fn time() -> &'static AnnotationType<u64> {
-    &TIME
-}
-
-/// Whether the transaction represents another actor's edit.
-///
-/// Corrections and other transaction extenders that add changes skip remote
-/// transactions, because acting on them makes collaborating peers correct the
-/// same thing over and over.
-pub fn remote() -> &'static AnnotationType<bool> {
-    &REMOTE
-}
-
-/// A free-form provenance tag, for a host that needs to tell its own edits
-/// apart beyond what `user_event` expresses.
-pub fn origin() -> &'static AnnotationType<String> {
-    &ORIGIN
-}
-
-/// Whether `event` is `prefix` or a dotted refinement of it.
-pub(crate) fn matches_user_event(event: &str, prefix: &str) -> bool {
-    event == prefix
-        || (event.len() > prefix.len()
-            && event.starts_with(prefix)
-            && event.as_bytes()[prefix.len()] == b'.')
 }

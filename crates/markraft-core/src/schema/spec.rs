@@ -48,6 +48,23 @@ pub struct NodeTypeSpec {
     pub isolating: bool,
     /// The node holds code; consumers use this to disable smart behaviour.
     pub code: bool,
+    /// Whether the node stands for a line break in its textblock, and which
+    /// kind. Meant for inline leaves.
+    pub break_kind: Option<BreakKind>,
+}
+
+/// The kind of line break an inline node stands for.
+///
+/// Views that flatten a textblock into text read this instead of guessing
+/// from the type's name or groups: a [`Hard`](BreakKind::Hard) break ends a
+/// visual row and reads as `'\n'`, a [`Soft`](BreakKind::Soft) break reflows
+/// with the surrounding text and reads as a space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakKind {
+    /// A forced break: the textblock continues on a new row.
+    Hard,
+    /// A break the source kept but the layout ignores, rendered as a space.
+    Soft,
 }
 
 impl NodeTypeSpec {
@@ -67,6 +84,7 @@ impl NodeTypeSpec {
             defining: false,
             isolating: false,
             code: false,
+            break_kind: None,
         }
     }
 
@@ -140,6 +158,12 @@ impl NodeTypeSpec {
     /// Set the `code` flag.
     pub fn code(mut self, code: bool) -> Self {
         self.code = code;
+        self
+    }
+
+    /// Declare the type as a line break of the given kind.
+    pub fn break_kind(mut self, kind: BreakKind) -> Self {
+        self.break_kind = Some(kind);
         self
     }
 }

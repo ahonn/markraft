@@ -40,6 +40,33 @@ fn compiles_the_test_schema() {
 }
 
 #[test]
+fn a_declared_break_kind_is_compiled_into_the_type() {
+    use crate::schema::BreakKind;
+    let schema = Schema::new(
+        SchemaSpec::new()
+            .node(NodeTypeSpec::new("doc", "inline*"))
+            .node(NodeTypeSpec::text("text").group("inline"))
+            .node(
+                NodeTypeSpec::leaf("soft")
+                    .inline(true)
+                    .group("inline")
+                    .break_kind(BreakKind::Soft),
+            ),
+    )
+    .expect("valid schema");
+    let kind_of = |name: &str| {
+        schema
+            .node_type(schema.node_id(name).expect("known"))
+            .break_kind()
+    };
+    assert_eq!(kind_of("soft"), Some(BreakKind::Soft));
+    assert_eq!(kind_of("text"), None);
+    let test = test_schema();
+    let hard = test.node_id("hard_break").expect("known");
+    assert_eq!(test.node_type(hard).break_kind(), Some(BreakKind::Hard));
+}
+
+#[test]
 fn rejects_duplicate_names() {
     let err = Schema::new(
         SchemaSpec::new()

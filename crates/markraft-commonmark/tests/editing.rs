@@ -344,7 +344,7 @@ fn apply(state: &EditorState, changes: Vec<markraft_core::Change>) -> EditorStat
         .update([markraft_core::TransactionSpec::new().changes(changes)])
         .expect("the edit applies");
     assert_eq!(
-        tr.annotation(markraft_core::corrections_diverged()),
+        tr.annotation(markraft_core::protocol::corrections_diverged()),
         None,
         "the corrections settle"
     );

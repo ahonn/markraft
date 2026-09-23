@@ -44,7 +44,7 @@ impl Node {
         let mut parent_offset = pos;
         let mut node = self.clone();
         loop {
-            let (index, offset) = node.content().find_index(parent_offset);
+            let (index, offset) = node.content().find_index_unchecked(parent_offset);
             let rem = parent_offset - offset;
             path.push(PathEntry {
                 node: node.clone(),
@@ -164,7 +164,7 @@ impl ResolvedPos {
         let index = self.index(self.depth());
         let offset = self.text_offset();
         if offset > 0 {
-            return Some(self.parent().child(index).cut_text(0, offset));
+            return Some(self.parent().child(index).cut_text_unchecked(0, offset));
         }
         if index == 0 {
             None
@@ -184,7 +184,7 @@ impl ResolvedPos {
         let child = parent.child(index);
         let offset = self.text_offset();
         if offset > 0 {
-            Some(child.cut_text(offset, child.text_len()))
+            Some(child.cut_text_unchecked(offset, child.text_len()))
         } else {
             Some(child.clone())
         }

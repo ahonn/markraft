@@ -3,8 +3,8 @@
 //! Nothing here knows what a table *means*. A caller names the three node types
 //! a table is built from ([`TableTypes`]) and the commands maintain the shape
 //! those names describe: a table holds rows, a row holds cells, the first row
-//! is the header, and the table's [`ALIGNMENTS_ATTR`] attribute carries one
-//! entry per column.
+//! is the header, and the table's alignment attribute
+//! ([`TableTypes::alignments_attr`]) carries one entry per column.
 //!
 //! # The invariant
 //!
@@ -36,32 +36,47 @@ use crate::state::{EditorState, TransactionSpec};
 use super::structure::{can_replace, default_block_type, markup_of};
 use super::{Command, changes_spec, command, resolve_changes};
 
-/// The attribute a table carries its per-column alignments in.
-///
-/// Its value is a comma-separated list of [`ColumnAlignment`] names, one per
-/// column. A table type that does not declare the attribute still works: the
-/// commands then keep the structure and leave alignment alone.
-pub const ALIGNMENTS_ATTR: &str = "alignments";
-
-/// The node types a table is built from.
+/// The node types a table is built from, and the attribute its alignments
+/// live in.
 ///
 /// Passed to every command in this module, so a host that calls its types
 /// something else — or has several table-like shapes — needs no configuration
-/// beyond these three ids.
+/// beyond these three ids and one attribute name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TableTypes {
-    /// The table itself: a block holding rows, carrying [`ALIGNMENTS_ATTR`].
+    /// The table itself: a block holding rows, carrying
+    /// [`TableTypes::alignments_attr`].
     pub table: NodeTypeId,
     /// A row: holds one cell per column.
     pub row: NodeTypeId,
     /// A cell: a textblock.
     pub cell: NodeTypeId,
+    /// The attribute the table carries its per-column alignments in.
+    ///
+    /// Its value is a comma-separated list of [`ColumnAlignment`] names, one
+    /// per column. A table type that does not declare the attribute still
+    /// works: the commands then keep the structure and leave alignment alone.
+    /// [`kind::TABLE_ALIGNMENTS_ATTR`](crate::kind::TABLE_ALIGNMENTS_ATTR) is
+    /// the name a kind following [`DocTypeNames`](crate::kind::DocTypeNames)
+    /// uses.
+    pub alignments_attr: &'static str,
 }
 
 impl TableTypes {
-    /// The three types, in the order a table nests them.
-    pub fn new(table: NodeTypeId, row: NodeTypeId, cell: NodeTypeId) -> TableTypes {
-        TableTypes { table, row, cell }
+    /// The three types, in the order a table nests them, and the table's
+    /// alignment attribute.
+    pub fn new(
+        table: NodeTypeId,
+        row: NodeTypeId,
+        cell: NodeTypeId,
+        alignments_attr: &'static str,
+    ) -> TableTypes {
+        TableTypes {
+            table,
+            row,
+            cell,
+            alignments_attr,
+        }
     }
 }
 
@@ -80,7 +95,8 @@ pub enum ColumnAlignment {
 }
 
 impl ColumnAlignment {
-    /// The name this alignment is written under in [`ALIGNMENTS_ATTR`].
+    /// The name this alignment is written under in
+    /// [`TableTypes::alignments_attr`].
     pub fn name(self) -> &'static str {
         match self {
             ColumnAlignment::None => "none",
@@ -143,14 +159,14 @@ fn cell_at_pos(types: TableTypes, doc: &Node, pos: usize) -> Option<CellPos> {
     })
 }
 
-/// The alignments `table` declares, one per column.
+/// The alignments `table` declares in its `attr` attribute, one per column.
 ///
 /// A missing, short or over-long attribute is padded and trimmed to `columns`,
 /// so callers never have to bounds-check the result.
-pub fn column_alignments(table: &Node, columns: usize) -> Vec<ColumnAlignment> {
+pub fn column_alignments(table: &Node, attr: &str, columns: usize) -> Vec<ColumnAlignment> {
     let mut out: Vec<ColumnAlignment> = table
         .attrs()
-        .get(ALIGNMENTS_ATTR)
+        .get(attr)
         .and_then(AttrValue::as_str)
         .filter(|text| !text.is_empty())
         .map(|text| text.split(',').map(ColumnAlignment::from_name).collect())
@@ -219,7 +235,7 @@ fn context(types: TableTypes, state: &EditorState) -> Option<TableCtx> {
     let pos = cell_at(types, state)?;
     let table = state.doc().node_at(pos.table)?;
     let columns = table.first_child()?.child_count();
-    let alignments = column_alignments(&table, columns);
+    let alignments = column_alignments(&table, types.alignments_attr, columns);
     Some(TableCtx {
         pos,
         table,
@@ -299,7 +315,7 @@ fn empty_table(schema: &Schema, types: TableTypes, rows: usize, columns: usize) 
     let row = empty_row(schema, types, columns)?;
     let attrs = aligned_attrs(
         schema,
-        types.table,
+        types,
         schema.node_type(types.table).default_attrs(),
         &vec![ColumnAlignment::None; columns],
     );
@@ -309,24 +325,24 @@ fn empty_table(schema: &Schema, types: TableTypes, rows: usize, columns: usize) 
     ))
 }
 
-/// Whether the table type declares [`ALIGNMENTS_ATTR`] at all.
-fn declares_alignments(schema: &Schema, ty: NodeTypeId) -> bool {
+/// Whether the table type declares [`TableTypes::alignments_attr`] at all.
+fn declares_alignments(schema: &Schema, types: TableTypes) -> bool {
     schema
-        .node_type(ty)
+        .node_type(types.table)
         .attrs()
         .iter()
-        .any(|spec| spec.name == ALIGNMENTS_ATTR)
+        .any(|spec| spec.name == types.alignments_attr)
 }
 
-/// `attrs` with [`ALIGNMENTS_ATTR`] set, or unchanged when the type does not
-/// declare it.
+/// `attrs` with [`TableTypes::alignments_attr`] set, or unchanged when the
+/// table type does not declare it.
 fn aligned_attrs(
     schema: &Schema,
-    ty: NodeTypeId,
+    types: TableTypes,
     attrs: &Attrs,
     alignments: &[ColumnAlignment],
 ) -> Attrs {
-    if !declares_alignments(schema, ty) {
+    if !declares_alignments(schema, types) {
         return attrs.clone();
     }
     let text = alignments
@@ -334,7 +350,7 @@ fn aligned_attrs(
         .map(|alignment| alignment.name())
         .collect::<Vec<_>>()
         .join(",");
-    attrs.with(ALIGNMENTS_ATTR, text)
+    attrs.with(types.alignments_attr, text)
 }
 
 /// The changes that rewrite the table's alignments.
@@ -343,11 +359,16 @@ fn aligned_attrs(
 /// token carry, so both are replaced — the same shape
 /// [`set_block_type`](super::set_block_type) uses to re-type a block. Empty
 /// when the table type declares no alignment attribute.
-fn realign_changes(schema: &Schema, ctx: &TableCtx, alignments: &[ColumnAlignment]) -> Vec<Change> {
-    if !declares_alignments(schema, ctx.table.type_id()) {
+fn realign_changes(
+    schema: &Schema,
+    types: TableTypes,
+    ctx: &TableCtx,
+    alignments: &[ColumnAlignment],
+) -> Vec<Change> {
+    if !declares_alignments(schema, types) {
         return Vec::new();
     }
-    let attrs = aligned_attrs(schema, ctx.table.type_id(), ctx.table.attrs(), alignments);
+    let attrs = aligned_attrs(schema, types, ctx.table.attrs(), alignments);
     let markup = markup_of(schema, ctx.table.type_id(), &attrs).marked(ctx.table.marks().clone());
     vec![
         Change::replace(
@@ -505,7 +526,7 @@ fn add_column(state: &EditorState, types: TableTypes, after: bool) -> Option<Tra
     let cell = empty_cell(state.schema(), types)?;
     let mut alignments = ctx.alignments.clone();
     alignments.insert(at.min(alignments.len()), ColumnAlignment::None);
-    let mut changes = realign_changes(state.schema(), &ctx, &alignments);
+    let mut changes = realign_changes(state.schema(), types, &ctx, &alignments);
     for row in 0..ctx.rows() {
         let width = ctx.table.child(row).child_count();
         let pos = ctx.cell_start(row, at.min(width))?;
@@ -555,7 +576,7 @@ pub fn delete_column(types: TableTypes) -> Command {
         if ctx.pos.column < alignments.len() {
             alignments.remove(ctx.pos.column);
         }
-        let mut changes = realign_changes(state.schema(), &ctx, &alignments);
+        let mut changes = realign_changes(state.schema(), types, &ctx, &alignments);
         for row in 0..ctx.rows() {
             let row_node = ctx.table.child(row);
             let Some(cell) = row_node.maybe_child(ctx.pos.column) else {
@@ -678,7 +699,7 @@ pub fn set_column_alignment(types: TableTypes, alignment: ColumnAlignment) -> Co
             return None;
         }
         *slot = alignment;
-        let changes = realign_changes(state.schema(), &ctx, &alignments);
+        let changes = realign_changes(state.schema(), types, &ctx, &alignments);
         if changes.is_empty() {
             return None;
         }
