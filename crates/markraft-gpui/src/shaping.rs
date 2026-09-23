@@ -52,6 +52,8 @@ pub(crate) struct Shaping {
     /// nowhere is not drawn as one that leads somewhere. Absent until the host
     /// says, and then every link is drawn as followable.
     wiki: Option<WikiResolver>,
+    /// How the host fetches remote images; absent, none is fetched.
+    remote_images: Option<crate::RemoteImageFetcher>,
     /// Bumped by every change above. The rows of a shaping that read an older
     /// revision are not the rows this one would produce.
     revision: u64,
@@ -94,6 +96,30 @@ impl Shaping {
     /// that finds nothing must leave the laid-out rows alone.
     pub(crate) fn refresh_images(&mut self) -> bool {
         let changed = self.images.refresh();
+        if changed {
+            self.changed();
+        }
+        changed
+    }
+
+    pub(crate) fn remote_images(&self) -> Option<&crate::RemoteImageFetcher> {
+        self.remote_images.as_ref()
+    }
+
+    pub(crate) fn set_remote_images(&mut self, fetcher: Option<crate::RemoteImageFetcher>) {
+        self.images.set_remote_enabled(fetcher.is_some());
+        self.remote_images = fetcher;
+        self.changed();
+    }
+
+    /// Keep a remote image the background fetch delivered, and say whether the
+    /// rows have to be shaped again.
+    pub(crate) fn finish_remote_image(
+        &mut self,
+        source: &str,
+        result: Result<std::sync::Arc<gpui::RenderImage>, crate::images::ImageError>,
+    ) -> bool {
+        let changed = self.images.finish_remote(source, result);
         if changed {
             self.changed();
         }

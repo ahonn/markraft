@@ -401,6 +401,12 @@ type DocumentGuard = Box<dyn Fn(&Node) -> Result<(), EditRejection>>;
 /// knows rather than by looking at the disk.
 pub type WikiResolver = Box<dyn Fn(&str) -> bool>;
 
+/// Fetches the bytes behind a remote image URL. It is called on a background
+/// thread, once per image source while that source stays in the document, and may
+/// block. An error is shown as an image that could not be loaded; what went wrong
+/// is the host's to log.
+pub type RemoteImageFetcher = Arc<dyn Fn(&str) -> Result<Vec<u8>, String> + Send + Sync>;
+
 /// Build all transactions before publishing any state. Unlike a transaction
 /// filter, this boundary also covers no-filter edits, undo and appender output.
 fn apply_guarded(
@@ -653,6 +659,41 @@ impl EditorView {
     ) {
         self.shaping.set_image_base(directory);
         cx.notify();
+    }
+
+    /// Fetch remote images with `fetcher`, or, with `None`, show every one as a
+    /// remote image this editor does not load. A standalone image being fetched is
+    /// drawn as a placeholder the size of a picture, and replaced when it arrives.
+    pub fn set_remote_images(
+        &mut self,
+        fetcher: Option<RemoteImageFetcher>,
+        cx: &mut Context<Self>,
+    ) {
+        self.shaping.set_remote_images(fetcher);
+        cx.notify();
+    }
+
+    /// Start a background fetch for each remote image the last layout asked for.
+    pub(crate) fn fetch_remote_images(&mut self, cx: &mut Context<Self>) {
+        let Some(fetcher) = self.shaping.remote_images().cloned() else {
+            return;
+        };
+        for source in self.shaping.images().take_requests() {
+            let fetcher = fetcher.clone();
+            cx.spawn(async move |this, cx| {
+                let fetching = source.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { images::fetch(&fetcher, &fetching) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.shaping.finish_remote_image(&source, result) {
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
     }
 
     /// Refresh changed image files without modifying document state or history.

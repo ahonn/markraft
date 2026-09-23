@@ -62,6 +62,9 @@ const PILL_MAX_RATIO: f32 = 0.9;
 /// format no decoder handles, an image sharing its line with text — keeps the
 /// placeholder pill.
 const IMAGE_MAX_HEIGHT: Pixels = px(320.);
+/// The widest a picture still being fetched is held open for. Its own size is not
+/// known until it arrives, so the frame only has to read as a picture's place.
+const LOADING_FRAME_MAX_WIDTH: Pixels = px(480.);
 // SF Mono; Menlo is wider and heavier at this size.
 const CODE_FONT: &str = ".AppleSystemUIFontMonospaced";
 const CODE_PADDING: Pixels = px(12.);
@@ -186,6 +189,9 @@ struct InlineAtom {
     /// A decoded image drawn in place of the pill, at the size it was measured
     /// for.
     image: Option<(Arc<RenderImage>, Size<Pixels>)>,
+    /// A picture still being fetched: a frame of this size stands where it will
+    /// be drawn, with the label in it.
+    frame: Option<Size<Pixels>>,
     /// The pill stands for a note rather than a picture, so it wears a page.
     note: bool,
 }
@@ -1797,6 +1803,7 @@ fn place_atoms(layout: &mut LayoutLine, pending: Vec<PendingAtom>) {
             visual_row: ((slot.origin.y - layout.origin.y) / layout.line_height).round() as usize,
             label: atom.label,
             image: atom.image,
+            frame: atom.frame,
             note: atom.note,
         });
     }
@@ -1839,6 +1846,7 @@ struct PendingAtom {
     chars: Range<usize>,
     label: Rc<ShapedLine>,
     image: Option<(Arc<RenderImage>, Size<Pixels>)>,
+    frame: Option<Size<Pixels>>,
     note: bool,
 }
 
@@ -1894,7 +1902,7 @@ fn display_text(
                     let count = (atom.width / unit).ceil().max(1.) as usize;
                     text.extend(std::iter::repeat_n(PILL_FILLER, count));
                     run_bytes.push(count * PILL_FILLER.len_utf8());
-                    if let Some((_, size)) = &atom.image {
+                    if let Some(size) = atom.image.as_ref().map(|(_, size)| *size).or(atom.frame) {
                         line_height = Some(size.height);
                     }
                     atoms.push(PendingAtom {
@@ -1902,6 +1910,7 @@ fn display_text(
                         note: atom.note,
                         label: atom.label,
                         image: atom.image,
+                        frame: atom.frame,
                     });
                     count
                 };
@@ -2034,6 +2043,8 @@ struct Atom {
     label: Rc<ShapedLine>,
     width: Pixels,
     image: Option<(Arc<RenderImage>, Size<Pixels>)>,
+    /// A picture still being fetched, drawn as a frame of this size.
+    frame: Option<Size<Pixels>>,
     /// A wiki link leading nowhere; see [`Widening::broken`].
     broken: bool,
     /// An `![[…]]` whose target is a note in the host's index rather than a file
@@ -2159,14 +2170,13 @@ fn atom_of(
     // for a note that is plainly there tells the reader something untrue.
     let embed = Some(node.type_id()) == types.wiki_link && crate::wiki::wiki_link_embed(node);
     let note = embed && wiki.is_some_and(|resolves| resolves(attr(node, "target")));
+    // An embed is labelled with the name it was written with and nothing else, found
+    // or not: `![[…]]` never said the target was a picture, so an embed that finds
+    // nothing is not reported as a missing one.
     let text = match picture {
-        Some(_) if note => format!("Embedded note: {original}"),
+        Some(_) if note => original,
         Some(source) => match images.load(source) {
-            // `![[…]]` never said the target was a picture, so when nothing of
-            // that name is there, neither did we.
-            Err(crate::images::ImageError::Missing) if embed => {
-                format!("Embed not found: {original}")
-            }
+            Err(crate::images::ImageError::Missing) if embed => original,
             Err(error) => format!("{}: {original}", error.label()),
             Ok(_) if !alone => format!("Inline image: {original}"),
             Ok(_) => original.to_owned(),
@@ -2179,6 +2189,13 @@ fn atom_of(
         .then_some(picture)
         .flatten()
         .and_then(|source| drawn_image(images, source, column));
+    // A picture still on its way keeps the room a picture takes, so the line does
+    // not start as one row and jump when it arrives.
+    let frame = (alone && !note && drawn.is_none())
+        .then_some(picture)
+        .flatten()
+        .filter(|source| images.load(source) == Err(crate::images::ImageError::Loading))
+        .map(|_| loading_frame(column));
     // A pill's label is smaller than the text around it, as inline code is;
     // source text and a wiki link's label sit in the sentence at the
     // sentence's own size, the one in the code font it is and the other in the
@@ -2229,14 +2246,15 @@ fn atom_of(
         label = shaped(shown.clone());
     }
     Some(Atom {
-        width: match &drawn {
-            Some((_, size)) => size.width,
+        width: match drawn.as_ref().map(|(_, size)| *size).or(frame) {
+            Some(size) => size.width,
             None => label.width + shape.chrome(),
         },
         shape,
         text: shown,
         label,
         image: drawn,
+        frame,
         broken,
         note,
     })
@@ -2262,6 +2280,13 @@ fn drawn_image(
         width = height * (native_width / native_height);
     }
     Some((image, size(width, height)))
+}
+
+/// The frame a picture still being fetched is drawn as: the column's width up to
+/// [`LOADING_FRAME_MAX_WIDTH`], at a photo's proportions.
+fn loading_frame(column: Pixels) -> Size<Pixels> {
+    let width = column.min(LOADING_FRAME_MAX_WIDTH).max(px(1.));
+    size(width, (width * 0.5625).min(IMAGE_MAX_HEIGHT).round())
 }
 
 /// The file name an image source ends in, for a placeholder with no alt text.
@@ -3115,6 +3140,9 @@ impl Element for EditorSurface {
             );
         }
         self.editor.update(cx, |editor, cx| {
+            if editor.shaping().images().has_requests() {
+                editor.fetch_remote_images(cx);
+            }
             editor.single_line_scroll_x = single_line_scroll_x;
             editor.tables = scroll;
             editor.content_bounds = bounds;
@@ -3676,6 +3704,28 @@ fn paint_atom(
             image.clone(),
             0,
             false,
+        );
+        return;
+    }
+    if let Some(frame) = atom.frame {
+        let bounds = Bounds::new(point(row.origin.x + atom.left, top), frame);
+        window
+            .paint_quad(fill(bounds, style.inline_code_background).corner_radii(style.code_radius));
+        let icon = PILL_ICON + PILL_ICON_GAP;
+        let left = bounds.origin.x + (frame.width - icon - atom.label.width).max(px(0.)) / 2.;
+        let line = bounds.center().y - style.body_size * style.line_height_ratio * 0.5;
+        paint_picture(
+            point(left, bounds.center().y - PILL_ICON * 0.5),
+            style,
+            window,
+        );
+        let _ = atom.label.paint(
+            point(left + icon, line),
+            style.body_size * style.line_height_ratio,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
         );
         return;
     }
@@ -4329,6 +4379,90 @@ mod tests {
             composition: None,
         };
         shape(&input, px(600.), &text_system())
+    }
+
+    /// The label each atom pill of `source`'s first line reaches the screen with, the
+    /// host's index holding every note `resolves` accepts.
+    fn pill_labels(source: &str, resolves: fn(&str) -> bool) -> Vec<String> {
+        let state = state_of(source);
+        let projection = projection_of(&state);
+        // A directory with nothing in it, so an embed that is no note finds no file.
+        let images = crate::images::Images::new(Some(std::env::temp_dir().join("markraft-none")));
+        let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
+        let types = callout_types();
+        let style = EditorStyle::notes();
+        let wiki: crate::WikiResolver = Box::new(resolves);
+        let input = ShapeInput {
+            images: &images,
+            spelling: Some(&spelling),
+            wiki: Some(&wiki),
+            doc: state.doc(),
+            types: &types,
+            projection: &projection,
+            style: &style,
+            single_line: false,
+            selection: 0..0,
+            composition: None,
+        };
+        shape(&input, px(600.), &text_system())[0]
+            .atoms
+            .iter()
+            .map(|atom| atom.label.text.to_string())
+            .collect()
+    }
+
+    /// The atoms of `source`'s first line, remote images being fetched.
+    fn fetching_atoms(source: &str) -> Vec<(String, Option<gpui::Size<Pixels>>)> {
+        let state = state_of(source);
+        let projection = projection_of(&state);
+        let mut images = crate::images::Images::default();
+        images.set_remote_enabled(true);
+        let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
+        let types = callout_types();
+        let style = EditorStyle::notes();
+        let input = ShapeInput {
+            images: &images,
+            spelling: Some(&spelling),
+            wiki: None,
+            doc: state.doc(),
+            types: &types,
+            projection: &projection,
+            style: &style,
+            single_line: false,
+            selection: 0..0,
+            composition: None,
+        };
+        let line = &shape(&input, px(600.), &text_system())[0];
+        line.atoms
+            .iter()
+            .map(|atom| (atom.label.text.to_string(), atom.frame))
+            .collect()
+    }
+
+    /// A picture still on its way holds the room of one where it stands alone, and
+    /// stays a pill beside text, where a picture would be a pill too.
+    #[test]
+    fn a_remote_image_being_fetched_holds_a_pictures_place() {
+        let alone = fetching_atoms("![a cat](https://example.com/cat.png)");
+        assert_eq!(alone.len(), 1);
+        assert_eq!(alone[0].0, "Loading image: a cat");
+        let frame = alone[0].1.expect("a frame, not a pill");
+        assert_eq!(frame.width, px(480.));
+        assert!(frame.height > px(200.), "a picture's height, not a row's");
+        let inline = fetching_atoms("see ![a cat](https://example.com/cat.png) here");
+        assert_eq!(inline, [("Loading image: a cat".to_owned(), None)]);
+    }
+
+    #[test]
+    fn an_embed_is_labelled_with_its_name_alone() {
+        assert_eq!(
+            pill_labels("x ![[Second Note]] y", |_| true),
+            ["Second Note"]
+        );
+        assert_eq!(
+            pill_labels("x ![[Missing Note]] y", |_| false),
+            ["Missing Note"]
+        );
     }
 
     /// The display text of `source`'s first line and the runs it is shaped with.

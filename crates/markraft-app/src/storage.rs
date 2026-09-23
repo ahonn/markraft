@@ -77,6 +77,9 @@ pub struct Preferences {
     /// Modal editing in the note editors. Settings files written before it existed
     /// deserialize to `false`.
     pub vim_mode: bool,
+    /// Whether notes fetch the remote images they show. Settings files written
+    /// before it existed deserialize to the default, on.
+    pub remote_images: bool,
 }
 
 impl Default for Preferences {
@@ -87,6 +90,7 @@ impl Default for Preferences {
             hotkey: "Alt+N".into(),
             window_bounds: None,
             vim_mode: false,
+            remote_images: true,
         }
     }
 }

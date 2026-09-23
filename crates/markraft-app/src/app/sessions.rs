@@ -186,6 +186,7 @@ impl NotesApp {
         let resolver = self.wiki_resolver();
         let extensions = editor.update(cx, |editor, cx| {
             editor.set_wiki_resolver(resolver, cx);
+            editor.set_remote_images(self.remote_image_fetcher(), cx);
             [
                 editor.add_extension(menu, cx),
                 editor.add_extension(links, cx),
@@ -330,5 +331,37 @@ impl NotesApp {
         self.save.reset();
         self.links.invalidate();
         self.ensure_session(window, cx);
+    }
+}
+
+impl NotesApp {
+    /// What a note editor fetches remote images with: nothing while the preference
+    /// is off, so each one reads as an image this editor does not load.
+    fn remote_image_fetcher(&self) -> Option<markraft_gpui::RemoteImageFetcher> {
+        self.library
+            .preferences
+            .remote_images
+            .then(crate::remote_images::shared)
+    }
+
+    /// Turn fetching remote images on or off in every open note at once.
+    pub(super) fn set_remote_images(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.library.preferences.remote_images == enabled {
+            return;
+        }
+        self.library.preferences.remote_images = enabled;
+        let fetcher = self.remote_image_fetcher();
+        let editors: Vec<_> = self
+            .sessions
+            .values()
+            .map(|session| session.editor().clone())
+            .collect();
+        for editor in editors {
+            editor.update(cx, |editor, cx| {
+                editor.set_remote_images(fetcher.clone(), cx)
+            });
+        }
+        self.schedule_save(cx);
+        cx.notify();
     }
 }

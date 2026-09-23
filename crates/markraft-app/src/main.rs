@@ -3,6 +3,7 @@ mod doc;
 mod instance;
 mod persistence;
 mod platform;
+mod remote_images;
 mod storage;
 mod updater;
 mod vault;

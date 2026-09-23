@@ -70,6 +70,7 @@ enum Change {
     Theme(Option<bool>),
     AutoHeight(bool),
     VimMode(bool),
+    RemoteImages(bool),
     LaunchAtLogin(bool),
     /// Empty turns the global shortcut off.
     Shortcut(String),
@@ -89,6 +90,7 @@ struct Snapshot {
     theme: Option<bool>,
     auto_height: bool,
     vim: bool,
+    remote_images: bool,
     /// None without the platform layer, which is what answers the question.
     login: Option<bool>,
     shortcut: String,
@@ -141,6 +143,7 @@ impl NotesApp {
             theme: self.library.preferences.dark_mode,
             auto_height: self.library.preferences.auto_height,
             vim: self.library.preferences.vim_mode,
+            remote_images: self.library.preferences.remote_images,
             login: self
                 .platform
                 .as_ref()
@@ -166,6 +169,7 @@ impl NotesApp {
                 self.schedule_save(cx);
             }
             Change::VimMode(enabled) => self.set_vim(enabled, cx),
+            Change::RemoteImages(enabled) => self.set_remote_images(enabled, cx),
             Change::LaunchAtLogin(enabled) => {
                 if let Some(platform) = &mut self.platform {
                     self.settings_errors.login = platform.set_launch_at_login(enabled).err();
@@ -792,12 +796,28 @@ impl SettingsView {
                 self.sender(Change::AutoHeight),
             ))
             .render(p);
-        vec![section(
-            "Editing",
-            vec![vim, grow],
-            Some("Resizing the note by hand turns growing off.".into()),
-            p,
-        )]
+        let remote = Row::new("Load remote images")
+            .description(
+                "Show pictures a note links from the web. Opening the note tells their server.",
+            )
+            .trailing(switch(
+                "remote-images",
+                "Load remote images",
+                s.remote_images,
+                p,
+                cx,
+                self.sender(Change::RemoteImages),
+            ))
+            .render(p);
+        vec![
+            section(
+                "Editing",
+                vec![vim, grow],
+                Some("Resizing the note by hand turns growing off.".into()),
+                p,
+            ),
+            section("Images", vec![remote], None, p),
+        ]
     }
 
     fn notes(&self, s: &Snapshot, p: Palette) -> Vec<Div> {
