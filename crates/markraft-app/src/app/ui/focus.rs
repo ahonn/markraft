@@ -30,7 +30,6 @@ pub(super) enum Surface {
     Table,
     Picker,
     Actions,
-    Settings,
 }
 
 /// What Enter or Space does at a stop.
@@ -105,7 +104,6 @@ impl NotesApp {
             Panel::Editor => Surface::Editor,
             Panel::Browse => Surface::Picker,
             Panel::Actions => Surface::Actions,
-            Panel::Settings => Surface::Settings,
         }
     }
 
@@ -210,52 +208,6 @@ impl NotesApp {
                     if let Some(intent) = command.intent {
                         stops.push(Stop::run(command.id, intent).in_row(index));
                     }
-                }
-            }
-            Surface::Settings => {
-                stops.push(Stop::run("settings-done", Intent::Back));
-                for (id, mode) in [
-                    ("theme-system", None),
-                    ("theme-light", Some(false)),
-                    ("theme-dark", Some(true)),
-                ] {
-                    stops.push(Stop::run(id, Intent::Theme(mode)));
-                }
-                stops.push(Stop::run("auto-height", Intent::AutoHeight));
-                stops.push(Stop::run("vim-mode", Intent::VimMode));
-                stops.push(Stop::run("launch-at-login", Intent::Login));
-                stops.push(Stop::run("change-folder", Intent::ChooseFolder));
-                // The file-placement rows are only drawn while there is a folder to
-                // place files in.
-                if self.path.is_some() {
-                    stops.push(Stop::run("new-note-location", Intent::NewNoteLocation));
-                    if !self
-                        .library
-                        .workspace
-                        .new_note_directory
-                        .as_os_str()
-                        .is_empty()
-                    {
-                        stops.push(Stop::run(
-                            "reset-new-note-location",
-                            Intent::ResetNewNoteLocation,
-                        ));
-                    }
-                    stops.push(Stop::run("image-location", Intent::ImageLocation));
-                    if self.library.workspace.attachments
-                        != crate::storage::AttachmentPolicy::Default
-                    {
-                        stops.push(Stop::run(
-                            "reset-image-location",
-                            Intent::ResetImageLocation,
-                        ));
-                    }
-                }
-                stops.push(Stop::query());
-                stops.push(Stop::run("apply-shortcut", Intent::Shortcut));
-                stops.push(Stop::run("open-markdown-setting", Intent::OpenMarkdown));
-                if self.path.is_some() {
-                    stops.push(Stop::run("show-storage", Intent::Reveal));
                 }
             }
         }
@@ -396,21 +348,5 @@ impl NotesApp {
         };
         self.intent(intent, window, cx);
         true
-    }
-
-    /// Draw the keyboard focus ring around `element` while the ring rests on `id`. It
-    /// sits outside the control's own box, so showing it moves nothing.
-    pub(super) fn ring(&self, id: &str, radius: Pixels, element: Stateful<Div>) -> Stateful<Div> {
-        if !self.ring.rests_on(id) {
-            return element;
-        }
-        element.child(
-            div()
-                .absolute()
-                .inset(px(-4.))
-                .rounded(radius + px(4.))
-                .border_2()
-                .border_color(notes_style(self.dark).marker),
-        )
     }
 }

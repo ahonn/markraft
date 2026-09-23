@@ -51,7 +51,6 @@ define_icons! {
     Open => "folder",
     // Leaving Markraft: a link in the browser, a file in another editor.
     External => "arrow.up.right.square",
-    Image => "photo",
     Lock => "lock",
     Alert => "exclamationmark.triangle",
     // Two versions of one file that have to be told apart.

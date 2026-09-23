@@ -81,7 +81,6 @@ pub(super) struct Picker {
     row: usize,
     browse_scroll: ScrollHandle,
     actions_scroll: ScrollHandle,
-    settings_scroll: ScrollHandle,
 }
 
 impl Picker {
@@ -95,10 +94,6 @@ impl Picker {
 
     pub(super) fn actions_scroll(&self) -> &ScrollHandle {
         &self.actions_scroll
-    }
-
-    pub(super) fn settings_scroll(&self) -> &ScrollHandle {
-        &self.settings_scroll
     }
 
     /// Select `row` in Browse, keeping it in view.

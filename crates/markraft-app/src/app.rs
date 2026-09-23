@@ -64,7 +64,6 @@ enum Panel {
     Editor,
     Browse,
     Actions,
-    Settings,
 }
 /// The pill above a link: its actions, or the field that edits its address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +100,8 @@ pub struct NotesApp {
     /// Everything the window has to tell the user: the errors that stand, the
     /// notices that pass, and whose turn it is.
     feedback: Feedback,
+    /// What the Settings window's rows say was refused.
+    settings_errors: ui::settings::SettingsErrors,
     /// Whether the quit question is already on screen, so a second ⌘Q cannot stack
     /// another one behind it.
     quitting: QuitState,
@@ -240,6 +241,7 @@ impl NotesApp {
             code_language: Cursor::default(),
             save: SaveState::default(),
             feedback,
+            settings_errors: Default::default(),
             quitting: QuitState::default(),
             trashed: Vec::new(),
             links: Default::default(),
@@ -549,10 +551,7 @@ impl NotesApp {
                     self.show(window, cx);
                     self.new_note(window, cx);
                 }
-                PlatformEvent::Settings => {
-                    self.show(window, cx);
-                    self.open_panel(Panel::Settings, window, cx);
-                }
+                PlatformEvent::Settings => self.open_settings(window, cx),
                 PlatformEvent::CheckForUpdates => self.check_for_updates(window, cx),
                 PlatformEvent::Quit => self.quit(window, cx),
             }
@@ -849,11 +848,6 @@ impl NotesApp {
         self.picker.reopen_browse();
         self.ring.release();
         let (query, placeholder, label) = match self.interaction.panel() {
-            Panel::Settings => (
-                self.library.preferences.hotkey.clone(),
-                "Type a shortcut, e.g. Alt+N",
-                "Global shortcut",
-            ),
             Panel::Actions => (String::new(), "Search for actions…", "Search actions"),
             _ => (String::new(), "Search for notes…", "Search notes"),
         };
@@ -1006,28 +1000,6 @@ impl NotesApp {
         self.close_popover(cx);
         self.focus_editor(window, cx);
         cx.notify();
-    }
-    fn apply_shortcut(&mut self, cx: &mut Context<Self>) {
-        let query = self.query().read(cx);
-        let text =
-            markraft_core::projection::Projection::of(query.committed_document(), query.schema())
-                .plain_text()
-                .trim()
-                .to_string();
-        if let Some(platform) = &mut self.platform {
-            match platform.set_shortcut(&text) {
-                Ok(()) => {
-                    self.library.preferences.hotkey = text;
-                    self.feedback.set_platform_error(None);
-                    self.schedule_save(cx);
-                    self.inform("Updated shortcut", cx);
-                }
-                Err(e) => {
-                    self.feedback.set_platform_error(Some(e));
-                    cx.notify();
-                }
-            }
-        }
     }
     fn copy_markdown(&mut self, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(doc::to_markdown(
@@ -1453,15 +1425,18 @@ impl NotesApp {
                             .map(ToOwned::to_owned)
                             .map_err(|_| "Choose a folder inside the notes folder.".to_owned())
                     });
-                let _ = this.update(cx, |this, cx| match relative {
-                    Ok(relative) if this.path.as_ref() == Some(&root) => {
-                        this.library.workspace.new_note_directory = relative;
-                        this.schedule_save(cx);
+                let _ = this.update(cx, |this, cx| {
+                    match relative {
+                        Ok(relative) if this.path.as_ref() == Some(&root) => {
+                            this.library.workspace.new_note_directory = relative;
+                            this.schedule_save(cx);
+                        }
+                        Ok(_) => this.set_settings_error_new_notes(Some(
+                            "The notes folder changed; choose the location again.".into(),
+                        )),
+                        Err(error) => this.set_settings_error_new_notes(Some(error)),
                     }
-                    Ok(_) => {
-                        this.inform("The notes folder changed; choose the location again.", cx)
-                    }
-                    Err(error) => this.inform(error, cx),
+                    cx.notify();
                 });
             }
         })
@@ -1492,16 +1467,19 @@ impl NotesApp {
                             .map(ToOwned::to_owned)
                             .map_err(|_| "Choose a folder inside the notes folder.".to_owned())
                     });
-                let _ = this.update(cx, |this, cx| match relative {
-                    Ok(relative) if this.path.as_ref() == Some(&root) => {
-                        this.library.workspace.attachments =
-                            crate::storage::AttachmentPolicy::WorkspaceFolder(relative);
-                        this.schedule_save(cx);
+                let _ = this.update(cx, |this, cx| {
+                    match relative {
+                        Ok(relative) if this.path.as_ref() == Some(&root) => {
+                            this.library.workspace.attachments =
+                                crate::storage::AttachmentPolicy::WorkspaceFolder(relative);
+                            this.schedule_save(cx);
+                        }
+                        Ok(_) => this.set_settings_error_images(Some(
+                            "The notes folder changed; choose the location again.".into(),
+                        )),
+                        Err(error) => this.set_settings_error_images(Some(error)),
                     }
-                    Ok(_) => {
-                        this.inform("The notes folder changed; choose the location again.", cx)
-                    }
-                    Err(error) => this.inform(error, cx),
+                    cx.notify();
                 });
             }
         })
@@ -1892,6 +1870,7 @@ pub fn bind_app_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-e", Export, Some("MarkraftApp")),
         KeyBinding::new("cmd-o", OpenMarkdown, Some("MarkraftApp")),
     ]);
+    ui::settings::bind_keys(cx);
     cx.set_menus([
         Menu::new("Markraft").items([
             MenuItem::action("Show Notes", Show),

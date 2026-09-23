@@ -5,7 +5,6 @@ use super::*;
 pub(super) enum InputKind {
     Notes,
     Actions,
-    Shortcut,
     Link,
     Language,
     Rename,
@@ -61,7 +60,6 @@ impl Interaction {
             Panel::Editor => None,
             Panel::Browse => Some(InputKind::Notes),
             Panel::Actions => Some(InputKind::Actions),
-            Panel::Settings => Some(InputKind::Shortcut),
         }
     }
     pub fn switch_panel(&mut self, panel: Panel) -> bool {
@@ -321,9 +319,9 @@ mod tests {
     fn panels_clear_popovers_and_have_distinct_input_lifetimes() {
         let mut state = Interaction::default();
         state.open("note", Popover::Format(FormatMenu::Inline));
-        state.switch_panel(Panel::Settings);
+        state.switch_panel(Panel::Browse);
         assert!(state.popover().is_none());
-        assert_eq!(state.input_kind(), Some(InputKind::Shortcut));
+        assert_eq!(state.input_kind(), Some(InputKind::Notes));
         state.switch_panel(Panel::Actions);
         assert_eq!(state.input_kind(), Some(InputKind::Actions));
         state.switch_panel(Panel::Editor);

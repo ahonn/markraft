@@ -112,51 +112,47 @@ impl NotesApp {
             let checked = canonical_language(language) == canonical_language(&active);
             let stop = SharedString::from(format!("code-language-{index}"));
             list = list.child(
-                self.ring(
-                    &stop,
-                    ROW_RADIUS,
-                    div()
-                        .id(stop.clone())
-                        .role(Role::Button)
-                        .aria_label(label)
-                        .aria_selected(index == self.code_language.row())
-                        .aria_position_in_set(index + 1)
-                        .aria_size_of_set(total)
-                        .aria_toggled(if checked {
-                            accesskit::Toggled::True
-                        } else {
-                            accesskit::Toggled::False
-                        })
-                        .h(ROW_HEIGHT)
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded(ROW_RADIUS)
-                        .text_size(px(13.))
-                        .cursor_pointer()
-                        .when(index == self.code_language.row(), |s| {
-                            s.bg(self.selected_color())
-                        })
-                        .hover(|s| s.bg(self.selected_color()))
-                        .active(|s| s.bg(self.pressed_color()))
-                        .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                            if this.code_language.row() != index {
-                                this.code_language.point_at(index);
-                                cx.notify();
-                            }
-                        }))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.apply_code_language(language, window, cx);
-                        }))
-                        .child(
-                            div()
-                                .w(px(14.))
-                                .when(checked, |s| s.child(icon(Icon::Check, self.control_text()))),
-                        )
-                        .child(label),
-                ),
+                div()
+                    .id(stop.clone())
+                    .role(Role::Button)
+                    .aria_label(label)
+                    .aria_selected(index == self.code_language.row())
+                    .aria_position_in_set(index + 1)
+                    .aria_size_of_set(total)
+                    .aria_toggled(if checked {
+                        accesskit::Toggled::True
+                    } else {
+                        accesskit::Toggled::False
+                    })
+                    .h(ROW_HEIGHT)
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(ROW_RADIUS)
+                    .text_size(px(13.))
+                    .cursor_pointer()
+                    .when(index == self.code_language.row(), |s| {
+                        s.bg(self.selected_color())
+                    })
+                    .hover(|s| s.bg(self.selected_color()))
+                    .active(|s| s.bg(self.pressed_color()))
+                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        if this.code_language.row() != index {
+                            this.code_language.point_at(index);
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.apply_code_language(language, window, cx);
+                    }))
+                    .child(
+                        div()
+                            .w(px(14.))
+                            .when(checked, |s| s.child(icon(Icon::Check, self.control_text()))),
+                    )
+                    .child(label),
             );
         }
         if empty {

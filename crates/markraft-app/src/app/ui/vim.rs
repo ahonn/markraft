@@ -18,8 +18,10 @@ impl NotesApp {
 
     /// Turn modal editing on or off for every open note editor at once, rather than on
     /// the next launch. The query field never gets it: it is a single-line host control.
-    pub(in crate::app) fn toggle_vim(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let enabled = !self.library.preferences.vim_mode;
+    pub(in crate::app) fn set_vim(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.library.preferences.vim_mode == enabled {
+            return;
+        }
         self.library.preferences.vim_mode = enabled;
         let editors: Vec<_> = self
             .sessions
@@ -32,9 +34,8 @@ impl NotesApp {
                 session.set_vim(handle);
             }
         }
-        self.set_panel(Panel::Editor, cx);
-        self.focus_editor(window, cx);
         self.schedule_save(cx);
+        cx.notify();
     }
 
     /// The mode a note's editor reported through `EditorEvent::Extension`. It is kept per

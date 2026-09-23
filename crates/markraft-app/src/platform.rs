@@ -76,6 +76,9 @@ pub struct Platform {
     _tray: TrayIcon,
     hotkeys: GlobalHotKeyManager,
     shortcut: Option<HotKey>,
+    /// Whether `shortcut` has been let go of while the Settings window records a new
+    /// one, so the chord being recorded is not taken by the running shortcut.
+    suspended: bool,
     menu_actions: Vec<(MenuId, PlatformEvent)>,
     // Retained NSRunningApplication; None when no previous app is known.
     previous_app: Option<Retained<AnyObject>>,
@@ -118,6 +121,7 @@ impl Platform {
             _tray: tray,
             hotkeys,
             shortcut: None,
+            suspended: false,
             menu_actions,
             previous_app: None,
         };
@@ -134,6 +138,8 @@ impl Platform {
     /// Register before replacing, so an unavailable shortcut preserves the old one.
     /// An empty string explicitly disables the global shortcut.
     pub fn set_shortcut(&mut self, shortcut: &str) -> Result<(), String> {
+        // The swap below assumes the current shortcut is registered.
+        self.resume_shortcut()?;
         let next = if shortcut.trim().is_empty() {
             None
         } else {
@@ -169,6 +175,37 @@ impl Platform {
                 .into());
         }
         self.shortcut = next;
+        Ok(())
+    }
+
+    /// Let go of the shortcut without forgetting it, so a recorder can hear the chord.
+    pub fn suspend_shortcut(&mut self) {
+        if self.suspended {
+            return;
+        }
+        if let Some(shortcut) = self.shortcut
+            && let Err(error) = self.hotkeys.unregister(shortcut)
+        {
+            eprintln!("Markraft: the shortcut could not be suspended: {error}");
+            return;
+        }
+        self.suspended = true;
+    }
+
+    /// Take the suspended shortcut back. Another app may have claimed it meanwhile.
+    pub fn resume_shortcut(&mut self) -> Result<(), String> {
+        if !std::mem::take(&mut self.suspended) {
+            return Ok(());
+        }
+        if let Some(shortcut) = self.shortcut
+            && let Err(error) = self.hotkeys.register(shortcut)
+        {
+            eprintln!("Markraft: the shortcut could not be resumed: {error}");
+            self.shortcut = None;
+            return Err("The shortcut was taken by another app while it was being \
+                        changed. Choose a different shortcut."
+                .into());
+        }
         Ok(())
     }
 
@@ -348,25 +385,42 @@ impl Platform {
     /// Keep the GPUI window and editor entity alive, including selection/history.
     pub fn hide(&mut self, window: &mut gpui::Window) -> Result<(), String> {
         let native = native_window(window)?;
+        let was_key: Bool = unsafe { msg_send![native, isKeyWindow] };
         unsafe {
-            let was_key: Bool = msg_send![native, isKeyWindow];
             let _: () = msg_send![native, orderOut: ptr::null_mut::<AnyObject>()];
-            if was_key != Bool::NO
-                && let Some(previous) = &self.previous_app
-            {
-                let terminated: Bool = msg_send![&**previous, isTerminated];
-                if terminated == Bool::NO {
-                    // NSApplicationActivateIgnoringOtherApps. Restoring the app
-                    // does not reorder its windows or alter their selection.
-                    let _: Bool = msg_send![&**previous, activateWithOptions: 2_usize];
-                }
-            }
+        }
+        if was_key.as_bool() {
+            self.return_to_previous_app();
         }
         diagnostics("window hidden");
         Ok(())
     }
 
-    fn remember_frontmost_app(&mut self) {
+    /// Whether the window is on screen, rather than ordered out by [`Self::hide`].
+    pub fn is_visible(&self, window: &gpui::Window) -> bool {
+        native_window(window).is_ok_and(|native| {
+            let visible: Bool = unsafe { msg_send![native, isVisible] };
+            visible.as_bool()
+        })
+    }
+
+    /// Hand the foreground back to the app that had it before Markraft took it.
+    pub fn return_to_previous_app(&self) {
+        let Some(previous) = &self.previous_app else {
+            return;
+        };
+        unsafe {
+            let terminated: Bool = msg_send![&**previous, isTerminated];
+            if terminated == Bool::NO {
+                // NSApplicationActivateIgnoringOtherApps. Restoring the app
+                // does not reorder its windows or alter their selection.
+                let _: Bool = msg_send![&**previous, activateWithOptions: 2_usize];
+            }
+        }
+    }
+
+    /// Note which app is in front, before a Markraft window takes the foreground.
+    pub fn remember_frontmost_app(&mut self) {
         unsafe {
             let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
             let frontmost: *mut AnyObject = msg_send![workspace, frontmostApplication];

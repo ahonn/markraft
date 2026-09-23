@@ -33,10 +33,6 @@ impl FocusRing {
         self.at.as_ref()
     }
 
-    pub(super) fn rests_on(&self, id: &str) -> bool {
-        self.at.as_deref() == Some(id)
-    }
-
     /// Move the ring onto `id`.
     pub(super) fn move_to(&mut self, id: SharedString) {
         self.at = Some(id);

@@ -5,6 +5,7 @@ pub(super) mod html;
 mod icons;
 mod link;
 mod rename;
+pub(in crate::app) mod settings;
 pub(in crate::app) mod slash;
 mod table;
 mod tokens;
@@ -52,17 +53,8 @@ enum Intent {
     ApplyRename,
     RenameLinks,
     OpenMarkdown,
-    NewNoteLocation,
-    ImageLocation,
-    ResetImageLocation,
-    ResetNewNoteLocation,
     Select(String),
     CodeLanguage(&'static str),
-    Theme(Option<bool>),
-    Login,
-    AutoHeight,
-    VimMode,
-    Shortcut,
     Reveal,
     ChooseFolder,
     /// Error-recovery shortcut back to Documents/Markraft when another folder failed.
@@ -145,14 +137,6 @@ struct Caret {
     in_raw_html: bool,
     in_task: bool,
 }
-/// The settings rows drawn as a switch rather than as a labelled button.
-fn is_switch(id: &str) -> bool {
-    matches!(id, "auto-height" | "launch-at-login" | "vim-mode")
-}
-
-/// Critically damped, settling in about 150 ms: the switch knob eases into its new
-/// end and reverses from wherever it is when the row is flipped back.
-const SWITCH_SPRING: SpringConfig = SpringConfig::new(3700., 121.7, 1.);
 /// Soft fade for the format toolbar and its toggle glyphs — a touch slower than the
 /// title chrome, still under a beat.
 const FORMAT_SPRING: SpringConfig = SpringConfig::new(800., 55., 1.);
@@ -212,14 +196,10 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::ToggleCount => Icon::Count,
         // Anything that hands the note to something outside Markraft.
         Intent::OpenLink | Intent::OpenExternally => Icon::External,
-        Intent::Reveal
-        | Intent::RevealNote
-        | Intent::NewNoteLocation
-        | Intent::ChooseFolder
-        | Intent::UseDefaultFolder => Icon::Open,
+        Intent::Reveal | Intent::RevealNote | Intent::ChooseFolder | Intent::UseDefaultFolder => {
+            Icon::Open
+        }
         Intent::FileStatus => Icon::Conflict,
-        Intent::ImageLocation => Icon::Image,
-        Intent::ResetImageLocation | Intent::ResetNewNoteLocation => Icon::Reset,
         Intent::Retry | Intent::Reload => Icon::Reset,
         // Removing a link is a removal, as the pill's own button says.
         Intent::Unlink => Icon::Trash,
@@ -272,7 +252,10 @@ impl NotesApp {
                 cx.notify();
             }
             Intent::FormatMenu(menu) => self.open_format_menu(menu, window, cx),
-            Intent::Settings => self.open_panel(Panel::Settings, window, cx),
+            Intent::Settings => {
+                self.intent(Intent::Back, window, cx);
+                self.open_settings(window, cx);
+            }
             Intent::Link => {
                 self.set_panel(Panel::Editor, cx);
                 self.open_link_popover(window, cx);
@@ -350,41 +333,6 @@ impl NotesApp {
             Intent::ApplyRename => self.apply_rename(window, cx),
             Intent::RenameLinks => self.toggle_rename_links(cx),
             Intent::OpenMarkdown => self.open_markdown(window, cx),
-            Intent::NewNoteLocation => self.configure_new_notes(window, cx),
-            Intent::ImageLocation => self.configure_images(window, cx),
-            Intent::ResetImageLocation => {
-                self.library.workspace.attachments = crate::storage::AttachmentPolicy::Default;
-                self.schedule_save(cx);
-            }
-            // An empty relative path is the folder itself, which is where new notes
-            // go until another location is chosen.
-            Intent::ResetNewNoteLocation => {
-                self.library.workspace.new_note_directory = PathBuf::new();
-                self.schedule_save(cx);
-            }
-            Intent::Theme(mode) => {
-                self.library.preferences.dark_mode = mode;
-                self.apply_theme(window, cx);
-                self.schedule_save(cx);
-            }
-            Intent::Login => {
-                if let Some(platform) = &mut self.platform {
-                    let enabled = platform.launch_at_login_enabled();
-                    match platform.set_launch_at_login(!enabled) {
-                        Ok(()) => self.inform("Updated login setting", cx),
-                        Err(e) => {
-                            self.feedback.set_platform_error(Some(e));
-                            cx.notify();
-                        }
-                    }
-                }
-            }
-            Intent::AutoHeight => {
-                self.library.preferences.auto_height = !self.library.preferences.auto_height;
-                self.schedule_save(cx);
-            }
-            Intent::VimMode => self.toggle_vim(window, cx),
-            Intent::Shortcut => self.apply_shortcut(cx),
             // Two destinations, so two commands: the folder the notes live in, and
             // the one file this note is.
             Intent::Reveal => {
@@ -528,82 +476,25 @@ impl NotesApp {
     ) -> Stateful<Div> {
         let id: SharedString = id.into();
         let label: SharedString = label.into();
-        let accessible_label = match id.as_ref() {
-            "auto-height" => "Automatic height",
-            "launch-at-login" => "Launch at login",
-            "vim-mode" => "Vim mode",
-            _ => label.as_ref(),
-        }
-        .to_string();
-        let switch = is_switch(&id);
-        self.ring(
-            &id.clone(),
-            px(6.),
-            div()
-                .id(id.clone())
-                .role(Role::Button)
-                .aria_label(accessible_label)
-                .when(switch, |s| {
-                    s.role(Role::Switch)
-                        .aria_toggled(if label.as_ref() == "On" {
-                            accesskit::Toggled::True
-                        } else {
-                            accesskit::Toggled::False
-                        })
-                })
-                .px_2()
-                .h(px(28.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.))
-                .cursor_pointer()
-                .text_size(px(13.))
-                .text_color(self.muted())
-                .hover(move |s| s.bg(hover))
-                .active(|s| s.bg(self.pressed_color()).text_color(self.control_text()))
-                .on_click(
-                    cx.listener(move |this, _, window, cx| this.intent(intent.clone(), window, cx)),
-                )
-                .child(if switch {
-                    self.switch(&id, label.as_ref() == "On", cx)
-                        .into_any_element()
-                } else {
-                    label.into_any_element()
-                }),
-        )
-    }
-    /// A settings switch: its track, and the knob that slides between the two ends.
-    /// Reduced motion keeps both ends and drops the slide. The spring is keyed by the
-    /// row, so each switch carries its own position.
-    fn switch(&self, id: &str, enabled: bool, cx: &App) -> SpringAnimationElement<Div> {
-        let off: Hsla = if self.dark {
-            rgb(0x595b62)
-        } else {
-            rgb(0xc5c6cb)
-        }
-        .into();
-        let on = notes_style(self.dark).marker;
         div()
-            .w(px(28.))
-            .h(px(17.))
-            .p(px(2.))
-            .rounded_full()
-            .with_spring(
-                SharedString::from(format!("{id}-switch")),
-                SpringAnimation::new(SWITCH_SPRING)
-                    .to(enabled)
-                    .playback(playback(cx.reduce_motion())),
-                move |track, phase| {
-                    track.bg(phase.interpolate_clamped(off, on)).child(
-                        div()
-                            .size(px(13.))
-                            .rounded_full()
-                            .bg(rgb(0xffffff))
-                            .ml(phase.interpolate_clamped(px(0.), px(11.))),
-                    )
-                },
+            .id(id)
+            .role(Role::Button)
+            .aria_label(label.clone())
+            .px_2()
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .cursor_pointer()
+            .text_size(px(13.))
+            .text_color(self.muted())
+            .hover(move |s| s.bg(hover))
+            .active(|s| s.bg(self.pressed_color()).text_color(self.control_text()))
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.intent(intent.clone(), window, cx)),
             )
+            .child(label)
     }
     fn surface_color(&self) -> Hsla {
         if self.dark {
@@ -703,39 +594,35 @@ impl NotesApp {
         // the tooltip it opened with, which by then names the opposite action.
         let showing = expanded == Some(true)
             || (matches!(intent, Intent::ToggleFormatToolbar) && self.toolbar.shown());
-        self.ring(
-            &id.clone(),
-            px(if chrome { 16. } else { 6. }),
-            div()
-                .id(id)
-                .role(Role::Button)
-                .aria_label(label)
-                .size(px(28.))
-                .opacity(0.7)
-                .when_some(expanded, |s, expanded| s.aria_expanded(expanded))
-                .when(expanded == Some(true), |s| s.bg(selected).opacity(1.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.))
-                .cursor_pointer()
-                .hover(|s| {
-                    s.bg(if expanded == Some(true) {
-                        selected
-                    } else {
-                        hover
-                    })
-                    .opacity(1.)
+        div()
+            .id(id)
+            .role(Role::Button)
+            .aria_label(label)
+            .size(px(28.))
+            .opacity(0.7)
+            .when_some(expanded, |s, expanded| s.aria_expanded(expanded))
+            .when(expanded == Some(true), |s| s.bg(selected).opacity(1.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .cursor_pointer()
+            .hover(|s| {
+                s.bg(if expanded == Some(true) {
+                    selected
+                } else {
+                    hover
                 })
-                .active(|s| s.bg(pressed).opacity(1.))
-                .when(!showing, |s| s.tooltip(self.hint(label)))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.intent(intent.clone(), window, cx);
-                }))
-                .child(glyph),
-        )
+                .opacity(1.)
+            })
+            .active(|s| s.bg(pressed).opacity(1.))
+            .when(!showing, |s| s.tooltip(self.hint(label)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.intent(intent.clone(), window, cx);
+            }))
+            .child(glyph)
     }
     /// Toolbar icons recede while another application is active.
     pub(super) fn chrome_icon_color(&self) -> Hsla {
@@ -782,31 +669,27 @@ impl NotesApp {
         } else {
             self.control_text()
         };
-        self.ring(
-            id,
-            ROW_RADIUS,
-            div()
-                .id(id)
-                .role(Role::Button)
-                .aria_label(label)
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .h(ROW_HEIGHT)
-                .px_2()
-                .rounded(ROW_RADIUS)
-                .cursor_pointer()
-                .text_size(px(13.))
-                .text_color(ink)
-                .hover(|s| s.bg(self.selected_color()))
-                .active(|s| s.bg(self.pressed_color()))
-                .on_click(
-                    cx.listener(move |this, _, window, cx| this.intent(intent.clone(), window, cx)),
-                )
-                .child(icon(kind, ink))
-                .child(div().flex_1().min_w_0().truncate().child(label))
-                .child(self.shortcut(hint)),
-        )
+        div()
+            .id(id)
+            .role(Role::Button)
+            .aria_label(label)
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(ROW_HEIGHT)
+            .px_2()
+            .rounded(ROW_RADIUS)
+            .cursor_pointer()
+            .text_size(px(13.))
+            .text_color(ink)
+            .hover(|s| s.bg(self.selected_color()))
+            .active(|s| s.bg(self.pressed_color()))
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.intent(intent.clone(), window, cx)),
+            )
+            .child(icon(kind, ink))
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .child(self.shortcut(hint))
     }
     fn search_field(&self, cx: &mut Context<Self>) -> Div {
         div()
@@ -818,21 +701,17 @@ impl NotesApp {
     }
     /// The input editor owned by the current surface. It carries the name
     /// of the surface it is serving, set with its text in [`NotesApp::set_query`], so
-    /// this is only the box the ring is drawn around.
+    /// this is only the box around it.
     fn query_field(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        self.ring(
-            focus::QUERY,
-            px(6.),
-            div()
-                .id(focus::QUERY)
-                .size_full()
-                // Clicking into the field hands the keyboard back to the caret.
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, _| this.ring.release()),
-                )
-                .child(self.query().clone()),
-        )
+        div()
+            .id(focus::QUERY)
+            .size_full()
+            // Clicking into the field hands the keyboard back to the caret.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.ring.release()),
+            )
+            .child(self.query().clone())
     }
     /// What stands in the document area for a file Markraft could not read.
     ///
@@ -1013,92 +892,88 @@ impl NotesApp {
             let row_id = SharedString::from(id.clone());
             let select = id.clone();
             list = list.child(
-                self.ring(
-                    &row_id,
-                    px(9.),
-                    div()
-                        .id(row_id.clone())
-                        .role(Role::Button)
-                        .aria_label(format!(
-                            "{}, {meta}{}",
-                            note.title(),
-                            if note.pinned { ", Pinned" } else { "" }
-                        ))
-                        .aria_selected(selected)
-                        .aria_position_in_set(index + 1)
-                        .aria_size_of_set(total)
-                        .relative()
-                        .h(px(58.))
-                        .flex_shrink_0()
-                        .rounded(px(9.))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .cursor_pointer()
-                        .when(selected, |s| s.bg(self.selected_color()))
-                        .hover(|s| s.bg(self.selected_color()))
-                        .active(|s| s.bg(self.pressed_color()))
-                        // The pointer picks a row without scrolling it: the list must
-                        // not move out from under the cursor that is aiming at it.
-                        .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                            if this.picker.row() != index {
-                                this.picker.point_at(index);
-                                cx.notify();
-                            }
-                        }))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.intent(Intent::Select(select.clone()), window, cx);
-                        }))
-                        .child(
-                            div()
-                                .w_full()
-                                // Clear of the row's controls.
-                                .pr(px(60.))
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .line_height(px(18.))
-                                        .text_color(self.control_text())
-                                        .truncate()
-                                        .child(note.title()),
-                                )
-                                .child(
-                                    div()
-                                        .mt(px(2.))
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(4.))
-                                        .when(current, |s| {
-                                            s.child(
-                                                div()
-                                                    .size(px(4.))
-                                                    .rounded_full()
-                                                    .bg(notes_style(self.dark).marker),
-                                            )
-                                        })
-                                        // Two parts, so the location can be shortened
-                                        // on its own while the status stays whole.
-                                        .child(
+                div()
+                    .id(row_id.clone())
+                    .role(Role::Button)
+                    .aria_label(format!(
+                        "{}, {meta}{}",
+                        note.title(),
+                        if note.pinned { ", Pinned" } else { "" }
+                    ))
+                    .aria_selected(selected)
+                    .aria_position_in_set(index + 1)
+                    .aria_size_of_set(total)
+                    .relative()
+                    .h(px(58.))
+                    .flex_shrink_0()
+                    .rounded(px(9.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .when(selected, |s| s.bg(self.selected_color()))
+                    .hover(|s| s.bg(self.selected_color()))
+                    .active(|s| s.bg(self.pressed_color()))
+                    // The pointer picks a row without scrolling it: the list must
+                    // not move out from under the cursor that is aiming at it.
+                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        if this.picker.row() != index {
+                            this.picker.point_at(index);
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.intent(Intent::Select(select.clone()), window, cx);
+                    }))
+                    .child(
+                        div()
+                            .w_full()
+                            // Clear of the row's controls.
+                            .pr(px(60.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .line_height(px(18.))
+                                    .text_color(self.control_text())
+                                    .truncate()
+                                    .child(note.title()),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(2.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .when(current, |s| {
+                                        s.child(
                                             div()
-                                                .flex_shrink_0()
-                                                .text_size(px(12.))
-                                                .line_height(px(18.))
-                                                .text_color(self.muted())
-                                                .child(format!("{status} ·")),
+                                                .size(px(4.))
+                                                .rounded_full()
+                                                .bg(notes_style(self.dark).marker),
                                         )
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .text_size(px(12.))
-                                                .line_height(px(18.))
-                                                .text_color(location_color)
-                                                .truncate()
-                                                .child(location),
-                                        ),
-                                ),
-                        )
-                        .child(controls),
-                ),
+                                    })
+                                    // Two parts, so the location can be shortened
+                                    // on its own while the status stays whole.
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_size(px(12.))
+                                            .line_height(px(18.))
+                                            .text_color(self.muted())
+                                            .child(format!("{status} ·")),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .text_size(px(12.))
+                                            .line_height(px(18.))
+                                            .text_color(location_color)
+                                            .truncate()
+                                            .child(location),
+                                    ),
+                            ),
+                    )
+                    .child(controls),
             );
         }
         div()
@@ -1124,324 +999,6 @@ impl NotesApp {
             .child(self.scroll_area(list, self.picker.browse_scroll(), cx))
     }
 
-    /// One "where do these files go" setting: what it is, where it points now, and
-    /// the buttons that move it. `id` names the Change… control, so it is also the
-    /// keyboard stop; a reset is only offered while there is something to undo.
-    fn location_group(
-        &self,
-        id: &'static str,
-        (label, aria): (&'static str, &'static str),
-        location: String,
-        change: Intent,
-        reset: Option<Intent>,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        div()
-            .id(SharedString::from(format!("{id}-group")))
-            .role(Role::Group)
-            .aria_label(aria)
-            .py_2()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(
-                div().flex_1().min_w_0().child(label).child(
-                    div()
-                        .mt_1()
-                        .truncate()
-                        .text_size(px(11.))
-                        .text_color(self.muted())
-                        .child(location),
-                ),
-            )
-            .child(self.button(id, "Change…", change, cx))
-            .when_some(reset, |s, reset| {
-                s.child(self.button(
-                    SharedString::from(format!("reset-{id}")),
-                    "Reset",
-                    reset,
-                    cx,
-                ))
-            })
-    }
-    fn settings(&self, cx: &mut Context<Self>) -> Div {
-        let mut themes = div()
-            .flex()
-            .p(px(2.))
-            .rounded(px(7.))
-            .bg(self.hover_color());
-        for (id, label, mode) in [
-            ("theme-system", "Auto", None),
-            ("theme-light", "Light", Some(false)),
-            ("theme-dark", "Dark", Some(true)),
-        ] {
-            // The selected segment is raised above its track in both themes, and keeps
-            // that fill while hovered (the track itself is the ordinary hover color).
-            let selected = self.library.preferences.dark_mode == mode;
-            let raised: Hsla = if self.dark {
-                rgb(0x4a4b50).into()
-            } else {
-                self.surface_color()
-            };
-            let hover = if selected {
-                raised
-            } else {
-                self.selected_color()
-            };
-            themes = themes.child(
-                self.button_with_hover(id, label, Intent::Theme(mode), hover, cx)
-                    .aria_label(format!("{label} appearance"))
-                    .when(selected, |s| {
-                        s.bg(raised).text_color(notes_style(self.dark).text)
-                    }),
-            );
-        }
-        let login = self
-            .platform
-            .as_ref()
-            .is_some_and(|p| p.launch_at_login_enabled());
-        let folder = self.path.clone();
-        let content = div()
-            .id("settings-content")
-            .track_scroll(self.picker.settings_scroll())
-            .overflow_y_scroll()
-            .px_4()
-            .pb_4()
-            .text_size(px(13.))
-            .child(
-                div()
-                    .id("appearance-group")
-                    .role(Role::RadioGroup)
-                    .aria_label("Appearance")
-                    .py_2()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .child("Appearance")
-                    .child(themes),
-            )
-            .child(
-                div()
-                    .py_2()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .child("Grow with content")
-                    .child(self.button(
-                        "auto-height",
-                        if self.library.preferences.auto_height {
-                            "On"
-                        } else {
-                            "Off"
-                        },
-                        Intent::AutoHeight,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(self.muted())
-                    .child("Manual resizing keeps your chosen height."),
-            )
-            .child(
-                div()
-                    .py_3()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .child("Vim mode")
-                    .child(self.button(
-                        "vim-mode",
-                        if self.library.preferences.vim_mode {
-                            "On"
-                        } else {
-                            "Off"
-                        },
-                        Intent::VimMode,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .py_3()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .child("Launch at login")
-                    .child(self.button(
-                        "launch-at-login",
-                        if login { "On" } else { "Off" },
-                        Intent::Login,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .mt_2()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(self.border_color())
-                    .text_size(px(11.))
-                    .text_color(self.muted())
-                    .child("Notes Folder"),
-            )
-            .child(
-                div()
-                    .id("folder-group")
-                    .role(Role::Group)
-                    .aria_label("Notes folder")
-                    .mt_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .w_0()
-                            .truncate()
-                            .text_size(px(12.))
-                            .when(folder.is_none(), |s| s.text_color(self.muted()))
-                            .child(match &folder {
-                                Some(path) => path.display().to_string(),
-                                None => "No folder — editing individual files".to_owned(),
-                            }),
-                    )
-                    .child(self.button(
-                        "change-folder",
-                        if folder.is_some() {
-                            "Change…"
-                        } else {
-                            "Open Folder…"
-                        },
-                        Intent::ChooseFolder,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .mt_1()
-                    .text_size(px(11.))
-                    .text_color(self.muted())
-                    .child(
-                        "Default is Documents/Markraft. Change to use an Obsidian vault or any \
-                         Markdown folder.",
-                    ),
-            )
-            // Both of these place files inside the folder, so neither has anything to
-            // say while individual files are being edited. They are the same kind of
-            // setting, so they are drawn by the same part.
-            .when_some(folder.clone(), |s, root| {
-                let attachments = &self.library.workspace.attachments;
-                s.child(
-                    self.location_group(
-                        "new-note-location",
-                        ("New notes", "New notes location"),
-                        folder_label(&root, &self.library.workspace.new_note_directory),
-                        Intent::NewNoteLocation,
-                        (!self
-                            .library
-                            .workspace
-                            .new_note_directory
-                            .as_os_str()
-                            .is_empty())
-                        .then_some(Intent::ResetNewNoteLocation),
-                        cx,
-                    ),
-                )
-                .child(
-                    self.location_group(
-                        "image-location",
-                        ("Images", "Image location"),
-                        match attachments {
-                            crate::storage::AttachmentPolicy::Default => {
-                                "assets beside each note".to_owned()
-                            }
-                            crate::storage::AttachmentPolicy::WorkspaceFolder(path) => {
-                                folder_label(&root, path)
-                            }
-                        },
-                        Intent::ImageLocation,
-                        (*attachments != crate::storage::AttachmentPolicy::Default)
-                            .then_some(Intent::ResetImageLocation),
-                        cx,
-                    ),
-                )
-            })
-            .child(
-                div()
-                    .mt_2()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(self.border_color())
-                    .text_size(px(11.))
-                    .text_color(self.muted())
-                    .child("Global Shortcut"),
-            )
-            .child(
-                div()
-                    .id("shortcut-group")
-                    .role(Role::Group)
-                    .aria_label("Global shortcut")
-                    .mt_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .w_0()
-                            .h(px(34.))
-                            .px_2()
-                            .pt(px(6.))
-                            .rounded(px(6.))
-                            .border_1()
-                            .border_color(self.border_color())
-                            .child(self.query_field(cx)),
-                    )
-                    .child(self.button("apply-shortcut", "Apply", Intent::Shortcut, cx)),
-            )
-            .child(
-                div()
-                    .mt_2()
-                    .text_size(px(11.))
-                    .text_color(self.muted())
-                    .child("Alt+N or Ctrl+Shift+Space. Leave empty to disable."),
-            )
-            .child(
-                div()
-                    .mt_4()
-                    .pt_2()
-                    .border_t_1()
-                    .border_color(self.border_color())
-                    .child(self.row(
-                        "open-markdown-setting",
-                        "Open Markdown…",
-                        "⌘O",
-                        Intent::OpenMarkdown,
-                        cx,
-                    ))
-                    .when(folder.is_some(), |s| {
-                        s.child(self.row(
-                            "show-storage",
-                            "Show Folder in Finder",
-                            "",
-                            Intent::Reveal,
-                            cx,
-                        ))
-                    }),
-            )
-            .child(
-                div()
-                    .mt_3()
-                    .text_size(px(11.))
-                    .text_color(self.muted())
-                    .child("Saved on this Mac. Closing the window keeps Markraft running."),
-            );
-        self.scroll_area(content, self.picker.settings_scroll(), cx)
-    }
     fn panel_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.interaction.html().is_some() {
             return self.html_key(key, window, cx);
@@ -1481,13 +1038,6 @@ impl NotesApp {
             return true;
         }
         if self.interaction.panel() == Panel::Editor {
-            return false;
-        }
-        if self.interaction.panel() == Panel::Settings {
-            if key == "enter" {
-                self.apply_shortcut(cx);
-                return true;
-            }
             return false;
         }
         if self.interaction.panel() == Panel::Actions {
@@ -1980,17 +1530,10 @@ impl NotesApp {
         // edge, so a short window shows a shorter card rather than one running off it.
         let top = if viewport.height < px(400.) {
             px(44.)
-        } else if self.interaction.panel() == Panel::Settings {
-            px(72.)
         } else {
             px(100.)
         };
-        let width = px(if self.interaction.panel() == Panel::Settings {
-            360.
-        } else {
-            320.
-        })
-        .min(viewport.width - px(32.));
+        let width = px(320.).min(viewport.width - px(32.));
         let available = (viewport.height - top - px(16.)).max(px(0.));
         let desired = match self.interaction.panel() {
             Panel::Browse => {
@@ -2018,42 +1561,16 @@ impl NotesApp {
                     px(52.) + ACTION_ROW_HEIGHT * count as f32 + px(17. * separators as f32)
                 }
             }
-            _ => px(470.),
+            // The overlay is only drawn over a panel.
+            Panel::Editor => px(0.),
         };
         // Include both border pixels so a fully visible short list does not scroll.
-        let height = (desired + px(2.))
-            .min(px(if self.interaction.panel() == Panel::Settings {
-                440.
-            } else {
-                420.
-            }))
-            .min(available);
+        let height = (desired + px(2.)).min(px(420.)).min(available);
         let contents = match self.interaction.panel() {
             // A short card gives what room it has to the rows rather than to a heading.
             Panel::Browse => self.picker(height >= px(136.), cx),
             Panel::Actions => self.actions_panel(cx),
-            _ => div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h_0()
-                .child(
-                    div()
-                        .h(px(44.))
-                        .flex_shrink_0()
-                        .px_4()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child("Settings"),
-                        )
-                        .child(self.button("settings-done", "Done", Intent::Back, cx)),
-                )
-                .child(self.settings(cx)),
+            Panel::Editor => div(),
         };
         div()
             .id("notes-overlay")

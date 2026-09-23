@@ -276,44 +276,40 @@ impl NotesApp {
         } else {
             self.muted()
         };
-        self.ring(
-            id,
-            ROW_RADIUS,
-            div()
-                .id(id)
-                .role(Role::Button)
-                .aria_label(label)
-                .when_some(menu, |s, _| s.aria_expanded(expanded))
-                // A control that opens a menu reports whether the menu is open; it is
-                // not a toggle, whatever fill the format in force gives it.
-                .when_some(toggled.filter(|_| menu.is_none()), |s, on| {
-                    s.aria_toggled(if on {
-                        accesskit::Toggled::True
-                    } else {
-                        accesskit::Toggled::False
-                    })
+        div()
+            .id(id)
+            .role(Role::Button)
+            .aria_label(label)
+            .when_some(menu, |s, _| s.aria_expanded(expanded))
+            // A control that opens a menu reports whether the menu is open; it is
+            // not a toggle, whatever fill the format in force gives it.
+            .when_some(toggled.filter(|_| menu.is_none()), |s, on| {
+                s.aria_toggled(if on {
+                    accesskit::Toggled::True
+                } else {
+                    accesskit::Toggled::False
                 })
-                .h(px(26.))
-                .w(px(if menu.is_some() { 40. } else { 28. }))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(ROW_RADIUS)
-                .cursor_pointer()
-                .when(active || expanded, |s| s.bg(self.selected_color()))
-                // A tooltip beside an open menu only covers the menu.
-                .when(!expanded, |s| s.tooltip(self.hint(label)))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.intent(intent.clone(), window, cx);
-                }))
-                .child(icon(kind, ink))
-                .when(menu.is_some(), |s| {
-                    s.gap(px(2.))
-                        .child(sized_icon(Icon::ChevronDown, self.muted(), 12.))
-                }),
-        )
+            })
+            .h(px(26.))
+            .w(px(if menu.is_some() { 40. } else { 28. }))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(ROW_RADIUS)
+            .cursor_pointer()
+            .when(active || expanded, |s| s.bg(self.selected_color()))
+            // A tooltip beside an open menu only covers the menu.
+            .when(!expanded, |s| s.tooltip(self.hint(label)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.intent(intent.clone(), window, cx);
+            }))
+            .child(icon(kind, ink))
+            .when(menu.is_some(), |s| {
+                s.gap(px(2.))
+                    .child(sized_icon(Icon::ChevronDown, self.muted(), 12.))
+            })
     }
 
     fn toolbar_button(
@@ -822,50 +818,46 @@ impl NotesApp {
         for (index, (label, hint, intent, checked)) in items.into_iter().enumerate() {
             let stop = SharedString::from(format!("format-choice-{index}"));
             list = list.child(
-                self.ring(
-                    &stop,
-                    ROW_RADIUS,
-                    div()
-                        .id(stop.clone())
-                        .role(Role::Button)
-                        .aria_label(label)
-                        .aria_selected(index == self.format.row())
-                        .aria_position_in_set(index + 1)
-                        .aria_size_of_set(total)
-                        .aria_toggled(if checked {
-                            accesskit::Toggled::True
-                        } else {
-                            accesskit::Toggled::False
-                        })
-                        .h(ROW_HEIGHT)
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded(ROW_RADIUS)
-                        .text_size(px(13.))
-                        .cursor_pointer()
-                        .when(index == self.format.row(), |s| s.bg(self.selected_color()))
-                        .hover(|s| s.bg(self.selected_color()))
-                        .active(|s| s.bg(self.pressed_color()))
-                        .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                            if this.format.row() != index {
-                                this.format.point_at(index);
-                                cx.notify();
-                            }
-                        }))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.intent(intent.clone(), window, cx)
-                        }))
-                        .child(
-                            div()
-                                .w(px(14.))
-                                .when(checked, |s| s.child(icon(Icon::Check, self.control_text()))),
-                        )
-                        .child(div().flex_1().child(label))
-                        .child(self.shortcut(hint)),
-                ),
+                div()
+                    .id(stop.clone())
+                    .role(Role::Button)
+                    .aria_label(label)
+                    .aria_selected(index == self.format.row())
+                    .aria_position_in_set(index + 1)
+                    .aria_size_of_set(total)
+                    .aria_toggled(if checked {
+                        accesskit::Toggled::True
+                    } else {
+                        accesskit::Toggled::False
+                    })
+                    .h(ROW_HEIGHT)
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(ROW_RADIUS)
+                    .text_size(px(13.))
+                    .cursor_pointer()
+                    .when(index == self.format.row(), |s| s.bg(self.selected_color()))
+                    .hover(|s| s.bg(self.selected_color()))
+                    .active(|s| s.bg(self.pressed_color()))
+                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        if this.format.row() != index {
+                            this.format.point_at(index);
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.intent(intent.clone(), window, cx)
+                    }))
+                    .child(
+                        div()
+                            .w(px(14.))
+                            .when(checked, |s| s.child(icon(Icon::Check, self.control_text()))),
+                    )
+                    .child(div().flex_1().child(label))
+                    .child(self.shortcut(hint)),
             );
         }
         div()
