@@ -1223,7 +1223,10 @@ struct Underscores;
 
 impl Underscores {
     fn on() -> Underscores {
-        set_house_style(HouseStyle { emphasis: '_' });
+        set_house_style(HouseStyle {
+            emphasis: '_',
+            ..HouseStyle::default()
+        });
         Underscores
     }
 }

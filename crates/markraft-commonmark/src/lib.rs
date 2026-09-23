@@ -47,7 +47,8 @@
 //!   type and a rule per mark type over a state that handles block separation,
 //!   line prefixes and escaping. See [`serialize`].
 //! * [`commonmark_extensions`] — the input rules and corrections an editor on
-//!   this schema wants.
+//!   this schema wants, and [`commonmark_auto_pairs`] — brackets and quotes
+//!   that close themselves, behind a switch.
 //!
 //! # The clipboard surface
 //!
@@ -117,6 +118,7 @@ mod house;
 pub mod html;
 mod inline;
 mod kind;
+mod pairs;
 pub mod parse;
 mod pending;
 mod preset;
@@ -142,7 +144,7 @@ pub use extensions::{
     commonmark_input_rules,
 };
 pub use fragment::open_fragment;
-pub use house::{HouseStyle, house_style, set_house_style};
+pub use house::{HardBreak, HouseStyle, house_style, set_house_style};
 pub use html::{
     HtmlParser, HtmlRule, HtmlRules, HtmlSerializer, commonmark_html_rules,
     commonmark_html_serializer,
@@ -152,6 +154,7 @@ pub use kind::{
     clear_formatting, commonmark_doc_type_names, keeping_styles, set_link,
     split_block_keeping_styles, toggle_style, toggle_style_mark, unlink,
 };
+pub use pairs::commonmark_auto_pairs;
 pub use parse::{MarkdownParser, ParseError, commonmark_options};
 pub use preset::{
     commonmark_mark_rules, commonmark_node_rules, commonmark_serializer, inline_link_mark_rule,

@@ -285,6 +285,24 @@ impl Platform {
         Ok(())
     }
 
+    /// Put the note on every Space, full-screen ones included, or leave it on the one
+    /// it was opened on.
+    pub fn set_all_spaces(&self, window: &gpui::Window, all: bool) -> Result<(), String> {
+        // NSWindowCollectionBehaviorCanJoinAllSpaces and …FullScreenAuxiliary.
+        const ALL_SPACES: usize = 1 << 0 | 1 << 8;
+        let native = native_window(window)?;
+        unsafe {
+            let behavior: usize = msg_send![native, collectionBehavior];
+            let behavior = if all {
+                behavior | ALL_SPACES
+            } else {
+                behavior & !ALL_SPACES
+            };
+            let _: () = msg_send![native, setCollectionBehavior: behavior];
+        }
+        Ok(())
+    }
+
     /// Read the operating system's state instead of trusting a saved preference.
     pub fn launch_at_login_enabled(&self) -> bool {
         main_app_service().is_ok_and(|service| {
@@ -387,38 +405,6 @@ impl Platform {
         }
     }
 
-    /// Fade the native close button with window hover, independently of activation.
-    pub fn set_traffic_lights_alpha(&self, window: &gpui::Window, alpha: f32, animated: bool) {
-        let Ok(native) = native_window(window) else {
-            return;
-        };
-        let alpha = f64::from(alpha.clamp(0., 1.));
-        unsafe {
-            let context_class = class!(NSAnimationContext);
-            if animated {
-                let _: () = msg_send![context_class, beginGrouping];
-                let context: *mut AnyObject = msg_send![context_class, currentContext];
-                let _: () = msg_send![context, setDuration: 0.2_f64];
-            }
-            // Minimize and zoom stay hidden, regardless of window hover.
-            for button_kind in [0_usize] {
-                let button: *mut AnyObject = msg_send![native, standardWindowButton: button_kind];
-                if button.is_null() {
-                    continue;
-                }
-                let target: *mut AnyObject = if animated {
-                    msg_send![button, animator]
-                } else {
-                    button
-                };
-                let _: () = msg_send![target, setAlphaValue: alpha];
-            }
-            if animated {
-                let _: () = msg_send![context_class, endGrouping];
-            }
-        }
-    }
-
     /// The system "Reduce motion" accessibility preference.
     pub fn system_reduce_motion() -> bool {
         unsafe {
@@ -449,14 +435,20 @@ impl Platform {
         events
     }
 
-    pub fn show(&mut self, window: &mut gpui::Window) -> Result<(), String> {
+    /// Bring the note forward; with `follow_pointer`, onto the display the pointer is
+    /// on, so it appears there rather than being seen to jump.
+    pub fn show(&mut self, window: &mut gpui::Window, follow_pointer: bool) -> Result<(), String> {
         self.remember_frontmost_app();
         let native = native_window(window)?;
+        if follow_pointer {
+            move_to_pointer_screen(native);
+        }
         unsafe {
             let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
             let _: () = msg_send![app, activateIgnoringOtherApps: Bool::YES];
             let _: () = msg_send![native, makeKeyAndOrderFront: ptr::null_mut::<AnyObject>()];
         }
+
         window.activate_window();
         diagnostics("window shown");
         Ok(())
@@ -587,6 +579,45 @@ impl NativeWindow {
                 animate: Bool::new(animate)
             ];
         }
+    }
+}
+
+/// Move `native` to the display under the pointer, where it sits as far from that
+/// display's top-left as it did from its own, pulled back inside if it would overhang.
+fn move_to_pointer_screen(native: *mut AnyObject) {
+    unsafe {
+        let pointer: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+        let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
+        let count: usize = msg_send![screens, count];
+        let contains = |frame: NSRect| {
+            pointer.x >= frame.origin.x
+                && pointer.x < frame.origin.x + frame.size.x
+                && pointer.y >= frame.origin.y
+                && pointer.y < frame.origin.y + frame.size.y
+        };
+        let Some(target) = (0..count)
+            .map(|index| -> *mut AnyObject { msg_send![screens, objectAtIndex: index] })
+            .find(|screen| contains(msg_send![*screen, frame]))
+        else {
+            return;
+        };
+        let current: *mut AnyObject = msg_send![native, screen];
+        if current.is_null() || current == target {
+            return;
+        }
+        let from: NSRect = msg_send![current, visibleFrame];
+        let to: NSRect = msg_send![target, visibleFrame];
+        let frame: NSRect = msg_send![native, frame];
+        // AppKit measures from the bottom-left; the offset kept is from the top-left.
+        let left = frame.origin.x - from.origin.x;
+        let top = (from.origin.y + from.size.y) - (frame.origin.y + frame.size.y);
+        let x = (to.origin.x + left)
+            .min(to.origin.x + to.size.x - frame.size.x)
+            .max(to.origin.x);
+        let y = (to.origin.y + to.size.y - top - frame.size.y)
+            .max(to.origin.y)
+            .min(to.origin.y + to.size.y - frame.size.y);
+        let _: () = msg_send![native, setFrameOrigin: NSPoint { x, y }];
     }
 }
 

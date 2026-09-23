@@ -446,8 +446,10 @@ fn heading(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: us
     state.close_block(node);
 }
 
-/// A hard break in spelled content: a trailing `\\`, which survives an editor
-/// that strips trailing whitespace where the two-space spelling does not.
+/// A hard break in spelled content, spelled in the house style's
+/// [`HardBreak`](crate::HardBreak): by default a trailing `\\`, which
+/// survives an editor that strips trailing whitespace where the two-space
+/// spelling does not.
 fn hard_break(state: &mut SerializerState<'_>, node: &Node, parent: Option<&Node>, index: usize) {
     if state.is_single_line() {
         state.text(state.line_break(), false);
@@ -460,7 +462,8 @@ fn hard_break(state: &mut SerializerState<'_>, node: &Node, parent: Option<&Node
     {
         return;
     }
-    state.text("\\\n", false);
+    let marker = crate::house_style().hard_break.marker();
+    state.text(&format!("{marker}\n"), false);
 }
 
 /// The marker character a list uses, taken from its attributes.

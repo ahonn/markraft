@@ -8,10 +8,9 @@
 //! answer is given once, in one place, rather than assembled again at each
 //! caller from fields anyone can set.
 //!
-//! The corner buttons and the native traffic lights are the exception, and
-//! deliberately so: they follow the pointer alone
-//! ([`Presence::pointer_inside`]). Typing, focus and open panels must not keep
-//! a close button on screen over a note someone is writing.
+//! The corner buttons are the exception, and deliberately so: they follow the
+//! pointer alone ([`Presence::pointer_inside`]). Typing, focus and open panels
+//! must not keep them on screen over a note someone is writing.
 
 use std::time::{Duration, Instant};
 
@@ -24,10 +23,6 @@ pub(super) struct Presence {
     last_key_at: Option<Instant>,
     /// What the last frame drew, so that a change can be told from a redraw.
     chrome_shown: bool,
-    /// Whether the platform's close button is currently shown. It follows the
-    /// pointer like the rest of the corner chrome, but also stands down for a
-    /// popup it would cover.
-    close_button_shown: bool,
 }
 
 impl Presence {
@@ -37,12 +32,11 @@ impl Presence {
             window_active,
             last_key_at: None,
             chrome_shown: true,
-            close_button_shown: false,
         }
     }
 
-    /// Whether the pointer is over the window. The corner buttons and traffic
-    /// lights follow this alone.
+    /// Whether the pointer is over the window. The corner buttons follow this
+    /// alone.
     pub(super) fn pointer_inside(&self) -> bool {
         self.pointer_inside
     }
@@ -88,14 +82,6 @@ impl Presence {
     pub(super) fn chrome_changed(&mut self, visible: bool) -> bool {
         let changed = self.chrome_shown != visible;
         self.chrome_shown = visible;
-        changed
-    }
-
-    /// Record whether the close button is shown, and say whether that changed —
-    /// which is when the traffic lights have to be told.
-    pub(super) fn close_button_changed(&mut self, shown: bool) -> bool {
-        let changed = self.close_button_shown != shown;
-        self.close_button_shown = shown;
         changed
     }
 }
@@ -182,8 +168,6 @@ mod tests {
         let mut presence = Presence::new(false, false);
         assert!(presence.set_pointer_inside(true));
         assert!(!presence.set_pointer_inside(true));
-        assert!(presence.close_button_changed(true));
-        assert!(!presence.close_button_changed(true));
         // The chrome starts out drawn, so turning it off is the first change.
         assert!(!presence.chrome_changed(true));
         assert!(presence.chrome_changed(false));

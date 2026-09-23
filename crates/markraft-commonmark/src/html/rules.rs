@@ -457,7 +457,12 @@ pub fn commonmark_html_rules() -> HtmlRules {
                         .attr("start")
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(1);
-                    let delimiter = target.attr("data-delimiter").unwrap_or(".").to_string();
+                    // A list from outside Markraft names no delimiter, so it
+                    // is one the editor makes, in the house style.
+                    let delimiter = target.attr("data-delimiter").map_or_else(
+                        || crate::house_style().ordered_delimiter.to_string(),
+                        str::to_string,
+                    );
                     attrs! {
                         "start" => start,
                         "delimiter" => delimiter,

@@ -15,7 +15,12 @@ use gpui_base::{Popup, Select};
 use std::rc::Rc;
 
 /// Every pop-up button the pages hold. Each has its own place in the focus order.
-const IDS: [&str; 10] = [
+const IDS: [&str; 15] = [
+    "summon",
+    "line-width",
+    "ordered-delimiter",
+    "hard-break",
+    "image-name",
     "notes-folder",
     "new-note-folder",
     "image-folder",

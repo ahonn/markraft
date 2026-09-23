@@ -209,18 +209,23 @@ pub(crate) fn enter_with(
 /// Shift-Return: a new line inside the block rather than a new block.
 ///
 /// In a verbatim block that is a newline, as Return is. Elsewhere it is a hard
-/// break, spelled — where the kind keeps its markup in the text — with the
-/// trailing `\` the serialiser writes, since a line ending alone is a soft
-/// break a reader sees as a space. A GFM table row is one line, so a cell takes
-/// none.
-pub(crate) fn line_break(types: &DocTypes) -> Command {
+/// break, spelled — where the kind keeps its markup in the text — with what
+/// `spelling` answers, or the trailing `\` the serialiser writes where there
+/// is none, since a line ending alone is a soft break a reader sees as a space.
+/// `spelling` is asked each time the command runs, so a host preference takes
+/// effect at once. A GFM table row is one line, so a cell takes none.
+pub(crate) fn line_break(types: &DocTypes, spelling: Option<&crate::BreakSpelling>) -> Command {
     let hard_break = types.hard_break.map(|node| {
         let types = types.clone();
         let insert = if types.syntax.is_some() {
-            composed(vec![
-                markraft_core::commands::insert_text("\\"),
-                insert_hard_break(node),
-            ])
+            let spelling = spelling.cloned();
+            command(move |state| {
+                let marker = spelling.as_ref().map_or("\\", |spelling| spelling());
+                composed(vec![
+                    markraft_core::commands::insert_text(marker),
+                    insert_hard_break(node),
+                ])(state)
+            })
         } else {
             insert_hard_break(node)
         };
@@ -1495,32 +1500,61 @@ mod tests {
         let typed = markraft_core::commands::insert_text("b");
         let state = state_of("a");
         let types = types_of(&state);
-        let broken = applied(&at(&state, caret_in(&state, "a") + 1), &line_break(&types))
-            .expect("Shift-Return applies");
+        let broken = applied(
+            &at(&state, caret_in(&state, "a") + 1),
+            &line_break(&types, None),
+        )
+        .expect("Shift-Return applies");
         assert_eq!(after(&broken, &typed).as_deref(), Some("a\\\nb"));
         // Left with nothing after it, the break goes, and its `\` with it.
         let state = state_of("a\n\nz");
-        let broken = applied(&at(&state, caret_in(&state, "a") + 1), &line_break(&types))
-            .expect("Shift-Return applies");
+        let broken = applied(
+            &at(&state, caret_in(&state, "a") + 1),
+            &line_break(&types, None),
+        )
+        .expect("Shift-Return applies");
         let left = at(&broken, caret_in(&broken, "z"));
         assert_eq!(to_markdown(left.schema(), left.doc()), "a\n\nz");
 
         let state = state_of("**ab**");
         let broken = applied(
             &at(&state, caret_in(&state, "**ab**") + 3),
-            &line_break(&types),
+            &line_break(&types, None),
         )
         .expect("Shift-Return applies inside a span");
         assert_eq!(to_markdown(broken.schema(), broken.doc()), "**a\\\nb**");
 
         let state = state_of("```\nx\n```");
-        let broken = applied(&at(&state, caret_in(&state, "x") + 1), &line_break(&types))
-            .expect("Shift-Return applies in code");
+        let broken = applied(
+            &at(&state, caret_in(&state, "x") + 1),
+            &line_break(&types, None),
+        )
+        .expect("Shift-Return applies in code");
         assert_eq!(after(&broken, &typed).as_deref(), Some("```\nx\nb\n```"));
 
         let (state, _) = table_state();
         let caret = caret_in(&state, "c") + 1;
-        assert!(run_command(&at(&state, caret), &line_break(&types)).is_none());
+        assert!(run_command(&at(&state, caret), &line_break(&types, None)).is_none());
+    }
+
+    /// A kind that spells hard breaks with two spaces gets them from
+    /// Shift-Return, and a break already spelled with `\` keeps it.
+    #[test]
+    fn shift_return_spells_the_break_as_the_kind_says() {
+        let spaces: crate::BreakSpelling = std::sync::Arc::new(|| "  ");
+        let typed = markraft_core::commands::insert_text("c");
+        let state = state_of("x\\\ny\n\nb");
+        let types = types_of(&state);
+        let command = line_break(&types, Some(&spaces));
+        let broken = applied(&at(&state, caret_in(&state, "b") + 1), &command)
+            .expect("Shift-Return applies");
+        assert_eq!(after(&broken, &typed).as_deref(), Some("x\\\ny\n\nb  \nc"));
+        // Left with nothing after it, the break goes, and its spaces with it.
+        let state = state_of("a\n\nz");
+        let broken = applied(&at(&state, caret_in(&state, "a") + 1), &command)
+            .expect("Shift-Return applies");
+        let left = at(&broken, caret_in(&broken, "z"));
+        assert_eq!(to_markdown(left.schema(), left.doc()), "a\n\nz");
     }
 
     /// Letting the caret into a picture's source is not an edit of its own:

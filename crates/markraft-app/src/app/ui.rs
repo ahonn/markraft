@@ -302,14 +302,17 @@ impl NotesApp {
                 };
                 window.dispatch_action(action, cx);
             }
-            Intent::Delete => self.delete_note(window, cx),
+            Intent::Delete => {
+                let id = self.library.active_id.clone();
+                self.confirm_trash(id, false, window, cx)
+            }
             Intent::Pin => {
                 let id = self.library.active_id.clone();
                 self.toggle_pin(&id, cx);
                 self.intent(Intent::Back, window, cx);
             }
             Intent::PinNote(id) => self.toggle_pin(&id, cx),
-            Intent::TrashNote(id) => self.trash_note(&id, window, cx),
+            Intent::TrashNote(id) => self.confirm_trash(id, true, window, cx),
             Intent::Select(id) => self.select_note(&id, window, cx),
             Intent::CodeLanguage(language) => self.apply_code_language(language, window, cx),
             Intent::Copy => {
@@ -1672,8 +1675,11 @@ impl Render for NotesApp {
                     cx.propagate();
                 }
             }))
-            // The editor's own ⌘* and ⌘( make a list with the schema's marker; the note's
-            // lists take the one the preferences ask for, as the toolbar's do.
+            // The editor's own ⌘&, ⌘* and ⌘( make a list with the schema's marker; the
+            // note's lists take the one the preferences ask for, as the toolbar's do.
+            .capture_action(cx.listener(|this, _: &markraft_gpui::Ordered, w, cx| {
+                this.run_list_shortcut(doc::Block::Ordered, w, cx);
+            }))
             .capture_action(cx.listener(|this, _: &markraft_gpui::Bullet, w, cx| {
                 this.run_list_shortcut(doc::Block::Bullet, w, cx);
             }))

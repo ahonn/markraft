@@ -22,8 +22,8 @@ mod shortcut;
 use super::*;
 use crate::platform::Shortcut;
 use crate::storage::{
-    BulletMarker, CodeFence, EditorFont, EmphasisMarker, LineHeight, NoteNaming, Preferences,
-    TabKey,
+    BulletMarker, CodeFence, EditorFont, EmphasisMarker, HardBreakStyle, ImageNaming, LineHeight,
+    LineWidth, NoteNaming, OrderedDelimiter, Preferences, Summon, TabKey,
 };
 use controls::{
     ChordFace, Palette, button, checkbox, chord_face, error, group_gap, line, metrics::*, row,
@@ -124,7 +124,17 @@ enum Change {
     Emphasis(EmphasisMarker),
     NewNoteName(NoteNaming),
     AutomaticUpdates(bool),
+    AutomaticDownloads(bool),
     CheckForUpdates,
+    Summon(Summon),
+    LineWidth(LineWidth),
+    AutoPair(bool),
+    ConfirmDelete(bool),
+    AllSpaces(bool),
+    FollowPointer(bool),
+    OrderedDelimiter(OrderedDelimiter),
+    HardBreak(HardBreakStyle),
+    ImageName(ImageNaming),
     /// The page on screen, remembered for the next time the window opens.
     Page(Page),
 }
@@ -157,6 +167,16 @@ struct Snapshot {
     emphasis: EmphasisMarker,
     /// None where this copy has no updater to ask: unbundled, or not configured.
     automatic_updates: Option<bool>,
+    automatic_downloads: Option<bool>,
+    summon: Summon,
+    line_width: LineWidth,
+    auto_pair: bool,
+    confirm_delete: bool,
+    all_spaces: bool,
+    follow_pointer: bool,
+    ordered_delimiter: OrderedDelimiter,
+    hard_break: HardBreakStyle,
+    image_name: ImageNaming,
     errors: SettingsErrors,
 }
 
@@ -229,6 +249,16 @@ impl NotesApp {
             fence: preferences.code_fence,
             emphasis: preferences.emphasis_marker,
             automatic_updates: self.updater.automatically_checks(),
+            automatic_downloads: self.updater.automatically_downloads(),
+            summon: preferences.summon,
+            line_width: preferences.line_width,
+            auto_pair: preferences.auto_pair,
+            confirm_delete: preferences.confirm_delete,
+            all_spaces: preferences.all_spaces,
+            follow_pointer: preferences.follow_pointer,
+            ordered_delimiter: preferences.ordered_delimiter,
+            hard_break: preferences.hard_break,
+            image_name: workspace.image_name,
             errors: self.settings_errors.clone(),
         }
     }
@@ -349,6 +379,52 @@ impl NotesApp {
                 if let Err(error) = self.updater.set_automatically_checks(enabled) {
                     self.settings_errors.updates = Some(error);
                 }
+            }
+            Change::AutomaticDownloads(enabled) => {
+                if let Err(error) = self.updater.set_automatically_downloads(enabled) {
+                    self.settings_errors.updates = Some(error);
+                }
+            }
+            Change::Summon(summon) => {
+                self.library.preferences.summon = summon;
+                self.schedule_save(cx);
+            }
+            Change::LineWidth(width) => {
+                self.library.preferences.line_width = width;
+                self.restyle_editors(cx);
+                self.schedule_save(cx);
+            }
+            Change::AutoPair(enabled) => self.set_auto_pair(enabled, cx),
+            Change::ConfirmDelete(enabled) => {
+                self.library.preferences.confirm_delete = enabled;
+                self.schedule_save(cx);
+            }
+            Change::AllSpaces(enabled) => {
+                self.library.preferences.all_spaces = enabled;
+                if let Some(platform) = &self.platform
+                    && let Err(error) = platform.set_all_spaces(window, enabled)
+                {
+                    self.feedback.set_platform_error(Some(error));
+                }
+                self.schedule_save(cx);
+            }
+            Change::FollowPointer(enabled) => {
+                self.library.preferences.follow_pointer = enabled;
+                self.schedule_save(cx);
+            }
+            Change::OrderedDelimiter(delimiter) => {
+                self.library.preferences.ordered_delimiter = delimiter;
+                crate::app::apply_markdown_style(&self.library.preferences);
+                self.schedule_save(cx);
+            }
+            Change::HardBreak(style) => {
+                self.library.preferences.hard_break = style;
+                crate::app::apply_markdown_style(&self.library.preferences);
+                self.schedule_save(cx);
+            }
+            Change::ImageName(naming) => {
+                self.library.workspace.image_name = naming;
+                self.schedule_save(cx);
             }
             Change::CheckForUpdates => {
                 self.settings_errors.updates = self.updater.check().err();
@@ -943,6 +1019,18 @@ impl SettingsView {
         );
 
         let [toggle, new_note] = &s.shortcuts;
+        let summon = self.select(
+            "summon",
+            "Show on open",
+            &[
+                ("Last Note", Summon::LastNote),
+                ("New Note", Summon::NewNote),
+            ],
+            s.summon,
+            Change::Summon,
+            p,
+            cx,
+        );
         let mut toggle_lines = vec![line(vec![self.shortcut_field(
             Shortcut::Toggle,
             toggle,
@@ -1011,9 +1099,28 @@ impl SettingsView {
                         self.sender(Change::AutoHeight),
                     )
                     .into_any_element(),
+                    checkbox(
+                        "all-spaces",
+                        "Show on all desktops",
+                        s.all_spaces,
+                        false,
+                        p,
+                        self.sender(Change::AllSpaces),
+                    )
+                    .into_any_element(),
+                    checkbox(
+                        "follow-pointer",
+                        "Open on the display with the pointer",
+                        s.follow_pointer,
+                        false,
+                        p,
+                        self.sender(Change::FollowPointer),
+                    )
+                    .into_any_element(),
                 ],
                 p,
             ),
+            row(Some("Show on open"), vec![line(vec![summon])], p),
             group_gap(),
             row(
                 Some("Appearance"),
@@ -1075,6 +1182,19 @@ impl SettingsView {
             p,
             cx,
         );
+        let line_width = self.select(
+            "line-width",
+            "Line width",
+            &[
+                ("Narrow", LineWidth::Narrow),
+                ("Normal", LineWidth::Normal),
+                ("Full", LineWidth::Full),
+            ],
+            s.line_width,
+            Change::LineWidth,
+            p,
+            cx,
+        );
         let tab_key = self.select(
             "tab-key",
             "Tab key",
@@ -1092,6 +1212,7 @@ impl SettingsView {
             row(Some("Text size"), vec![line(size_line)], p),
             row(Some("Font"), vec![line(vec![font])], p),
             row(Some("Line height"), vec![line(vec![line_height])], p),
+            row(Some("Line width"), vec![line(vec![line_width])], p),
             group_gap(),
             row(
                 Some("Editing"),
@@ -1103,6 +1224,15 @@ impl SettingsView {
                         false,
                         p,
                         self.sender(Change::MarkdownShortcuts),
+                    )
+                    .into_any_element(),
+                    checkbox(
+                        "auto-pair",
+                        "Pair brackets and quotes",
+                        s.auto_pair,
+                        false,
+                        p,
+                        self.sender(Change::AutoPair),
                     )
                     .into_any_element(),
                     checkbox(
@@ -1237,6 +1367,36 @@ impl SettingsView {
                 image_lines.push(error(refused.clone(), p));
             }
             page.push(row(Some("Save images in"), image_lines, p));
+            let image_name = self.select(
+                "image-name",
+                "Name images",
+                &[
+                    ("Random ID", ImageNaming::RandomId),
+                    ("Note Name and Date", ImageNaming::NoteAndDate),
+                ],
+                s.image_name,
+                Change::ImageName,
+                p,
+                cx,
+            );
+            page.push(row(Some("Name images"), vec![line(vec![image_name])], p));
+
+            page.push(group_gap());
+            page.push(row(
+                Some("Deleting"),
+                vec![
+                    checkbox(
+                        "confirm-delete",
+                        "Ask before moving a note to the Trash",
+                        s.confirm_delete,
+                        false,
+                        p,
+                        self.sender(Change::ConfirmDelete),
+                    )
+                    .into_any_element(),
+                ],
+                p,
+            ));
         }
         page
     }
@@ -1264,6 +1424,30 @@ impl SettingsView {
             p,
             cx,
         );
+        let ordered = self.select(
+            "ordered-delimiter",
+            "Numbered list",
+            &[
+                ("1.  Item", OrderedDelimiter::Period),
+                ("1)  Item", OrderedDelimiter::Parenthesis),
+            ],
+            s.ordered_delimiter,
+            Change::OrderedDelimiter,
+            p,
+            cx,
+        );
+        let hard_break = self.select(
+            "hard-break",
+            "Line break",
+            &[
+                ("Backslash", HardBreakStyle::Backslash),
+                ("Two Spaces", HardBreakStyle::Spaces),
+            ],
+            s.hard_break,
+            Change::HardBreak,
+            p,
+            cx,
+        );
         let emphasis = self.select(
             "emphasis-marker",
             "Emphasis",
@@ -1278,8 +1462,10 @@ impl SettingsView {
         );
         vec![
             row(Some("Bullet list"), vec![line(vec![bullet])], p),
+            row(Some("Numbered list"), vec![line(vec![ordered])], p),
             row(Some("Code block"), vec![line(vec![fence])], p),
             row(Some("Emphasis"), vec![line(vec![emphasis])], p),
+            row(Some("Line break"), vec![line(vec![hard_break])], p),
             group_gap(),
             row(
                 Some("Emoji"),
@@ -1336,6 +1522,16 @@ impl SettingsView {
                 s.automatic_updates.is_none(),
                 p,
                 self.sender(Change::AutomaticUpdates),
+            )
+            .into_any_element(),
+            checkbox(
+                "automatic-downloads",
+                "Download updates automatically",
+                s.automatic_downloads.unwrap_or(false),
+                // Downloading on its own only follows from checking on its own.
+                !s.automatic_updates.unwrap_or(false),
+                p,
+                self.sender(Change::AutomaticDownloads),
             )
             .into_any_element(),
         ];

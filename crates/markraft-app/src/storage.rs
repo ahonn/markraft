@@ -108,6 +108,77 @@ pub struct Preferences {
     pub emphasis_marker: EmphasisMarker,
     /// The Settings page last shown, which the window opens on next time.
     pub settings_page: String,
+    /// What the note shows when the shortcut or the menu bar brings it back.
+    pub summon: Summon,
+    /// How wide a line of the note may run before it wraps.
+    pub line_width: LineWidth,
+    /// Typing an opening bracket or quote writes its closing one too.
+    pub auto_pair: bool,
+    /// Moving a note to the Trash asks first.
+    pub confirm_delete: bool,
+    /// The note window is on every Space rather than the one it was opened on.
+    pub all_spaces: bool,
+    /// The note comes up on the display the pointer is on.
+    pub follow_pointer: bool,
+    /// The delimiter a numbered list made from the toolbar or the `/` menu takes.
+    pub ordered_delimiter: OrderedDelimiter,
+    /// How a line break inside a paragraph is written.
+    pub hard_break: HardBreakStyle,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Summon {
+    /// The note that was showing.
+    #[default]
+    LastNote,
+    /// A new note, unless the one showing is still empty.
+    NewNote,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LineWidth {
+    Narrow,
+    #[default]
+    Normal,
+    /// As wide as the window.
+    Full,
+}
+
+impl LineWidth {
+    /// The longest a line may run, in multiples of the text size: 36 and 50 em are
+    /// about 504 and 700 points at 14 pt, Obsidian's readable length being the latter.
+    pub fn ems(self) -> Option<f32> {
+        match self {
+            LineWidth::Narrow => Some(36.),
+            LineWidth::Normal => Some(50.),
+            LineWidth::Full => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderedDelimiter {
+    #[default]
+    Period,
+    Parenthesis,
+}
+
+impl OrderedDelimiter {
+    pub fn char(self) -> char {
+        match self {
+            OrderedDelimiter::Period => '.',
+            OrderedDelimiter::Parenthesis => ')',
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HardBreakStyle {
+    /// `\` at the end of the line, which shows.
+    #[default]
+    Backslash,
+    /// Two trailing spaces, which do not.
+    Spaces,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,6 +317,14 @@ impl Default for Preferences {
             code_fence: CodeFence::default(),
             emphasis_marker: EmphasisMarker::default(),
             settings_page: String::new(),
+            summon: Summon::default(),
+            line_width: LineWidth::default(),
+            auto_pair: true,
+            confirm_delete: true,
+            all_spaces: false,
+            follow_pointer: false,
+            ordered_delimiter: OrderedDelimiter::default(),
+            hard_break: HardBreakStyle::default(),
         }
     }
 }
@@ -496,6 +575,17 @@ pub struct WorkspaceSettings {
     pub attachments: AttachmentPolicy,
     /// What a new note's file is called when it is first written.
     pub new_note_name: NoteNaming,
+    /// What a pasted or dropped image's copy is called.
+    pub image_name: ImageNaming,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageNaming {
+    /// `image-<uuid>`: never the same twice, and saying nothing.
+    #[default]
+    RandomId,
+    /// The note's name and the local time, `Meeting notes 2026-09-24 10.21.05`.
+    NoteAndDate,
 }
 
 /// How a new note's file is named. Either way the name is given once, when the note

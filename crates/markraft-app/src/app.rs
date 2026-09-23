@@ -128,6 +128,8 @@ pub struct NotesApp {
     emoji: markraft_gpui::EmojiInsertion,
     /// Whether the Markdown input rules run, shared with every note editor's rules.
     shortcuts: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Whether brackets and quotes pair as they are typed, shared the same way.
+    pairs: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Whether someone is at the window, which is what the chrome follows.
     presence: Presence,
     /// The window's own size, and the one resize the app asked for.
@@ -233,11 +235,9 @@ impl NotesApp {
             }
         });
         let pointer_inside = platform.as_ref().is_none_or(|p| p.pointer_inside(window));
-        if let Some(platform) = &platform {
-            platform.set_traffic_lights_alpha(window, if pointer_inside { 1. } else { 0. }, false);
-        }
         let emoji = markraft_gpui::EmojiInsertion::new(library.preferences.emoji_characters);
         let shortcuts = std::sync::Arc::new(library.preferences.markdown_shortcuts.into());
+        let pairs = std::sync::Arc::new(library.preferences.auto_pair.into());
         apply_markdown_style(&library.preferences);
         let mut app = Self {
             library,
@@ -262,6 +262,7 @@ impl NotesApp {
             links: Default::default(),
             emoji,
             shortcuts,
+            pairs,
             toolbar: Toolbar::default(),
             format: Cursor::default(),
             dark,
@@ -471,9 +472,9 @@ impl NotesApp {
         }
         cx.notify();
     }
-    /// The title recedes while the window is idle. Corner action buttons and native
-    /// traffic lights follow `pointer_inside` alone and fade out completely;
-    /// typing, focus and open panels must not keep those buttons visible.
+    /// The title recedes while the window is idle. Corner action buttons follow
+    /// `pointer_inside` alone and fade out completely; typing, focus and open panels
+    /// must not keep those buttons visible. The native close button stays put.
     fn chrome_visible(&self) -> bool {
         let busy =
             self.interaction.panel() != Panel::Editor || self.interaction.format_menu().is_some();
@@ -527,23 +528,12 @@ impl NotesApp {
         if self.links.take_stale() {
             self.refresh_link_targets();
         }
-        // The platform draws the close button above everything the view renders, so a
-        // popup that reaches the top-left corner would be covered by it. It stands down
-        // while one is open, the same way it does when the pointer leaves the window.
-        let covered =
-            self.interaction.panel() == Panel::Editor && self.editor().read(cx).overlay_open();
-        if let Some(platform) = &self.platform {
-            let inside = platform.pointer_inside(window);
-            if self.presence.set_pointer_inside(inside) {
-                cx.notify();
-            }
-            if self.presence.close_button_changed(inside && !covered) {
-                platform.set_traffic_lights_alpha(
-                    window,
-                    if inside && !covered { 1. } else { 0. },
-                    !cx.reduce_motion(),
-                );
-            }
+        if let Some(platform) = &self.platform
+            && self
+                .presence
+                .set_pointer_inside(platform.pointer_inside(window))
+        {
+            cx.notify();
         }
         // The keystroke timer expires on its own, so the chrome is compared here rather
         // than only where its inputs change.
@@ -673,8 +663,9 @@ impl NotesApp {
         }
     }
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let follow_pointer = self.library.preferences.follow_pointer;
         if let Some(p) = &mut self.platform {
-            if let Err(e) = p.show(window) {
+            if let Err(e) = p.show(window, follow_pointer) {
                 self.feedback.set_error(e);
             }
         } else {
@@ -710,8 +701,22 @@ impl NotesApp {
     fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if window.is_window_active() {
             self.hide(window, cx);
-        } else {
-            self.show(window, cx);
+            return;
+        }
+        let hidden = self
+            .platform
+            .as_ref()
+            .is_some_and(|platform| !platform.is_visible(window));
+        self.show(window, cx);
+        // Brought back from hiding, the note can be a fresh page — but one still blank
+        // already is, and a second would only pile up empty notes.
+        if hidden
+            && self.library.preferences.summon == crate::storage::Summon::NewNote
+            && self.persistence.is_some()
+            && self.interaction.panel() == Panel::Editor
+            && !doc::is_blank(&self.library.active_note().document)
+        {
+            self.new_note(window, cx);
         }
     }
     fn prepare_to_quit(&mut self, cx: &mut Context<Self>) -> bool {
@@ -739,7 +744,7 @@ impl NotesApp {
         self.show_popover(Popover::FileStatus, cx);
         cx.notify();
     }
-    /// ⌘* or ⌘( in the note: the list the toolbar would make. Anywhere else the key is
+    /// ⌘&, ⌘* or ⌘( in the note: the list the toolbar would make. Anywhere else the key is
     /// left to whoever has the keyboard.
     fn run_list_shortcut(
         &mut self,
@@ -924,6 +929,52 @@ impl NotesApp {
             .unwrap_or(0);
         self.picker.select_in_browse(row);
     }
+    /// Move a note to the Trash, asking first when the preferences say to. `from_browse`
+    /// is where the request came from: Browse stays open after, the editor takes the
+    /// next note.
+    fn confirm_trash(
+        &mut self,
+        id: String,
+        from_browse: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = self
+            .library
+            .note(&id)
+            .map(|note| note.title())
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "this note".to_owned());
+        let trash = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+            if from_browse {
+                this.trash_note(&id, window, cx);
+            } else if this.library.active_id == id {
+                this.delete_note(window, cx);
+            }
+        };
+        if !self.library.preferences.confirm_delete {
+            trash(self, window, cx);
+            return;
+        }
+        // Asked from the actions list, the question stands over the note, not over the
+        // list that asked it; Browse stays, as its row is what the question is about.
+        if !from_browse {
+            self.set_panel(Panel::Editor, cx);
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Move “{title}” to the Trash?"),
+            None,
+            &["Cancel", "Move to Trash"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(1) {
+                let _ = cx.update(|window, cx| this.update(cx, |this, cx| trash(this, window, cx)));
+            }
+        })
+        .detach();
+    }
     fn trash_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_documents(cx);
         let folder = self
@@ -1000,6 +1051,10 @@ impl NotesApp {
         let mut style = scaled(notes_style(self.dark), preferences.text_size);
         style.font_family = preferences.font.family().into();
         style.line_height_ratio = preferences.line_height.ratio();
+        style.max_line_width = preferences
+            .line_width
+            .ems()
+            .map(|ems| px((ems * preferences.text_size).round()));
         style
     }
     fn restyle_editors(&self, cx: &mut Context<Self>) {
@@ -1596,6 +1651,7 @@ impl NotesApp {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         let policy = self.library.workspace.attachments.clone();
+        let naming = self.library.workspace.image_name;
         let journal = self
             .settings_path
             .parent()
@@ -1612,7 +1668,7 @@ impl NotesApp {
             }
             let result = cx
                 .background_executor()
-                .spawn(async move { assets::insert(assets, &path, &root, &policy, &journal) })
+                .spawn(async move { assets::insert(assets, &path, &root, &policy, naming, &journal) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let inserted = match result {
@@ -1907,9 +1963,10 @@ fn apply_platform_preferences(
     window: &Window,
 ) -> Result<(), String> {
     let on_top = platform.set_always_on_top(window, preferences.always_on_top);
+    let spaces = platform.set_all_spaces(window, preferences.all_spaces);
     let toggle = platform.set_shortcut(Shortcut::Toggle, &preferences.hotkey);
     let new_note = platform.set_shortcut(Shortcut::NewNote, &preferences.new_note_hotkey);
-    on_top.and(toggle).and(new_note)
+    on_top.and(spaces).and(toggle).and(new_note)
 }
 
 /// Tell the Markdown writer which markers the preferences ask new syntax to be spelled
@@ -1917,10 +1974,16 @@ fn apply_platform_preferences(
 fn apply_markdown_style(preferences: &crate::storage::Preferences) {
     crate::doc::set_markers(crate::doc::Markers {
         bullet: preferences.bullet_marker.char(),
+        ordered: preferences.ordered_delimiter.char(),
         fence: preferences.code_fence.char(),
     });
     markraft_commonmark::set_house_style(markraft_commonmark::HouseStyle {
         emphasis: preferences.emphasis_marker.char(),
+        ordered_delimiter: preferences.ordered_delimiter.char(),
+        hard_break: match preferences.hard_break {
+            crate::storage::HardBreakStyle::Backslash => markraft_commonmark::HardBreak::Backslash,
+            crate::storage::HardBreakStyle::Spaces => markraft_commonmark::HardBreak::Spaces,
+        },
     });
 }
 

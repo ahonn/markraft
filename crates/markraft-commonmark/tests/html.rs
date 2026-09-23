@@ -667,3 +667,65 @@ fn a_callout_travels_as_a_blockquote_carrying_its_marker() {
     // A blockquote from anywhere else is an ordinary quote.
     assert_eq!(markdown("<blockquote><p>a</p></blockquote>"), "> a");
 }
+
+// -- the house style ----------------------------------------------------------
+
+/// Run `each` under `style`, putting the default back whatever happens.
+fn in_house_style<T>(style: markraft_commonmark::HouseStyle, each: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            markraft_commonmark::set_house_style(markraft_commonmark::HouseStyle::default());
+        }
+    }
+    markraft_commonmark::set_house_style(style);
+    let _reset = Reset;
+    each()
+}
+
+/// An `<ol>` from another application names no delimiter, so it is a list the
+/// editor makes, in the house style's; one copied out of Markraft says which
+/// it was, and keeps it.
+#[test]
+fn an_ordered_list_from_elsewhere_takes_the_house_delimiter() {
+    use markraft_commonmark::HouseStyle;
+    let parens = HouseStyle {
+        ordered_delimiter: ')',
+        ..HouseStyle::default()
+    };
+    in_house_style(parens, || {
+        assert_eq!(markdown("<ol><li>a</li></ol>"), "1) a");
+        assert_eq!(markdown("<ol data-delimiter='.'><li>a</li></ol>"), "1. a");
+        // Written for that reader, a `.` list has to say so; a `)` one need not.
+        assert_eq!(
+            html_of("1. a"),
+            "<ol data-delimiter=\".\">\n<li><p>a</p></li>\n</ol>"
+        );
+        assert_eq!(html_of("1) a"), "<ol>\n<li><p>a</p></li>\n</ol>");
+        assert_eq!(markdown(&html_of("1. a")), "1. a");
+    });
+    assert_eq!(markdown("<ol><li>a</li></ol>"), "1. a");
+    assert_eq!(
+        html_of("1) a"),
+        "<ol data-delimiter=\")\">\n<li><p>a</p></li>\n</ol>"
+    );
+}
+
+/// A pasted `<br>` is a new hard break, so it is spelled in the house style.
+#[test]
+fn a_pasted_line_break_is_spelled_in_the_house_style() {
+    use markraft_commonmark::{HardBreak, HouseStyle};
+    let spaces = HouseStyle {
+        hard_break: HardBreak::Spaces,
+        ..HouseStyle::default()
+    };
+    in_house_style(spaces, || {
+        assert_eq!(markdown("<p>a<br>b</p>"), "a  \nb");
+        let codec = Codec::new();
+        assert_eq!(
+            codec.describe(&parser().parse("<p>a<br>b</p>").expect("HTML parses")),
+            codec.describe(&codec.parse("a  \nb")),
+        );
+    });
+    assert_eq!(markdown("<p>a<br>b</p>"), "a\\\nb");
+}

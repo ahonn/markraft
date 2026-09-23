@@ -8,6 +8,12 @@ const DEFAULT_FONT_FAMILY: &str = ".SystemUIFont";
 #[derive(Clone, Debug)]
 pub struct EditorStyle {
     pub padding: Pixels,
+    /// The widest the text column may be: a readable line length. Where the
+    /// view is wider, the column — prose, code blocks, tables, the placeholder
+    /// and everything aligned to the text — is this wide and centred in it,
+    /// with [`EditorStyle::padding`] still kept outside. `None` lets the text
+    /// fill the view.
+    pub max_line_width: Option<Pixels>,
     /// The family the note's own text is set in: its paragraphs, headings,
     /// list and quote text, table cells and placeholder. Code keeps its
     /// monospaced face, and the editor's chrome — pills, labels — the system
@@ -79,6 +85,7 @@ impl Default for EditorStyle {
     fn default() -> Self {
         Self {
             padding: px(32.),
+            max_line_width: None,
             font_family: DEFAULT_FONT_FAMILY.into(),
             body_size: px(17.),
             heading_sizes: [px(30.), px(25.), px(21.), px(19.), px(18.), px(17.)],
@@ -129,6 +136,7 @@ impl EditorStyle {
     pub fn notes() -> Self {
         Self {
             padding: px(24.),
+            max_line_width: None,
             font_family: DEFAULT_FONT_FAMILY.into(),
             body_size: px(14.),
             // Typora's ratios (2.25, 1.75, 1.5, 1.25, 1, 1 em) held down at the

@@ -17,7 +17,7 @@
 //! | `data-type="taskItem"`, `data-checked` | `<li>` | a GFM task item |
 //! | `data-tight` | `<ul>`, `<ol>` | whether the list renders without `<p>` |
 //! | `data-bullet` | `<ul>` | the bullet character |
-//! | `data-delimiter` | `<ol>` | `.` or `)` |
+//! | `data-delimiter` | `<ol>` | `.` or `)`, where it is not the house style's |
 //! | `data-fence`, `data-fence-length` | `<pre>` | the code fence's spelling |
 //! | `data-type="rawBlock"` | `<pre>` | source the model does not interpret |
 //!
@@ -609,8 +609,12 @@ fn ordered_list(state: &mut HtmlState<'_>, node: &Node, _: Option<&Node>) {
     if start != 1 {
         state.attr("start", &start.to_string());
     }
+    // The reader takes an `<ol>` without one for a list in the house style's
+    // delimiter, since a list pasted from anywhere else is one the editor
+    // makes; see `commonmark_html_rules`.
     let delimiter = attr_str(node, "delimiter", ".");
-    if delimiter != "." {
+    let house = crate::house_style().ordered_delimiter.to_string();
+    if delimiter != house {
         state.attr("data-delimiter", delimiter);
     }
     if !attr_bool(node, "tight", true) {

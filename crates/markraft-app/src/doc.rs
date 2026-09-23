@@ -57,9 +57,13 @@ pub fn codecs() -> Arc<dyn Codecs> {
 }
 
 /// The input rules and corrections a CommonMark editor wants. The input rules — `# `,
-/// `- `, `> ` and the rest turning a line into a block — run while `shortcuts` holds.
-pub fn extensions(shortcuts: Arc<AtomicBool>) -> Extension {
-    markraft_commonmark::commonmark_extensions_with_shortcuts(schema(), shortcuts)
+/// `- `, `> ` and the rest turning a line into a block — run while `shortcuts` holds,
+/// and brackets and quotes pair while `pairs` does.
+pub fn extensions(shortcuts: Arc<AtomicBool>, pairs: Arc<AtomicBool>) -> Extension {
+    Extension::all([
+        markraft_commonmark::commonmark_extensions_with_shortcuts(schema(), shortcuts),
+        markraft_commonmark::commonmark_auto_pairs(pairs),
+    ])
 }
 
 /// The markers a block made from the toolbar or the `/` menu is written with. One
@@ -67,6 +71,8 @@ pub fn extensions(shortcuts: Arc<AtomicBool>) -> Extension {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Markers {
     pub bullet: char,
+    /// A numbered list's `.` or `)`.
+    pub ordered: char,
     pub fence: char,
 }
 
@@ -74,6 +80,7 @@ impl Default for Markers {
     fn default() -> Self {
         Self {
             bullet: '-',
+            ordered: '.',
             fence: '`',
         }
     }
@@ -348,7 +355,7 @@ impl Block {
             Block::Ordered => markraft_gpui::commands::toggle_list(
                 types,
                 node(md::ORDERED_LIST),
-                Attrs::empty(),
+                Attrs::from_pairs([("delimiter", markers().ordered.to_string())]),
                 node(md::LIST_ITEM),
             ),
             Block::Bullet => markraft_gpui::commands::toggle_list(
@@ -494,7 +501,7 @@ mod tests {
                 .extensions(Extension::all([
                     markraft_core::projection::projection(),
                     markraft_core::history::history(Default::default()),
-                    extensions(Arc::new(true.into())),
+                    extensions(Arc::new(true.into()), Arc::new(false.into())),
                 ])),
         )
         .expect("a valid state")
@@ -600,14 +607,17 @@ mod tests {
             to_markdown(done.doc())
         };
         assert_eq!(run(Block::Bullet), "- text");
+        assert_eq!(run(Block::Ordered), "1. text");
         assert_eq!(run(Block::Code), "```\ntext\n```");
         set_markers(Markers {
             bullet: '*',
+            ordered: ')',
             fence: '~',
         });
         assert_eq!(run(Block::Bullet), "* text");
         assert_eq!(run(Block::Task), "* [ ] text");
         assert_eq!(run(Block::Code), "~~~\ntext\n~~~");
+        assert_eq!(run(Block::Ordered), "1) text");
         set_markers(Markers::default());
     }
 

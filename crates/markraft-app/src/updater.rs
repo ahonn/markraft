@@ -132,6 +132,21 @@ impl Updater {
             .map_err(|error| error.to_string())
     }
 
+    /// Whether Sparkle downloads an update it finds before asking to install it.
+    pub fn automatically_downloads(&self) -> Option<bool> {
+        self.native.as_ref()?.automatically_downloads_updates().ok()
+    }
+
+    pub fn set_automatically_downloads(&self, enabled: bool) -> Result<(), String> {
+        let native = self
+            .native
+            .as_ref()
+            .ok_or_else(|| self.unavailable.clone())?;
+        native
+            .set_automatically_downloads_updates(enabled)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn take_relaunch(&self) -> Option<RelaunchContinuation> {
         self.pending.borrow_mut().take_ready()
     }

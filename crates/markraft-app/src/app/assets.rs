@@ -1,5 +1,5 @@
 //! Image insertion policy. Existing images are never moved or garbage-collected.
-use crate::storage::AttachmentPolicy;
+use crate::storage::{AttachmentPolicy, ImageNaming};
 use std::{
     fs,
     io::Write,
@@ -109,11 +109,47 @@ pub(super) struct Inserted {
     pub urls: Vec<String>,
 }
 
+/// Where a copied image goes in `folder`, under a name no file there has yet.
+fn image_path(folder: &Path, document: &Path, naming: ImageNaming, extension: &str) -> PathBuf {
+    let stem = match naming {
+        ImageNaming::RandomId => {
+            return folder.join(format!("image-{}.{extension}", uuid::Uuid::new_v4()));
+        }
+        ImageNaming::NoteAndDate => {
+            let note = document
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "image".to_owned());
+            let local = crate::storage::timestamp()
+                .saturating_add_signed(crate::platform::local_utc_offset() * 1000);
+            format!("{note} {}", time_stamp(local))
+        }
+    };
+    // Two images pasted within a second take the same stamp; the later one is numbered.
+    (1..)
+        .map(|n| {
+            folder.join(if n == 1 {
+                format!("{stem}.{extension}")
+            } else {
+                format!("{stem} {n}.{extension}")
+            })
+        })
+        .find(|path| !path.exists())
+        .expect("some number is free")
+}
+
+/// A local time as a file name can hold it, `2026-09-24 10.21.05`.
+fn time_stamp(local_milliseconds: u64) -> String {
+    let (year, month, day, hour, minute, second, _) = crate::vault::civil(local_milliseconds);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}.{minute:02}.{second:02}")
+}
+
 pub(super) fn insert(
     assets: Vec<Asset>,
     document: &Path,
     root: &Path,
     policy: &AttachmentPolicy,
+    naming: ImageNaming,
     journal: &Path,
 ) -> Result<Inserted, String> {
     let parent = document
@@ -158,7 +194,7 @@ pub(super) fn insert(
             }
             let folder = destination(document, &root, policy)?;
             fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
-            let path = folder.join(format!("image-{}.{}", uuid::Uuid::new_v4(), extension));
+            let path = image_path(&folder, document, naming, &extension);
             // Record the destination before writing. If copying, insertion or
             // document saving is interrupted, the retained image stays traceable
             // without assuming it is safe to delete a shared attachment.
@@ -434,6 +470,7 @@ mod tests {
             &root.join("notes/note.md"),
             &root,
             &AttachmentPolicy::Default,
+            ImageNaming::RandomId,
             &root.join("unused-journal"),
         )
         .unwrap();
@@ -464,8 +501,15 @@ mod tests {
                 AttachmentPolicy::WorkspaceFolder("assets".into()),
             ] {
                 let assets = from_clipboard(clipboard.clone());
-                let inserted =
-                    insert(assets, &root.join("note.md"), &root, &policy, &journal).unwrap();
+                let inserted = insert(
+                    assets,
+                    &root.join("note.md"),
+                    &root,
+                    &policy,
+                    ImageNaming::RandomId,
+                    &journal,
+                )
+                .unwrap();
                 let markdown = inserted.markdown;
                 assert!(markdown.starts_with("![image](assets/image-"));
                 assert_ne!(previous.as_ref(), Some(&markdown));
@@ -492,6 +536,7 @@ mod tests {
             &root.path().join("note.md"),
             root.path(),
             &policy,
+            ImageNaming::RandomId,
             journal.path(),
         )
         .unwrap();
@@ -500,6 +545,7 @@ mod tests {
             &root.path().join("note.md"),
             root.path(),
             &policy,
+            ImageNaming::RandomId,
             journal.path(),
         )
         .unwrap();
@@ -524,6 +570,34 @@ mod tests {
                 &AttachmentPolicy::WorkspaceFolder("../outside".into())
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn an_image_can_be_named_for_its_note_and_when_it_came() {
+        assert_eq!(time_stamp(1_790_165_105_000), "2026-09-23 12.05.05");
+        let folder = tempfile::tempdir().unwrap();
+        let note = Path::new("/notes/Meeting notes.md");
+        let first = image_path(folder.path(), note, ImageNaming::NoteAndDate, "png");
+        let name = first.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("Meeting notes 20") && name.ends_with(".png"),
+            "{name}"
+        );
+        // The same second again: the second copy is numbered, not written over.
+        fs::write(&first, b"one").unwrap();
+        let second = image_path(folder.path(), note, ImageNaming::NoteAndDate, "png");
+        assert_ne!(first, second);
+        assert!(
+            second.to_string_lossy().ends_with(" 2.png") || second.file_name() != first.file_name()
+        );
+        let random = image_path(folder.path(), note, ImageNaming::RandomId, "png");
+        assert!(
+            random
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("image-")
         );
     }
 }

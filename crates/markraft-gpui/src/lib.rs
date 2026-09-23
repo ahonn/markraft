@@ -298,6 +298,11 @@ pub struct Setup {
     /// turns that line into the block here. Enter carries on as usual where
     /// it does not apply.
     pub enter_rule: Option<markraft_core::commands::Command>,
+    /// What a kind that keeps its markup in the text writes before the line
+    /// ending of a hard break Shift-Return makes. Asked each time the key is
+    /// pressed, so a host whose preference changes needs no new view. Without
+    /// it the break is spelled with a trailing `\`.
+    pub break_spelling: Option<BreakSpelling>,
     /// The document to open with. The schema's smallest valid document
     /// otherwise.
     pub doc: Option<Node>,
@@ -315,6 +320,7 @@ impl Setup {
             link_setter: None,
             split_wrap: None,
             enter_rule: None,
+            break_spelling: None,
             doc: None,
         }
     }
@@ -350,6 +356,10 @@ impl Setup {
         self.enter_rule = Some(rule);
         self
     }
+    pub fn break_spelling(mut self, spelling: BreakSpelling) -> Setup {
+        self.break_spelling = Some(spelling);
+        self
+    }
     pub fn doc(mut self, doc: Node) -> Setup {
         self.doc = Some(doc);
         self
@@ -374,6 +384,10 @@ pub type LinkSetter =
 /// How a document kind wraps a command that splits a textblock at the caret.
 pub type SplitWrap =
     Arc<dyn Fn(markraft_core::commands::Command) -> markraft_core::commands::Command + Send + Sync>;
+
+/// What a document kind writes before the line ending of a new hard break —
+/// `"\\"` or two spaces in Markdown. See [`Setup::break_spelling`].
+pub type BreakSpelling = Arc<dyn Fn() -> &'static str + Send + Sync>;
 
 /// Why an edit did not reach the document. The editor only keeps the cases apart;
 /// the host words each one, because only it knows what the document is stored in.
@@ -462,14 +476,13 @@ pub struct EditorView {
     split_wrap: Option<SplitWrap>,
     /// What Enter tries first; see [`Setup::enter_rule`].
     enter_rule: Option<markraft_core::commands::Command>,
+    /// How Shift-Return spells a hard break; see [`Setup::break_spelling`].
+    break_spelling: Option<BreakSpelling>,
     /// The host's extensions, kept so the state can be rebuilt on a replacement.
     host_extensions: markraft_core::Extension,
     pub(crate) extensions: Vec<extension::Registration>,
     /// The selection the extensions were last told about.
     pub(crate) extension_selection: Selection,
-    /// Whether the last frame drew an extension's popup, for a host whose window
-    /// chrome is drawn by the platform above everything this view renders.
-    overlay_open: bool,
     /// The style, the images and the two host callbacks shaping reads, and the
     /// rows it last produced from them.
     shaping: shaping::Shaping,
@@ -555,6 +568,7 @@ impl EditorView {
             link_setter,
             split_wrap,
             enter_rule,
+            break_spelling,
             doc,
         } = setup;
         let state = build_state(&schema, &extensions, doc);
@@ -570,8 +584,8 @@ impl EditorView {
             link_setter,
             split_wrap,
             enter_rule,
+            break_spelling,
             extension_selection: state.selection().clone(),
-            overlay_open: false,
             state,
             projection,
             host_extensions: extensions,
@@ -826,13 +840,6 @@ impl EditorView {
     }
     pub fn is_composing(&self) -> bool {
         markraft_core::composition::is_composing(&self.state)
-    }
-
-    /// Whether an extension's popup — the `/` menu, the emoji list — is on screen.
-    /// A host whose window chrome the platform draws above the whole view reads this
-    /// to keep that chrome off the popup.
-    pub fn overlay_open(&self) -> bool {
-        self.overlay_open
     }
 
     /// Height at the most recently laid-out width, including editor padding.
@@ -1820,7 +1827,6 @@ impl Render for EditorView {
         self.prune_extensions();
         let key_context = self.extension_key_context();
         let overlay = self.extension_overlay(window, cx);
-        self.overlay_open = overlay.is_some();
         let accessible_text = self.accessible_text.clone();
         let mut root = div()
             .id("markraft-editor")
@@ -1976,7 +1982,16 @@ impl EditorView {
                 cx.propagate();
             }
         }));
-        rich!(LineBreak, keymap::line_break);
+        root = root.on_action(cx.listener(|this, _: &LineBreak, _, cx| {
+            if this.single_line {
+                cx.propagate();
+                return;
+            }
+            let command = keymap::line_break(&this.types, this.break_spelling.as_ref());
+            if !this.run_command(&command, cx) {
+                cx.propagate();
+            }
+        }));
         root = root.on_action(cx.listener(|this, _: &Indent, _, cx| {
             if this.single_line {
                 cx.propagate();

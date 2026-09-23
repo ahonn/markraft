@@ -950,6 +950,23 @@ pub(crate) fn shape_cached(
     lines
 }
 
+/// The width the text is laid out in: the view's content width, or
+/// [`EditorStyle::max_line_width`] where that is narrower.
+pub(crate) fn column_width(width: Pixels, max: Option<Pixels>) -> Pixels {
+    max.map_or(width, |max| width.min(max.max(px(0.))))
+}
+
+/// The column the text stands in inside the content box `bounds`: as wide as
+/// [`column_width`] says and centred across the box, over its whole height.
+pub(crate) fn column_bounds(bounds: Bounds<Pixels>, max: Option<Pixels>) -> Bounds<Pixels> {
+    let width = column_width(bounds.size.width, max);
+    let inset = ((bounds.size.width - width) / 2.).round();
+    Bounds::new(
+        point(bounds.left() + inset, bounds.top()),
+        size(width, bounds.size.height),
+    )
+}
+
 /// Every line of the projection, shaped afresh.
 #[cfg(test)]
 pub(crate) fn shape(
@@ -3481,7 +3498,8 @@ impl Element for EditorSurface {
                     _ if view.single_line => px(0.),
                     _ => px(600.),
                 });
-                let rows = shape_cached(view, width, window.text_system());
+                let column = column_width(width, view.style().max_line_width);
+                let rows = shape_cached(view, column, window.text_system());
                 let height = rows
                     .iter()
                     .fold(if view.single_line { px(0.) } else { px(40.) }, |h, row| {
@@ -3502,6 +3520,10 @@ impl Element for EditorSurface {
         cx: &mut App,
     ) -> Vec<LayoutLine> {
         let view = self.editor.read(cx);
+        // The element spans the view; the text is laid out in the column
+        // inside it, and every row is placed there. Hit testing, the caret,
+        // the selection and every popup read the rows, so they follow.
+        let bounds = column_bounds(bounds, view.style().max_line_width);
         let mut rows = shape_cached(view, bounds.size.width, window.text_system());
         let mut y = bounds.top();
         for row in &mut rows {
@@ -3657,6 +3679,8 @@ impl Element for EditorSurface {
             ElementInputHandler::new(bounds, self.editor.clone()),
             cx,
         );
+        // The text's own column, where prepaint placed the rows.
+        let bounds = column_bounds(bounds, style.max_line_width);
         // A grid wider than the note is drawn scrolled, so the painting below is
         // held inside the editor's own content box. Nothing else ever draws
         // outside it, and the mask only goes up where a grid needs it.
@@ -4535,6 +4559,22 @@ mod tests {
                 .collect();
             assert_eq!(drawn, vec![last.index], "caret {caret}");
         }
+    }
+
+    #[test]
+    fn a_readable_line_width_narrows_the_column_and_centres_it() {
+        let view = Bounds::new(point(px(40.), px(10.)), size(px(1000.), px(600.)));
+        // No limit, or one wider than the view: the text fills the content box.
+        assert_eq!(super::column_bounds(view, None), view);
+        assert_eq!(super::column_bounds(view, Some(px(1200.))), view);
+        let column = super::column_bounds(view, Some(px(700.)));
+        assert_eq!(column.size.width, px(700.));
+        assert_eq!(column.size.height, view.size.height);
+        assert_eq!(column.top(), view.top());
+        assert_eq!(column.left() - view.left(), view.right() - column.right());
+        // Shaping wraps at the same width the column is placed at.
+        assert_eq!(super::column_width(px(1000.), Some(px(700.))), px(700.));
+        assert_eq!(super::column_width(px(500.), Some(px(700.))), px(500.));
     }
 
     /// Gaps far enough apart that the number a line carries says which spacing

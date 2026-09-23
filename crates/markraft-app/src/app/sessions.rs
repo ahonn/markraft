@@ -148,7 +148,11 @@ impl NotesApp {
                     .link_setter(doc::link_setter(refusal_message))
                     .split_wrap(doc::split_wrap())
                     .enter_rule(doc::enter_rule())
-                    .extensions(doc::extensions(self.shortcuts.clone()))
+                    // Shift-Return writes the break the preferences ask for.
+                    .break_spelling(std::sync::Arc::new(|| {
+                        markraft_commonmark::house_style().hard_break.marker()
+                    }))
+                    .extensions(doc::extensions(self.shortcuts.clone(), self.pairs.clone()))
                     .doc(document),
                 cx,
             )
@@ -363,6 +367,15 @@ impl NotesApp {
     pub(super) fn set_markdown_shortcuts(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.library.preferences.markdown_shortcuts = enabled;
         self.shortcuts
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// Turn bracket and quote pairing on or off in every open note at once.
+    pub(super) fn set_auto_pair(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.library.preferences.auto_pair = enabled;
+        self.pairs
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
         self.schedule_save(cx);
         cx.notify();

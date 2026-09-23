@@ -124,7 +124,10 @@ fn spelling_marks_in_the_underscore_house_style() {
     use markraft_commonmark::{HouseStyle, commonmark_serializer, set_house_style};
     use markraft_core::MarkSet;
 
-    set_house_style(HouseStyle { emphasis: '_' });
+    set_house_style(HouseStyle {
+        emphasis: '_',
+        ..HouseStyle::default()
+    });
     let codec = Codec::new();
     let serializer = commonmark_serializer(&codec.schema);
     set_house_style(HouseStyle::default());
