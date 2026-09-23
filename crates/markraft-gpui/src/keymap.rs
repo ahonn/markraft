@@ -1482,4 +1482,34 @@ mod tests {
         let caret = caret_in(&state, "c") + 1;
         assert!(run_command(&at(&state, caret), &line_break(&types)).is_none());
     }
+
+    /// Letting the caret into a picture's source is not an edit of its own:
+    /// one undo takes back what was typed before it, and gives the picture
+    /// back as the atom it was.
+    #[test]
+    fn letting_the_caret_into_a_picture_is_not_an_undo_step() {
+        let state = state_of("after\n\n![a](x.png)");
+        let typed = applied(
+            &at(&state, caret_in(&state, "after") + "after".len()),
+            &markraft_core::commands::insert_text("z"),
+        )
+        .expect("typing");
+        let picture = projection_of(&typed).lines()[1].from();
+        let reached = applied(
+            &typed,
+            &markraft_core::commands::command(move |_| {
+                Some(TransactionSpec::new().selection(Selection::cursor(picture)))
+            }),
+        )
+        .expect("the caret moves");
+        assert_eq!(
+            projection_of(&reached).line_text(1),
+            Some("![a](x.png)"),
+            "the caret found the source"
+        );
+        let undone = applied(&reached, &history(true)).expect("undo applies");
+        let schema = undone.schema();
+        assert_eq!(to_markdown(schema, undone.doc()), "after\n\n![a](x.png)");
+        assert_eq!(undone.doc(), state.doc(), "the picture is the atom again");
+    }
 }

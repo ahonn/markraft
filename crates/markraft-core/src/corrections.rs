@@ -62,6 +62,7 @@ use crate::fragment::Fragment;
 use crate::mark::MarkSet;
 use crate::node::Node;
 use crate::schema::NodeTypeId;
+use crate::selection::Selection;
 use crate::slice::Slice;
 use crate::state::protocol::{add_to_history, corrections_diverged, fold_into_previous, remote};
 use crate::state::{
@@ -95,6 +96,11 @@ pub struct CorrectionContext<'a> {
     /// The document the transaction produces. Every position the correction
     /// returns refers to this document.
     pub doc: &'a Node,
+    /// The selection the transaction leaves, mapped onto `doc`: in a later
+    /// round, through what the corrections before it changed. Positions read
+    /// off [`Transaction::new_selection`] address the transaction's own
+    /// document, which a later round no longer has.
+    pub selection: &'a Selection,
     /// The matched node.
     pub node: &'a Node,
     /// The position of the first token inside `node`.
@@ -260,11 +266,12 @@ fn run_corrections(tr: &Transaction) -> Option<TransactionSpec> {
     }
     let schema = tr.start_state().schema().clone();
     let mut doc = tr.new_doc().clone();
+    let mut selection = tr.new_selection();
     let (mut replaced, mut marked) = changed_ranges(tr.changes());
     let mut accumulated: Option<ChangeSet> = None;
     let mut settled = false;
     for _ in 0..MAX_CORRECTION_ROUNDS {
-        let changes = corrections_for(&list, tr, &doc, &replaced, &marked, &left);
+        let changes = corrections_for(&list, tr, &doc, &selection, &replaced, &marked, &left);
         left.clear();
         if changes.is_empty() {
             settled = true;
@@ -285,6 +292,7 @@ fn run_corrections(tr: &Transaction) -> Option<TransactionSpec> {
         let ranges = changed_ranges(&round);
         replaced = ranges.0;
         marked = ranges.1;
+        selection = selection.map(&schema, &next, round.desc());
         accumulated = Some(match accumulated {
             Some(previous) => previous.compose(&round).ok()?,
             None => round,
@@ -369,7 +377,15 @@ pub fn collect_corrections(corrections: &[Correction], tr: &Transaction) -> Vec<
         return Vec::new();
     }
     let (replaced, marked) = changed_ranges(tr.changes());
-    corrections_for(corrections, tr, tr.new_doc(), &replaced, &marked, &[])
+    corrections_for(
+        corrections,
+        tr,
+        tr.new_doc(),
+        &tr.new_selection(),
+        &replaced,
+        &marked,
+        &[],
+    )
 }
 
 /// One round: the changes `corrections` want to make to `doc`, given the ranges
@@ -378,6 +394,7 @@ fn corrections_for(
     corrections: &[Correction],
     tr: &Transaction,
     doc: &Node,
+    selection: &Selection,
     replaced: &[(usize, usize)],
     marked: &[(usize, usize)],
     left: &[usize],
@@ -416,6 +433,7 @@ fn corrections_for(
                 start_state: tr.start_state(),
                 tr,
                 doc,
+                selection,
                 node,
                 content_start,
                 before,

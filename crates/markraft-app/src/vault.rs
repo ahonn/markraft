@@ -841,6 +841,26 @@ impl Store {
             }
         }
         let bytes = render(saved, note)?.into_bytes();
+        // A tree that writes what the file already holds — a picture spelled
+        // out under the caret, which saves as the same characters as the
+        // picture — is not written again: the file keeps its bytes and its
+        // modification time, and only the record follows the tree.
+        if let Some(saved) = saved
+            && saved.bytes == bytes
+        {
+            let mut stored = note.clone();
+            stored.path = Some(saved.path.clone());
+            stored.conflicted = false;
+            stored.deleted_at = None;
+            self.files.insert(
+                note.id.clone(),
+                Saved {
+                    note: stored,
+                    ..saved.clone()
+                },
+            );
+            return Ok(());
+        }
         let path = match saved {
             Some(s) => s.path.clone(),
             None if note.path.is_some() => {
@@ -1808,6 +1828,46 @@ mod tests {
         library.set_document(&id, original);
         store.save(&library).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"Title\n=====\n\noriginal\n\n");
+    }
+    /// A tree that differs from the saved one but writes the same characters —
+    /// a picture the caret has spelled out — leaves the file alone: no write,
+    /// so no backup of the version it would have replaced either.
+    #[test]
+    fn a_tree_that_writes_the_same_bytes_is_not_saved_again() {
+        let root = tempfile::tempdir().unwrap();
+        let text = b"intro\n\n![a](x.png)\n";
+        let path = fixture(root.path(), "intro.md", text);
+        let (mut store, mut library) = open(root.path());
+        let id = library.active_id.clone();
+        let schema = doc::schema();
+        let spelled = schema
+            .doc([
+                schema
+                    .node(
+                        markraft_commonmark::schema::PARAGRAPH,
+                        [schema.text("intro")],
+                    )
+                    .unwrap(),
+                schema
+                    .node(
+                        markraft_commonmark::schema::PARAGRAPH,
+                        [schema.text("![a](x.png)")],
+                    )
+                    .unwrap(),
+            ])
+            .unwrap();
+        assert_ne!(library.active_note().document, spelled);
+        library.set_document(&id, spelled);
+        store.save(&library).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), text);
+        assert!(
+            !store
+                .state
+                .join("backups")
+                .join(format!("{id}.md"))
+                .exists(),
+            "nothing was written over the file"
+        );
     }
     #[test]
     fn disk_wins_keeps_local_work_as_a_conflicted_copy() {

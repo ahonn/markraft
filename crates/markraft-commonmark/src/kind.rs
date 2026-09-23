@@ -7,7 +7,10 @@
 //! contracts declared by [`markraft_core`], so the editor's GPUI layer consumes
 //! them without depending on this crate.
 
+use std::ops::Range;
+
 use markraft_core::kind::SYNTAX_DISPLAY_ATTR;
+use markraft_core::projection::{Line, OBJECT_REPLACEMENT, RunContent};
 use markraft_core::{
     Attrs, Fragment, MarkSet, Node, NodeTypeId, Schema, Slice,
     kind::{Codecs, DocTypeNames, SourceSpelling},
@@ -414,5 +417,38 @@ impl SourceSpelling for CommonMarkSpelling {
             ),
             _ => None,
         }
+    }
+
+    fn spelled_atoms(&self, line: &Line) -> Vec<(Range<usize>, Node)> {
+        let Some(kind) = line
+            .ancestors()
+            .last()
+            .and_then(|block| block_kind(&self.schema, block.node_type))
+        else {
+            return Vec::new();
+        };
+        // The line's text as the correction reads its block: an atom one
+        // placeholder, a line break a newline.
+        let line_break = self.schema.node_id(schema::LINE_BREAK);
+        let mut text = String::new();
+        for run in line.runs() {
+            match &run.content {
+                RunContent::Text(run) => text.push_str(run),
+                RunContent::Atom(node) if Some(node.type_id()) == line_break => text.push('\n'),
+                RunContent::Atom(_) => text.push(OBJECT_REPLACEMENT),
+            }
+        }
+        derive(kind, &text, &DeriveContext::new())
+            .atoms
+            .into_iter()
+            .filter_map(|atom| {
+                let ty = self.schema.node_id(atom.node_type)?;
+                let node = self
+                    .schema
+                    .create(ty, atom.attrs, MarkSet::empty(), Fragment::empty())
+                    .ok()?;
+                Some((atom.range, node))
+            })
+            .collect()
     }
 }

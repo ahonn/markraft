@@ -77,6 +77,12 @@ const CODE_INSET: Pixels = px(12.);
 const CODE_LANGUAGE_HEIGHT: Pixels = px(18.);
 const CODE_LANGUAGE_PADDING: Pixels = px(6.);
 const CODE_RADIUS: Pixels = px(12.);
+/// The space between a picture's spelled-out source and the picture drawn
+/// under it while the caret is in the source.
+const PREVIEW_GAP: Pixels = px(6.);
+/// How far a picture sharing its line with text stands inside the row, above
+/// and below: it is drawn as tall as the row allows and no taller.
+const INLINE_IMAGE_INSET: Pixels = px(2.);
 /// The row a table keeps above its grid for the host's table toolbar, focused
 /// or not, so the toolbar never covers the block above and the caret coming
 /// or going never moves what follows.
@@ -389,6 +395,9 @@ pub(crate) struct LayoutLine {
     /// How far a code block's panel reaches above and below its text; zero on
     /// any other line.
     code_inset: Pixels,
+    /// The picture a line spelling one out draws under its text, as Typora
+    /// keeps a picture in view while the caret edits its source.
+    preview: Option<(Arc<RenderImage>, Size<Pixels>)>,
     /// How far left of the text each quote the line sits in draws its bar,
     /// outermost first. See [`quote_bar_distances`].
     quote_bars: Vec<Pixels>,
@@ -964,6 +973,23 @@ pub(crate) fn shape_reusing(
     previous: &[LayoutLine],
     text_system: &WindowTextSystem,
 ) -> Vec<LayoutLine> {
+    // The pictures the document shows: its atoms', and those of a picture the
+    // caret has spelled out, which is text now but still drawn under its
+    // source. Dropping the latter would throw away a remote fetch as soon as
+    // it started, and decode a local file again on every frame.
+    let spelled: Vec<Node> = input
+        .spelling
+        .map(|spelling| {
+            input
+                .projection
+                .lines()
+                .iter()
+                .filter(|line| line_focused(input, line))
+                .flat_map(|line| spelling.spelled_atoms(line))
+                .map(|(_, node)| node)
+                .collect()
+        })
+        .unwrap_or_default();
     input.images.retain_sources(
         input
             .projection
@@ -973,7 +999,12 @@ pub(crate) fn shape_reusing(
             .filter_map(|run| match &run.content {
                 RunContent::Atom(node) => picture_source(input.types, node),
                 _ => None,
-            }),
+            })
+            .chain(
+                spelled
+                    .iter()
+                    .filter_map(|node| picture_source(input.types, node)),
+            ),
     );
     let current = input.projection.lines();
     let (prefix, suffix) = kept_ends(previous, current);
@@ -1229,6 +1260,24 @@ fn shape_line(
     // A callout says what kind of note it is on a line of its own above the
     // block it opens. The line is chrome: it holds no caret stop, so it lives
     // in the room the block reserves above itself rather than in the text.
+    // A picture whose source the caret was let into: the source is the line's
+    // text now, and the picture stays in view under it — where the picture had
+    // the line to itself, as it is drawn full size only there.
+    let preview = (focused && cell.is_none() && !single_line)
+        .then(|| {
+            let atoms = input.spelling?.spelled_atoms(line);
+            let [(range, node)] = atoms.as_slice() else {
+                return None;
+            };
+            let text = projection.line_text(index)?;
+            let alone = text
+                .chars()
+                .enumerate()
+                .all(|(at, c)| range.contains(&at) || c.is_whitespace());
+            let source = picture_source(types, node).filter(|_| alone)?;
+            drawn_image(input.images, source, wrap_width)
+        })
+        .flatten();
     let above = index.checked_sub(1).map(|above| &projection.lines()[above]);
     let callout_header = crate::callout::header_of(types, line, above).map(|head| CalloutHeader {
         label: callout_label(
@@ -1267,6 +1316,7 @@ fn shape_line(
         decoration,
         code_language,
         code_inset,
+        preview,
         quote_bars,
         callout_header,
         widenings: text.widenings,
@@ -1288,7 +1338,13 @@ fn shape_line(
             .fold(px(0.), |widest, width| widest.max(width));
         layout.min_width = min_content_width(&layout, &runs.code);
     }
-    layout.height = layout.text_height() + layout.code_inset + gap;
+    layout.height = layout.text_height()
+        + layout.code_inset
+        + layout
+            .preview
+            .as_ref()
+            .map_or(px(0.), |(_, size)| PREVIEW_GAP + size.height)
+        + gap;
     shape_inline_code(&mut layout, &runs.code, font_size, text_system);
     place_atoms(&mut layout, text.atoms);
     layout
@@ -2094,7 +2150,12 @@ fn display_text(
                     let count = (atom.width / unit).ceil().max(1.) as usize;
                     text.extend(std::iter::repeat_n(PILL_FILLER, count));
                     run_bytes.push(count * PILL_FILLER.len_utf8());
-                    if let Some(size) = atom.image.as_ref().map(|(_, size)| *size).or(atom.frame) {
+                    // A picture with the line to itself sets the row's height;
+                    // one sharing it with text fits inside the row it is in.
+                    if alone
+                        && let Some(size) =
+                            atom.image.as_ref().map(|(_, size)| *size).or(atom.frame)
+                    {
                         line_height = Some(size.height);
                     }
                     atoms.push(PendingAtom {
@@ -2375,12 +2436,18 @@ fn atom_of(
         },
         None => original,
     };
-    // A local file the note can read is drawn for real where it has the line to
-    // itself; the placeholder is still built, and stands in wherever it is not.
-    let drawn = (alone && !note)
-        .then_some(picture)
-        .flatten()
-        .and_then(|source| drawn_image(images, source, column));
+    // A picture the note can show is drawn for real: at its own size where it
+    // has the line to itself, and as tall as the row where it shares the line
+    // with text. The placeholder is still built, and stands in wherever it is
+    // not drawn.
+    let row_height = font_size * style.line_height_ratio;
+    let drawn = (!note).then_some(picture).flatten().and_then(|source| {
+        if alone {
+            drawn_image(images, source, column)
+        } else {
+            inline_image(images, source, row_height - INLINE_IMAGE_INSET * 2., column)
+        }
+    });
     // A picture still on its way keeps the room a picture takes, so the line does
     // not start as one row and jump when it arrives.
     let frame = (alone && !note && drawn.is_none())
@@ -2469,6 +2536,25 @@ fn drawn_image(
     let width = column.min(px(native_width)).max(px(1.));
     let height = width * (native_height / native_width);
     Some((image, size(width, height)))
+}
+
+/// A decoded image fitted to a row: `height` tall, as wide as its proportions
+/// make it, and no wider than the column.
+fn inline_image(
+    images: &crate::images::Images,
+    src: &str,
+    height: Pixels,
+    column: Pixels,
+) -> Option<(Arc<RenderImage>, Size<Pixels>)> {
+    let image = images.load(src).ok()?;
+    let intrinsic = image.size(0);
+    let (native_width, native_height) = (intrinsic.width.0 as f32, intrinsic.height.0 as f32);
+    if native_width <= 0. || native_height <= 0. || height <= px(0.) {
+        return None;
+    }
+    let ratio = native_width / native_height;
+    let width = (height * ratio).min(column).max(px(1.));
+    Some((image, size(width, width / ratio)))
 }
 
 /// The frame a picture still being fetched is drawn as: the column's width up to
@@ -2930,12 +3016,15 @@ fn starts_item(types: &DocTypes, line: &Line) -> bool {
 
 /// Whether this line has anything to draw differently while it is focused.
 ///
-/// Only a code block does, showing its language tag: every other block draws
-/// its marker, bar or heading the same wherever the caret is, as Typora does.
-/// So the caret passing through any other line does not invalidate the shaped
-/// rows.
+/// A code block does, showing its language tag, and a line spelling out a
+/// picture, drawing it under its source: every other block draws its marker,
+/// bar or heading the same wherever the caret is, as Typora does. So the
+/// caret passing through any other line does not invalidate the shaped rows.
 fn focus_chrome(input: &ShapeInput<'_>, line: &Line) -> bool {
     input.types.is_code_block(line)
+        || input
+            .spelling
+            .is_some_and(|spelling| !spelling.spelled_atoms(line).is_empty())
 }
 
 /// Whether the selection or composition touches this projection line.
@@ -3661,6 +3750,20 @@ impl Element for EditorSurface {
                 if let Some(marker) = &row.marker {
                     paint_marker(row, marker, &style, window, cx);
                 }
+                if let Some((image, size)) = &row.preview {
+                    let bounds = Bounds::new(
+                        row.origin + point(px(0.), row.text_height() + PREVIEW_GAP),
+                        *size,
+                    );
+                    let _ = window.paint_image(
+                        bounds,
+                        bounds,
+                        Corners::all(style.code_radius),
+                        image.clone(),
+                        0,
+                        false,
+                    );
+                }
                 if row.index == 0
                     && let Some(text) = placeholder.as_ref().filter(|text| !text.is_empty())
                 {
@@ -3987,11 +4090,13 @@ fn paint_atom(
 ) {
     let top = row.origin.y + row.line_height * atom.visual_row as f32;
     if let Some((image, drawn)) = &atom.image {
+        // Centred in its row: a picture sharing the line is shorter than it.
+        let top = top + ((row.line_height - drawn.height) * 0.5).max(px(0.));
         let bounds = Bounds::new(point(row.origin.x + atom.left, top), *drawn);
         let _ = window.paint_image(
             bounds,
             bounds,
-            Corners::all(style.code_radius),
+            Corners::all(style.code_radius.min(drawn.height * 0.2)),
             image.clone(),
             0,
             false,
@@ -4171,9 +4276,9 @@ fn paint_marker(
 mod tests {
     use super::{
         AtomShape, CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_FONT, CODE_INSET,
-        Decoration, LayoutLine, LayoutRow, Marker, QUOTE_BAR, Runs, ShapeInput, TableScroll,
-        Widening, atom_label, cell_under, chrome_marker, column_demands, column_widths,
-        decoration_of, display_text, drawn_image, file_name, gap_below, max_indent,
+        Decoration, LayoutLine, LayoutRow, Marker, PREVIEW_GAP, QUOTE_BAR, Runs, ShapeInput,
+        TableScroll, Widening, atom_label, cell_under, chrome_marker, column_demands,
+        column_widths, decoration_of, display_text, drawn_image, file_name, gap_below, max_indent,
         merge_row_centers, picture_source, place_table, quote_bars, reveal_offset, shape,
         table_overflows, text_runs, unbreakable_units, visible_strips,
     };
@@ -4212,6 +4317,7 @@ mod tests {
             code_language: None,
             callout_header: None,
             code_inset: px(0.),
+            preview: None,
             quote_bars: Vec::new(),
             widenings: Vec::new(),
             atoms: Vec::new(),
@@ -5027,6 +5133,136 @@ mod tests {
         assert_eq!(drawn.height, px(1.));
         assert!(drawn_image(&images, "https://host/a.png", px(100.)).is_none());
         assert!(drawn_image(&images, "/no/such/file.png", px(100.)).is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A caret let into a picture's source finds it spelled out as the line's
+    /// text, with the picture still drawn under it — as in Typora — and the
+    /// line tall enough for both.
+    #[test]
+    fn a_picture_stays_in_view_under_its_spelled_out_source() {
+        let path = std::env::temp_dir().join("markraft-preview-test.png");
+        std::fs::write(&path, PNG).expect("a writable temp directory");
+        let source = format!("![a]({})\n\nafter", path.display());
+        let state = state_of(&source);
+        let reached = state
+            .update([markraft_core::TransactionSpec::new()
+                .selection(markraft_core::Selection::cursor(1))])
+            .expect("the caret moves")
+            .state()
+            .clone();
+        let projection = projection_of(&reached);
+        assert_eq!(
+            projection.line_text(0),
+            Some(format!("![a]({})", path.display()).as_str()),
+            "the caret found the source"
+        );
+        let images = crate::images::Images::default();
+        let spelling = markraft_commonmark::CommonMarkSpelling::new(reached.schema().clone());
+        let style = EditorStyle::notes();
+        let types = callout_types();
+        let input = ShapeInput {
+            images: &images,
+            spelling: Some(&spelling),
+            wiki: None,
+            doc: reached.doc(),
+            types: &types,
+            projection: &projection,
+            style: &style,
+            single_line: false,
+            selection: 1..1,
+            composition: None,
+        };
+        let lines = shape(&input, px(600.), &text_system());
+        let (_, drawn) = lines[0].preview.as_ref().expect("the picture under it");
+        assert_eq!(drawn.width, px(2.));
+        assert_eq!(
+            lines[0].height,
+            lines[0].text_height() + PREVIEW_GAP + drawn.height + style.paragraph_gap,
+            "the line holds the source and the picture"
+        );
+        // Away from it, the picture is the line again, and nothing is drawn
+        // under anything.
+        let after = projection.lines()[1].from();
+        let lines = shape(
+            &ShapeInput {
+                selection: after..after,
+                composition: None,
+                ..input
+            },
+            px(600.),
+            &text_system(),
+        );
+        assert!(lines[0].preview.is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A remote picture spelled out under the caret is still one the document
+    /// shows: its fetch is kept rather than dropped as soon as it starts, and
+    /// the picture is drawn under its source once it arrives.
+    #[test]
+    fn a_remote_picture_stays_in_view_under_its_spelled_out_source() {
+        let source = "https://example.com/a.png";
+        let state = state_of(&format!("![a]({source})\n\nafter"));
+        let reached = state
+            .update([markraft_core::TransactionSpec::new()
+                .selection(markraft_core::Selection::cursor(1))])
+            .expect("the caret moves")
+            .state()
+            .clone();
+        let projection = projection_of(&reached);
+        let mut images = crate::images::Images::default();
+        images.set_remote_enabled(true);
+        let spelling = markraft_commonmark::CommonMarkSpelling::new(reached.schema().clone());
+        let style = EditorStyle::notes();
+        let types = callout_types();
+        let shaped = |images: &crate::images::Images| {
+            let input = ShapeInput {
+                images,
+                spelling: Some(&spelling),
+                wiki: None,
+                doc: reached.doc(),
+                types: &types,
+                projection: &projection,
+                style: &style,
+                single_line: false,
+                selection: 1..1,
+                composition: None,
+            };
+            shape(&input, px(600.), &text_system())
+        };
+        assert!(shaped(&images)[0].preview.is_none(), "still on its way");
+        assert_eq!(images.take_requests(), [source]);
+        let fetcher: crate::RemoteImageFetcher = Arc::new(|_| Ok(PNG.to_vec()));
+        assert!(
+            images.finish_remote(source, crate::images::fetch(&fetcher, source)),
+            "the fetch was still wanted when it arrived"
+        );
+        assert!(
+            shaped(&images)[0].preview.is_some(),
+            "drawn once it arrives"
+        );
+    }
+
+    /// A picture sharing its line with text is drawn, as tall as the row
+    /// allows, rather than named in a pill; the row keeps the text's height.
+    #[test]
+    fn a_picture_sharing_its_line_is_drawn_as_tall_as_the_row() {
+        let path = std::env::temp_dir().join("markraft-inline-test.png");
+        std::fs::write(&path, PNG).expect("a writable temp directory");
+        let source = format!("see ![a]({}) here", path.display());
+        let lines = shaped_revealing(&source, 0..0, None);
+        let line = &lines[0];
+        let style = EditorStyle::notes();
+        let row = style.body_size * style.line_height_ratio;
+        assert_eq!(line.line_height, row, "the row keeps the text's height");
+        let (_, drawn) = line.atoms[0].image.as_ref().expect("the picture is drawn");
+        assert_eq!(drawn.height, row - super::INLINE_IMAGE_INSET * 2.);
+        assert_eq!(
+            drawn.width,
+            drawn.height * 2.,
+            "at the picture's proportions"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

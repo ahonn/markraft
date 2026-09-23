@@ -125,6 +125,7 @@ pub mod source;
 pub mod table;
 mod text;
 mod textblock;
+mod unfold;
 pub mod wiki;
 
 /// The comrak version this codec parses with, re-exported so a consumer

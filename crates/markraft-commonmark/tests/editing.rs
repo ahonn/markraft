@@ -44,6 +44,28 @@ fn typed(text: &str) -> String {
     schema.describe(type_all(&state, text).doc())
 }
 
+/// `text` typed into the first of two paragraphs, and the caret then moved
+/// into the second: what the first reads as once the caret has left it.
+fn typed_and_left(text: &str) -> String {
+    let schema = commonmark_schema();
+    let doc = schema
+        .doc([
+            schema.node(md::PARAGRAPH, []).expect("a paragraph"),
+            schema
+                .node(md::PARAGRAPH, [schema.text("x")])
+                .expect("a paragraph"),
+        ])
+        .expect("a document");
+    let typed = type_all(&start_from(doc, &schema, 1), text);
+    let end = typed.doc().content_size() - 1;
+    let left = typed
+        .update([markraft_core::TransactionSpec::new().selection(Selection::cursor(end))])
+        .expect("the caret moves")
+        .state()
+        .clone();
+    schema.describe(left.doc())
+}
+
 #[test]
 fn hash_markers_make_headings_of_every_level() {
     for level in 1..=6 {
@@ -206,34 +228,50 @@ fn everything_the_rules_build_survives_a_round_trip() {
 }
 
 #[test]
-fn a_closing_bracket_pair_makes_the_wiki_link_atom() {
+fn a_closing_bracket_pair_makes_the_wiki_link_atom_once_the_caret_leaves() {
+    let second = r#"paragraph("x")"#;
     for (typing, described) in [
         (
             "[[Note]]",
-            r#"doc(paragraph(wiki_link[alias=Str(""),embed=Bool(false),target=Str("Note")]))"#,
+            r#"paragraph(wiki_link[alias=Str(""),embed=Bool(false),target=Str("Note")])"#,
         ),
         (
             "[[Note|Alias]]",
-            r#"doc(paragraph(wiki_link[alias=Str("Alias"),embed=Bool(false),target=Str("Note")]))"#,
+            r#"paragraph(wiki_link[alias=Str("Alias"),embed=Bool(false),target=Str("Note")])"#,
         ),
         (
             "![[x.png]]",
-            r#"doc(paragraph(wiki_link[alias=Str(""),embed=Bool(true),target=Str("x.png")]))"#,
+            r#"paragraph(wiki_link[alias=Str(""),embed=Bool(true),target=Str("x.png")])"#,
         ),
         (
             "see [[a#H]] now",
             concat!(
-                r#"doc(paragraph("see ", "#,
-                r#"wiki_link[alias=Str(""),embed=Bool(false),target=Str("a#H")], " now"))"#
+                r#"paragraph("see ", "#,
+                r#"wiki_link[alias=Str(""),embed=Bool(false),target=Str("a#H")], " now")"#
             ),
         ),
         // Half of one is still the text it is.
-        ("[[Note]", r#"doc(paragraph("[[Note]"))"#),
+        ("[[Note]", r#"paragraph("[[Note]")"#),
         // And so is a spelling the codec does not read.
-        ("[[a|]]", r#"doc(paragraph("[[a|]]"))"#),
+        ("[[a|]]", r#"paragraph("[[a|]]")"#),
     ] {
-        assert_eq!(typed(typing), described, "{typing:?}");
+        assert_eq!(
+            typed_and_left(typing),
+            format!("doc({described}, {second})"),
+            "{typing:?}"
+        );
     }
+    // While the caret still touches it, it is the text being typed: the caret
+    // can go back into it.
+    assert_eq!(typed("[[Note]]"), r#"doc(paragraph("[[Note]]"))"#);
+    // One the caret has typed past folds as soon as it is complete.
+    assert_eq!(
+        typed("see [[a#H]] now"),
+        concat!(
+            r#"doc(paragraph("see ", "#,
+            r#"wiki_link[alias=Str(""),embed=Bool(false),target=Str("a#H")], " now"))"#
+        )
+    );
     // A code span keeps what is typed in it literal, and so does a code block.
     let (schema, state) = empty();
     assert_eq!(
@@ -651,4 +689,87 @@ fn enter_after_a_thematic_break_of_stars_or_underscores_makes_a_divider() {
     for line in ["**", "***a", "*_*"] {
         assert!(entered(line).is_none(), "{line:?}");
     }
+}
+
+/// `state` with the caret moved to `pos`, as an arrow key or a click moves it.
+fn moved(state: &EditorState, pos: usize) -> EditorState {
+    state
+        .update([markraft_core::TransactionSpec::new().selection(Selection::cursor(pos))])
+        .expect("the caret moves")
+        .state()
+        .clone()
+}
+
+/// A caret that reaches a picture finds its source, as in Typora: it can walk
+/// into `![alt](logo.png)` and edit it, and the picture comes back once the
+/// caret has gone. The file never sees the difference.
+#[test]
+fn a_caret_reaching_a_picture_finds_its_source() {
+    let source = "![alt](logo.png)\n\nafter";
+    let (schema, state) = opened(source);
+    let picture = r#"image[alt=Str("alt"),source=Str(""),src=Str("logo.png"),title=Str("")]"#;
+    let away = moved(&state, state.doc().content_size() - 1);
+    assert_eq!(
+        schema.describe(away.doc()),
+        format!(r#"doc(paragraph({picture}), paragraph("after"))"#)
+    );
+
+    // Before the picture: its spelling, the caret where it starts.
+    let before = moved(&away, 1);
+    assert_eq!(
+        schema.describe(before.doc()),
+        r#"doc(paragraph("![alt](logo.png)"), paragraph("after"))"#
+    );
+    assert_eq!(before.selection(), &Selection::cursor(1));
+    assert_eq!(
+        markraft_commonmark::to_markdown(&schema, before.doc()),
+        source
+    );
+
+    // Inside it, and editing it.
+    let inside = moved(&before, 1 + "![al".len());
+    let edited = type_all(&inside, "t");
+    assert_eq!(
+        markraft_commonmark::to_markdown(&schema, edited.doc()),
+        "![altt](logo.png)\n\nafter"
+    );
+
+    // Gone again: the picture, with what was typed.
+    let left = moved(&edited, edited.doc().content_size() - 1);
+    assert_eq!(
+        schema.describe(left.doc()),
+        r#"doc(paragraph(image[alt=Str("altt"),source=Str(""),src=Str("logo.png"),title=Str("")]), paragraph("after"))"#
+    );
+
+    // After the picture: the caret at the end of its spelling.
+    let after = moved(&away, 2);
+    assert_eq!(
+        schema.describe(after.doc()),
+        r#"doc(paragraph("![alt](logo.png)"), paragraph("after"))"#
+    );
+    assert_eq!(
+        after.selection(),
+        &Selection::cursor(1 + "![alt](logo.png)".chars().count())
+    );
+}
+
+/// A caret moving along its own line out of a spelling folds it too, not only
+/// one leaving for another block.
+#[test]
+fn a_spelling_folds_when_the_caret_leaves_along_its_line() {
+    let (schema, state) = opened("see [[Note]] now");
+    let reached = moved(&state, 1 + "see ".len());
+    assert_eq!(
+        schema.describe(reached.doc()),
+        r#"doc(paragraph("see [[Note]] now"))"#
+    );
+    let end = reached.doc().content_size() - 1;
+    let left = moved(&reached, end);
+    assert_eq!(
+        schema.describe(left.doc()),
+        concat!(
+            r#"doc(paragraph("see ", "#,
+            r#"wiki_link[alias=Str(""),embed=Bool(false),target=Str("Note")], " now"))"#
+        )
+    );
 }

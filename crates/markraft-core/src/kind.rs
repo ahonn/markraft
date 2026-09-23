@@ -16,7 +16,10 @@
 //! nothing; a kind whose roles are not on this list resolves its own ids and
 //! hands the view whatever it needs beside this table.
 
+use std::ops::Range;
+
 use crate::node::Node;
+use crate::projection::Line;
 use crate::slice::Slice;
 
 /// The integer attribute of the [`DocTypeNames::syntax`] mark naming the span
@@ -207,4 +210,10 @@ pub trait Codecs: Send + Sync {
 pub trait SourceSpelling: Send + Sync {
     /// An inline atom as the source it was read from.
     fn atom_source(&self, node: &Node) -> Option<String>;
+
+    /// The atoms the text of `line` spells but holds as text — a picture's
+    /// `![alt](src)` the caret was let into — as `char` ranges of the line's
+    /// text, each with the atom it spells. A view uses them to show what the
+    /// source stands for beside it, as it shows the atom itself once folded.
+    fn spelled_atoms(&self, line: &Line) -> Vec<(Range<usize>, Node)>;
 }

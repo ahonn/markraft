@@ -81,6 +81,7 @@ pub fn commonmark_extensions(schema: &Schema) -> Extension {
         input_rules(commonmark_input_rules()),
         corrections(commonmark_corrections(schema)),
         crate::pending::pending_pairs(),
+        crate::unfold::unfold_atoms(),
     ])
 }
 
@@ -461,9 +462,12 @@ fn canonicalise(cx: &CorrectionContext<'_>) -> Vec<Change> {
     let items = Items::from_nodes(schema, cx.node.children());
     let carets = caret_lines(cx, &items);
     let candidates = definition_candidates(schema, cx.doc);
+    // A caret leaving the spelling of an atom, even along its own line, is
+    // what folds it again.
+    let left = cx.selection_left && (left_a_line(cx, &items, &carets) || may_spell_an_atom(&items));
     if first_round
         && !edits_characters(cx)
-        && !(cx.selection_left && left_a_line(cx, &items, &carets))
+        && !left
         && candidates == definition_candidates(schema, cx.start_state.doc())
     {
         return Vec::new();
@@ -565,12 +569,35 @@ fn edits_characters(cx: &CorrectionContext<'_>) -> bool {
         })
 }
 
+/// The ends of the selection after the transaction that stand in this block,
+/// as offsets into its items.
+fn selection_ends(cx: &CorrectionContext<'_>) -> Vec<usize> {
+    let start = cx.content_start;
+    let end = start + cx.node.content_size();
+    cx.selection
+        .ranges(cx.doc)
+        .iter()
+        .flat_map(|range| [range.from, range.to])
+        .filter(|pos| (start..=end).contains(pos))
+        .map(|pos| pos - start)
+        .collect()
+}
+
+/// Whether the block's text could hold the spelling of an atom — a picture,
+/// a wiki link, a raw HTML tag — that a caret may have been let into. A
+/// cheap test, so a caret moving along a line of plain prose derives
+/// nothing.
+fn may_spell_an_atom(items: &Items) -> bool {
+    let text = items.text();
+    text.contains("![") || text.contains("[[") || text.contains('<')
+}
+
 /// The lines of the block a caret or either end of a selection stands on
 /// after the transaction, counted from 0 by the line breaks before them.
 fn caret_lines(cx: &CorrectionContext<'_>, items: &Items) -> Vec<usize> {
-    let selection = cx.tr.new_selection();
-    let ends = selection
-        .ranges(cx.tr.new_doc())
+    let ends = cx
+        .selection
+        .ranges(cx.doc)
         .iter()
         .flat_map(|range| [range.from, range.to])
         .collect::<Vec<_>>();
@@ -749,7 +776,10 @@ fn split_block(cx: &CorrectionContext<'_>, from: usize, to: usize, first: bool) 
     )]
 }
 
-/// Step 2: text a reader takes for an atom becomes the atom.
+/// Step 2: text a reader takes for an atom becomes the atom — except where an
+/// end of the selection touches it in a transaction that lets the caret in,
+/// moves it or types: that is a spelling the caret was let into (see the
+/// `unfold` module) or is typing, and it folds once the caret has gone.
 ///
 /// Every spelling folds in the same round. The derivation reports them in
 /// order and never one inside another, but a change set cannot hold two
@@ -757,10 +787,20 @@ fn split_block(cx: &CorrectionContext<'_>, from: usize, to: usize, first: bool) 
 /// for the next round — as does one that only a fold exposes.
 fn fold_atoms(cx: &CorrectionContext<'_>, derived: &Derived) -> Vec<Change> {
     let schema = cx.start_state.schema();
+    let ends = if crate::unfold::keeps_spelling_at_caret(cx.tr) {
+        selection_ends(cx)
+    } else {
+        Vec::new()
+    };
     let mut folded_to = 0;
     derived
         .atoms
         .iter()
+        .filter(|atom| {
+            !ends
+                .iter()
+                .any(|end| (atom.range.start..=atom.range.end).contains(end))
+        })
         .filter(|atom| {
             let disjoint = atom.range.start >= folded_to;
             if disjoint {
