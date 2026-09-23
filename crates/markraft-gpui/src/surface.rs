@@ -57,11 +57,8 @@ const PILL_FILLER: char = '\u{00a0}';
 /// The widest a drawn atom may grow, as a share of the column.
 const PILL_MAX_RATIO: f32 = 0.9;
 
-/// An image the note can read off the disk is drawn for real, at the column's
-/// width, on the line it has to itself. Everything else — a remote source, a
-/// format no decoder handles, an image sharing its line with text — keeps the
-/// placeholder pill.
-const IMAGE_MAX_HEIGHT: Pixels = px(320.);
+/// The tallest the frame of a picture still being fetched is held open for.
+const LOADING_FRAME_MAX_HEIGHT: Pixels = px(320.);
 /// The widest a picture still being fetched is held open for. Its own size is not
 /// known until it arrives, so the frame only has to read as a picture's place.
 const LOADING_FRAME_MAX_WIDTH: Pixels = px(480.);
@@ -2271,8 +2268,9 @@ fn atom_of(
     })
 }
 
-/// A decoded local image and the size it is drawn at: the column's width, or
-/// the image's own where that is narrower, capped at [`IMAGE_MAX_HEIGHT`].
+/// A decoded image and the size it is drawn at: its own, or the column's width
+/// where it is wider, as Typora draws it. A tall picture is drawn tall rather
+/// than shrunk into a thumbnail no one can read.
 fn drawn_image(
     images: &crate::images::Images,
     src: &str,
@@ -2284,12 +2282,8 @@ fn drawn_image(
     if native_width <= 0. || native_height <= 0. {
         return None;
     }
-    let mut width = column.min(px(native_width)).max(px(1.));
-    let mut height = width * (native_height / native_width);
-    if height > IMAGE_MAX_HEIGHT {
-        height = IMAGE_MAX_HEIGHT;
-        width = height * (native_width / native_height);
-    }
+    let width = column.min(px(native_width)).max(px(1.));
+    let height = width * (native_height / native_width);
     Some((image, size(width, height)))
 }
 
@@ -2297,7 +2291,7 @@ fn drawn_image(
 /// [`LOADING_FRAME_MAX_WIDTH`], at a photo's proportions.
 fn loading_frame(column: Pixels) -> Size<Pixels> {
     let width = column.min(LOADING_FRAME_MAX_WIDTH).max(px(1.));
-    size(width, (width * 0.5625).min(IMAGE_MAX_HEIGHT).round())
+    size(width, (width * 0.5625).min(LOADING_FRAME_MAX_HEIGHT).round())
 }
 
 /// The file name an image source ends in, for a placeholder with no alt text.

@@ -2313,8 +2313,8 @@ mod tests {
 
         let large = scaled(notes_style(false), 21.);
         assert_eq!(large.body_size, gpui::px(21.));
-        assert_eq!(large.heading_sizes[0], gpui::px(36.));
-        assert_eq!(large.paragraph_gap, gpui::px(11.));
+        assert_eq!(large.heading_sizes[0], gpui::px(39.));
+        assert_eq!(large.paragraph_gap, gpui::px(15.));
         assert_eq!(large.list_indent, gpui::px(33.));
         // Colours are the theme's whatever the size.
         assert_eq!(large.text, base.text);

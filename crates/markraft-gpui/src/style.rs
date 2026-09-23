@@ -120,14 +120,21 @@ impl EditorStyle {
         Self {
             padding: px(24.),
             body_size: px(14.),
-            heading_sizes: [px(24.), px(19.), px(17.), px(16.), px(15.), px(14.)],
+            // Typora's ratios (2.25, 1.75, 1.5, 1.25, 1, 1 em) held down at the
+            // top, so a floating note's title does not crowd its own window.
+            // Typora draws its last two levels at the body size and tells H6 apart
+            // by colour; here every level is a size step down from the one above
+            // it, ending at the body size in bold.
+            heading_sizes: [px(26.), px(21.), px(18.), px(16.), px(15.), px(14.)],
             line_height_ratio: 1.5,
-            paragraph_gap: px(7.),
-            list_gap: px(7.),
+            // Paragraphs part further than the items of a list, which are one
+            // block's lines.
+            paragraph_gap: px(10.),
+            list_gap: px(6.),
             // A heading belongs to the text under it, so the space above it has
             // to beat the gap below it at every level.
-            heading_top_gaps: [px(18.), px(16.), px(14.), px(12.), px(10.), px(8.)],
-            heading_bottom_gap: px(6.),
+            heading_top_gaps: [px(22.), px(20.), px(16.), px(14.), px(12.), px(12.)],
+            heading_bottom_gap: px(8.),
             list_indent: px(22.),
             background: rgb(0xefefef).into(),
             text: rgb(0x1c1d21).into(),
@@ -153,7 +160,7 @@ impl EditorStyle {
                 rgb(0x6a3ab2).into(),
                 rgb(0x55575c).into(),
             ],
-            quote_indent: px(12.),
+            quote_indent: px(16.),
             top_overlay: px(0.),
             bottom_overlay: px(0.),
             scrollbar: rgba(0x00000047).into(),
