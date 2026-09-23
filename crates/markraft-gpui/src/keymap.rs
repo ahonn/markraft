@@ -166,21 +166,34 @@ impl DocTypes {
 
 /// Enter.
 pub(crate) fn enter(types: &DocTypes) -> Command {
+    enter_with(types, None)
+}
+
+/// Enter, with each command that splits a textblock at the caret wrapped by
+/// the document kind's [`SplitWrap`](crate::SplitWrap).
+pub(crate) fn enter_with(types: &DocTypes, wrap: Option<&crate::SplitWrap>) -> Command {
+    let splits = |command: Command| match wrap {
+        Some(wrap) => wrap(command),
+        None => command,
+    };
     let mut list: Vec<Option<Command>> = vec![
         // Inside a table Enter moves down a row and appends one at the bottom.
         // The guard behind it is the invariant written down: a cell that split
         // would leave its row one cell wider than the rest.
         types.table_types().map(goto_cell_below),
         types.table_types().map(guard_cell_split),
-        types.list_item.map(split_list_item),
-        types.task_item.map(|item| split_task_item(types, item)),
+        types.list_item.map(split_list_item).map(splits),
+        types
+            .task_item
+            .map(|item| split_task_item(types, item))
+            .map(splits),
     ];
     list.extend(per_item(types, lift_list_item));
     list.extend([
         Some(new_line_in_code()),
         Some(create_paragraph_near()),
         Some(lift_empty_block()),
-        Some(split_block_keep_marks()),
+        Some(splits(split_block_keep_marks())),
     ]);
     some(list)
 }
@@ -220,6 +233,8 @@ pub(crate) fn backspace(types: &DocTypes) -> Command {
         types.table_types().map(guard_cell_range),
         Some(undo_input_rule()),
         Some(delete_selection()),
+        Some(demote_heading_at_start(types)),
+        Some(lift_quote_at_start(types)),
         Some(delete_by_grapheme(Direction::Backward)),
         types.table_types().map(delete_empty_table),
         types.table_types().map(guard_cell_boundary),
@@ -228,6 +243,69 @@ pub(crate) fn backspace(types: &DocTypes) -> Command {
         Some(join_backward()),
         Some(select_node_backward()),
     ])
+}
+
+/// Whether the cursor sits at the start of its textblock.
+fn at_textblock_start(state: &EditorState) -> bool {
+    let doc = state.doc();
+    let selection = state.selection();
+    if !selection.is_cursor() {
+        return false;
+    }
+    let Ok(resolved) = doc.resolve(selection.head(doc)) else {
+        return false;
+    };
+    let depth = (1..=resolved.depth())
+        .rev()
+        .find(|&d| resolved.node(d).is_textblock(state.schema()));
+    let Some(depth) = depth else {
+        return false;
+    };
+    let start = resolved.start(depth);
+    let hidden = resolved.depth() - depth;
+    resolved.pos().checked_sub(hidden) == Some(start)
+}
+
+/// At the start of a heading, Backspace lowers the level or turns it into a
+/// paragraph — the editable ATX-prefix behaviour.
+fn demote_heading_at_start(types: &DocTypes) -> Command {
+    let types = types.clone();
+    command(move |state| {
+        if !at_textblock_start(state) {
+            return None;
+        }
+        let heading = types.heading?;
+        let paragraph = types.paragraph?;
+        let (ty, attrs) = types.block_at_cursor(state)?;
+        if ty != heading {
+            return None;
+        }
+        let level = attrs.get("level").and_then(|v| v.as_int()).unwrap_or(1);
+        if level <= 1 {
+            return set_block_type(paragraph, Attrs::empty())(state);
+        }
+        set_block_type(heading, Attrs::from_pairs([("level", level - 1)]))(state)
+    })
+}
+
+/// At the start of a quoted block, Backspace lifts one quote level.
+fn lift_quote_at_start(types: &DocTypes) -> Command {
+    let types = types.clone();
+    command(move |state| {
+        if !at_textblock_start(state) {
+            return None;
+        }
+        let blockquote = types.blockquote?;
+        let doc = state.doc();
+        let head = state.selection().head(doc);
+        let resolved = doc.resolve(head).ok()?;
+        let in_quote =
+            (1..=resolved.depth()).any(|depth| resolved.node(depth).type_id() == blockquote);
+        if !in_quote {
+            return None;
+        }
+        markraft_core::commands::lift()(state)
+    })
 }
 
 /// Forward delete.
@@ -527,6 +605,11 @@ pub(crate) fn insert_plain(types: &DocTypes, text: &str) -> Command {
     let types = types.clone();
     let text = text.to_owned();
     let insert = command(move |state| {
+        if text == "#"
+            && let Some(spec) = promote_heading_at_start(&types)(state)
+        {
+            return Some(spec);
+        }
         if !text.contains('\n') || types.in_verbatim_block_at(state) {
             return markraft_core::commands::insert_text(&text)(state);
         }
@@ -557,6 +640,26 @@ pub(crate) fn insert_plain(types: &DocTypes, text: &str) -> Command {
     // Typing over a selection that reaches out of one cell would merge the
     // cells it spans, so that edit is refused before anything else is tried.
     some([guard, Some(insert)])
+}
+
+/// At the start of a heading, typing `#` raises the level (up to 6).
+fn promote_heading_at_start(types: &DocTypes) -> Command {
+    let types = types.clone();
+    command(move |state| {
+        if !at_textblock_start(state) {
+            return None;
+        }
+        let heading = types.heading?;
+        let (ty, attrs) = types.block_at_cursor(state)?;
+        if ty != heading {
+            return None;
+        }
+        let level = attrs.get("level").and_then(|v| v.as_int()).unwrap_or(1);
+        if level >= 6 {
+            return None;
+        }
+        set_block_type(heading, Attrs::from_pairs([("level", level + 1)]))(state)
+    })
 }
 
 /// ⌘A: the verbatim block the cursor sits in first, then the whole document.
@@ -649,6 +752,22 @@ mod tests {
         let state = at(&state, projection_of(&state).lines()[1].to);
         let lifted = after(&state, &enter(&types_of(&state))).expect("the lift applies");
         assert_eq!(lifted, "- one");
+    }
+
+    /// With the document kind's split wrapper, Enter inside a style keeps it on
+    /// both sides — in a list item as in a paragraph.
+    #[test]
+    fn enter_with_a_kinds_split_keeps_the_style_open_at_the_caret() {
+        let wrap: crate::SplitWrap = std::sync::Arc::new(markraft_commonmark::keeping_styles);
+        for (source, line, expected) in [
+            ("**abcd**", "**abcd**", "**ab**\n\n**cd**"),
+            ("- **abcd**", "**abcd**", "- **ab**\n- **cd**"),
+        ] {
+            let state = state_of(source);
+            let state = at(&state, caret_in(&state, line) + 4);
+            let enter = enter_with(&types_of(&state), Some(&wrap));
+            assert_eq!(after(&state, &enter).as_deref(), Some(expected), "{source}");
+        }
     }
 
     #[test]
@@ -807,6 +926,34 @@ mod tests {
         // A different level sets rather than clears.
         let two = toggle_block(&types, heading, Attrs::from_pairs([("level", 2i64)]));
         assert_eq!(after(&state, &two).as_deref(), Some("## text"));
+    }
+
+    #[test]
+    fn backspace_at_heading_start_demotes_and_hash_promotes() {
+        let state = state_of("## title");
+        let types = types_of(&state);
+        let start = projection_of(&state).lines()[0].from;
+        let demoted = applied(&at(&state, start), &backspace(&types)).expect("demotes");
+        assert_eq!(to_markdown(state.schema(), demoted.doc()), "# title");
+        let head = demoted.selection().head(demoted.doc());
+        let promoted = applied(&at(&demoted, head), &insert_plain(&types, "#")).expect("promotes");
+        assert_eq!(to_markdown(state.schema(), promoted.doc()), "## title");
+        let h1 = state_of("# title");
+        let cleared = applied(
+            &at(&h1, projection_of(&h1).lines()[0].from),
+            &backspace(&types_of(&h1)),
+        )
+        .expect("clears to paragraph");
+        assert_eq!(to_markdown(state.schema(), cleared.doc()), "title");
+    }
+
+    #[test]
+    fn backspace_at_quote_start_lifts() {
+        let state = state_of("> quoted");
+        let types = types_of(&state);
+        let start = projection_of(&state).lines()[0].from;
+        let lifted = applied(&at(&state, start), &backspace(&types)).expect("lifts");
+        assert_eq!(to_markdown(state.schema(), lifted.doc()), "quoted");
     }
 
     #[test]

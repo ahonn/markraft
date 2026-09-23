@@ -173,6 +173,127 @@ fn canonical_tag(tag: &str) -> String {
     format!("<{body}>")
 }
 
+// -- inline source ------------------------------------------------------------
+
+/// A placeholder for an atom in a textblock's text: one character, which
+/// CommonMark 0.31 classes as punctuation.
+pub const ATOM: char = '\u{fffc}';
+
+/// The application's comrak options, rendering raw HTML and every link
+/// destination as written so a judge sees them.
+pub fn options() -> comrak::Options<'static> {
+    let mut options = commonmark_options();
+    options.render.r#unsafe = true;
+    options
+}
+
+/// `markdown` with every atom's source replaced by [`ATOM`].
+pub fn with_atoms(markdown: &str) -> String {
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, markdown, &options());
+    let starts = line_starts(markdown);
+    let lines: Vec<&str> = markdown.split('\n').collect();
+    let mut ranges = Vec::new();
+    collect_atoms(root, &starts, &lines, 0, markdown, &mut ranges);
+    ranges.sort_by_key(|range| (range.start, range.end));
+    let mut out = String::new();
+    let mut at = 0;
+    for range in ranges {
+        if range.start < at {
+            continue;
+        }
+        out.push_str(&markdown[at..range.start]);
+        out.push(ATOM);
+        at = range.end;
+    }
+    out.push_str(&markdown[at..]);
+    out
+}
+
+/// Collect the byte ranges of the atoms under `node`, whose inline positions
+/// are reported `shift` lines early.
+///
+/// comrak reports the inline positions of a paragraph that starts with link
+/// reference definitions as though the definitions were not there: one line
+/// early for each line they take.
+fn collect_atoms<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    starts: &[usize],
+    lines: &[&str],
+    shift: usize,
+    markdown: &str,
+    out: &mut Vec<std::ops::Range<usize>>,
+) {
+    let (value, mut pos) = {
+        let data = node.data.borrow();
+        (data.value.clone(), data.sourcepos)
+    };
+    let mut shift = shift;
+    if matches!(value, comrak::nodes::NodeValue::Paragraph) {
+        let own = &lines[pos.start.line - 1..pos.end.line.min(lines.len())];
+        shift = leading_definition_lines(own);
+    } else {
+        pos.start.line += shift;
+        pos.end.line += shift;
+    }
+    let atom = match &value {
+        comrak::nodes::NodeValue::Image(_) | comrak::nodes::NodeValue::WikiLink(_) => true,
+        comrak::nodes::NodeValue::HtmlInline(html) => !is_u_tag(html),
+        _ => false,
+    };
+    if atom {
+        if let Some(range) = byte_range(starts, pos, markdown) {
+            out.push(range);
+        }
+        return;
+    }
+    for child in node.children() {
+        collect_atoms(child, starts, lines, shift, markdown, out);
+    }
+}
+
+/// Whether an inline HTML tag is `<u>` or `</u>`, the one pair that is a
+/// style rather than an atom.
+pub fn is_u_tag(html: &str) -> bool {
+    let body = html.trim_start_matches('<').trim_end_matches('>').trim();
+    body.eq_ignore_ascii_case("u") || body.eq_ignore_ascii_case("/u")
+}
+
+/// The byte offset of each line's start.
+pub fn line_starts(text: &str) -> Vec<usize> {
+    std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(at, _)| at + 1))
+        .collect()
+}
+
+/// The bytes of `text` a comrak position covers, reading its columns as byte
+/// offsets from the start of its line (which also reads a column past a line's
+/// end the way comrak means it), or `None` when they do not fit.
+pub fn byte_range(
+    starts: &[usize],
+    pos: comrak::nodes::Sourcepos,
+    text: &str,
+) -> Option<std::ops::Range<usize>> {
+    let from = starts.get(pos.start.line.checked_sub(1)?)? + pos.start.column.checked_sub(1)?;
+    let to = starts.get(pos.end.line.checked_sub(1)?)? + pos.end.column;
+    (from < to && to <= text.len() && text.is_char_boundary(from) && text.is_char_boundary(to))
+        .then_some(from..to)
+}
+
+/// How many whole lines at the start of `lines` a reader takes for link
+/// reference definitions: the longest run that reads as nothing else.
+pub fn leading_definition_lines(lines: &[&str]) -> usize {
+    (1..=lines.len())
+        .rev()
+        .find(|count| {
+            let arena = comrak::Arena::new();
+            comrak::parse_document(&arena, &lines[..*count].join("\n"), &options())
+                .first_child()
+                .is_none()
+        })
+        .unwrap_or(0)
+}
+
 /// Whether the codec's normalisation of `source` renders the same HTML.
 pub fn judge(codec: &Codec, source: &str) -> Result<(), String> {
     let written = codec.normalize(source);
@@ -223,3 +344,114 @@ impl Rng {
         &items[self.below(items.len())]
     }
 }
+
+/// Every Markdown source the old codec's tests fed to `from_markdown`.
+pub const CORPUS: &[&str] = &[
+    // Plain text.
+    "",
+    "a",
+    "ab",
+    "aaa",
+    "x",
+    "xz",
+    "text",
+    "abcdef",
+    "original",
+    "read this",
+    "a\nb",
+    "one\ntwo",
+    "first\nsecond\nthird",
+    "abcd\nef",
+    "tail",
+    "**paste**",
+    // Headings.
+    "# Title\nbody text",
+    "# a **bold** tail\n- item\n中文",
+    "# a **bold** tail\n- item\n中文\n```\n\ncode\n```\nlast",
+    "# h\n\n\npara\n\n- a\n\n- b\n\n> q\n> \n> r",
+    "Title\n=====",
+    "```rust\none\ntwo\n```\n# after",
+    // Lists.
+    "- item",
+    "- first\n  - ",
+    "- first\n  - child",
+    "- root\n  - child",
+    "- root\n  - child\n- sibling",
+    "- root\n  - child\nparagraph",
+    "- first\n- second\n  - child\n- third\n- last",
+    "- parent\n  - child\n    - grandchild\n  - second child\n- root",
+    "- [x] done\n- [ ] open\nuntouched",
+    "- first\n- \n- [ ] \n1. \n",
+    "- first\n    - child\n        - grandchild",
+    "1. one\n2. two\nbreak\n1. again",
+    "3) one\n9. two\nbreak\n1. again",
+    "1. first\n    1. child\n        - grandchild\n    2. child two\n2. second\n- [ ] task\n  - [x] nested\n> quote\n> > nested quote",
+    "-   lead",
+    // Quotes and dividers.
+    "> first\n> second\n",
+    "\\> not a quote",
+    "---\nafter",
+    "***\nafter",
+    "\\-\\-\\-",
+    "text\n---\nmore",
+    "> quote\nlazy\n- item\ncontinued",
+    "> - item\n> - two\n- > quoted\n  - > deep",
+    // Code.
+    "```\n```",
+    "```\nx\n```\nafter",
+    "```rust\na\nb\n```",
+    "```rust\nx\n```\nafter",
+    "```rust\ntext\n```",
+    "```rust\none\ntwo\n```",
+    "```rust\n\nafter\n```",
+    "before\n```rust\n\nafter\n```",
+    "```rust\nlet x = 1;\n```",
+    "```rust\none\n  two\nlast\n```",
+    "```rust\ncode\n\nmore\n```",
+    "```rust\nlet x = 1;\nprintln!(\"{x}\");\n```\nparagraph",
+    "```rust\n# not a heading\n\n**not bold**\n```\nafter\n````\n```\n````",
+    "~~~\n~~~",
+    "    indented\n    more\n\ntext",
+    "- item\n\n  ```rust\n  code\n  ```",
+    // Emphasis.
+    "ab**cd**\nef\ngh",
+    "~~gone~~ and <u>**kept**</u>",
+    "**bold** [link](https://example.com)",
+    "# Title\n- **bold** and *italic* and `code`\n- [ ] todo\n- [x] done\n\n***both***",
+    "# Title\n- **bold** and *italic* and `code`\n- [ ] todo\n- [x] done\n\n***both*** **`bold code`** \\*literal\\*",
+    // Links.
+    "see [the **docs**](https://example.com/a_(b)) and [x](<a b>)",
+    "see [the docs](https://example.com) end",
+    "[x](https://example.com/?q=&amp;copy;)",
+    "[ref]: https://example.com",
+    // Escaping, entities, whitespace.
+    "a \\* b &amp; c &copy;",
+    "1\\. not a list",
+    "  lead",
+    "one\ntwo  \nthree\\\nfour",
+    "&amp; &#32; \\* a",
+    "    four",
+    "\tfour",
+    "   \tfour",
+    // Constructs with no model of their own.
+    "| a | b |\n[text] (url)\n![alt](image.png)",
+    "| a | b |\n|---|---|\n| c | d |",
+    "<div>\nraw\n</div>",
+    "![alt](image.png)",
+    "term\n: definition",
+    "[^1]: a footnote",
+    "<br>",
+    "$$\nx = 1\n$$",
+    // Unicode.
+    "中😀\ntext",
+    "a😀b\nc",
+    "e\u{301}x",
+    "hello  é 👨‍👩‍👧‍👦\n中文",
+    "中😀e\u{301}👨‍👩‍👧‍👦\n末",
+    "a👨‍👩‍👧‍👦b",
+    "a👨‍👩‍👧‍👦\nb",
+    "\u{3000}你好",
+    "\u{a0}hello",
+    "  \u{3000}你好",
+    "first\n\u{3000}second",
+];

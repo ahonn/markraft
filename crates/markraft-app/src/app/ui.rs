@@ -431,8 +431,9 @@ impl NotesApp {
             Intent::Reload => self.reload(window, cx),
             Intent::Mark(mark) => {
                 self.close_popover(cx);
-                self.editor()
-                    .update(cx, |e, cx| e.run_command(&mark.command(), cx));
+                self.editor().update(cx, |e, cx| {
+                    e.toggle_mark(mark.mark(), markraft_core::Attrs::empty(), cx)
+                });
                 self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
             }

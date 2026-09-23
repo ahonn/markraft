@@ -236,18 +236,28 @@ impl HtmlState<'_> {
     /// Write `parent`'s children as inline content, opening each mark once for
     /// the whole run that carries it.
     ///
-    /// Method-B delimiter leaves (the [`crate::schema::SYNTAX`] mark) are
-    /// skipped: their characters exist for Markdown round-trip and editing, not
-    /// for HTML. Style marks that are already open are kept as a prefix even
-    /// when rank order would otherwise close them — nested `*a **b** c*` must
-    /// write `<em>a <strong>b</strong> c</em>`, not reopen `<em>` around `b`.
+    /// The text is Markdown source, so what it spells rather than says — the
+    /// runs carrying [`crate::schema::SYNTAX`] — is left out, and an entity is
+    /// written as the character it displays. A line break is `<br>` where the
+    /// text makes it a hard break, and otherwise a soft break the importer
+    /// reads back as one. Style marks that
+    /// are already open are kept as a prefix even when rank order would
+    /// otherwise close them — nested `*a **b** c*` must write
+    /// `<em>a <strong>b</strong> c</em>`, not reopen `<em>` around `b`.
     pub fn render_inline(&mut self, parent: &Node) {
         let mut open: Vec<Mark> = Vec::new();
-        let syntax = self.schema().mark_id(crate::schema::SYNTAX);
-        for child in parent.children() {
-            if syntax.is_some_and(|ty| child.marks().get(ty).is_some()) {
-                continue;
-            }
+        let schema = self.schema();
+        let syntax = schema.mark_id(crate::schema::SYNTAX);
+        let line_break = schema.node_id(crate::schema::LINE_BREAK);
+        let hard = hard_break_indexes(schema, parent);
+        for (index, child) in parent.children().enumerate() {
+            let display = syntax.and_then(|ty| child.marks().get(ty)).map(|mark| {
+                mark.attrs
+                    .get("display")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            });
             let marks = self.ordered_marks(&open, child.marks());
             let keep = open
                 .iter()
@@ -263,7 +273,19 @@ impl HtmlState<'_> {
                 self.write(&open_tag);
                 open.push(mark);
             }
-            self.render(child, Some(parent));
+            // A concealed run still opens and closes the marks around it, so
+            // a link that is all spelling is still a link.
+            if let Some(display) = display {
+                self.text(&display);
+            } else if Some(child.type_id()) == line_break {
+                self.write(if hard.contains(&index) {
+                    "<br>"
+                } else {
+                    "<span data-type=\"softBreak\"> </span>"
+                });
+            } else {
+                self.render(child, Some(parent));
+            }
         }
         for mark in open.into_iter().rev() {
             let close = self.mark_tags(&mark).1;
@@ -295,6 +317,28 @@ impl HtmlState<'_> {
             None => (String::new(), String::new()),
         }
     }
+}
+
+/// The indexes of `parent`'s children that are hard line breaks.
+fn hard_break_indexes(schema: &Schema, parent: &Node) -> Vec<usize> {
+    let Some(kind) = crate::textblock::block_kind(schema, parent.type_id()) else {
+        return Vec::new();
+    };
+    let items = crate::textblock::Items::from_nodes(schema, parent.children());
+    let derived = crate::derive::derive(kind, &items.text(), &crate::derive::DeriveContext::new());
+    if derived.hard_breaks.is_empty() {
+        return Vec::new();
+    }
+    // Each child is one item except text, which is one per character.
+    let mut out = Vec::new();
+    let mut offset = 0;
+    for (index, child) in parent.children().enumerate() {
+        if derived.hard_breaks.contains(&offset) && child.text().is_none() {
+            out.push(index);
+        }
+        offset += child.text().map_or(1, |text| text.chars().count());
+    }
+    out
 }
 
 fn rule(
@@ -478,14 +522,6 @@ pub fn commonmark_html_node_rules() -> HtmlNodeRules {
         }),
     );
     rules.insert(
-        md::SOFT_BREAK.to_string(),
-        rule(|state, _, _| state.write("<span data-type=\"softBreak\"> </span>")),
-    );
-    rules.insert(
-        md::INLINE_SPAN.to_string(),
-        rule(|state, node, _| state.render_inline(node)),
-    );
-    rules.insert(
         md::RAW_INLINE.to_string(),
         rule(|state, node, _| {
             // Keep the source opaque in clipboard HTML. Pasting must not execute
@@ -496,7 +532,7 @@ pub fn commonmark_html_node_rules() -> HtmlNodeRules {
         }),
     );
     rules.insert(
-        md::HARD_BREAK.to_string(),
+        md::LINE_BREAK.to_string(),
         rule(|state, _, _| state.write("<br>")),
     );
     rules
@@ -638,7 +674,6 @@ pub fn commonmark_html_mark_rules() -> HtmlMarkRules {
     rules.insert(md::STRONG.to_string(), tags("<strong>", "</strong>"));
     rules.insert(md::EM.to_string(), tags("<em>", "</em>"));
     rules.insert(md::CODE.to_string(), tags("<code>", "</code>"));
-    rules.insert(md::SYNTAX.to_string(), tags("", ""));
     rules
 }
 

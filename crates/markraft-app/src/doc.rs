@@ -10,8 +10,8 @@
 //! the editor's catalogue.
 
 use markraft_commonmark::{
-    CommonMarkCodecs, commonmark_doc_type_names, commonmark_extensions, commonmark_schema,
-    schema as md,
+    CommandRefusal, CommonMarkCodecs, CommonMarkSpelling, commonmark_doc_type_names,
+    commonmark_extensions, commonmark_schema, schema as md,
 };
 use markraft_core::Codecs;
 use markraft_core::commands::{Command, command, replace_selection};
@@ -19,8 +19,8 @@ use markraft_core::projection::{Line, Projection};
 use markraft_core::{
     Attrs, EditorState, Extension, Fragment, MarkSet, MarkTypeId, Node, NodeTypeId, Schema, Slice,
 };
-use markraft_gpui::MarkToggle;
 use markraft_gpui::{CalloutAttrs, DocTypes};
+use markraft_gpui::{Formatting, LinkSetter, MarkToggle, SplitWrap};
 use std::sync::{Arc, LazyLock};
 
 static SCHEMA: LazyLock<Schema> = LazyLock::new(commonmark_schema);
@@ -35,6 +35,8 @@ static TYPES: LazyLock<DocTypes> = LazyLock::new(|| DocTypes {
 });
 static CODECS: LazyLock<Arc<dyn Codecs>> =
     LazyLock::new(|| Arc::new(CommonMarkCodecs::new(schema().clone())));
+static SPELLING: LazyLock<Arc<dyn markraft_core::SourceSpelling>> =
+    LazyLock::new(|| Arc::new(CommonMarkSpelling::new(schema().clone())));
 
 /// The document kind every note is written in.
 pub fn schema() -> &'static Schema {
@@ -57,13 +59,44 @@ pub fn extensions() -> Extension {
     commonmark_extensions(schema())
 }
 
+/// How this document kind spells the parts of itself a focused line reveals.
+pub fn spelling() -> Arc<dyn markraft_core::SourceSpelling> {
+    SPELLING.clone()
+}
+
 /// How this document kind toggles an inline mark.
 ///
 /// Markdown keeps the characters that spell a mark in the document, so a toggle
 /// edits those rather than the mark alone; the model's own `toggle_mark` would
-/// leave the two disagreeing.
-pub fn mark_toggle() -> MarkToggle {
-    Arc::new(markraft_commonmark::toggle_style_mark)
+/// leave the two disagreeing. Where Markdown cannot spell the result, the
+/// editor is told why in the words `refusal` gives it.
+pub fn mark_toggle(refusal: fn(&CommandRefusal) -> String) -> MarkToggle {
+    Arc::new(move |ty, _| worded(markraft_commonmark::toggle_style(ty), refusal))
+}
+
+/// How this document kind links and unlinks: by editing the link's source.
+pub fn link_setter(refusal: fn(&CommandRefusal) -> String) -> LinkSetter {
+    Arc::new(move |_, url| {
+        let command = match url {
+            Some(url) => markraft_commonmark::set_link(url, ""),
+            None => markraft_commonmark::unlink(),
+        };
+        worded(command, refusal)
+    })
+}
+
+/// How this document kind splits a block: every style open at the caret is
+/// closed before the cut and opened again after it.
+pub fn split_wrap() -> SplitWrap {
+    Arc::new(markraft_commonmark::keeping_styles)
+}
+
+/// A kind's formatting command, its refusal put in the application's words.
+fn worded(
+    command: markraft_commonmark::FormatCommand,
+    refusal: fn(&CommandRefusal) -> String,
+) -> Formatting {
+    Arc::new(move |state| command(state).map_err(|error| refusal(&error)))
 }
 
 /// The smallest document the schema allows: one empty paragraph.
@@ -346,10 +379,6 @@ impl Inline {
             Inline::Strikethrough => md::STRIKETHROUGH,
             Inline::Underline => md::UNDERLINE,
         })
-    }
-
-    pub fn command(self) -> Command {
-        markraft_core::commands::toggle_mark(self.mark(), Attrs::empty())
     }
 
     pub fn is_active(self, marks: &MarkSet) -> bool {

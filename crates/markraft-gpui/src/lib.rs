@@ -271,11 +271,22 @@ pub struct Setup {
     /// How the clipboard reads and writes this document kind. Without it a copy
     /// writes plain text and a paste is inserted literally.
     pub codecs: Option<Arc<dyn markraft_core::Codecs>>,
+    /// How this document kind spells the parts of itself a reader may be shown
+    /// as source — a heading's `##`, a code fence, a link's `](…)`. Without it
+    /// the view draws only what it renders, never the characters behind it.
+    pub spelling: Option<Arc<dyn markraft_core::SourceSpelling>>,
     /// How this document kind toggles an inline mark. A kind that keeps the
     /// characters spelling a mark in the document edits *those*, which the
     /// model's own [`toggle_mark`](markraft_core::commands::toggle_mark) knows
     /// nothing about; one that does not leaves this unset and gets it.
     pub mark_toggle: Option<MarkToggle>,
+    /// How this document kind links and unlinks the selection, for the same
+    /// reason. Without it the view sets and removes the link mark itself.
+    pub link_setter: Option<LinkSetter>,
+    /// How this document kind splits a textblock: a wrapper around each of
+    /// the view's own splitting commands that Enter runs. A kind that spells
+    /// styles in the text closes and reopens them around the cut here.
+    pub split_wrap: Option<SplitWrap>,
     /// The document to open with. The schema's smallest valid document
     /// otherwise.
     pub doc: Option<Node>,
@@ -288,7 +299,10 @@ impl Setup {
             types: DocTypes::none(),
             extensions: markraft_core::Extension::none(),
             codecs: None,
+            spelling: None,
             mark_toggle: None,
+            link_setter: None,
+            split_wrap: None,
             doc: None,
         }
     }
@@ -304,8 +318,20 @@ impl Setup {
         self.codecs = Some(codecs);
         self
     }
+    pub fn spelling(mut self, spelling: Arc<dyn markraft_core::SourceSpelling>) -> Setup {
+        self.spelling = Some(spelling);
+        self
+    }
     pub fn mark_toggle(mut self, toggle: MarkToggle) -> Setup {
         self.mark_toggle = Some(toggle);
+        self
+    }
+    pub fn link_setter(mut self, setter: LinkSetter) -> Setup {
+        self.link_setter = Some(setter);
+        self
+    }
+    pub fn split_wrap(mut self, wrap: SplitWrap) -> Setup {
+        self.split_wrap = Some(wrap);
         self
     }
     pub fn doc(mut self, doc: Node) -> Setup {
@@ -314,9 +340,24 @@ impl Setup {
     }
 }
 
+/// A document kind's formatting edit over a state: `Ok(None)` where it does not
+/// apply, the edit, or — where the kind has no way to write the result — the
+/// sentence the host wants shown, which the view reports as
+/// [`EditRejection::Refused`].
+pub type Formatting =
+    Arc<dyn Fn(&EditorState) -> Result<Option<TransactionSpec>, String> + Send + Sync>;
+
 /// How a document kind toggles one inline mark over the selection.
-pub type MarkToggle =
-    Arc<dyn Fn(markraft_core::MarkTypeId, Attrs) -> markraft_core::commands::Command + Send + Sync>;
+pub type MarkToggle = Arc<dyn Fn(markraft_core::MarkTypeId, Attrs) -> Formatting + Send + Sync>;
+
+/// How a document kind links the selection to a URL, or unlinks it with `None`.
+/// The mark type is the one [`DocTypes::link`] names.
+pub type LinkSetter =
+    Arc<dyn Fn(markraft_core::MarkTypeId, Option<&str>) -> Formatting + Send + Sync>;
+
+/// How a document kind wraps a command that splits a textblock at the caret.
+pub type SplitWrap =
+    Arc<dyn Fn(markraft_core::commands::Command) -> markraft_core::commands::Command + Send + Sync>;
 
 /// Why an edit did not reach the document. The editor only keeps the cases apart;
 /// the host words each one, because only it knows what the document is stored in.
@@ -333,6 +374,9 @@ pub enum EditRejection {
     Marked(String),
     /// The transaction itself could not be built.
     Invalid(String),
+    /// The document kind has no way to write this edit here — a style its
+    /// syntax cannot spell at that spot. Nothing changed.
+    Refused(String),
 }
 
 impl EditRejection {
@@ -341,7 +385,8 @@ impl EditRejection {
         let (Self::ReadOnly(message)
         | Self::Protected(message)
         | Self::Marked(message)
-        | Self::Invalid(message)) = self;
+        | Self::Invalid(message)
+        | Self::Refused(message)) = self;
         message
     }
 }
@@ -396,8 +441,14 @@ pub struct EditorView {
     pub(crate) types: DocTypes,
     /// The host's clipboard codecs, absent for an editor that only holds text.
     pub(crate) codecs: Option<Arc<dyn markraft_core::Codecs>>,
+    /// How the host's document kind spells itself; see [`Setup::spelling`].
+    pub(crate) spelling: Option<Arc<dyn markraft_core::SourceSpelling>>,
     /// How the host's document kind toggles a mark; see [`Setup::mark_toggle`].
     mark_toggle: Option<MarkToggle>,
+    /// How the host's document kind links; see [`Setup::link_setter`].
+    link_setter: Option<LinkSetter>,
+    /// How the host's document kind splits; see [`Setup::split_wrap`].
+    split_wrap: Option<SplitWrap>,
     /// The host's extensions, kept so the state can be rebuilt on a replacement.
     host_extensions: markraft_core::Extension,
     pub(crate) extensions: Vec<extension::Registration>,
@@ -484,7 +535,10 @@ impl EditorView {
             types,
             extensions,
             codecs,
+            spelling,
             mark_toggle,
+            link_setter,
+            split_wrap,
             doc,
         } = setup;
         let state = build_state(&schema, &extensions, doc);
@@ -495,7 +549,10 @@ impl EditorView {
             file_paste: false,
             types,
             codecs,
+            spelling,
             mark_toggle,
+            link_setter,
+            split_wrap,
             extension_selection: state.selection().clone(),
             overlay_open: false,
             state,
@@ -700,6 +757,7 @@ impl EditorView {
             images: self.shaping.images(),
             wiki: self.shaping.wiki(),
             protected: self.shaping.protected(),
+            spelling: self.spelling.as_deref(),
             selection: selection.from(doc)..selection.to(doc),
             composition: markraft_core::composition_range(&self.state)
                 .map(|range| range.from..range.to),
@@ -892,14 +950,44 @@ impl EditorView {
 
     pub fn toggle_mark(&mut self, ty: MarkTypeId, attrs: Attrs, cx: &mut Context<Self>) {
         let command = self.mark_command(ty, attrs);
-        self.run_command(&command, cx);
+        self.run_formatting(&command, cx);
     }
 
     /// The host's way of toggling `ty`, or the model's where it has none.
-    fn mark_command(&self, ty: MarkTypeId, attrs: Attrs) -> markraft_core::commands::Command {
+    fn mark_command(&self, ty: MarkTypeId, attrs: Attrs) -> Formatting {
         match &self.mark_toggle {
             Some(toggle) => toggle(ty, attrs),
-            None => markraft_core::commands::toggle_mark(ty, attrs),
+            None => {
+                let command = markraft_core::commands::toggle_mark(ty, attrs);
+                Arc::new(move |state| Ok(command(state)))
+            }
+        }
+    }
+
+    /// The host's way of linking the selection to `url`, or unlinking it, or
+    /// the view's own where it has none.
+    fn link_command(&self, ty: MarkTypeId, url: Option<&str>) -> Formatting {
+        match &self.link_setter {
+            Some(setter) => setter(ty, url),
+            None => {
+                let url = url.map(str::to_owned);
+                Arc::new(move |state| Ok(links::set_link(state, ty, url.as_deref())))
+            }
+        }
+    }
+
+    /// Run a document kind's formatting edit. A refusal changes nothing and is
+    /// kept for the host, as [`EditorView::take_edit_error`] reports it; `false`
+    /// only when the edit does not apply here at all.
+    pub fn run_formatting(&mut self, command: &Formatting, cx: &mut Context<Self>) -> bool {
+        match command(&self.state) {
+            Ok(Some(spec)) => self.edit(cx, false, vec![spec]).is_some(),
+            Ok(None) => false,
+            Err(message) => {
+                self.edit_error = Some(EditRejection::Refused(message));
+                cx.notify();
+                true
+            }
         }
     }
 
@@ -919,9 +1007,8 @@ impl EditorView {
             return;
         }
         let Some(ty) = self.types.link else { return };
-        if let Some(spec) = links::set_link(&self.state, ty, url) {
-            self.edit(cx, false, vec![spec]);
-        }
+        let command = self.link_command(ty, url);
+        self.run_formatting(&command, cx);
     }
 
     /// The URL of the link drawn under `point`.
@@ -1408,18 +1495,42 @@ impl EditorView {
             return;
         }
         let schema = self.state.schema().clone();
-        let spec = if literal {
+        let verbatim = self.types.in_verbatim_block_at(&self.state);
+        let spec = if let Some(codecs) = self
+            .codecs
+            .clone()
+            .filter(|_| matches!(mode, clipboard::PasteMode::Plain))
+            .filter(|_| !self.single_line && !verbatim)
+        {
+            // The kind reads plain text as the characters it is. A table cell
+            // holds one line, so its line endings become spaces there.
+            let in_cell = self
+                .types
+                .table_types()
+                .and_then(|types| markraft_core::commands::cell_at(types, &self.state))
+                .is_some();
+            let text = if in_cell {
+                text.replace('\n', " ")
+            } else {
+                text.to_owned()
+            };
+            markraft_core::commands::replace_selection(codecs.from_text(&text))(&self.state)
+        } else if literal {
             let text = single_line::text(text, self.single_line);
             keymap::insert_plain(&self.types, &text)(&self.state)
         } else if is_web_url(text.trim())
             && self.types.link.is_some()
             && (!self.state.selection().is_empty(self.state.doc()) || self.active_link().is_none())
         {
-            links::set_link(
-                &self.state,
-                self.types.link.expect("checked"),
-                Some(text.trim()),
-            )
+            let command = self.link_command(self.types.link.expect("checked"), Some(text.trim()));
+            match command(&self.state) {
+                Ok(spec) => spec,
+                Err(message) => {
+                    self.edit_error = Some(EditRejection::Refused(message));
+                    cx.notify();
+                    return;
+                }
+            }
         } else if let Some(slice) = self
             .codecs
             .clone()
@@ -1711,7 +1822,7 @@ impl EditorView {
                 cx.propagate();
                 return;
             }
-            let command = keymap::enter(&this.types);
+            let command = keymap::enter_with(&this.types, this.split_wrap.as_ref());
             if !this.run_command(&command, cx) {
                 cx.propagate();
             }
@@ -1782,7 +1893,7 @@ impl EditorView {
                         .filter(|_| !this.single_line)
                         .map(|ty| this.mark_command(ty, Attrs::empty()));
                     match command {
-                        Some(command) if this.run_command(&command, cx) => {}
+                        Some(command) if this.run_formatting(&command, cx) => {}
                         _ => cx.propagate(),
                     }
                 }));

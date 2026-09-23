@@ -337,14 +337,6 @@ pub fn commonmark_html_rules() -> HtmlRules {
                 }),
             },
         )
-        .matching(
-            "span",
-            html_match_fn(|t| t.attr("data-type") == Some("softBreak")),
-            HtmlRule::Atom {
-                node_type: md::SOFT_BREAK.to_string(),
-                attrs: no_attrs(),
-            },
-        )
         .with_all(
             &[
                 "script", "style", "head", "template", "noscript", "title", "meta", "link",
@@ -486,7 +478,7 @@ pub fn commonmark_html_rules() -> HtmlRules {
         .with(
             "br",
             HtmlRule::LineBreak {
-                node_type: md::HARD_BREAK.to_string(),
+                node_type: md::LINE_BREAK.to_string(),
             },
         )
         .matching(

@@ -1,13 +1,15 @@
 //! The CommonMark/GFM serialiser rules.
 //!
+//! A paragraph's, a heading's and a table cell's text is written as the inline
+//! source it is (see [`crate::serialize`]); everything else follows the rules
+//! here.
+//!
 //! # Spellings this preset fixes
 //!
-//! * Headings are always ATX. The tree has no paragraph/underline ambiguity to
-//!   preserve, and a setext heading cannot hold more than two levels.
-//! * A hard break is a trailing `\`, which survives an editor that strips
-//!   trailing whitespace where the two-space spelling does not. A hard break
-//!   with nothing after it, or one inside a heading, cannot be expressed in
-//!   CommonMark: the first is dropped and the second becomes a space.
+//! * A heading is ATX, or setext when a level 1 or 2 heading holds a line
+//!   break, which only a setext heading can. A heading of level 3 or more has
+//!   no way to hold one; the canonicalising correction turns it into a space,
+//!   and so does the writer.
 //! * A thematic break is `---`, which is what an author writes, except where a
 //!   reader would take those three dashes for something else: directly under a
 //!   line of text they are that line's setext underline, and after a `-` marker
@@ -17,28 +19,29 @@
 //!   separators, so empty paragraphs write as nothing (like Obsidian / Typora)
 //!   and may collapse on the next read. A lone `<br>` HTML block still *reads*
 //!   as an empty paragraph so older Markraft files open cleanly.
-//! * A link whose text is its own URL is the bare URL — what an author typed
-//!   and what GFM's autolink extension reads back — rather than `[url](url)`
-//!   or `<url>`, wherever a reader would still give that link back. Where it
-//!   would not, the brackets stay. [`inline_link_mark_rule`] is the rule for a
-//!   dialect that has no autolink extension at all.
 //! * A code block is always fenced, with a fence longer than any run of the
 //!   fence character inside it.
-//! * Emphasis, strong and strikethrough always use Markdown delimiters
-//!   (`*` / `**` / `~~`), never HTML tags — even when flanking fails and the
-//!   mark will not survive a re-read. Underline has no CommonMark spelling and
-//!   writes as plain text.
 //! * A table is a pipe table whose columns are padded to a uniform display
 //!   width, so the source lines up in a fixed-width editor. Re-padding on the
 //!   way out is a cosmetic change, which is all this codec promises about
 //!   spelling. See [`table`].
+//!
+//! # Spelling semantic content
+//!
+//! The mark rules are for [`spell`](crate::serialize::spell), which writes
+//! content that has marks but no spelling — pasted HTML. Text carrying
+//! [`SYNTAX`](md::SYNTAX) there is spelling already and goes out as it stands.
+//! Otherwise emphasis,
+//! strong and strikethrough use `*`, `**` and `~~`, underline `<u>`…`</u>`, a
+//! hard break a trailing `\`, and a link whose text is its own URL the bare
+//! URL wherever a reader gives that link back.
 
 use std::sync::Arc;
 
 use markraft_core::{Mark, Node, Schema};
 
 use crate::escape::{
-    code_span_delimiters, escape_label, escape_pipes, escape_text, link_destination, link_title,
+    code_span_delimiters, escape_label, escape_text, link_destination, link_title,
 };
 use crate::schema as md;
 use crate::serialize::{
@@ -100,18 +103,7 @@ pub fn commonmark_node_rules() -> NodeRules {
             state.close_block(node);
         }),
     );
-    rules.insert(
-        md::HEADING.to_string(),
-        rule(|state, node, _, _| {
-            let level = attr_int(node, "level", 1).clamp(1, 6) as usize;
-            let previous = state.set_single_line(true);
-            state.write(&format!("{} ", "#".repeat(level)));
-            state.render_inline(node);
-            escape_trailing_hashes(state);
-            state.set_single_line(previous);
-            state.close_block(node);
-        }),
-    );
+    rules.insert(md::HEADING.to_string(), rule(heading));
     rules.insert(md::BLOCKQUOTE.to_string(), rule(blockquote));
     rules.insert(md::CODE_BLOCK.to_string(), rule(code_block));
     rules.insert(md::BULLET_LIST.to_string(), rule(bullet_list));
@@ -182,56 +174,7 @@ pub fn commonmark_node_rules() -> NodeRules {
             state.text(&link.source(), false);
         }),
     );
-    rules.insert(
-        md::INLINE_SPAN.to_string(),
-        rule(|state, node, _, _| {
-            // Nested / empty mark structures use a container. Write portable
-            // Markdown delimiters (never HTML tags) so other editors can read
-            // the file. Underline has no spelling and is skipped.
-            let mut closing = Vec::new();
-            for mark in node.marks().iter() {
-                let name = state.schema().mark_type(mark.ty).name();
-                let (open, close) = if name == md::LINK {
-                    let value = |key| mark.attrs.get(key).and_then(|v| v.as_str()).unwrap_or("");
-                    (
-                        "[".to_string(),
-                        format!(
-                            "]({}{})",
-                            link_destination(value("href")),
-                            link_title(value("title"))
-                        ),
-                    )
-                } else if name == md::STRONG {
-                    ("**".to_string(), "**".to_string())
-                } else if name == md::EM {
-                    ("*".to_string(), "*".to_string())
-                } else if name == md::STRIKETHROUGH {
-                    ("~~".to_string(), "~~".to_string())
-                } else if name == md::CODE {
-                    let (open, close) = code_span_delimiters("");
-                    (open, close)
-                } else {
-                    // Underline and unknown marks — no portable spelling.
-                    continue;
-                };
-                if !open.is_empty() {
-                    state.text(&open, false);
-                    closing.push(close);
-                }
-            }
-            state.render_inline(node);
-            for close in closing.iter().rev() {
-                state.text(close, false);
-            }
-        }),
-    );
-    rules.insert(
-        md::SOFT_BREAK.to_string(),
-        rule(|state, _, _, _| {
-            state.text(if state.is_single_line() { " " } else { "\n" }, false);
-        }),
-    );
-    rules.insert(md::HARD_BREAK.to_string(), rule(hard_break));
+    rules.insert(md::LINE_BREAK.to_string(), rule(hard_break));
     rules
 }
 
@@ -286,9 +229,9 @@ fn thematic_break(state: &SerializerState<'_>) -> &'static str {
 /// so `> [!note]` stays one line and reads back as itself.
 ///
 /// The marker is written unescaped because the codec spells it; text that only
-/// *looks* like one goes out of an ordinary quote through
-/// [`escape_text`](crate::escape::escape_text), which escapes the `[` it opens
-/// with, so no edit can turn a quote into a callout behind the user's back.
+/// *looks* like one at the start of an ordinary quote goes out with a
+/// backslash before its `[`, so no edit can turn a quote into a callout behind
+/// the user's back.
 fn blockquote(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: usize) {
     let callout = crate::callout::Callout {
         kind: attr_str(node, "callout", "").to_string(),
@@ -297,6 +240,15 @@ fn blockquote(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _:
     };
     state.wrap_block("> ", None, node, |state| {
         if callout.kind.is_empty() {
+            // Only the first line can be a marker; text there that spells one
+            // is kept text with a backslash, which the parser puts in the
+            // tree too.
+            if node
+                .first_child()
+                .is_some_and(|first| crate::textblock::looks_like_callout(state.schema(), first))
+            {
+                state.write_prefix("\\");
+            }
             state.render_content(node);
             return;
         }
@@ -385,10 +337,10 @@ fn table(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: usiz
         .map(|row| {
             (0..alignments.len())
                 .map(|column| match row.maybe_child(column) {
-                    // A hard break has no spelling inside a row, which is one
-                    // source line; `<br>` is what GFM renders as the break the
-                    // author made, and comes back as a raw inline primitive.
-                    Some(cell) => escape_pipes(&state.capture_inline(cell, "<br>")),
+                    // A cell is inline source whose pipes the guard has
+                    // escaped. It holds no line break; were one to reach
+                    // here, `<br>` is what GFM renders as the break.
+                    Some(cell) => state.capture_inline(cell, "<br>"),
                     None => String::new(),
                 })
                 .collect()
@@ -449,6 +401,31 @@ fn delimiter_row(alignments: &[Alignment], widths: &[usize]) -> String {
     line
 }
 
+/// A heading: ATX, or setext when a level 1 or 2 heading holds a line break.
+fn heading(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: usize) {
+    let level = attr_int(node, "level", 1).clamp(1, 6) as usize;
+    let breaks = state
+        .schema()
+        .node_id(md::LINE_BREAK)
+        .is_some_and(|ty| node.children().any(|child| child.type_id() == ty));
+    if breaks && level <= 2 {
+        let before = state.out().len();
+        state.render_inline(node);
+        if state.out().len() > before {
+            state.text(if level == 1 { "\n===" } else { "\n---" }, false);
+            state.close_block(node);
+            return;
+        }
+    }
+    let previous = state.set_single_line(true);
+    state.write(&format!("{} ", "#".repeat(level)));
+    state.render_inline(node);
+    state.set_single_line(previous);
+    state.close_block(node);
+}
+
+/// A hard break in spelled content: a trailing `\\`, which survives an editor
+/// that strips trailing whitespace where the two-space spelling does not.
 fn hard_break(state: &mut SerializerState<'_>, node: &Node, parent: Option<&Node>, index: usize) {
     if state.is_single_line() {
         state.text(state.line_break(), false);
@@ -586,39 +563,18 @@ fn interrupts_paragraph(state: &SerializerState<'_>, node: &Node) -> bool {
     false
 }
 
-/// An ATX heading whose text ends in `#` would lose it to the optional closing
-/// sequence, so the run is escaped once it has been written.
-fn escape_trailing_hashes(state: &mut SerializerState<'_>) {
-    let out = state.out();
-    let line = out.rfind('\n').map_or(0, |index| index + 1);
-    let tail = &out[line..];
-    let hashes = tail.len() - tail.trim_end_matches('#').len();
-    if hashes == 0 {
-        return;
-    }
-    let head = &tail[..tail.len() - hashes];
-    if !head.ends_with([' ', '\t']) {
-        return;
-    }
-    let at = out.len() - hashes;
-    state.out_mut().insert(at, '\\');
-}
-
-/// The CommonMark/GFM mark rules, keyed by schema type name.
+/// The CommonMark/GFM mark rules, keyed by schema type name, which
+/// [`spell`](crate::serialize::spell) writes semantic content with.
 pub fn commonmark_mark_rules() -> MarkRules {
     let mut rules = MarkRules::new();
     rules.insert(md::LINK.to_string(), autolink_link_rule());
-    rules.insert(md::STRONG.to_string(), method_b_emphasis_rule("**", '*'));
-    rules.insert(md::EM.to_string(), method_b_emphasis_rule("*", '*'));
-    rules.insert(
-        md::STRIKETHROUGH.to_string(),
-        method_b_emphasis_rule("~~", '~'),
-    );
-    // No CommonMark/Obsidian spelling exists. Keep the mark in the tree for HTML
-    // paste, but write plain text so `.md` files stay portable.
-    rules.insert(md::UNDERLINE.to_string(), MarkRule::fixed("", ""));
-    rules.insert(md::CODE.to_string(), method_b_code_rule());
-    // Delimiter characters already live in the text; this mark only flags them.
+    rules.insert(md::STRONG.to_string(), emphasis_rule("**", '*'));
+    rules.insert(md::EM.to_string(), emphasis_rule("*", '*'));
+    rules.insert(md::STRIKETHROUGH.to_string(), emphasis_rule("~~", '~'));
+    rules.insert(md::UNDERLINE.to_string(), MarkRule::fixed("<u>", "</u>"));
+    rules.insert(md::CODE.to_string(), code_rule());
+    // Text already spelled — a soft break, an empty link's `[](…)` — goes out
+    // as it stands.
     rules.insert(
         md::SYNTAX.to_string(),
         MarkRule {
@@ -634,56 +590,11 @@ pub fn commonmark_mark_rules() -> MarkRules {
     rules
 }
 
-/// Whether *this* mark already spells itself with Method-B delimiter leaves.
-///
-/// A delimiter leaf carries the style mark as well as [`SYNTAX`](md::SYNTAX), so
-/// a Method-B span holds its own delimiters inside the mark's run. The rule is
-/// asked once per node the run covers, so the run is walked out from
-/// [`MarkTarget::index`] rather than assumed to start at it.
-///
-/// Asking the whole textblock instead would suppress the delimiters of a mark
-/// that has none of its own — a paste or a legacy toggle leaves a bare style
-/// mark, and a block that also holds one Method-B span would then write that
-/// mark as plain text and lose it on the next load. Asking only for the leaf at
-/// the run's edge would invent the missing half of a pair an edit has broken,
-/// turning `em*` back into emphasis.
-fn method_b_spelled(target: &MarkTarget<'_>, schema: &Schema) -> bool {
-    let child = |index: usize| target.parent.maybe_child(index);
-    let carries =
-        |index: usize| child(index).is_some_and(|node| node.marks().contains_type(target.mark.ty));
-    let mut start = target.index;
-    while start > 0 && carries(start - 1) {
-        start -= 1;
-    }
-    let mut end = target.index;
-    while carries(end + 1) {
-        end += 1;
-    }
-    (start..=end)
-        .any(|index| child(index).is_some_and(|node| crate::inline::is_syntax(schema, node)))
-}
-
-/// A mark written as a delimiter run, suppressed when its own Method-B syntax
-/// leaf already carries those characters.
-fn method_b_emphasis_rule(run: &'static str, delimiter: char) -> MarkRule {
-    let spelled = |state: &SerializerState<'_>, target: &MarkTarget<'_>| {
-        method_b_spelled(target, state.schema())
-    };
+/// A mark written as a delimiter run.
+fn emphasis_rule(run: &'static str, delimiter: char) -> MarkRule {
     MarkRule {
-        open: Arc::new(move |state, target| {
-            if spelled(state, target) {
-                String::new()
-            } else {
-                run.to_string()
-            }
-        }),
-        close: Arc::new(move |state, target| {
-            if spelled(state, target) {
-                String::new()
-            } else {
-                run.to_string()
-            }
-        }),
+        open: Arc::new(move |_, _| run.to_string()),
+        close: Arc::new(move |_, _| run.to_string()),
         mixable: true,
         expel_enclosing_whitespace: true,
         escape: true,
@@ -692,7 +603,7 @@ fn method_b_emphasis_rule(run: &'static str, delimiter: char) -> MarkRule {
     }
 }
 
-fn method_b_code_rule() -> MarkRule {
+fn code_rule() -> MarkRule {
     let text_of = |target: &MarkTarget<'_>| {
         target
             .parent
@@ -701,24 +612,9 @@ fn method_b_code_rule() -> MarkRule {
             .unwrap_or_default()
             .to_string()
     };
-    let spelled = |state: &SerializerState<'_>, target: &MarkTarget<'_>| {
-        method_b_spelled(target, state.schema())
-    };
     MarkRule {
-        open: Arc::new(move |state, target| {
-            if spelled(state, target) {
-                String::new()
-            } else {
-                code_span_delimiters(&text_of(target)).0
-            }
-        }),
-        close: Arc::new(move |state, target| {
-            if spelled(state, target) {
-                String::new()
-            } else {
-                code_span_delimiters(&text_of(target)).1
-            }
-        }),
+        open: Arc::new(move |_, target| code_span_delimiters(&text_of(target)).0),
+        close: Arc::new(move |_, target| code_span_delimiters(&text_of(target)).1),
         mixable: false,
         expel_enclosing_whitespace: false,
         escape: false,
@@ -795,8 +691,7 @@ fn closing_brackets(target: &MarkTarget<'_>) -> String {
 ///
 /// The marked run has to be a single text leaf carrying the link: another
 /// *non-style* construct between the URL and what surrounds it would need
-/// brackets. Style marks (and Method-B delimiter leaves beside the run) are
-/// fine — their delimiters sit outside the URL. What surrounds it is then
+/// brackets. Style marks are fine — their delimiters sit outside the URL. What surrounds it is then
 /// exactly what the output already holds and what the nodes after it will
 /// write, which is what [`crate::autolink::writes_bare`] is asked about.
 fn writes_bare_url(state: &SerializerState<'_>, target: &MarkTarget<'_>) -> bool {
@@ -820,7 +715,7 @@ fn writes_bare_url(state: &SerializerState<'_>, target: &MarkTarget<'_>) -> bool
     let before = (!state.at_line_start())
         .then(|| state.out().chars().next_back())
         .flatten();
-    let Some(after) = following_text(state, target.parent, target.index + 1) else {
+    let Some(after) = following_text(target.parent, target.index + 1) else {
         return false;
     };
     crate::autolink::writes_bare(
@@ -837,22 +732,11 @@ fn writes_bare_url(state: &SerializerState<'_>, target: &MarkTarget<'_>) -> bool
 /// pull into a bare URL.
 ///
 /// `None` where what follows is not plain text — an image, a hard break, a
-/// marked run — and so cannot be shown to stay out of the URL. Method-B
-/// delimiter leaves count as the characters they hold (they end the URL).
-fn following_text(state: &SerializerState<'_>, parent: &Node, from: usize) -> Option<String> {
+/// marked run — and so cannot be shown to stay out of the URL.
+fn following_text(parent: &Node, from: usize) -> Option<String> {
     let mut out = String::new();
     for index in from..parent.child_count() {
         let child = parent.child(index);
-        // A source line ending is whitespace wherever it is written.
-        if state.schema().node_type(child.type_id()).name() == md::SOFT_BREAK {
-            break;
-        }
-        if crate::inline::is_syntax(state.schema(), child) {
-            // Delimiter leaves are written by their own step, not as "text
-            // after the URL" the bare-link probe should see — including them
-            // turns `*https://…*` into emphasis and rejects a valid bare URL.
-            break;
-        }
         let text = child.text().filter(|_| child.marks().is_empty())?;
         out.push_str(&escape_text(text, false));
         if out.contains(char::is_whitespace) {

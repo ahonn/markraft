@@ -138,6 +138,7 @@ static HISTORY_CONFIG: LazyLock<Facet<HistoryConfig, HistoryConfig>> = LazyLock:
 static INVERTED_EFFECTS: LazyLock<Facet<InvertedEffectsFn>> = LazyLock::new(Facet::list);
 static FROM_HISTORY: LazyLock<AnnotationType<FromHistory>> = LazyLock::new(AnnotationType::define);
 static ISOLATE: LazyLock<AnnotationType<IsolateHistory>> = LazyLock::new(AnnotationType::define);
+static FOLD: LazyLock<AnnotationType<bool>> = LazyLock::new(AnnotationType::define);
 static BEGIN_GROUP: LazyLock<StateEffectType<()>> = LazyLock::new(StateEffectType::define);
 static END_GROUP: LazyLock<StateEffectType<()>> = LazyLock::new(StateEffectType::define);
 static HISTORY_FIELD: LazyLock<StateField<HistoryState>> = LazyLock::new(|| {
@@ -164,6 +165,15 @@ pub fn inverted_effects() -> &'static Facet<InvertedEffectsFn> {
 /// Force an undo boundary around a transaction.
 pub fn isolate_history() -> &'static AnnotationType<IsolateHistory> {
     &ISOLATE
+}
+
+/// Fold a transaction into the entry below it, the way an appended one is.
+///
+/// For a change that finishes the edit recorded there rather than being an
+/// edit of its own — a correction that a selection change set off, settling
+/// what the previous edit left unsettled. Undoing the entry undoes both.
+pub fn fold_into_previous() -> &'static AnnotationType<bool> {
+    &FOLD
 }
 
 /// Open an explicit undo group. Every entry made until the matching
@@ -365,7 +375,8 @@ fn update_history(value: &HistoryState, tr: &Transaction) -> HistoryState {
     let at = tr.annotation(time()).copied().unwrap_or(0);
     let hints = MergeHints {
         was_composing,
-        appended: tr.annotation(crate::state::appended()).is_some(),
+        appended: tr.annotation(crate::state::appended()).is_some()
+            || tr.annotation(fold_into_previous()) == Some(&true),
     };
     match HistEvent::from_transaction(tr, None) {
         Some(event) => state = state.add_changes(event, at, user_event.as_deref(), &config, hints),

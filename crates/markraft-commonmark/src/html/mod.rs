@@ -32,6 +32,14 @@
 //! otherwise empty element is an editor's placeholder for an empty paragraph
 //! rather than a line break, and produces nothing.
 //!
+//! # Inline content becomes source
+//!
+//! A textblock's text is its Markdown inline source, so what an element says
+//! — `<strong>`, a `font-weight`, an `<a href>` — is first read into semantic
+//! content, text carrying marks, and then [spelled](crate::serialize::spell)
+//! as the Markdown that says the same thing. That source is what the block
+//! holds, with its marks derived from it like any other.
+//!
 //! # Inline CSS
 //!
 //! Word processors put their formatting in a `style` attribute instead of a
@@ -59,6 +67,7 @@ use crate::fragment::open_fragment;
 use crate::inline::InlineContent;
 use crate::parse::ParseError;
 use crate::schema as md;
+use crate::serialize::MarkdownSerializer;
 
 /// Reads HTML into a [`Node`] tree.
 #[derive(Clone)]
@@ -109,9 +118,11 @@ impl HtmlParser {
 
     fn blocks(&self, source: &str) -> Result<Vec<Node>, ParseError> {
         let html = Html::parse_fragment(source);
+        let serializer = crate::commonmark_serializer(&self.schema);
         let mut build = Build {
             schema: &self.schema,
             rules: &self.rules,
+            serializer: &serializer,
             blocks: Vec::new(),
             inline: InlineContent::new(&self.schema),
             leading_space: true,
@@ -126,6 +137,8 @@ impl HtmlParser {
 struct Build<'s> {
     schema: &'s Schema,
     rules: &'s HtmlRules,
+    /// What spells a textblock's semantic content as source.
+    serializer: &'s MarkdownSerializer,
     blocks: Vec<Node>,
     inline: InlineContent<'s>,
     leading_space: bool,
@@ -172,14 +185,39 @@ impl<'s> Build<'s> {
                 kind: "node",
                 name: md::PARAGRAPH.to_string(),
             })?;
-        self.blocks
-            .push(fit(self.schema, ty, Attrs::empty(), content)?);
+        let block = self.textblock(ty, Attrs::empty(), content)?;
+        self.blocks.push(block);
         Ok(())
+    }
+
+    /// A block of `ty` holding `content`; for a textblock whose text is inline
+    /// source, that content spelled as source first.
+    fn textblock(
+        &self,
+        ty: NodeTypeId,
+        attrs: Attrs,
+        content: Vec<Node>,
+    ) -> Result<Node, ParseError> {
+        let block = fit(self.schema, ty, attrs, content)?;
+        let Some(kind) = crate::textblock::block_kind(self.schema, ty) else {
+            return Ok(block);
+        };
+        let source = crate::serialize::spell(self.serializer, &block);
+        let content = crate::textblock::build(self.schema, kind, &source);
+        Ok(block.copy(Fragment::from_nodes(content)))
+    }
+
+    /// Add text that is Markdown source already, which spelling leaves as it
+    /// stands.
+    fn spelled(&mut self, source: &str, marks: &[Mark]) {
+        let syntax = crate::textblock::syntax_mark(self.schema, 0, "");
+        let set = self.inline.mark_set(marks.iter().cloned().chain(syntax));
+        self.inline.push_text(source, set);
     }
 
     /// Whether a space written now would be collapsed away.
     fn at_space(&self) -> bool {
-        match self.inline.last_prose() {
+        match self.inline.last() {
             None => self.leading_space,
             Some(node) => ends_in_space(self.schema, node),
         }
@@ -231,6 +269,12 @@ impl<'s> Build<'s> {
             element,
             schema: self.schema,
         };
+        // Markraft's own soft break: a line ending of the source, which is
+        // spelling rather than a break to spell.
+        if target.tag() == "span" && target.attr("data-type") == Some("softBreak") {
+            self.spelled("\n", marks);
+            return Ok(());
+        }
         let mut marks = marks.to_vec();
         for name in style_marks(element) {
             marks.push(self.mark(name, Attrs::empty())?);
@@ -306,23 +350,24 @@ impl<'s> Build<'s> {
                 self.leading_space = previous_leading;
                 self.inline.restore(before);
                 let mark = self.mark(&mark_type, attrs(target))?;
-                let name = self.schema.mark_type(mark.ty).name().to_string();
-                let wrapped = if let Some((open, close)) = crate::inline::style_delimiters(&name) {
-                    crate::inline::wrap_mark_method_b(self.schema, mark, open, close, children)?
-                } else if name == md::CODE {
-                    let text: String = children.iter().filter_map(|n| n.text()).collect();
-                    let (open, close) = crate::escape::code_span_delimiters(&text);
-                    crate::inline::wrap_mark_method_b(self.schema, mark, &open, &close, children)?
-                } else {
-                    crate::inline::wrap_mark(self.schema, mark, children)?
-                };
-                for node in wrapped {
-                    // Delimiter leaves keep their syntax mark; outer path marks
-                    // land on content only.
-                    if crate::inline::is_syntax(self.schema, &node) {
-                        self.inline.push_node(node.clone(), node.marks().clone());
-                        continue;
-                    }
+                // A link with nothing in it has no text to carry the mark, so
+                // it arrives as the spelling it has.
+                if children.is_empty() && self.schema.mark_type(mark.ty).name() == md::LINK {
+                    let attr = |name: &str| {
+                        mark.attrs
+                            .get(name)
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    };
+                    let spelling = format!(
+                        "[{}",
+                        crate::inline::link_closing(&attr("href"), &attr("title"))
+                    );
+                    self.spelled(&spelling, &marks);
+                    return Ok(());
+                }
+                for node in crate::inline::wrap_mark(self.schema, mark, children) {
                     let set = marks.iter().fold(node.marks().clone(), |set, mark| {
                         set.add(self.schema, mark.clone())
                     });
@@ -380,8 +425,8 @@ impl<'s> Build<'s> {
                 } else {
                     self.collect_blocks(element, &marks)?
                 };
-                self.blocks
-                    .push(fit(self.schema, ty, attrs(target), content)?);
+                let block = self.textblock(ty, attrs(target), content)?;
+                self.blocks.push(block);
             }
         }
         Ok(())
@@ -396,6 +441,7 @@ impl<'s> Build<'s> {
         let mut inner = Build {
             schema: self.schema,
             rules: self.rules,
+            serializer: self.serializer,
             blocks: Vec::new(),
             inline: InlineContent::new(self.schema),
             leading_space: true,
@@ -417,6 +463,7 @@ impl<'s> Build<'s> {
         let mut inner = Build {
             schema: self.schema,
             rules: self.rules,
+            serializer: self.serializer,
             blocks: Vec::new(),
             inline: InlineContent::new(self.schema),
             leading_space: true,
@@ -426,28 +473,6 @@ impl<'s> Build<'s> {
         inner.inline.trim_end();
         Ok(inner.inline.take())
     }
-}
-
-/// One HTML tag read on its own: its element name and its attributes, with
-/// entity references in the values resolved.
-///
-/// The Markdown importer meets inline HTML as source text, so it has to read
-/// the same `href` out of `<a href="a&amp;b">` that this importer reads out of
-/// the element. Both go through the one HTML parser, which is what keeps the
-/// two flavours from drifting apart on what a tag says.
-pub(crate) fn read_tag(source: &str) -> Option<(String, Vec<(String, String)>)> {
-    let document = Html::parse_fragment(source);
-    let root = document.root_element();
-    let element = root
-        .descendants()
-        .filter_map(ElementRef::wrap)
-        .find(|element| element.id() != root.id())?;
-    let attrs = element
-        .value()
-        .attrs()
-        .map(|(name, value)| (name.to_string(), value.to_string()))
-        .collect();
-    Some((element.value().name().to_string(), attrs))
 }
 
 /// Whether the element is the only thing in its parent that carries meaning.
@@ -502,5 +527,4 @@ fn ends_in_space(schema: &Schema, node: &Node) -> bool {
         return ends_in_space(schema, child);
     }
     markraft_core::projection::is_line_break(schema, node.type_id())
-        || schema.node_type(node.type_id()).in_group("soft_break")
 }

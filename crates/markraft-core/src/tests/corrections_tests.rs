@@ -264,3 +264,106 @@ fn several_corrections_extensions_share_one_fixed_point_loop() {
         .unwrap();
     assert_eq!(schema.describe(tr.new_doc()), r#"doc(paragraph("x#!"))"#);
 }
+
+/// A paragraph that must end in `!` once no caret stands in it.
+fn settle_when_left(schema: &Schema) -> Correction {
+    let paragraph = schema.node_id("paragraph").unwrap();
+    Correction::on_content(paragraph, |cx| {
+        let end = cx.content_start + cx.node.content_size();
+        let selection = cx.tr.new_selection();
+        let caret_inside = selection
+            .ranges(cx.doc)
+            .iter()
+            .any(|range| (cx.content_start..=end).contains(&range.from));
+        if caret_inside || text_of(cx.node).ends_with('!') {
+            return Vec::new();
+        }
+        vec![insert_text(cx.start_state.schema(), end, "!")]
+    })
+    .when_selection_leaves()
+}
+
+fn two_paragraphs(schema: &Schema) -> Node {
+    doc(
+        schema,
+        [
+            n(schema, "paragraph", [t(schema, "ab")]),
+            n(schema, "paragraph", [t(schema, "cd")]),
+        ],
+    )
+}
+
+#[test]
+fn a_selection_leaving_a_node_runs_a_correction_that_asks_for_it() {
+    use crate::history::{HistoryConfig, history, undo, undo_depth};
+    use crate::selection::Selection;
+    let schema = shared_schema();
+    let start = crate::state::EditorState::create(
+        crate::state::EditorStateConfig::new(schema.clone())
+            .doc(two_paragraphs(&schema))
+            .selection(Selection::cursor(2))
+            .extensions(Extension::all([
+                corrections([settle_when_left(&schema)]),
+                history(HistoryConfig::default()),
+            ])),
+    )
+    .unwrap();
+    // Typing leaves the paragraph unsettled: the caret is in it.
+    let typed = start
+        .update([TransactionSpec::new()
+            .changes([insert_text(&schema, 2, "X")])
+            .selection(Selection::cursor(3))
+            .user_event("input.type")])
+        .unwrap()
+        .state()
+        .clone();
+    assert_eq!(
+        schema.describe(typed.doc()),
+        r#"doc(paragraph("aXb"), paragraph("cd"))"#
+    );
+    // Moving within the paragraph settles nothing.
+    let tr = typed
+        .update([TransactionSpec::new().selection(Selection::cursor(2))])
+        .unwrap();
+    assert!(!tr.doc_changed());
+    // Moving out of it, and nothing else, settles it in the same transaction.
+    let tr = typed
+        .update([TransactionSpec::new().selection(Selection::cursor(7))])
+        .unwrap();
+    assert_eq!(
+        schema.describe(tr.new_doc()),
+        r#"doc(paragraph("aXb!"), paragraph("cd"))"#
+    );
+    assert_eq!(tr.new_selection(), Selection::cursor(8));
+    // The settling belongs to the edit that left the paragraph unsettled: one
+    // undo takes both back.
+    let left = tr.state().clone();
+    assert_eq!(undo_depth(&left), 1);
+    let back = left
+        .update([undo(&left).expect("something to undo")])
+        .unwrap();
+    assert_eq!(
+        schema.describe(back.new_doc()),
+        r#"doc(paragraph("ab"), paragraph("cd"))"#
+    );
+}
+
+#[test]
+fn a_selection_leaving_does_not_run_corrections_that_did_not_ask() {
+    let schema = shared_schema();
+    let paragraph = schema.node_id("paragraph").unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let probe = hits.clone();
+    let start = state(
+        two_paragraphs(&schema),
+        corrections([Correction::on_content(paragraph, move |_| {
+            hits.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        })]),
+    );
+    let tr = start
+        .update([TransactionSpec::new().selection(crate::selection::Selection::cursor(6))])
+        .unwrap();
+    assert!(!tr.doc_changed());
+    assert_eq!(probe.load(Ordering::SeqCst), 0);
+}

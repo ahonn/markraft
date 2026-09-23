@@ -563,6 +563,7 @@ mod tests {
                 wiki: None,
                 protected: None,
                 selection: 0..0,
+                spelling: None,
                 composition: None,
             },
             gpui::px(400.),

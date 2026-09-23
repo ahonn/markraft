@@ -6,35 +6,31 @@
 //!
 //! # What the mapping decides
 //!
-//! * A **soft line break** stays a primitive, displayed as a space. Its source
-//!   newline is retained because raw HTML can make whitespace significant.
-//! * A **hard line break** becomes a `hard_break` atom.
+//! * A paragraph's, a heading's and a table cell's content is its **inline
+//!   source**: the text a reader sees once the block's own syntax is stripped,
+//!   one `line_break` atom per line ending, and an atom for each image, wiki
+//!   link and raw HTML tag. Every style mark is derived from that text; see
+//!   [`crate::textblock`] and [`crate::derive`]. comrak's inline tree is not
+//!   consulted for it, so the inline rules of a [`ParseRules`] table only
+//!   apply where an inline construct turns up in block position.
 //! * An **HTML block holding only `<br>`** becomes an empty paragraph, so older
 //!   Markraft files that used that spelling still open. Empty paragraphs have
 //!   no CommonMark write-back; they become blank separators. Runs of blank
 //!   lines in the source are separators, as CommonMark says, and produce
 //!   nothing.
-//! * **Inline HTML** that pairs up as `<u>`, `<em>`, `<strong>`, `<del>` or
-//!   `<a href="…">` becomes the matching mark or nested span, and `<img src="…">`
-//!   and `<br>` become the image and hard break atoms. A tag is read this way
-//!   only when the tree holds everything it says and the serialiser can write
-//!   that back: one carrying an attribute the model has no room for — a
-//!   `target`, a `width` — stays a raw inline primitive, as `<mark>`, `<sub>`
-//!   and every other tag do, and is written without escaping. A `<br>` in a
-//!   heading or a table cell stays raw too, because a break has no spelling on
-//!   a line that cannot end.
+//! * **Inline HTML** is a `raw_inline` atom holding the tag as written, except
+//!   a `<u>`…`</u>` pair, which is underline spelled in the text, and a `<u>`
+//!   or `</u>` without its partner, which stays text.
 //! * An **Obsidian wiki link** — `[[target]]`, `[[target|alias]]` or the embed
 //!   `![[target]]` — becomes a `wiki_link` atom holding the bytes the source
-//!   spelled. comrak finds the first two and normalises what it reads, so the
-//!   parts come from the source; the embed is recognised here. A spelling
-//!   [`crate::wiki`] refuses stays the text a reader sees.
+//!   spelled. A spelling [`crate::wiki`] refuses stays the text a reader sees.
 //! * An **indented code block** becomes an ordinary `code_block` and is written
 //!   back fenced. The two render identically.
-//! * **Link reference definitions** are resolved by comrak, so a reference link
-//!   arrives as an ordinary link and is written back inline; the definition
-//!   itself is not part of the document.
-//! * A **bare URL**, a `www.` address or an e-mail address is a link too, as
-//!   GFM's autolink extension says, and is written back bare.
+//! * **Link reference definitions** are kept as they were written, in a
+//!   `raw_block` where they stood — between blocks, or at the start of the
+//!   paragraph they opened — so the reference links in the text still resolve
+//!   once the file is written back. The tree does not resolve them yet: a
+//!   reference link is text until it does.
 //! * A **GFM table** becomes a `table` of `table_row`s of `table_cell`s, with
 //!   the delimiter row's alignments on the table. The first row is the header
 //!   row, and every row is squared off to the column count the alignments
@@ -59,7 +55,7 @@ use std::cell::Ref;
 
 use comrak::nodes::{AstNode, NodeValue};
 use comrak::{Arena, Options, parse_document};
-use markraft_core::{Attrs, Fragment, MarkTypeId, Node, NodeError, NodeTypeId, Schema, Slice};
+use markraft_core::{Attrs, Fragment, Node, NodeError, NodeTypeId, Schema, Slice};
 
 use crate::rules::{ParseCx, ParseRule, ParseRules, ParseTarget, commonmark_rules};
 
@@ -213,6 +209,7 @@ impl MarkdownParser {
             schema: &self.schema,
             rules: &self.rules,
             cx: &cx,
+            options: &self.options,
         };
         let blocks = walk.blocks(root)?;
         let doc = walk.fit(self.schema.top_type(), Attrs::empty(), blocks)?;
@@ -226,6 +223,7 @@ pub(crate) struct Walk<'a> {
     pub(crate) schema: &'a Schema,
     pub(crate) rules: &'a ParseRules,
     pub(crate) cx: &'a ParseCx<'a>,
+    pub(crate) options: &'a Options<'static>,
 }
 
 impl<'a> Walk<'a> {
@@ -234,15 +232,6 @@ impl<'a> Walk<'a> {
             .node_id(name)
             .ok_or_else(|| ParseError::UnknownType {
                 kind: "node",
-                name: name.to_string(),
-            })
-    }
-
-    pub(crate) fn mark_id(&self, name: &str) -> Result<MarkTypeId, ParseError> {
-        self.schema
-            .mark_id(name)
-            .ok_or_else(|| ParseError::UnknownType {
-                kind: "mark",
                 name: name.to_string(),
             })
     }
@@ -259,10 +248,46 @@ impl<'a> Walk<'a> {
 
     fn blocks(&self, parent: &'a AstNode<'a>) -> Result<Vec<Node>, ParseError> {
         let mut out = Vec::new();
+        let pos = self.target(parent).sourcepos();
+        let mut next = pos.start.line.max(1);
         for child in parent.children() {
+            let child_pos = self.target(child).sourcepos();
+            self.push_definitions(parent, next, child_pos.start.line, &mut out)?;
             self.block(child, &mut out)?;
+            next = next.max(child_pos.end.line + 1);
         }
+        self.push_definitions(parent, next, pos.end.line + 1, &mut out)?;
         Ok(out)
+    }
+
+    /// The link reference definitions between `from` and `to`, each run as a
+    /// raw block.
+    fn push_definitions(
+        &self,
+        parent: &'a AstNode<'a>,
+        from: usize,
+        to: usize,
+        out: &mut Vec<Node>,
+    ) -> Result<(), ParseError> {
+        if from >= to {
+            return Ok(());
+        }
+        let in_list = matches!(&*self.value(parent), NodeValue::List(_));
+        for definitions in self.definitions_between(parent, from, to) {
+            let block = self.raw_block(crate::schema::RAW_BLOCK, &definitions)?;
+            // Between two items, a definition indented under the first is its
+            // content: comrak ends an item at its last block, not at the
+            // definitions and blank lines after it.
+            match out.last_mut() {
+                Some(item) if in_list && item.is_container() => {
+                    let mut children: Vec<Node> = item.children().cloned().collect();
+                    children.push(block);
+                    *item = item.copy(Fragment::from_nodes(children));
+                }
+                _ => out.push(block),
+            }
+        }
+        Ok(())
     }
 
     fn block(&self, node: &'a AstNode<'a>, out: &mut Vec<Node>) -> Result<(), ParseError> {
@@ -283,7 +308,11 @@ impl<'a> Walk<'a> {
                 let children = if kind.is_leaf() {
                     Vec::new()
                 } else if kind.has_inline_content() {
-                    self.inlines(node)?
+                    let (children, definitions) = self.textblock(node)?;
+                    if let Some(definitions) = definitions {
+                        out.push(self.raw_block(crate::schema::RAW_BLOCK, &definitions)?);
+                    }
+                    children
                 } else {
                     self.blocks(node)?
                 };
@@ -326,22 +355,26 @@ impl<'a> Walk<'a> {
     /// [`crate::fit::fit`] puts the empty one back that the content rule asks
     /// for.
     ///
-    /// The cut is the paragraph's first *top-level* line break. A paragraph
-    /// that runs past its first line without one — `> [!note] **bold` with the
-    /// emphasis closing on the line below — has no marker line to take away, so
-    /// the quote stays an ordinary one rather than losing the text that spans
-    /// the cut.
+    /// The cut is the paragraph's first line break, and what follows it is
+    /// read again as a paragraph of its own: `> [!note] **bold` with the
+    /// emphasis closing on the line below leaves a body that is not bold, which
+    /// is how the body reads once the marker is taken off it.
     fn callout(
         &self,
         node: &'a AstNode<'a>,
         attrs: Attrs,
         mut children: Vec<Node>,
     ) -> (Attrs, Vec<Node>) {
-        let named = attrs
-            .get("callout")
-            .and_then(|value| value.as_str())
-            .is_some_and(|kind| !kind.is_empty());
-        if !named {
+        let Some(kind) = attrs.get("callout").and_then(|value| value.as_str()) else {
+            return (attrs, children);
+        };
+        if kind.is_empty() {
+            // An ordinary quote whose first line only looks like a marker —
+            // indented, say — keeps it text with a backslash, as it is
+            // written back.
+            if let Some(first) = children.first_mut() {
+                *first = crate::textblock::escape_callout_lookalike(self.schema, first);
+            }
             return (attrs, children);
         }
         if self.take_marker_line(node, &mut children) {
@@ -355,33 +388,34 @@ impl<'a> Walk<'a> {
     /// Take the marker line out of the body, answering whether it could be
     /// taken out at all.
     fn take_marker_line(&self, node: &'a AstNode<'a>, children: &mut Vec<Node>) -> bool {
-        let Some(first) = node.first_child() else {
+        if node.first_child().is_none() {
             return false;
-        };
-        let pos = first.data.borrow().sourcepos;
+        }
         let Some(paragraph) = children.first().cloned() else {
             return false;
         };
-        let breaks: Vec<NodeTypeId> = [crate::schema::SOFT_BREAK, crate::schema::HARD_BREAK]
+        let Some(kind) = crate::textblock::block_kind(self.schema, paragraph.type_id()) else {
+            return false;
+        };
+        let items = crate::textblock::Items::from_nodes(self.schema, paragraph.children());
+        let cut = items
+            .0
             .iter()
-            .filter_map(|name| self.schema.node_id(name))
-            .collect();
-        let cut = paragraph
-            .children()
-            .position(|child| breaks.contains(&child.type_id()));
+            .position(|item| *item == crate::textblock::Item::Break);
         match cut {
             Some(cut) => {
-                let body: Vec<Node> = paragraph.children().skip(cut + 1).cloned().collect();
+                let body = crate::textblock::Items(items.0[cut + 1..].to_vec());
+                let derived =
+                    crate::derive::derive(kind, &body.text(), &crate::derive::DeriveContext::new());
+                let body = body.nodes(self.schema, &derived);
                 children[0] = paragraph.copy(Fragment::from_nodes(body));
                 true
             }
-            // No break, so the marker is the whole paragraph — unless the
-            // paragraph runs past the line the marker sits on.
-            None if pos.start.line == pos.end.line => {
+            // No break, so the marker is the whole paragraph.
+            None => {
                 children.remove(0);
                 true
             }
-            None => false,
         }
     }
 

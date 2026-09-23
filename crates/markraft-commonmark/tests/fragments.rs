@@ -224,3 +224,63 @@ fn a_node_selection_copies_the_whole_node() {
     let slice = Selection::node(3).content(&doc);
     assert_eq!(codec.serializer.serialize_fragment(&slice), "---");
 }
+
+// -- pasting each flavour ---------------------------------------------------------
+
+/// A plain-text paste is the characters it is: `*`, `_` and `#` that would
+/// read as Markdown arrive escaped, in the tree as in the file.
+#[test]
+fn pasted_plain_text_stays_literal() {
+    use markraft_commonmark::CommonMarkCodecs;
+    use markraft_core::Codecs;
+    let codec = Codec::new();
+    let codecs = CommonMarkCodecs::new(codec.schema.clone());
+    let doc = codec.parse("x");
+    let pasted = paste(&codec, &doc, 2, 2, &codecs.from_text("*a* _b_\n# c"));
+    let file = codec.write(&pasted);
+    assert_eq!(file, "x\\*a\\* \\_b\\_\n\n\\# c");
+    assert_eq!(to_plain_text(&codec.schema, &pasted), "x*a* _b_\n# c");
+}
+
+/// Markdown pastes as the source it is, and HTML as the source that spells it.
+#[test]
+fn pasted_markdown_and_html_arrive_as_source() {
+    use markraft_commonmark::CommonMarkCodecs;
+    use markraft_core::Codecs;
+    let codec = Codec::new();
+    let codecs = CommonMarkCodecs::new(codec.schema.clone());
+    let doc = codec.parse("x");
+    let markdown = codecs.from_markup("__a__ *b*").expect("a fragment");
+    assert_eq!(
+        codec.write(&paste(&codec, &doc, 2, 2, &markdown)),
+        "x__a__ *b*"
+    );
+    let html = codecs
+        .from_html("<b>a</b> <a href=\"u)\">c</a>")
+        .expect("a fragment");
+    let pasted = paste(&codec, &doc, 2, 2, &html);
+    assert_eq!(
+        common::html(&codec.write(&pasted)),
+        common::html("x**a** [c](<u)>)")
+    );
+}
+
+/// What a copy carries is the selection with the spelling its styles need;
+/// its Markdown flavour stays the characters selected.
+#[test]
+fn a_copy_of_a_spans_inside_carries_its_delimiters() {
+    use markraft_commonmark::CommonMarkCodecs;
+    use markraft_core::Codecs;
+    let codec = Codec::new();
+    let codecs = CommonMarkCodecs::new(codec.schema.clone());
+    let doc = codec.parse("a *b **c** d* e\n\nf");
+    // `b **c** d`, inside the emphasis.
+    let slice = doc.slice(4, 13).expect("a slice");
+    assert_eq!(codecs.to_markup(&slice).as_deref(), Some("b **c** d"));
+    let carried = codecs.copied(&slice);
+    let pasted = paste(&codec, &doc, 19, 19, &carried);
+    assert_eq!(codec.write(&pasted), "a *b **c** d* e\n\nf*b **c** d*");
+    // A copy that already spells its styles travels unchanged.
+    let whole = doc.slice(3, 14).expect("a slice");
+    assert_eq!(codecs.copied(&whole), whole);
+}

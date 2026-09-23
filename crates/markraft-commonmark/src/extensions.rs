@@ -7,29 +7,58 @@
 //!   `[ ] `/`[x] ` at the start of a bullet item, and a fence. The fence waits
 //!   for the space that ends its info string — ```` ``` ```` opens a code block
 //!   with no language and ```` ```rust ```` opens one with `rust` — because the
-//!   two cannot be told apart before it. A typed `[[Note]]` becomes the wiki
-//!   link atom on its closing `]]`, because text spelling one is not one and a
-//!   source-preserving save would read the two back as different documents.
-//!   `[!note] ` at the start of a block quote turns it into a callout, for the
-//!   same reason and on the same space a check box waits for.
-//! * **Corrections** — a list merge, and the repair that puts a required child
-//!   back into an emptied container. Two lists of the same type and attributes
-//!   sitting next to each other are one list as far as CommonMark is concerned,
-//!   so the model is brought in line rather than left describing something the
-//!   source cannot express.
+//!   two cannot be told apart before it. `[!note] ` at the start of a block
+//!   quote turns it into a callout on the same space a check box waits for.
+//! * **Corrections** — a list merge, the repair that puts a required child
+//!   back into an emptied container, and the canonicalising correction that
+//!   keeps every textblock's marks what its source says. Two lists of the same
+//!   type and attributes sitting next to each other are one list as far as
+//!   CommonMark is concerned, so the model is brought in line rather than left
+//!   describing something the source cannot express.
+//!
+//! # The canonicalising correction
+//!
+//! A paragraph's, a heading's and a table cell's text is its inline source,
+//! and every style mark on it is [derived](crate::derive::derive) from that
+//! text. Whenever a transaction changes the characters of such a block, one
+//! correction brings the block back to what a reader of its source would read:
+//!
+//! 1. Its lines: a blank line splits the block in two, a line break at either
+//!    end of it goes, whitespace starting a line or ending the block goes,
+//!    and in a heading of level 3 or more — which has no way to hold one — or
+//!    a table cell a break becomes a space.
+//! 2. Its atoms: text a reader takes for an image, a wiki link or a raw HTML
+//!    tag becomes that atom, every such spelling in the same round. This is
+//!    how a typed `[[Note]]` becomes a link.
+//! 3. Its block syntax: the backslashes [`guard`](crate::derive::guard) names
+//!    go in, so no line of it opens another block.
+//! 4. Its marks: each run whose marks differ from what the derivation says
+//!    gets its whole mark set in one change. Mark changes only: replacing the
+//!    content would collapse every caret inside it.
+//!
+//! Each round of the correction loop does the first of these that has
+//! anything to do, so each works on the text the one before it left. Each
+//! settles the whole block in the round it runs in: every blank line splits
+//! at once, and the marks go in as one non-overlapping change per run. Steps 1 and 3 leave alone the
+//! line a caret stands on: `-` is a list item a writer may still be typing
+//! into `- `, and `*` the start of `*em*`. The transaction that moves the
+//! caret off that line settles it — the correction is registered with
+//! [`Correction::when_selection_leaves`] — so apart from the caret's line the
+//! tree always holds what the file will.
 //!
 //! Nothing else: key bindings, clipboard handling and the rest belong to a
 //! host, which composes them with this.
 
 use markraft_core::commands::structure::markup_of;
 use markraft_core::commands::{InputRule, InputRuleMatch, input_rules};
-use markraft_core::projection::OBJECT_REPLACEMENT;
 use markraft_core::{
-    Attrs, Change, Correction, Extension, Fragment, Mark, MarkSet, Markup, Node, NodeTypeId,
-    Schema, Selection, Slice, Token, attrs, corrections, fill_required_content,
+    Attrs, Change, ChangeRange, Correction, CorrectionContext, Extension, Fragment, MarkSet,
+    Markup, Node, NodeTypeId, Schema, Slice, Token, attrs, corrections, fill_required_content,
 };
 
+use crate::derive::{BlockKind, DeriveContext, Derived, derive};
 use crate::schema as md;
+use crate::textblock::{Item, Items, block_kind, derived_mark_types, derived_marks};
 
 /// Input rules and corrections for the CommonMark preset.
 pub fn commonmark_extensions(schema: &Schema) -> Extension {
@@ -40,8 +69,8 @@ pub fn commonmark_extensions(schema: &Schema) -> Extension {
 }
 
 /// The corrections the preset needs: merge adjacent identical lists, fill in
-/// the block a container's content rule requires, and re-derive Method-B
-/// delimiter leaves after inline edits.
+/// the block a container's content rule requires, and keep every textblock
+/// what its source says — see the module documentation.
 pub fn commonmark_corrections(schema: &Schema) -> Vec<Correction> {
     let containers = [
         md::DOC,
@@ -61,7 +90,11 @@ pub fn commonmark_corrections(schema: &Schema) -> Vec<Correction> {
         out.push(fill_required_content(ty));
         out.push(Correction::on_child_list(ty, merge_adjacent_lists));
     }
-    out.extend(crate::normalize::method_b_normalize_corrections(schema));
+    for name in [md::PARAGRAPH, md::HEADING, md::TABLE_CELL] {
+        if let Some(ty) = schema.node_id(name) {
+            out.push(Correction::on_content(ty, canonicalise).when_selection_leaves());
+        }
+    }
     out
 }
 
@@ -102,94 +135,8 @@ pub fn commonmark_input_rules() -> Vec<InputRule> {
         code_rule(),
         divider_rule(),
         task_rule(),
-        wiki_link_rule(),
         callout_rule(),
-        // Longest delimiter first: `**bold**` must not be read as emphasis
-        // around `*bold*`.
-        inline_style_rule("~~", md::STRIKETHROUGH),
-        inline_style_rule("**", md::STRONG),
-        inline_style_rule("*", md::EM),
-        inline_style_rule("`", md::CODE),
     ]
-}
-
-/// `**bold**`, `*em*`, `~~struck~~` and `` `code` `` become the mark and its
-/// Method-B delimiter leaves as soon as the closing run is typed.
-///
-/// A rule rather than a reparse of the block: the tree cannot tell a delimiter
-/// a writer just typed from one that was written `\*` in the source, so the only
-/// characters safe to read as spelling are the ones the caret has just closed.
-fn inline_style_rule(delim: &'static str, mark_name: &'static str) -> InputRule {
-    InputRule::new(
-        move |before| {
-            let head = before.strip_suffix(delim)?;
-            let start = head.rfind(delim)?;
-            let content = &head[start + delim.len()..];
-            if content.is_empty() || content.contains(delim) {
-                return None;
-            }
-            // A longer run of the same character is a longer delimiter still
-            // being typed: `**bold*` is on its way to strong, not emphasis
-            // around `bold`.
-            let repeated = delim.chars().next()?;
-            if head[..start].ends_with(repeated)
-                || content.starts_with(repeated)
-                || content.ends_with(repeated)
-            {
-                return None;
-            }
-            // CommonMark will not read a run that flanks whitespace as emphasis,
-            // and neither does the writer who typed it.
-            if content.starts_with(char::is_whitespace) || content.ends_with(char::is_whitespace) {
-                return None;
-            }
-            Some(before[start..].chars().count())
-        },
-        move |m| {
-            let ty = m.schema.mark_id(mark_name)?;
-            let code = m.schema.mark_id(md::CODE);
-            let width = delim.chars().count();
-            let (inner_from, inner_to) = (m.from + width, m.to - width);
-            if inner_from >= inner_to {
-                return None;
-            }
-            // Inside a code span every character is literal, and an atom is one
-            // token that no delimiter may be pushed into.
-            let in_code = code.is_some_and(|code| {
-                m.doc
-                    .resolve(m.from)
-                    .is_ok_and(|resolved| resolved.marks(m.schema).contains_type(code))
-            });
-            if in_code || m.text.contains(OBJECT_REPLACEMENT) {
-                return None;
-            }
-            // A code span holds no other marks, so one that would swallow some
-            // is left as the characters the writer typed.
-            if Some(ty) == code
-                && m.doc
-                    .slice(inner_from, inner_to)
-                    .is_ok_and(|slice| slice.content().iter().any(|node| !node.marks().is_empty()))
-            {
-                return None;
-            }
-            let mark = Mark::new(ty);
-            let leaf = |text: &str| -> Option<Slice> {
-                let leaf = crate::inline::syntax_text(m.schema, text).ok()?;
-                let leaf = leaf.mark(leaf.marks().add(m.schema, mark.clone()));
-                Some(Slice::from_fragment(Fragment::from_node(leaf)))
-            };
-            Some(
-                spec(vec![
-                    Change::replace(m.from, inner_from, leaf(delim)?),
-                    Change::add_mark(inner_from, inner_to, mark.clone()),
-                    Change::replace(inner_to, m.to, leaf(delim)?),
-                ])
-                // The caret stands past the closing delimiter, where the style is
-                // over: what is typed next is ordinary text.
-                .selection(Selection::cursor_with_marks(m.to, MarkSet::empty())),
-            )
-        },
-    )
 }
 
 /// Replace the block's own open and close tokens and drop the marker text,
@@ -449,66 +396,351 @@ fn callout_rule() -> InputRule {
     )
 }
 
-/// `[[Note]]` becomes the atom as soon as the closing `]]` is typed.
-///
-/// It has to: text spelling a wiki link is not a wiki link, and a save would
-/// read the two back as different documents and refuse the edit. A code span
-/// keeps what is typed in it literal, and so does a code block, which the rule
-/// runner excludes already.
-fn wiki_link_rule() -> InputRule {
-    InputRule::new(
-        |before| {
-            if !before.ends_with("]]") {
-                return None;
-            }
-            let mut start = before.rfind("[[")?;
-            // An embed's `!` belongs to the link it opens.
-            if before[..start].ends_with('!') {
-                start -= 1;
-            }
-            let (_, len) = crate::wiki::read_wiki_link(&before[start..])?;
-            (start + len == before.len()).then(|| before[start..].chars().count())
-        },
-        |m| {
-            let ty = m.schema.node_id(md::WIKI_LINK)?;
-            let (link, _) = crate::wiki::read_wiki_link(m.text)?;
-            // An atom stands for one token, so what the rule replaces has to be
-            // text and nothing else.
-            if m.text
-                .contains(markraft_core::projection::OBJECT_REPLACEMENT)
-            {
-                return None;
-            }
-            let in_code = m.schema.mark_id(md::CODE).is_some_and(|code| {
-                m.doc
-                    .resolve(m.from)
-                    .is_ok_and(|resolved| resolved.marks(m.schema).contains_type(code))
-            });
-            if in_code {
-                return None;
-            }
-            let node = m
-                .schema
-                .create(
-                    ty,
-                    attrs! {
-                        "target" => link.target,
-                        "alias" => link.alias,
-                        "embed" => link.embed,
-                    },
-                    MarkSet::empty(),
-                    Fragment::empty(),
-                )
-                .ok()?;
-            Some(spec(vec![Change::replace(
-                m.from,
-                m.to,
-                Slice::from_fragment(Fragment::from_node(node)),
-            )]))
-        },
-    )
-}
-
 fn spec(changes: Vec<Change>) -> markraft_core::TransactionSpec {
     markraft_core::TransactionSpec::new().changes(changes)
+}
+
+// -- the canonicalising correction -------------------------------------------
+
+/// Bring one textblock back to what its source says. See the module
+/// documentation for the steps and their order.
+fn canonicalise(cx: &CorrectionContext<'_>) -> Vec<Change> {
+    let schema = cx.start_state.schema();
+    let Some(kind) = block_kind(schema, cx.node.type_id()) else {
+        return Vec::new();
+    };
+    // In the first round only a change to this block's characters can have
+    // made it wrong. In a later one the document is the corrections' own
+    // output, and what touched this block was one of them.
+    let first_round = cx.doc.ptr_eq(cx.tr.new_doc());
+    let items = Items::from_nodes(schema, cx.node.children());
+    let carets = caret_lines(cx, &items);
+    if first_round
+        && !edits_characters(cx)
+        && !(cx.selection_left && left_a_line(cx, &items, &carets))
+    {
+        return Vec::new();
+    }
+    let lines = settle_lines(cx, kind, &items, &carets);
+    if !lines.is_empty() {
+        return lines;
+    }
+    let ctx = DeriveContext::new();
+    let text = items.text();
+    let derived = derive(kind, &text, &ctx);
+    let atoms = fold_atoms(cx, &derived);
+    if !atoms.is_empty() {
+        return atoms;
+    }
+    let guards = guard_backslashes(cx, kind, &items, &carets);
+    if !guards.is_empty() {
+        return guards;
+    }
+    mark_changes(cx, &items, &derived)
+}
+
+/// Whether this transaction changed characters *in this block*.
+///
+/// Only characters can change what the text says, so a transaction that
+/// only moved marks around has nothing here to re-derive. It also keeps the
+/// derivation off the blocks an edit never reached.
+fn edits_characters(cx: &CorrectionContext<'_>) -> bool {
+    let schema = cx.start_state.schema();
+    let start = cx.content_start;
+    let end = start + cx.node.content_size();
+    let text_of = |slice: &Slice| markraft_core::projection::slice_to_plain_text(schema, slice);
+    cx.tr
+        .changes()
+        .iter_changes()
+        .iter()
+        .any(|change| match change {
+            ChangeRange::Marked { .. } => false,
+            ChangeRange::Replaced {
+                from_a,
+                to_a,
+                from_b,
+                to_b,
+                inserted,
+            } => {
+                if *from_b > end || *to_b < start {
+                    return false;
+                }
+                // A command may rewrite the nodes it covers without moving a
+                // character, so a replacement alone proves nothing. Compare
+                // the text.
+                match cx.start_state.doc().slice(*from_a, *to_a) {
+                    Ok(replaced) => text_of(&replaced) != text_of(inserted),
+                    Err(_) => true,
+                }
+            }
+        })
+}
+
+/// The lines of the block a caret or either end of a selection stands on
+/// after the transaction, counted from 0 by the line breaks before them.
+fn caret_lines(cx: &CorrectionContext<'_>, items: &Items) -> Vec<usize> {
+    let selection = cx.tr.new_selection();
+    let ends = selection
+        .ranges(cx.tr.new_doc())
+        .iter()
+        .flat_map(|range| [range.from, range.to])
+        .collect::<Vec<_>>();
+    lines_at(cx, items, &ends)
+}
+
+/// Whether a line of the block that an end of the selection stood on before
+/// the transaction has none on it now: the line the caret left, which steps
+/// 1 and 3 left alone while it was there and settle now.
+fn left_a_line(cx: &CorrectionContext<'_>, items: &Items, carets: &[usize]) -> bool {
+    let start = cx.tr.start_state();
+    let before = start
+        .selection()
+        .map(start.schema(), cx.tr.new_doc(), &cx.tr.changes().desc());
+    let ends = before
+        .ranges(cx.tr.new_doc())
+        .iter()
+        .flat_map(|range| [range.from, range.to])
+        .collect::<Vec<_>>();
+    lines_at(cx, items, &ends)
+        .iter()
+        .any(|line| !carets.contains(line))
+}
+
+/// The lines of the block the positions among `ends` inside it stand on.
+fn lines_at(cx: &CorrectionContext<'_>, items: &Items, ends: &[usize]) -> Vec<usize> {
+    let start = cx.content_start;
+    let end = start + cx.node.content_size();
+    ends.iter()
+        .copied()
+        .filter(|head| (start..=end).contains(head))
+        .map(|head| {
+            items.0[..(head - start).min(items.len())]
+                .iter()
+                .filter(|item| **item == Item::Break)
+                .count()
+        })
+        .collect()
+}
+
+/// The document position of the item at `index`.
+fn at(cx: &CorrectionContext<'_>, index: usize) -> usize {
+    cx.content_start + index
+}
+
+/// Step 1: a blank line splits the block, a break at either end goes,
+/// whitespace starting a line or ending the block goes, and a break a heading
+/// of level 3 or more or a table cell cannot hold becomes a space.
+fn settle_lines(
+    cx: &CorrectionContext<'_>,
+    kind: BlockKind,
+    items: &Items,
+    carets: &[usize],
+) -> Vec<Change> {
+    let schema = cx.start_state.schema();
+    let items = &items.0;
+    // A blank line ends a paragraph, so the block becomes as many blocks as
+    // it has blank-line runs plus one, all in one round; each new block is
+    // this correction's again in the next.
+    let mut splits = Vec::new();
+    let mut line_start: Option<usize> = None;
+    let mut last_split = 0;
+    for (index, item) in items.iter().enumerate() {
+        match item {
+            Item::Break => {
+                // Only between two lines that hold something: a break at
+                // either end of the block is an edge, settled below.
+                if let Some(first) = line_start
+                    && first > last_split + 1
+                    && index + 1 < items.len()
+                {
+                    splits.extend(split_block(cx, first - 1, index + 1, splits.is_empty()));
+                    last_split = index + 1;
+                    line_start = None;
+                    continue;
+                }
+                line_start = Some(index + 1);
+            }
+            Item::Char(' ' | '\t') => {}
+            _ => line_start = None,
+        }
+    }
+    if !splits.is_empty() {
+        return splits;
+    }
+    let flatten = match kind {
+        BlockKind::TableCell => true,
+        BlockKind::Heading => {
+            cx.node
+                .attrs()
+                .get("level")
+                .and_then(|value| value.as_int())
+                .unwrap_or(1)
+                > 2
+        }
+        BlockKind::Paragraph => false,
+    };
+    let last_line = items.iter().filter(|item| **item == Item::Break).count();
+    let mut out = Vec::new();
+    let mut line = 0;
+    let mut at_line_start = true;
+    for (index, item) in items.iter().enumerate() {
+        match item {
+            Item::Break => {
+                let edge = (index == 0 && !carets.contains(&0))
+                    || (index + 1 == items.len() && !carets.contains(&last_line));
+                if flatten {
+                    out.push(Change::replace(
+                        at(cx, index),
+                        at(cx, index + 1),
+                        Slice::from_fragment(Fragment::from_node(schema.text(" "))),
+                    ));
+                } else if edge {
+                    out.push(Change::delete(at(cx, index), at(cx, index + 1)));
+                }
+                line += 1;
+                at_line_start = !flatten;
+            }
+            Item::Char(' ' | '\t') if at_line_start && !carets.contains(&line) => {
+                out.push(Change::delete(at(cx, index), at(cx, index + 1)));
+            }
+            _ => at_line_start = false,
+        }
+    }
+    // Whitespace ending the block is not part of what a reader reads — `**ab** `
+    // left by an Enter reads back as `**ab**`. A line holding nothing else was
+    // cleared above, and a break still ending the block is settled first:
+    // until it goes, the whitespace before it spells a hard break.
+    if !at_line_start && !carets.contains(&last_line) && items.last() != Some(&Item::Break) {
+        let kept = items
+            .iter()
+            .rposition(|item| !matches!(item, Item::Char(' ' | '\t')))
+            .map_or(0, |index| index + 1);
+        if kept < items.len() {
+            out.push(Change::delete(at(cx, kept), at(cx, items.len())));
+        }
+    }
+    out
+}
+
+/// Replace the items `from..to` — a blank line and the breaks around it —
+/// with the end of a block and the start of a paragraph. The first split
+/// ends this block; every later one ends the paragraph an earlier one opened.
+fn split_block(cx: &CorrectionContext<'_>, from: usize, to: usize, first: bool) -> Vec<Change> {
+    let schema = cx.start_state.schema();
+    let paragraph = schema.node_id(md::PARAGRAPH).unwrap_or(cx.node.type_id());
+    let open = markup_of(schema, paragraph, &Attrs::empty());
+    let close = if first {
+        markup_of(schema, cx.node.type_id(), cx.node.attrs())
+    } else {
+        open.clone()
+    };
+    vec![Change::replace(
+        at(cx, from),
+        at(cx, to),
+        Slice::from_tokens(&[Token::Close(close), Token::Open(open)]),
+    )]
+}
+
+/// Step 2: text a reader takes for an atom becomes the atom.
+///
+/// Every spelling folds in the same round. The derivation reports them in
+/// order and never one inside another, but a change set cannot hold two
+/// overlapping changes, so a spelling that overlaps one already folded waits
+/// for the next round — as does one that only a fold exposes.
+fn fold_atoms(cx: &CorrectionContext<'_>, derived: &Derived) -> Vec<Change> {
+    let schema = cx.start_state.schema();
+    let mut folded_to = 0;
+    derived
+        .atoms
+        .iter()
+        .filter(|atom| {
+            let disjoint = atom.range.start >= folded_to;
+            if disjoint {
+                folded_to = atom.range.end;
+            }
+            disjoint
+        })
+        .filter_map(|atom| {
+            let ty = schema.node_id(atom.node_type)?;
+            let node = schema
+                .create(ty, atom.attrs.clone(), MarkSet::empty(), Fragment::empty())
+                .ok()?;
+            Some(Change::replace(
+                at(cx, atom.range.start),
+                at(cx, atom.range.end),
+                Slice::from_fragment(Fragment::from_node(node)),
+            ))
+        })
+        .collect()
+}
+
+/// Step 3: the backslashes that keep each line from opening a block, except
+/// on a line a caret stands on.
+fn guard_backslashes(
+    cx: &CorrectionContext<'_>,
+    kind: BlockKind,
+    items: &Items,
+    carets: &[usize],
+) -> Vec<Change> {
+    let schema = cx.start_state.schema();
+    items
+        .guard_insertions(schema, kind)
+        .into_iter()
+        .filter(|at| {
+            let line = items.0[..*at]
+                .iter()
+                .filter(|item| **item == Item::Break)
+                .count();
+            !carets.contains(&line)
+        })
+        .map(|index| {
+            Change::insert(
+                at(cx, index),
+                Slice::from_fragment(Fragment::from_node(schema.text("\\"))),
+            )
+        })
+        .collect()
+}
+
+/// Step 4: the mark changes that make every derived mark type over the block
+/// what the derivation says.
+///
+/// One [`Change::set_marks`] per run of positions whose marks differ from
+/// their target and share one target: the target keeps every mark type this
+/// kind does not derive and takes the derived ones from the derivation. The
+/// runs never overlap, so the whole block settles in one round.
+fn mark_changes(cx: &CorrectionContext<'_>, items: &Items, derived: &Derived) -> Vec<Change> {
+    let schema = cx.start_state.schema();
+    let wanted = derived_marks(schema, derived, items.len());
+    let mut current: Vec<&MarkSet> = Vec::with_capacity(items.len());
+    for child in cx.node.children() {
+        let count = child.text().map_or(1, |text| text.chars().count());
+        current.extend(std::iter::repeat_n(child.marks(), count));
+    }
+    if current.len() != wanted.len() {
+        return Vec::new();
+    }
+    let types = derived_mark_types(schema);
+    // `None` where a position already carries its target.
+    let targets = current.iter().zip(&wanted).map(|(current, wanted)| {
+        let kept = current.filter(|mark| !types.contains(&mark.ty));
+        let target = wanted
+            .iter()
+            .fold(kept, |set, mark| set.add(schema, mark.clone()));
+        (target != **current).then_some(target)
+    });
+    let mut out = Vec::new();
+    let mut run: Option<(usize, MarkSet)> = None;
+    for (index, next) in targets.chain([None]).enumerate() {
+        if let Some((_, open)) = &run
+            && next.as_ref() == Some(open)
+        {
+            continue;
+        }
+        if let Some((from, marks)) = run.take() {
+            out.push(Change::set_marks(at(cx, from), at(cx, index), marks));
+        }
+        run = next.map(|set| (index, set));
+    }
+    out
 }

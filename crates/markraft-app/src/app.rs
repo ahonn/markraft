@@ -491,7 +491,9 @@ impl NotesApp {
                     self.feedback.flash_file_status();
                     cx.notify();
                 }
-                EditRejection::Protected(message) | EditRejection::Invalid(message) => {
+                EditRejection::Protected(message)
+                | EditRejection::Invalid(message)
+                | EditRejection::Refused(message) => {
                     self.feedback.queue(message);
                 }
                 // The shading said it where the edit landed.
@@ -1629,6 +1631,31 @@ fn rejection_message(error: &markraft_commonmark::SourceError) -> String {
     .to_owned()
 }
 
+/// Why a formatting command left the note alone, naming the syntax that could
+/// not be written where it was asked for.
+fn refusal_message(refusal: &markraft_commonmark::CommandRefusal) -> String {
+    use markraft_commonmark::{CommandRefusal, Inexpressible, schema as md};
+    let CommandRefusal::NotExpressible { reason } = refusal;
+    match reason {
+        Inexpressible::Delimiters { mark } => {
+            let (format, delimiter) = match *mark {
+                md::STRONG => ("bold", "**"),
+                md::EM => ("italic", "*"),
+                md::STRIKETHROUGH => ("strikethrough", "~~"),
+                md::CODE => ("code", "`"),
+                md::UNDERLINE => ("underline", "<u>"),
+                md::LINK => ("a link", "[…](…)"),
+                _ => ("this format", "its delimiters"),
+            };
+            format!(
+                "Markdown cannot make this {format} here: the {delimiter} it needs would sit                  between punctuation and a letter, where it reads as plain text. Include or leave                  out the punctuation beside the selection."
+            )
+        }
+        Inexpressible::Unreadable => "Markdown has no way to write this formatting here without              changing how the text around it reads."
+            .to_owned(),
+    }
+}
+
 /// A wiki link target without the `#heading`, `^block` or `#^block` it may end
 /// with, and without the spaces around it.
 ///
@@ -1914,7 +1941,7 @@ mod tests {
     // Not a glob: `gpui::prelude` carries a `test` attribute of its own, and these
     // are ordinary unit tests.
     use super::{
-        classify_drop, folder_label, linked_file, location_budget, note_location,
+        classify_drop, folder_label, linked_file, location_budget, note_location, refusal_message,
         rejection_message, resolve_wiki_link, shorten_location, wiki_link_page,
     };
     use std::{
@@ -2123,6 +2150,30 @@ mod tests {
             messages[1].contains("link reference definition"),
             "{}",
             messages[1]
+        );
+
+        // A formatting command Markdown cannot spell names the delimiters that
+        // would not be read, in a sentence of their own.
+        use markraft_commonmark::{CommandRefusal, Inexpressible, schema as md};
+        let refused = |reason| refusal_message(&CommandRefusal::NotExpressible { reason });
+        let formats = [
+            (md::STRONG, "**"),
+            (md::EM, "*"),
+            (md::STRIKETHROUGH, "~~"),
+            (md::CODE, "`"),
+            (md::LINK, "[…](…)"),
+        ];
+        let mut all = messages.clone();
+        for (mark, delimiter) in formats {
+            let message = refused(Inexpressible::Delimiters { mark });
+            assert!(message.contains(delimiter), "{message}");
+            all.push(message);
+        }
+        all.push(refused(Inexpressible::Unreadable));
+        assert_eq!(
+            all.iter().collect::<HashSet<_>>().len(),
+            all.len(),
+            "each case needs its own sentence: {all:?}"
         );
     }
 

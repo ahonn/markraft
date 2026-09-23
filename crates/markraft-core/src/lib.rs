@@ -172,7 +172,7 @@ pub use change::{
 pub use error::{ChangeError, NodeError, SchemaError};
 pub use fit::Fit;
 pub use fragment::Fragment;
-pub use kind::{Codecs, DocTypeNames};
+pub use kind::{Codecs, DocTypeNames, SourceSpelling};
 pub use mark::{Mark, MarkSet};
 pub use node::{Markup, Node, NodeVisitor};
 pub use pos::{NodeRange, ResolvedPos};
@@ -193,8 +193,8 @@ pub use corrections::{
 };
 pub use history::{
     HistoryConfig, HistoryState, InvertedEffectsFn, IsolateHistory, begin_undo_group,
-    end_undo_group, history, history_config, history_field, inverted_effects, isolate,
-    isolate_history, redo, redo_depth, redo_selection, undo, undo_depth, undo_selection,
+    end_undo_group, fold_into_previous, history, history_config, history_field, inverted_effects,
+    isolate, isolate_history, redo, redo_depth, redo_selection, undo, undo_depth, undo_selection,
 };
 pub use selection::{Selection, SelectionKind, SelectionRange};
 pub use state::{

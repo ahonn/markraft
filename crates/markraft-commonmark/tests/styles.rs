@@ -1,8 +1,11 @@
-//! Method-B: style delimiters live in the document text.
+//! Styles are spelled by the text: a style mark covers its delimiters, which
+//! are characters of the text carrying `syntax` as well, and every edit
+//! re-derives the marks from what the text now says.
 mod common;
 
 use common::Codec;
 use markraft_commonmark::schema as md;
+use markraft_commonmark::serialize::spell_document;
 use markraft_commonmark::{commonmark_extensions, from_markdown, to_markdown, toggle_style_mark};
 use markraft_core::commands::{Direction, delete_by_grapheme, insert_text, run_command};
 use markraft_core::{Attrs, EditorState, EditorStateConfig, Selection};
@@ -33,6 +36,14 @@ fn em_code_and_strike_keep_delimiters() {
         codec.describe(&codec.parse("~~x~~")),
         r#"doc(paragraph("~~"{strikethrough,syntax}, "x"{strikethrough}, "~~"{strikethrough,syntax}))"#
     );
+    assert_eq!(
+        codec.describe(&codec.parse("[label](https://a.example)")),
+        r#"doc(paragraph("["{link,syntax}, "label"{link}, "](https://a.example)"{link,syntax}))"#
+    );
+    assert_eq!(
+        codec.describe(&codec.parse("https://a.example")),
+        r#"doc(paragraph("https://a.example"{link}))"#
+    );
 }
 
 #[test]
@@ -62,7 +73,7 @@ fn em_around_autolink_writes_bare() {
 }
 
 #[test]
-fn method_b_round_trips_without_doubling() {
+fn spelled_styles_round_trip_without_doubling() {
     let codec = Codec::new();
     for source in [
         "**bold**",
@@ -77,8 +88,10 @@ fn method_b_round_trips_without_doubling() {
     }
 }
 
+/// A bare style mark — what a host or an HTML paste describes — has no
+/// spelling until it is given one; spelling it writes its delimiters.
 #[test]
-fn old_style_marks_without_syntax_still_serialize() {
+fn a_bare_style_mark_is_spelled_with_its_delimiters() {
     let codec = Codec::new();
     let strong = codec
         .schema
@@ -97,11 +110,15 @@ fn old_style_marks_without_syntax_still_serialize() {
             )
             .unwrap()])
         .unwrap();
-    assert_eq!(codec.write(&doc), "**bold**");
+    // Unspelled, the text is all there is to write.
+    assert_eq!(codec.write(&doc), "bold");
+    let spelled = spell_document(&codec.serializer, &doc);
+    assert_eq!(codec.write(&spelled), "**bold**");
+    assert_eq!(spelled, codec.parse("**bold**"));
 }
 
 #[test]
-fn normalize_repairs_marks_after_deleting_a_delimiter() {
+fn deleting_a_delimiter_takes_the_style_with_it() {
     let codec = Codec::new();
     let doc = codec.parse("*em*");
     // Caret after the opening `*` (doc pos 2 is after the one-char syntax leaf).
@@ -125,30 +142,6 @@ fn normalize_repairs_marks_after_deleting_a_delimiter() {
         !described.contains("{em}") || described.contains(r#""em*""#),
         "expected literal leftover marker, got {described}"
     );
-}
-
-/// A bare style mark — what an HTML paste or an older file leaves — is written
-/// with its delimiters even where the block also holds Method-B spans, so the
-/// style survives the save. Normalize does not convert it: re-deriving marks
-/// from re-serialised prose is only safe when the characters do not change.
-#[test]
-fn a_bare_style_mark_still_writes_its_delimiters() {
-    let codec = Codec::new();
-    let strong = codec.schema.mark_id(md::STRONG).unwrap();
-    let marked = codec.schema.text_marked(
-        "bold",
-        markraft_core::MarkSet::from_marks(&codec.schema, [markraft_core::Mark::new(strong)]),
-    );
-    // Beside a Method-B span, and beside an atom the reparse cannot round-trip.
-    let method_b = codec.parse("**one** ![a](x)");
-    let mut children: Vec<_> = method_b.child(0).children().cloned().collect();
-    children.push(codec.schema.text(" "));
-    children.push(marked);
-    let doc = codec
-        .schema
-        .doc([codec.schema.node(md::PARAGRAPH, children).unwrap()])
-        .unwrap();
-    assert_eq!(codec.write(&doc), "**one** ![a](x) **bold**");
 }
 
 #[test]
@@ -197,8 +190,7 @@ fn typed(codec: &Codec, text: &str) -> EditorState {
     state
 }
 
-/// The delimiters a writer types become the mark and its syntax leaves as soon
-/// as the closing run lands.
+/// The delimiters a writer types make the style as soon as the text spells it.
 #[test]
 fn typing_a_delimiter_pair_applies_the_style() {
     let codec = Codec::new();
@@ -208,8 +200,9 @@ fn typing_a_delimiter_pair_applies_the_style() {
         ("~~x~~", "~~x~~"),
         ("`code`", "`code`"),
         ("a **b** c", "a **b** c"),
-        // Flanking whitespace is not emphasis, in CommonMark or under the caret.
-        ("** not bold**", r"\*\* not bold\*\*"),
+        // Flanking whitespace is not emphasis, so the text stays text — and
+        // is written as it is, since a reader reads it as text too.
+        ("** not bold**", "** not bold**"),
     ] {
         let state = typed(&codec, input);
         assert_eq!(
@@ -236,10 +229,9 @@ fn typing_past_a_closed_style_is_not_styled() {
     );
 }
 
-/// Characters that only *look* like delimiters were written `\*` in the source
-/// and have to stay literal, however much the rest of the block is edited. The
-/// tree cannot tell the two apart, so nothing but the input rules may read a
-/// character as spelling.
+/// Characters that only *look* like delimiters were written `\*` in the source,
+/// and the backslashes are in the text, so they stay literal however much the
+/// rest of the block is edited.
 #[test]
 fn an_escaped_literal_survives_an_edit_to_its_paragraph() {
     let codec = Codec::new();

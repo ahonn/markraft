@@ -243,16 +243,18 @@ fn a_closing_bracket_pair_makes_the_wiki_link_atom() {
 }
 
 #[test]
-fn undoing_the_wiki_link_rule_gives_the_typed_text_back() {
+fn a_wiki_link_is_text_until_the_source_spells_one() {
+    // The canonicalising correction folds text into the atom only once a
+    // reader would read one there, and never by the caret's own rule.
     let (schema, state) = empty();
-    let built = type_all(&state, "[[Note]]");
-    let undo = markraft_core::commands::undo_input_rule();
-    let back = markraft_core::commands::run_command(&built, &undo)
-        .expect("the rule can be taken back")
-        .expect("the transaction resolves")
-        .state()
-        .clone();
-    assert_eq!(schema.describe(back.doc()), r#"doc(paragraph("[[Note]]"))"#);
+    assert_eq!(
+        schema.describe(type_all(&state, "[[Note]").doc()),
+        r#"doc(paragraph("[[Note]"))"#
+    );
+    assert_eq!(
+        schema.describe(type_all(&state, "[[a|]]").doc()),
+        r#"doc(paragraph("[[a|]]"))"#
+    );
 }
 
 #[test]

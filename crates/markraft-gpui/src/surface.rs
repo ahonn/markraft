@@ -245,7 +245,11 @@ enum Marker {
     Task {
         checked: bool,
         number: Option<Rc<ShapedLine>>,
+        /// Focused spelling `- [ ] ` / `- [x] `, drawn instead of the checkbox.
+        source: Option<Rc<ShapedLine>>,
     },
+    /// Markdown source prefix shown while a heading or list line is focused.
+    Source(Rc<ShapedLine>),
 }
 
 /// Where a table cell sits in its grid, once the table pass has placed it.
@@ -336,6 +340,11 @@ pub(crate) struct LayoutLine {
     decoration: Option<Decoration>,
     /// The shaped language label of a code block's header.
     code_header: Option<Rc<ShapedLine>>,
+    /// Closing fence line drawn under a focused code block.
+    code_footer: Option<Rc<ShapedLine>>,
+    /// The marker each quote level draws in the gutter while the line is
+    /// focused, as the host's kind spells it.
+    quote_marker: Option<Rc<ShapedLine>>,
     /// The shaped header of a callout, on the line that opens it.
     callout_header: Option<CalloutHeader>,
     code_hitboxes: Option<(Hitbox, Hitbox)>,
@@ -504,8 +513,13 @@ impl LayoutLine {
     }
 
     /// Window-space bounds of the language button, available only on a code
-    /// line.
+    /// line that is not showing its fence spelling.
     pub(crate) fn code_language_bounds(&self) -> Option<Bounds<Pixels>> {
+        // Focused fences put the open fence on the left; the language chip
+        // stays off so a click does not open the picker over source text.
+        if self.code_footer.is_some() {
+            return None;
+        }
         let label = self.code_header.as_ref()?;
         let label_width = label.width + CODE_CHEVRON_WIDTH + px(12.);
         Some(Bounds::new(
@@ -537,7 +551,12 @@ impl LayoutLine {
 
     pub(crate) fn marker_bounds(&self) -> Option<Bounds<Pixels>> {
         let (offset, width, height) = match self.marker.as_ref()? {
-            Marker::Number(line) => (line.width + NUMBER_GAP, line.width, self.line_height),
+            Marker::Number(line) | Marker::Source(line) => {
+                (line.width + NUMBER_GAP, line.width, self.line_height)
+            }
+            Marker::Task {
+                source: Some(line), ..
+            } => (line.width + NUMBER_GAP, line.width, self.line_height),
             // Drawn markers share one center, 15px left of the text.
             Marker::Bullet { .. } => (px(17.5), px(5.), px(5.)),
             Marker::Task { .. } => (px(22.), px(14.), px(14.)),
@@ -766,6 +785,9 @@ pub(crate) struct ShapeInput<'a> {
     /// Which parts of a line the host keeps exactly as written. A host that has not
     /// said has no protected syntax, so nothing is shaded.
     pub protected: Option<&'a crate::ProtectedSpans>,
+    /// How the host's kind spells the parts of itself a focused line shows as
+    /// source. Without it a line is drawn the same focused or not.
+    pub spelling: Option<&'a dyn markraft_core::SourceSpelling>,
     /// Document selection range, which is what reveals a syntax run. Inclusive
     /// of both ends in the ProseMirror sense (`from`..`to`).
     pub selection: Range<usize>,
@@ -866,9 +888,31 @@ fn shape_line(
     let font_size = style.font_size(heading, code);
     let max_indent = max_indent(style, width);
     let number = ordered_marker(doc, types, line, style, font_size, text_system);
-    let indent = indent_of(types, line, style, number.as_ref().map(|(_, w)| *w)).min(max_indent);
-    let marker = marker_of(types, line, number.map(|(shaped, _)| shaped));
+    let focused = line_focused(input, line);
+    let marker = chrome_marker(
+        input,
+        line,
+        number.as_ref().map(|(shaped, _)| shaped.clone()),
+        focused,
+        font_size,
+        text_system,
+    );
     let decoration = decoration_of(input, index, line, cell.is_some(), max_indent);
+    // Headings park ATX hashes in a dedicated gutter. List source spellings
+    // reuse the ordered-number reserve so `- `, `1. `, and `- [ ] ` all fit.
+    let heading_gutter = match &marker {
+        Some(Marker::Source(label)) if heading.is_some() => label.width + NUMBER_GAP,
+        _ => px(0.),
+    };
+    let marker_width = match &marker {
+        Some(Marker::Source(label)) if heading.is_none() => Some(label.width),
+        Some(Marker::Task {
+            source: Some(label),
+            ..
+        }) => Some(label.width),
+        _ => number.as_ref().map(|(_, w)| *w),
+    };
+    let indent = (indent_of(types, line, style, marker_width) + heading_gutter).min(max_indent);
 
     let wrap_width = match cell {
         Some(CellWidth::Column(content)) => content.max(px(16.)),
@@ -922,14 +966,37 @@ fn shape_line(
     } else {
         px(0.)
     };
+    let fence = (code && focused)
+        .then(|| {
+            input
+                .spelling
+                .and_then(|spelling| spelling.verbatim_fence(line))
+        })
+        .flatten();
     let code_header = code.then(|| {
-        code_header(
-            crate::syntax::language_label(types.code_language(line).unwrap_or("")),
-            width,
-            style,
-            text_system,
-        )
+        let label = match &fence {
+            Some((open, _)) => open.clone(),
+            None => {
+                crate::syntax::language_label(types.code_language(line).unwrap_or("")).to_owned()
+            }
+        };
+        code_header(&label, width, style, text_system)
     });
+    let code_footer = fence
+        .as_ref()
+        .map(|(_, close)| shape_source_label(close, font_size, style.muted_text, text_system));
+    let quote_marker = (focused && matches!(decoration, Some(Decoration::Quote { .. })))
+        .then(|| {
+            let spelling = input.spelling?;
+            let marker = spelling.container_marker(types.blockquote?)?;
+            Some(shape_source_label(
+                &marker,
+                style.body_size,
+                style.muted_text,
+                text_system,
+            ))
+        })
+        .flatten();
     // A callout says what kind of note it is on a line of its own above the
     // block it opens. The line is chrome: it holds no caret stop, so it lives
     // in the room the block reserves above itself rather than in the text.
@@ -979,6 +1046,8 @@ fn shape_line(
         marker,
         decoration,
         code_header,
+        code_footer,
+        quote_marker,
         callout_header,
         code_hitboxes: None,
         widenings: text.widenings,
@@ -1711,7 +1780,17 @@ fn hide_syntax_run(input: &ShapeInput<'_>, line: &Line, index: usize) -> bool {
     let Some(run) = line.runs.get(index) else {
         return false;
     };
-    if run.marks.get(syntax).is_none() {
+    let Some(mark) = run.marks.get(syntax) else {
+        return false;
+    };
+    // A run that stands for something — an entity — shows its spelling until
+    // the view can draw what it displays instead.
+    let displays = mark
+        .attrs
+        .get("display")
+        .and_then(|value| value.as_str())
+        .is_some_and(|display| !display.is_empty());
+    if displays {
         return false;
     }
     let style: Vec<_> = run
@@ -1762,14 +1841,32 @@ fn hide_syntax_run(input: &ShapeInput<'_>, line: &Line, index: usize) -> bool {
 pub(crate) fn reveal_key(input: &ShapeInput<'_>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    if input.types.syntax.is_none() {
-        return 0;
-    }
     for line in input.projection.lines() {
-        for index in 0..line.runs.len() {
+        for (index, run) in line.runs.iter().enumerate() {
             if !hide_syntax_run(input, line, index) {
-                line.runs[index].from.hash(&mut hasher);
+                run.from.hash(&mut hasher);
             }
+            if matches!(run.content, RunContent::Atom(_)) {
+                let touches = |range: &Range<usize>| {
+                    if range.start == range.end {
+                        range.start >= run.from && range.start <= run.to
+                    } else {
+                        range.start < run.to && range.end > run.from
+                    }
+                };
+                if touches(&input.selection) || input.composition.as_ref().is_some_and(touches) {
+                    run.from.hash(&mut hasher);
+                    1u8.hash(&mut hasher);
+                }
+            }
+        }
+        // Any line that draws differently while it has the caret: a heading's
+        // hashes, a list marker's spelling, a fence, a quote's marker. Asking
+        // the kind only for the lines the caret actually touches keeps this to
+        // a couple of calls per move.
+        if affinity_touches(input, line.from, line.to) && focus_chrome(input, line) {
+            line.from.hash(&mut hasher);
+            2u8.hash(&mut hasher);
         }
     }
     hasher.finish()
@@ -1922,8 +2019,38 @@ fn atom_of(
         wiki,
         ..
     } = *input;
-    let (shape, original) = atom_label(types, node)?;
-    let picture = picture_source(types, node);
+    let revealed = {
+        let touches = |range: &Range<usize>| {
+            if range.start == range.end {
+                range.start >= run.from && range.start <= run.to
+            } else {
+                range.start < run.to && range.end > run.from
+            }
+        };
+        touches(&input.selection) || input.composition.as_ref().is_some_and(touches)
+    };
+    // An atom under the caret shows the source it was read from, which only the
+    // host's kind can spell — it is the same text a save writes.
+    let source = revealed
+        .then(|| {
+            input
+                .spelling
+                .and_then(|spelling| spelling.atom_source(node))
+        })
+        .flatten();
+    let (shape, original) = match source {
+        Some(source) => (AtomShape::Source, source),
+        None => {
+            let (shape, label) = atom_label(types, node)?;
+            (shape, label.to_owned())
+        }
+    };
+    // A picture stands for the atom; where the atom is showing its source there
+    // is nothing to stand for.
+    let picture = match shape {
+        AtomShape::Source => None,
+        _ => picture_source(types, node),
+    };
     // `![[…]]` is written for a file, but a note answers to the same spelling and
     // the host's index is what knows which this is. Reporting a missing picture
     // for a note that is plainly there tells the reader something untrue.
@@ -1941,7 +2068,7 @@ fn atom_of(
             Ok(_) if !alone => format!("Inline image: {original}"),
             Ok(_) => original.to_owned(),
         },
-        None => original.to_owned(),
+        None => original,
     };
     // A local file the note can read is drawn for real where it has the line to
     // itself; the placeholder is still built, and stands in wherever it is not.
@@ -2362,7 +2489,108 @@ fn starts_item(types: &DocTypes, line: &Line) -> bool {
             .all(|ancestor| ancestor.index == 0)
 }
 
-fn marker_of(types: &DocTypes, line: &Line, number: Option<Rc<ShapedLine>>) -> Option<Marker> {
+/// Whether this line has anything to draw differently while it is focused.
+///
+/// A line with no source spelling of its own — an ordinary paragraph — looks the
+/// same either way, so the caret passing through it does not invalidate the
+/// shaped rows.
+fn focus_chrome(input: &ShapeInput<'_>, line: &Line) -> bool {
+    let quoted = input.types.blockquote.is_some_and(|quote| {
+        line.ancestors
+            .iter()
+            .any(|ancestor| ancestor.node_type == quote)
+    });
+    quoted
+        || input.spelling.is_some_and(|spelling| {
+            spelling.line_prefix(line).is_some() || spelling.verbatim_fence(line).is_some()
+        })
+}
+
+/// Whether the selection or composition touches this projection line.
+fn line_focused(input: &ShapeInput<'_>, line: &Line) -> bool {
+    affinity_touches(input, line.from, line.to)
+}
+
+fn affinity_touches(input: &ShapeInput<'_>, from: usize, to: usize) -> bool {
+    let touches = |range: &Range<usize>| {
+        if range.start == range.end {
+            range.start >= from && range.start <= to
+        } else {
+            range.start < to && range.end > from
+        }
+    };
+    touches(&input.selection) || input.composition.as_ref().is_some_and(touches)
+}
+
+fn shape_source_label(
+    text: &str,
+    font_size: Pixels,
+    color: Hsla,
+    text_system: &WindowTextSystem,
+) -> Rc<ShapedLine> {
+    Rc::new(text_system.shape_line(
+        text.to_owned().into(),
+        font_size,
+        &[TextRun {
+            len: text.len(),
+            font: font(CODE_FONT),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    ))
+}
+
+/// The gutter marker a line draws: its source spelling while the caret is on
+/// it, and the rendered bullet or ordinal otherwise.
+///
+/// What the source *is* comes from the host's kind, not from here — a view that
+/// spelled `##` or `- [x] ` itself would only be able to draw one kind of
+/// document, and would have to keep its escaping in step with the codec's.
+fn chrome_marker(
+    input: &ShapeInput<'_>,
+    line: &Line,
+    number: Option<Rc<ShapedLine>>,
+    focused: bool,
+    font_size: Pixels,
+    text_system: &WindowTextSystem,
+) -> Option<Marker> {
+    let types = input.types;
+    let style = input.style;
+    let source = focused
+        .then(|| {
+            input
+                .spelling
+                .and_then(|spelling| spelling.line_prefix(line))
+        })
+        .flatten()
+        .map(|text| shape_source_label(&text, font_size, style.muted_text, text_system));
+    if types.heading_level(line).is_some() {
+        // A heading has nothing to draw when it is not showing its hashes.
+        return source.map(Marker::Source);
+    }
+    let (item, _) = types.item_of(line)?;
+    if !starts_item(types, line) {
+        return None;
+    }
+    match source {
+        Some(label) if Some(item.node_type) == types.task_item => Some(Marker::Task {
+            checked: DocTypes::task_checked(&item.attrs),
+            number: None,
+            source: Some(label),
+        }),
+        Some(label) => Some(Marker::Source(label)),
+        None => chrome_marker_unfocused(types, line, number),
+    }
+}
+
+fn chrome_marker_unfocused(
+    types: &DocTypes,
+    line: &Line,
+    number: Option<Rc<ShapedLine>>,
+) -> Option<Marker> {
     let (item, list) = types.item_of(line)?;
     if !starts_item(types, line) {
         return None;
@@ -2371,6 +2599,7 @@ fn marker_of(types: &DocTypes, line: &Line, number: Option<Rc<ShapedLine>>) -> O
         return Some(Marker::Task {
             checked: DocTypes::task_checked(&item.attrs),
             number,
+            source: None,
         });
     }
     if let Some(number) = number {
@@ -2721,9 +2950,10 @@ impl Element for EditorSurface {
             {
                 row.origin.x -= entry.offset;
             }
-            if let (Some(language), Some(copy)) =
-                (row.code_language_bounds(), row.code_copy_bounds())
-            {
+            if let Some(copy) = row.code_copy_bounds() {
+                let language = row
+                    .code_language_bounds()
+                    .unwrap_or_else(|| Bounds::from_corners(copy.origin, copy.origin));
                 row.code_hitboxes = Some((
                     window.insert_hitbox(language, HitboxBehavior::Normal),
                     window.insert_hitbox(copy, HitboxBehavior::Normal),
@@ -2884,16 +3114,30 @@ impl Element for EditorSurface {
                                 row.text_height()
                             };
                             let (top, height) = (row.origin.y - lift, height + lift);
+                            let bar_x = row.origin.x - style.quote_indent * (levels - level) as f32;
                             window.paint_quad(fill(
-                                Bounds::new(
-                                    point(
-                                        row.origin.x - style.quote_indent * (levels - level) as f32,
-                                        top,
-                                    ),
-                                    size(QUOTE_BAR, height),
-                                ),
+                                Bounds::new(point(bar_x, top), size(QUOTE_BAR, height)),
                                 tones.get(level).copied().flatten().unwrap_or(style.marker),
                             ));
+                            if let Some(marker) = &row.quote_marker {
+                                // A focused quote shows its own marker beside
+                                // each bar, one per level it sits in. The
+                                // marker ends where the next one — or the text
+                                // — begins, so the space its spelling carries
+                                // is the gap the reader sees. A gutter too
+                                // narrow for it keeps it off the bar instead.
+                                let next =
+                                    row.origin.x - style.quote_indent * (levels - level - 1) as f32;
+                                let x = (next - marker.width).max(bar_x + QUOTE_BAR);
+                                let _ = marker.paint(
+                                    point(x, row.origin.y),
+                                    row.line_height,
+                                    TextAlign::Left,
+                                    None,
+                                    window,
+                                    cx,
+                                );
+                            }
                         }
                     }
                     Some(Decoration::Divider) => window.paint_quad(fill(
@@ -2925,6 +3169,19 @@ impl Element for EditorSurface {
                 }
                 if let Some(label) = &row.code_header {
                     paint_code_header(self, row, label, &style, window, cx);
+                }
+                if let Some(footer) = &row.code_footer {
+                    let _ = footer.paint(
+                        point(
+                            row.origin.x,
+                            row.origin.y + row.text_height() + CODE_PADDING * 0.25,
+                        ),
+                        row.line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
                 }
                 if let Some(header) = &row.callout_header {
                     let _ = header.label.paint(
@@ -3369,7 +3626,19 @@ fn paint_marker(
 ) {
     let bounds = row.marker_bounds().expect("marker has bounds");
     match marker {
-        Marker::Number(line) => {
+        Marker::Number(line) | Marker::Source(line) => {
+            let _ = line.paint(
+                bounds.origin,
+                row.line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+        Marker::Task {
+            source: Some(line), ..
+        } => {
             let _ = line.paint(
                 bounds.origin,
                 row.line_height,
@@ -3394,7 +3663,11 @@ fn paint_marker(
                 window.paint_quad(fill(bounds, style.marker).corner_radii(radius));
             }
         }
-        Marker::Task { checked, number } => {
+        Marker::Task {
+            checked,
+            number,
+            source: None,
+        } => {
             if let Some(number) = number {
                 let _ = number.paint(
                     point(bounds.left() - NUMBER_GAP - number.width, row.origin.y),
@@ -3439,25 +3712,37 @@ fn paint_code_header(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let (Some(language), Some(copy)) = (row.code_language_bounds(), row.code_copy_bounds()) else {
+    let Some(copy) = row.code_copy_bounds() else {
         return;
     };
-    let _ = label.paint(
-        language.origin + point(px(6.), px(3.)),
-        px(18.),
-        TextAlign::Left,
-        None,
-        window,
-        cx,
-    );
+    // Focused fences spell ` ```lang ` on the left; unfocused keep the
+    // language chip on the right next to the copy control.
+    let focused_fence = row.code_footer.is_some();
+    let label_origin = if focused_fence {
+        point(
+            row.origin.x,
+            row.origin.y - CODE_HEADER_HEIGHT - CODE_HEADER_LIFT + px(3.),
+        )
+    } else {
+        let Some(language) = row.code_language_bounds() else {
+            return;
+        };
+        language.origin + point(px(6.), px(3.))
+    };
+    let _ = label.paint(label_origin, px(18.), TextAlign::Left, None, window, cx);
     let mut icons = PathBuilder::stroke(px(1.2));
-    let chevron = point(
-        language.right() - CODE_CHEVRON_WIDTH,
-        language.top() + px(10.5),
-    );
-    icons.move_to(chevron + point(px(2.), px(0.)));
-    icons.line_to(chevron + point(px(5.), px(3.)));
-    icons.line_to(chevron + point(px(8.), px(0.)));
+    if !focused_fence {
+        let Some(language) = row.code_language_bounds() else {
+            return;
+        };
+        let chevron = point(
+            language.right() - CODE_CHEVRON_WIDTH,
+            language.top() + px(10.5),
+        );
+        icons.move_to(chevron + point(px(2.), px(0.)));
+        icons.line_to(chevron + point(px(5.), px(3.)));
+        icons.line_to(chevron + point(px(8.), px(0.)));
+    }
     // Clipboard: a board with a clip on its top edge.
     let board = copy.origin + point(px(9.), px(6.5));
     let (w, h, r) = (px(10.), px(12.), px(2.));
@@ -3480,17 +3765,21 @@ fn paint_code_header(
     let Some((language_box, copy_box)) = &row.code_hitboxes else {
         return;
     };
-    window.set_cursor_style(CursorStyle::PointingHand, language_box);
+    if row.code_language_bounds().is_some() {
+        window.set_cursor_style(CursorStyle::PointingHand, language_box);
+    }
     window.set_cursor_style(CursorStyle::PointingHand, copy_box);
     let language_box = language_box.clone();
     let copy_box = copy_box.clone();
+    let language_enabled = row.code_language_bounds().is_some();
     let editor = surface.editor.clone();
     let code_pos = row.code_pos;
     window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
         if !phase.bubble() || event.button != MouseButton::Left {
             return;
         }
-        let language_clicked = language_box.is_hovered_at(event.position, window);
+        let language_clicked =
+            language_enabled && language_box.is_hovered_at(event.position, window);
         let copy_clicked = copy_box.is_hovered_at(event.position, window);
         if (language_clicked || copy_clicked) && editor.read(cx).is_composing() {
             editor.update(cx, |editor, cx| editor.cancel_composition(cx));
@@ -3532,9 +3821,10 @@ mod tests {
     use super::{
         AtomShape, CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_PADDING, Decoration,
         LayoutLine, LayoutRow, Marker, QUOTE_BAR, ShapeInput, TableScroll, Widening, atom_label,
-        cell_under, column_demands, column_widths, decoration_of, drawn_image, file_name,
-        gap_below, marker_of, max_indent, merge_row_centers, picture_source, place_table,
-        quote_bars, reveal_offset, shape, table_overflows, unbreakable_units, visible_strips,
+        cell_under, chrome_marker_unfocused, column_demands, column_widths, decoration_of,
+        drawn_image, file_name, gap_below, max_indent, merge_row_centers, picture_source,
+        place_table, quote_bars, reveal_offset, shape, table_overflows, unbreakable_units,
+        visible_strips,
     };
     use crate::style::EditorStyle;
     use crate::typeahead::tests::state_of;
@@ -3566,6 +3856,8 @@ mod tests {
             marker: None,
             decoration: None,
             code_header: None,
+            code_footer: None,
+            quote_marker: None,
             callout_header: None,
             code_hitboxes: None,
             widenings: Vec::new(),
@@ -3719,8 +4011,10 @@ mod tests {
         let schema = commonmark_schema();
         let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
         let images = crate::images::Images::default();
+        let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
         let input = ShapeInput {
             images: &images,
+            spelling: Some(&spelling),
             wiki: None,
             protected: None,
             doc: state.doc(),
@@ -3748,7 +4042,7 @@ mod tests {
                 line,
                 input.types.heading_level(line),
                 input.types.is_code_block(line),
-                &marker_of(input.types, line, None),
+                &chrome_marker_unfocused(input.types, line, None),
             )
         })
     }
@@ -3880,9 +4174,11 @@ mod tests {
         let state = state_of(source);
         let projection = projection_of(&state);
         let images = crate::images::Images::default();
+        let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
         let style = EditorStyle::notes();
         let input = ShapeInput {
             images: &images,
+            spelling: Some(&spelling),
             wiki: None,
             protected: None,
             doc: state.doc(),
@@ -4439,10 +4735,11 @@ mod tests {
             .lines()
             .iter()
             .map(|line| {
-                marker_of(&types, line, None).map(|marker| match marker {
+                chrome_marker_unfocused(&types, line, None).map(|marker| match marker {
                     Marker::Number(_) => "number",
                     Marker::Bullet { .. } => "bullet",
                     Marker::Task { .. } => "task",
+                    Marker::Source(_) => "source",
                 })
             })
             .collect()
@@ -4666,6 +4963,137 @@ mod tests {
         );
     }
 
+    #[test]
+    fn focused_heading_and_list_draw_source_markers() {
+        let text = text_system();
+        let state = state_of("# Hello\n\n- item\n\n1. numbered\n\n- [ ] task");
+        let projection = projection_of(&state);
+        let schema = commonmark_schema();
+        let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
+        let style = EditorStyle::default();
+        let images = crate::images::Images::default();
+        let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
+        // Caret in the heading.
+        let heading_pos = projection.lines()[0].from;
+        let input = ShapeInput {
+            images: &images,
+            spelling: Some(&spelling),
+            doc: state.doc(),
+            types: &types,
+            projection: &projection,
+            style: &style,
+            single_line: false,
+            wiki: None,
+            protected: None,
+            selection: heading_pos..heading_pos,
+            composition: None,
+        };
+        let rows = shape(&input, px(400.), &text);
+        assert!(
+            matches!(rows[0].marker, Some(Marker::Source(_))),
+            "focused heading shows ATX hashes"
+        );
+        // Caret in the bullet item.
+        let bullet_pos = projection.lines()[1].from;
+        let input = ShapeInput {
+            selection: bullet_pos..bullet_pos,
+            ..input
+        };
+        let rows = shape(&input, px(400.), &text);
+        assert!(
+            matches!(rows[1].marker, Some(Marker::Source(_))),
+            "focused bullet shows `- ` spelling"
+        );
+        // Unfocused list keeps chrome.
+        let input = ShapeInput {
+            selection: heading_pos..heading_pos,
+            ..input
+        };
+        let rows = shape(&input, px(400.), &text);
+        assert!(
+            matches!(rows[1].marker, Some(Marker::Bullet { .. })),
+            "unfocused bullet stays a drawn marker"
+        );
+    }
+
+    #[test]
+    fn focused_code_block_shows_fence_spelling() {
+        let text = text_system();
+        let state = state_of("```rust\nfn main() {}\n```");
+        let projection = projection_of(&state);
+        let schema = commonmark_schema();
+        let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
+        let style = EditorStyle::default();
+        let images = crate::images::Images::default();
+        let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
+        let pos = projection.lines()[0].from + 1;
+        let input = ShapeInput {
+            images: &images,
+            spelling: Some(&spelling),
+            doc: state.doc(),
+            types: &types,
+            projection: &projection,
+            style: &style,
+            single_line: false,
+            wiki: None,
+            protected: None,
+            selection: pos..pos,
+            composition: None,
+        };
+        let rows = shape(&input, px(400.), &text);
+        assert!(rows[0].code_footer.is_some(), "closing fence while focused");
+        assert!(rows[0].code_header.is_some());
+    }
+
+    #[test]
+    fn focused_quote_shows_source_markers() {
+        let text = text_system();
+        let state = state_of("> quoted\n\npara");
+        let projection = projection_of(&state);
+        let schema = commonmark_schema();
+        let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
+        let style = EditorStyle::default();
+        let images = crate::images::Images::default();
+        let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
+        let quote_pos = projection.lines()[0].from;
+        let input = ShapeInput {
+            images: &images,
+            spelling: Some(&spelling),
+            doc: state.doc(),
+            types: &types,
+            projection: &projection,
+            style: &style,
+            single_line: false,
+            wiki: None,
+            protected: None,
+            selection: quote_pos..quote_pos,
+            composition: None,
+        };
+        let rows = shape(&input, px(400.), &text);
+        // Whatever the kind spells a quote level with, marker and all — the
+        // view draws that and nothing of its own.
+        let expected = markraft_core::SourceSpelling::container_marker(
+            &spelling,
+            types.blockquote.expect("the quote type"),
+        )
+        .expect("a quote marker");
+        assert_eq!(
+            rows[0].quote_marker.as_ref().map(|line| line.len),
+            Some(expected.len()),
+            "focused quote shows its own spelling"
+        );
+        let para_pos = projection.lines()[1].from;
+        let input = ShapeInput {
+            selection: para_pos..para_pos,
+            ..input
+        };
+        let rows = shape(&input, px(400.), &text);
+        assert!(
+            rows[0].quote_marker.is_none(),
+            "unfocused quote hides its `>` spelling"
+        );
+    }
+
     /// An input method's marked text opens the span it is being typed into, and
     /// only that one.
     #[test]
@@ -4696,10 +5124,12 @@ mod tests {
         let state = state_of(source);
         let projection = projection_of(&state);
         let images = crate::images::Images::default();
+        let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
         let style = EditorStyle::notes();
         let types = callout_types();
         let input = ShapeInput {
             images: &images,
+            spelling: Some(&spelling),
             wiki: None,
             protected: None,
             doc: state.doc(),

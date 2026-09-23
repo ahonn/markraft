@@ -19,12 +19,18 @@
 //! content starts is written with the stack's prefix, including the blank lines
 //! between blocks, which is what keeps a nested structure inside its container.
 //!
-//! # Escaping
+//! # Inline content
 //!
-//! Text is escaped by [`crate::escape`], which only escapes what would be read
-//! as syntax in the position it lands in. The state tracks whether the next
-//! character starts a line's *content*, after any prefix, because that is where
-//! the block-opening characters mean something.
+//! A paragraph's, a heading's and a table cell's text is its inline source, so
+//! [`SerializerState::render_inline`] writes it as it stands, with only the
+//! backslashes [`guard`](crate::derive::guard) names to keep it the block it
+//! is. The mark rules are not consulted for it.
+//!
+//! What still goes through the mark rules is *semantic* inline content — text
+//! with style marks and no spelling of its own, which is what pasted HTML
+//! reads as. [`spell`] turns such content into source, escaping its text with
+//! [`crate::escape`], which only escapes what would be read as syntax in the
+//! position it lands in.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -183,6 +189,76 @@ impl MarkdownSerializer {
         state.render_content(doc);
         state.out
     }
+}
+
+/// `block`'s inline content, read as semantic content — text carrying style
+/// marks, with no spelling of its own — and spelled as Markdown inline source
+/// by `serializer`'s mark rules.
+///
+/// This is how content that did not come from Markdown, such as pasted HTML,
+/// becomes the source text a textblock holds. A heading is spelled on one line
+/// with a space for a break, a table cell with `<br>`.
+pub fn spell(serializer: &MarkdownSerializer, block: &Node) -> String {
+    spell_run(serializer, block, true)
+}
+
+/// [`spell`], for content that lands where a line may already have started:
+/// with `at_line_start` false nothing is escaped for opening a line, which a
+/// run spliced into the middle of a block's text does not do.
+pub(crate) fn spell_run(
+    serializer: &MarkdownSerializer,
+    block: &Node,
+    at_line_start: bool,
+) -> String {
+    let mut state = SerializerState {
+        serializer,
+        out: String::new(),
+        delim: String::new(),
+        closed: None,
+        in_tight_list: false,
+        line_start: true,
+        single_line: false,
+        line_break: " ",
+        after_mark_close: false,
+        tagged: vec![false; serializer.marks.len()],
+    };
+    state.line_start = at_line_start;
+    let schema = serializer.schema();
+    match crate::textblock::block_kind(schema, block.type_id()) {
+        Some(crate::derive::BlockKind::Heading) => {
+            state.single_line = true;
+        }
+        Some(crate::derive::BlockKind::TableCell) => {
+            state.single_line = true;
+            state.line_break = "<br>";
+        }
+        _ => {}
+    }
+    state.spell_inline(block);
+    state.out
+}
+
+/// `doc` with every paragraph, heading and table cell read as semantic content
+/// and rebuilt as the source [`spell`] gives it, marks derived.
+///
+/// A host that builds a document from marks — `strong` over `"bold"` — rather
+/// than from source brings it into this document kind with this; so does the
+/// HTML importer, block by block.
+pub fn spell_document(serializer: &MarkdownSerializer, doc: &Node) -> Node {
+    let schema = serializer.schema();
+    if let Some(kind) = crate::textblock::block_kind(schema, doc.type_id()) {
+        let source = spell(serializer, doc);
+        let content = crate::textblock::build(schema, kind, &source);
+        return doc.copy(markraft_core::Fragment::from_nodes(content));
+    }
+    if !doc.is_container() || doc.is_textblock(schema) {
+        return doc.clone();
+    }
+    let children: Vec<Node> = doc
+        .children()
+        .map(|child| spell_document(serializer, child))
+        .collect();
+    doc.copy(markraft_core::Fragment::from_nodes(children))
 }
 
 /// The output being built, and everything a rule needs to add to it.
@@ -401,7 +477,7 @@ impl<'a> SerializerState<'a> {
     ///
     /// Escaped text is inline content and always one output line: a line ending
     /// inside it is written as a character reference, because a line break in a
-    /// document is a `hard_break` node, not a character. Unescaped text is
+    /// document is a `line_break` node, not a character. Unescaped text is
     /// written as the caller spelled it, one output line per line, each with
     /// the current prefix — which is what a code block and a raw block need.
     pub fn text(&mut self, text: &str, escape: bool) {
@@ -512,10 +588,12 @@ impl<'a> SerializerState<'a> {
     /// A rule that has to measure what it writes before it writes it — a table
     /// padding its columns — renders into a buffer with no line prefix and no
     /// pending block separation, on one line, with `line_break` standing in for
-    /// a hard break. The buffer starts mid-line, because that is where a cell
-    /// lands: the characters that only open a block at the start of one need no
-    /// escaping there.
+    /// a line break.
     pub fn capture_inline(&mut self, node: &Node, line_break: &'static str) -> String {
+        self.capture(line_break, |state| state.render_inline(node))
+    }
+
+    fn capture(&mut self, line_break: &'static str, f: impl FnOnce(&mut Self)) -> String {
         let out = std::mem::take(&mut self.out);
         let delim = std::mem::take(&mut self.delim);
         let closed = self.closed.take();
@@ -526,7 +604,7 @@ impl<'a> SerializerState<'a> {
         let after_mark_close = std::mem::replace(&mut self.after_mark_close, false);
         let fresh = vec![false; self.tagged.len()];
         let tagged = std::mem::replace(&mut self.tagged, fresh);
-        self.render_inline(node);
+        f(self);
         let captured = std::mem::replace(&mut self.out, out);
         self.delim = delim;
         self.closed = closed;

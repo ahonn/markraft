@@ -16,6 +16,9 @@
 //! nothing; a kind whose roles are not on this list resolves its own ids and
 //! hands the view whatever it needs beside this table.
 
+use crate::node::Node;
+use crate::projection::Line;
+use crate::schema::NodeTypeId;
 use crate::slice::Slice;
 
 /// The name a schema gives each role an editing surface and its key bindings
@@ -54,7 +57,9 @@ pub struct DocTypeNames {
     pub table_row: Option<&'static str>,
     /// One cell of a table row: a textblock.
     pub table_cell: Option<&'static str>,
-    /// A hard line break: an inline atom.
+    /// A line break inside a textblock: an inline atom. Where a kind keeps
+    /// its source in the text, whether a break is a hard one is the text's to
+    /// say, and this is the atom every line ending of it is.
     pub hard_break: Option<&'static str>,
     /// An image: an inline atom.
     pub image: Option<&'static str>,
@@ -70,11 +75,25 @@ pub struct DocTypeNames {
     pub underline: Option<&'static str>,
     /// A link, carrying an `href` attribute.
     pub link: Option<&'static str>,
-    /// The mark a kind puts on the characters that *spell* another mark, where
-    /// it keeps that spelling in the document rather than only in its source —
-    /// the `**` of `**bold**`. A view hides such a run while the caret is
-    /// outside the span it belongs to, and shows it inside; a kind that writes
-    /// its marks some other way leaves this `None` and nothing is hidden.
+    /// The mark a kind puts on the characters that *spell* rather than say —
+    /// a run that marks up the text around it, or stands for something else,
+    /// where the kind keeps that spelling in the document's text. A view
+    /// conceals such a run and reveals it while the caret or a composition
+    /// touches the span it belongs to.
+    ///
+    /// The mark carries two attributes:
+    ///
+    /// * `span` (an integer) — which span the run belongs to. The runs that
+    ///   open and close one span share it, so a view reveals them together;
+    ///   a run that stands alone has one of its own. Ids are unique within a
+    ///   textblock, not across the document.
+    /// * `display` (a string) — what a reader sees in the run's place while it
+    ///   is concealed: empty for a run that shows nothing, otherwise the text
+    ///   it stands for.
+    ///
+    /// A plain-text rendering of the content — a clipboard's, an accessibility
+    /// tree's — reads each such run as its `display`. A kind that writes its
+    /// marks some other way leaves this `None` and nothing is concealed.
     pub syntax: Option<&'static str>,
 }
 
@@ -111,7 +130,53 @@ pub trait Codecs: Send + Sync {
     fn from_markup(&self, markup: &str) -> Option<Slice>;
 
     /// Read plain text as structure: line endings become block breaks rather
-    /// than characters. A caller that wants the characters themselves inserts
-    /// the text literally instead of going through this.
+    /// than characters, and every other character stays the character it is —
+    /// a kind whose text is markup escapes what would read as markup. A caller
+    /// that wants the characters inserted as typed goes around this.
     fn from_text(&self, text: &str) -> Slice;
+
+    /// What a copy of `slice` carries to a paste in the same kind, in place of
+    /// the slice itself.
+    ///
+    /// A kind whose marks are what its text spells cannot paste a mark without
+    /// its spelling — a copy of a styled span's inside would arrive unstyled —
+    /// so it completes the spelling here. The default is `slice` unchanged.
+    fn copied(&self, slice: &Slice) -> Slice {
+        slice.clone()
+    }
+}
+
+/// How a document kind spells the parts of itself that a view may want to show
+/// as source.
+///
+/// An editing surface that reveals the characters behind what it draws — the
+/// `##` of a heading while the caret is on it, the fence of a code block, a
+/// link's `](…)` — needs to know what those characters are, and only the kind
+/// does. Nothing here is required: a kind whose blocks have no written prefix
+/// answers `None` and the view draws only what it drew before.
+///
+/// This is the counterpart of [`Codecs`] for the *view* rather than for the
+/// clipboard, and a host that has no such spelling simply does not supply one.
+pub trait SourceSpelling: Send + Sync {
+    /// What the line's own block writes before its text — `## `, `- `, `1. `,
+    /// `- [x] ` — for a line the view is showing as source.
+    ///
+    /// Only the block the line belongs to; enclosing containers are
+    /// [`SourceSpelling::container_marker`].
+    fn line_prefix(&self, line: &Line) -> Option<String>;
+
+    /// What a block holding its text verbatim opens and closes with, for a view
+    /// that shows the fence around it.
+    fn verbatim_fence(&self, line: &Line) -> Option<(String, String)>;
+
+    /// What one level of an enclosing container of `node_type` writes at the
+    /// start of each of its lines — a block quote's `> `.
+    ///
+    /// Whatever separates the marker from the content belongs here, because a
+    /// view draws the answer as it stands and the space is what keeps the
+    /// marker from reading as part of the first word.
+    fn container_marker(&self, node_type: NodeTypeId) -> Option<String>;
+
+    /// An inline atom as the source it was read from.
+    fn atom_source(&self, node: &Node) -> Option<String>;
 }

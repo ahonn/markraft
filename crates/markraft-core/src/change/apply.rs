@@ -404,6 +404,86 @@ fn split_mark_node(
     }
 }
 
+/// Resolve "make `from..to` carry exactly `marks`" into per-run modifications.
+///
+/// Each inline node gets the removals and additions that take its own marks to
+/// `marks` restricted to what its parent allows; removals come first so the
+/// additions never meet a mark they exclude. Runs are reported in the same
+/// shape as [`split_mark_change`].
+pub(crate) fn split_set_marks(
+    schema: &Schema,
+    doc: &Node,
+    from: usize,
+    to: usize,
+    marks: &MarkSet,
+) -> Result<Vec<(usize, Vec<MarkChange>)>, ChangeError> {
+    let mut out = Vec::new();
+    if from >= to {
+        return Ok(out);
+    }
+    let resolved = doc.resolve(from)?;
+    let shared = resolved.shared_depth(to);
+    let base = resolved.start(shared);
+    let container = resolved.node(shared);
+    let run = tokens_cut(&content_tokens(container), from - base, to - base);
+    let mut parents: Vec<NodeTypeId> = (shared..=resolved.depth())
+        .map(|depth| resolved.node(depth).type_id())
+        .collect();
+    for token in &run {
+        match token {
+            Token::Open(markup) => {
+                parents.push(markup.ty);
+                out.push((1, Vec::new()));
+            }
+            Token::Close(_) => {
+                if parents.len() > 1 {
+                    parents.pop();
+                }
+                out.push((1, Vec::new()));
+            }
+            Token::Node(node) => {
+                let parent = *parents.last().expect("the outermost frame remains");
+                set_marks_node(schema, parent, node, marks, &mut out);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn set_marks_node(
+    schema: &Schema,
+    parent: NodeTypeId,
+    node: &Node,
+    marks: &MarkSet,
+    out: &mut Vec<(usize, Vec<MarkChange>)>,
+) {
+    if schema.node_type(node.type_id()).is_inline() {
+        let parent_ty = schema.node_type(parent);
+        let target = marks.filter(|m| parent_ty.allows_mark_in_content(m.ty));
+        let mut ops = Vec::new();
+        for mark in node.marks().iter() {
+            if !target.contains(mark) {
+                ops.push(MarkChange::Remove(mark.clone()));
+            }
+        }
+        for mark in target.iter() {
+            if !node.marks().contains(mark) {
+                ops.push(MarkChange::Add(mark.clone()));
+            }
+        }
+        out.push((node.node_size(), ops));
+    } else if node.is_container() && node.content_size() > 0 {
+        out.push((1, Vec::new()));
+        let inner = node.type_id();
+        for child in node.children() {
+            set_marks_node(schema, inner, child, marks, out);
+        }
+        out.push((1, Vec::new()));
+    } else {
+        out.push((node.node_size(), Vec::new()));
+    }
+}
+
 /// The mark type a modification acts on.
 pub(crate) fn mark_change_type(change: &MarkChange) -> MarkTypeId {
     match change {

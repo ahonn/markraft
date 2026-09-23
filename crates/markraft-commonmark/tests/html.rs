@@ -67,11 +67,11 @@ fn scripts_and_styles_are_dropped_and_images_are_kept() {
 fn inline_css_is_read_as_the_marks_it_stands_for() {
     assert_eq!(
         shape("<p><span style='font-weight:700;text-decoration:underline'>style</span></p>"),
-        r#"doc(paragraph("style"{underline,strong}))"#
+        r#"doc(paragraph("<u>"{underline,syntax}, "**"{underline,strong,syntax}, "style"{underline,strong}, "**"{underline,strong,syntax}, "</u>"{underline,syntax}))"#
     );
     assert_eq!(
         shape("<p><span style='font-style:italic;text-decoration:line-through'>x</span></p>"),
-        r#"doc(paragraph("x"{strikethrough,em}))"#
+        r#"doc(paragraph("~~"{strikethrough,syntax}, "*"{strikethrough,em,syntax}, "x"{strikethrough,em}, "*"{strikethrough,em,syntax}, "~~"{strikethrough,syntax}))"#
     );
 }
 
@@ -100,7 +100,7 @@ fn a_wrapped_task_item_imports_once_with_its_children() {
 fn a_break_is_a_line_break_unless_it_stands_alone() {
     assert_eq!(
         shape("<p>A<br>B</p>"),
-        r#"doc(paragraph("A", hard_break, "B"))"#
+        r#"doc(paragraph("A", "\"{syntax}, line_break, "B"))"#
     );
     // An editor's placeholder for an empty paragraph.
     assert_eq!(shape("<p><br></p>"), "doc(paragraph())");
@@ -119,7 +119,7 @@ fn whitespace_is_collapsed_the_way_a_browser_lays_it_out() {
     );
     assert_eq!(
         shape("<p>a <strong> b </strong> c</p>"),
-        r#"doc(paragraph("a ", "**"{strong,syntax}, "b "{strong}, "**"{strong,syntax}, "c"))"#,
+        r#"doc(paragraph("a ", "**"{strong,syntax}, "b"{strong}, "**"{strong,syntax}, " c"))"#,
         "a space between styled runs still separates the words"
     );
     // A non-breaking space is not whitespace.
@@ -171,6 +171,7 @@ fn every_styling_tag_has_a_mark() {
             "em" => r#"doc(paragraph("*"{em,syntax}, "x"{em}, "*"{em,syntax}))"#.to_string(),
             "strikethrough" => r#"doc(paragraph("~~"{strikethrough,syntax}, "x"{strikethrough}, "~~"{strikethrough,syntax}))"#.to_string(),
             "code" => r#"doc(paragraph("`"{code,syntax}, "x"{code}, "`"{code,syntax}))"#.to_string(),
+            "underline" => r#"doc(paragraph("<u>"{underline,syntax}, "x"{underline}, "</u>"{underline,syntax}))"#.to_string(),
             _ => format!("doc(paragraph(\"x\"{{{mark}}}))"),
         };
         assert_eq!(
@@ -210,9 +211,10 @@ fn html_and_markdown_agree_on_the_same_document() {
 }
 
 #[test]
-fn both_flavours_read_the_same_inline_html_the_same_way() {
-    // The Markdown importer meets these as source text and this one as
-    // elements; a fragment both can read has to land as one tree either way.
+fn both_flavours_read_the_same_inline_html_to_the_same_rendering() {
+    // The Markdown importer meets these as source and keeps each tag as an
+    // atom; this one meets them as elements and reads what they say. Either
+    // way the document renders what the fragment did.
     let codec = Codec::new();
     for fragment in [
         "a<br>b",
@@ -223,10 +225,11 @@ fn both_flavours_read_the_same_inline_html_the_same_way() {
         "an <a href=\"/u?a=1&amp;b=2\">anchor</a> here",
         "a <em>styled</em> <strong>run</strong> here",
     ] {
+        let imported = codec.write(&parser().parse(fragment).expect("HTML parses"));
         assert_eq!(
-            codec.describe(&parser().parse(fragment).expect("HTML parses")),
-            codec.describe(&codec.parse(fragment)),
-            "{fragment}"
+            common::html(&imported),
+            common::html(&codec.normalize(fragment)),
+            "{fragment} was imported as {imported:?}"
         );
     }
 }
@@ -355,7 +358,12 @@ fn text_and_attributes_are_escaped() {
         written,
         "<p><a href=\"a&quot;b\" title=\"c&quot;d\">x</a></p>"
     );
-    assert_eq!(parser().parse(&written).expect("parses"), doc);
+    // HTML paste re-derives Method-B `[` / `](…)` leaves around the label.
+    let round = parser().parse(&written).expect("parses");
+    assert_eq!(
+        markraft_commonmark::to_markdown(&schema, &round),
+        r#"[x](a"b "c\"d")"#
+    );
 }
 
 #[test]

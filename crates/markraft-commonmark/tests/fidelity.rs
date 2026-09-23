@@ -62,19 +62,23 @@ fn a_cell_resolves_links_and_images_before_definitions_disappear() {
 }
 
 #[test]
-fn nested_html_marks_close_only_their_own_scope() {
+fn nested_html_tags_are_written_as_they_were_read() {
     let codec = Codec::new();
-    // Underline has no Markdown spelling — nesting collapses to plain text.
-    assert_eq!(codec.normalize("<u>a <u>b</u> c</u>"), "a b c");
-    for tag in ["em", "strong", "del"] {
+    for tag in ["u", "em", "strong", "del"] {
         let source = format!("<{tag}>a <{tag}>b</{tag}> c</{tag}>");
-        let written = codec.normalize(&source);
-        assert!(
-            !written.contains('<'),
-            "{tag} wrote HTML instead of delimiters: {written:?}"
-        );
-        assert_eq!(codec.normalize(&written), written);
+        assert_eq!(codec.normalize(&source), source);
+        assert_eq!(html(&codec.normalize(&source)), html(&source));
     }
+    // Nested `<u>` pairs are nested underline spans.
+    let underline = codec.schema.mark_id(md::UNDERLINE).unwrap();
+    let doc = codec.parse("<u>a <u>b</u> c</u>");
+    let paragraph = doc.child(0);
+    assert!(
+        paragraph
+            .children()
+            .filter(|child| child.text().is_some_and(|text| !text.starts_with('<')))
+            .all(|child| child.marks().contains_type(underline))
+    );
 }
 
 #[test]
@@ -127,7 +131,7 @@ fn editing_nested_emphasis_keeps_delimiters() {
 }
 
 #[test]
-fn projected_method_b_keeps_delimiter_caret_stops() {
+fn projected_delimiters_keep_their_caret_stops() {
     let codec = Codec::new();
     let doc = codec.parse("**a 😀e\u{301}** z");
     let projection = Projection::of(&doc, &codec.schema);
@@ -170,8 +174,10 @@ fn html_judge_does_not_hide_attribute_comment_or_preformatted_whitespace_loss() 
     assert_eq!(normalize_html("<p>a\nb</p>"), normalize_html("<p>a b</p>"));
 }
 
+/// A copy taken inside a span is its source, which is `b` alone: the Markdown
+/// flavour is the text verbatim. The rich flavour carries the styles over it.
 #[test]
-fn copying_inside_method_b_keeps_style_in_rich_flavours() {
+fn copying_inside_a_span_keeps_style_in_the_rich_flavour() {
     let codec = Codec::new();
     let doc = codec.parse("*a **b** c*");
     let projection = Projection::of(&doc, &codec.schema);
@@ -185,7 +191,7 @@ fn copying_inside_method_b_keeps_style_in_rich_flavours() {
         "b"
     );
     let markdown = codec.serializer.serialize_fragment(&slice);
-    assert_eq!(html(&markdown), html("***b***"));
+    assert_eq!(markdown, "b");
     let rich = HtmlSerializer::commonmark(&codec.schema).serialize_fragment(&slice);
     assert!(
         rich.contains("<strong>") && rich.contains("<em>") && rich.contains('b'),
@@ -194,7 +200,7 @@ fn copying_inside_method_b_keeps_style_in_rich_flavours() {
 }
 
 #[test]
-fn toggling_style_mark_strips_method_b_delimiters() {
+fn toggling_a_style_off_deletes_its_delimiters() {
     let codec = Codec::new();
     let doc = codec.parse("**hello**");
     let projection = Projection::of(&doc, &codec.schema);

@@ -4,6 +4,7 @@ use super::support::*;
 use crate::change::{Change, ChangeRange, ChangeSet, TrackMode};
 use crate::error::ChangeError;
 use crate::fragment::Fragment;
+use crate::mark::MarkSet;
 use crate::node::Node;
 use crate::schema::Schema;
 use crate::slice::Slice;
@@ -258,6 +259,150 @@ fn invert_of_a_mark_change_is_exact_over_mixed_runs() {
     assert_eq!(schema.describe(&out), r#"doc(paragraph("abcd"{strong}))"#);
     let inverse = cs.invert(&d).expect("invertible");
     assert_eq!(inverse.apply(&out).expect("applies"), d);
+}
+
+fn marks(schema: &Schema, names: &[&str]) -> MarkSet {
+    MarkSet::from_marks(schema, names.iter().map(|name| m(schema, name)))
+}
+
+fn mixed_paragraph(schema: &Schema) -> Node {
+    doc(
+        schema,
+        [
+            n(
+                schema,
+                "paragraph",
+                [
+                    t(schema, "ab"),
+                    tm(schema, "cd", &["strong"]),
+                    tm(schema, "ef", &["em", "strong"]),
+                    tm(schema, "gh", &["em"]),
+                ],
+            ),
+            n(schema, "code_block", [t(schema, "ij")]),
+        ],
+    )
+}
+
+#[test]
+fn set_marks_makes_a_range_carry_exactly_one_set() {
+    let schema = test_schema();
+    let d = mixed_paragraph(&schema);
+    // One change over four differently marked runs.
+    let cs = set(
+        &schema,
+        &d,
+        vec![Change::set_marks(1, 9, marks(&schema, &["em"]))],
+    );
+    let out = cs.apply(&d).expect("applies");
+    assert_eq!(
+        schema.describe(&out),
+        r#"doc(paragraph("abcdefgh"{em}), code_block("ij"))"#
+    );
+    // The empty set clears; a range reaching into the code block leaves it
+    // alone because the code block allows no marks.
+    let cs = set(
+        &schema,
+        &d,
+        vec![Change::set_marks(1, 13, MarkSet::empty())],
+    );
+    let out = cs.apply(&d).expect("applies");
+    assert_eq!(
+        schema.describe(&out),
+        r#"doc(paragraph("abcdefgh"), code_block("ij"))"#
+    );
+    // Runs that already carry the target are not recorded as changed.
+    let cs = set(
+        &schema,
+        &d,
+        vec![Change::set_marks(3, 5, marks(&schema, &["strong"]))],
+    );
+    assert!(cs.is_empty());
+}
+
+#[test]
+fn set_marks_inverts_exactly() {
+    let schema = test_schema();
+    let d = mixed_paragraph(&schema);
+    for target in [&[][..], &["strong"], &["em", "strong"], &["em"]] {
+        for (from, to) in [(1, 9), (2, 6), (4, 8), (1, 13)] {
+            let cs = set(
+                &schema,
+                &d,
+                vec![Change::set_marks(from, to, marks(&schema, target))],
+            );
+            let out = cs.apply(&d).expect("applies");
+            let inverse = cs.invert(&d).expect("invertible");
+            assert_eq!(
+                inverse.apply(&out).expect("applies"),
+                d,
+                "set {target:?} over {from}..{to}"
+            );
+        }
+    }
+}
+
+#[test]
+fn set_marks_sit_beside_other_changes_and_map_positions_unchanged() {
+    let schema = test_schema();
+    let d = mixed_paragraph(&schema);
+    let cs = set(
+        &schema,
+        &d,
+        vec![
+            Change::set_marks(1, 5, marks(&schema, &["em"])),
+            Change::set_marks(5, 7, MarkSet::empty()),
+            Change::insert(8, text_slice(&schema, "XY")),
+        ],
+    );
+    let out = cs.apply(&d).expect("applies");
+    assert_eq!(
+        schema.describe(&out),
+        r#"doc(paragraph("abcd"{em}, "ef", "g"{em}, "XY", "h"{em}), code_block("ij"))"#
+    );
+    // A mark section keeps its positions; only the insertion shifts them.
+    assert_eq!(cs.map_pos(3, 1, TrackMode::Simple), Some(3));
+    assert_eq!(cs.map_pos(9, 1, TrackMode::Simple), Some(11));
+    assert!(!cs.touches(1, 7));
+    let json = cs.to_json();
+    assert_eq!(
+        ChangeSet::from_json(&schema, &json).expect("round trips"),
+        cs
+    );
+}
+
+#[test]
+fn set_marks_compose_with_edits_before_and_after() {
+    let schema = test_schema();
+    let d = mixed_paragraph(&schema);
+    let a = set(
+        &schema,
+        &d,
+        vec![Change::insert(3, text_slice(&schema, "XY"))],
+    );
+    let mid = a.apply(&d).expect("applies");
+    let b = set(
+        &schema,
+        &mid,
+        vec![Change::set_marks(2, 9, marks(&schema, &["strong"]))],
+    );
+    let end = b.apply(&mid).expect("applies");
+    let composed = a.compose(&b).expect("composable");
+    assert_eq!(composed.apply(&d).expect("applies"), end);
+    // And the other way round: marks first, then an edit inside the range.
+    let b2 = set(&schema, &end, vec![Change::delete(4, 6)]);
+    let composed = b.compose(&b2).expect("composable");
+    assert_eq!(
+        composed.apply(&mid).expect("applies"),
+        b2.apply(&end).expect("applies")
+    );
+    let inverse = composed.invert(&mid).expect("invertible");
+    assert_eq!(
+        inverse
+            .apply(&composed.apply(&mid).expect("applies"))
+            .expect("applies"),
+        mid
+    );
 }
 
 #[test]

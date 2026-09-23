@@ -77,12 +77,12 @@ pub fn commonmark_rules() -> ParseRules {
         )
         .with(
             &NodeValue::SoftBreak,
-            ParseRule::atom_with(md::SOFT_BREAK, no_attrs()),
+            ParseRule::atom_with(md::LINE_BREAK, no_attrs()),
         )
         .with(
             &NodeValue::LineBreak,
             ParseRule::Atom {
-                node_type: fixed(md::HARD_BREAK),
+                node_type: fixed(md::LINE_BREAK),
                 attrs: no_attrs(),
             },
         )

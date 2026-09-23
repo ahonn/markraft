@@ -9,35 +9,44 @@
 //! Every CommonMark block has a node type, except the ones whose structure the
 //! model does not model: those are kept verbatim in a [`RAW_BLOCK`], whose text
 //! *is* their source, so a document never loses text it cannot interpret and
-//! the source stays editable in place. Ordinary inline styling uses
-//! [`markraft_core::MarkSet`]; nested or empty structures that need more than a
-//! set use transparent [`INLINE_SPAN`] containers. [`RAW_INLINE`] preserves
-//! CommonMark inline HTML primitives, and [`WIKI_LINK`] an Obsidian `[[…]]`
-//! link, both as atoms whose source is never interpreted as text.
+//! the source stays editable in place.
+//!
+//! # Inline content is source
+//!
+//! A [`PARAGRAPH`]'s, a [`HEADING`]'s and a [`TABLE_CELL`]'s text *is* its
+//! Markdown inline source — delimiters, backslash escapes, entities and `<u>`
+//! tags included — exactly as a reader sees it once the block's own prefixes
+//! are stripped. Each line ending is one [`LINE_BREAK`] atom; a hard break's
+//! spelling (`\` or trailing spaces) is ordinary text before it. What the
+//! tree holds as an atom rather than as text is what a reader never shows as
+//! its characters: an [`IMAGE`], a [`WIKI_LINK`], a [`RAW_INLINE`] HTML tag.
+//!
+//! Every style mark is *derived* from that text by
+//! [`derive`](crate::derive::derive) and kept in step with it by the
+//! canonicalising correction in [`commonmark_extensions`](crate::commonmark_extensions):
+//! a style covers its delimiters as well as its content, and the characters
+//! that spell rather than say — delimiters, a backslash, an entity, a hard
+//! break's spelling — carry [`SYNTAX`] too. Nothing else authors a style mark,
+//! and the serialiser writes the text as it stands.
 //!
 //! # Mark ranks
 //!
-//! A mark set is sorted by rank, and the serialiser opens marks in that order,
-//! so the ranks fix the nesting of the Markdown it writes:
+//! A mark set is sorted by rank; the ranks decide the order marks are opened
+//! in when [`spell`](crate::serialize::spell) turns semantic inline content —
+//! pasted HTML — into source:
 //!
-//! | rank | mark | written as |
+//! | rank | mark | spelled as |
 //! |-----:|------|------------|
 //! | 10 | [`LINK`] | `[…](href "title")` — outermost, so a link wraps its styling |
-//! | 20 | [`UNDERLINE`] | plain text on Markdown write — no CommonMark spelling exists |
+//! | 20 | [`UNDERLINE`] | `<u>…</u>` |
 //! | 30 | [`STRIKETHROUGH`] | `~~…~~` |
 //! | 40 | [`STRONG`] | `**…**` |
 //! | 50 | [`EM`] | `*…*` |
 //! | 60 | [`CODE`] | `` `…` `` — innermost, because its content is literal |
+//! | 70 | [`SYNTAX`] | never spelled: it marks spelling |
 //!
-//! Underline is kept in the tree for HTML paste, but Markdown write strips it.
-//! Emphasis always uses Markdown delimiters, never HTML tags. A nested inline
-//! span preserves the source order independently of ranks.
-//!
-//! [`CODE`] excludes nothing but itself. A code span's *content* is literal —
-//! no emphasis is read inside the backticks — but the span as a whole carries
-//! whatever marks surround it: `` *`code`* `` is `<em><code>code</code></em>`,
-//! and `` [`code`](href) `` is a link around a code span. The serialiser writes
-//! the outer delimiters around the backticks.
+//! [`CODE`] excludes nothing but itself: a code span carries whatever styles
+//! surround it, `` *`code`* `` being `<em><code>code</code></em>`.
 //!
 //! # Why `block+` for list items but `paragraph block*` for task items
 //!
@@ -76,13 +85,14 @@ use markraft_core::{
 
 /// The top node type: `block+`.
 pub const DOC: &str = "doc";
-/// A paragraph: `inline*`. A paragraph with no content is an *empty
+/// A paragraph: `(inline | line_break)*`. A paragraph with no content is an *empty
 /// paragraph*. CommonMark has no spelling for those; they write as blank
 /// separators (and may collapse on re-read). A lone `<br>` HTML block still
 /// imports as an empty paragraph for older files.
 pub const PARAGRAPH: &str = "paragraph";
-/// An ATX or setext heading: `inline*`, attribute `level` (`Int`, 1..=6,
-/// default 1). Always written back as ATX.
+/// An ATX or setext heading: `(inline | line_break)*`, attribute `level`
+/// (`Int`, 1..=6, default 1). Written ATX, or setext when a level 1 or 2
+/// heading holds a line break.
 pub const HEADING: &str = "heading";
 /// A block quote: `block+`.
 ///
@@ -164,16 +174,14 @@ pub const TEXT: &str = "text";
 /// image is flattened to plain text, which is what CommonMark's `alt`
 /// attribute holds anyway.
 pub const IMAGE: &str = "image";
-/// A hard line break: an inline atom in the groups `inline` and
-/// [`LINE_BREAK_GROUP`](markraft_core::projection::LINE_BREAK_GROUP).
-pub const HARD_BREAK: &str = "hard_break";
-/// A source line ending inside a paragraph, displayed as a space. Keeping the
-/// primitive matters when surrounding raw HTML changes whitespace semantics.
-pub const SOFT_BREAK: &str = "soft_break";
-
-/// A transparent inline container. Its marks wrap its entire content, preserving
-/// nested marks and their order where a flat mark set would lose information.
-pub const INLINE_SPAN: &str = "inline_span";
+/// A line ending inside a paragraph or a heading: an inline atom in the group
+/// [`LINE_BREAK_GROUP`](markraft_core::projection::LINE_BREAK_GROUP) and not in
+/// `inline`, so a table cell, which is one source line, cannot hold one.
+///
+/// Whether it is a hard break is the text's to say: `\` or two spaces before
+/// it make it one, as they do in the source, and
+/// [`derive`](crate::derive::derive) reports which.
+pub const LINE_BREAK: &str = "line_break";
 /// One CommonMark inline HTML primitive, retained in the `source` attribute.
 /// It is an editable/selectable atom; its source is never interpreted as text.
 pub const RAW_INLINE: &str = "raw_inline";
@@ -202,15 +210,23 @@ pub const STRONG: &str = "strong";
 pub const EM: &str = "em";
 /// GFM strikethrough.
 pub const STRIKETHROUGH: &str = "strikethrough";
-/// Underline. CommonMark has no syntax for it: HTML paste may create the mark,
-/// but Markdown write drops the tags so `.md` files stay portable.
+/// Underline: a paired `<u>`…`</u>` in the text.
 pub const UNDERLINE: &str = "underline";
 /// A code span.
 pub const CODE: &str = "code";
-/// A Method-B delimiter leaf: the Markdown characters (`**`, `*`, `~~`,
-/// backticks) that open or close a style span. The characters live in the text;
-/// this mark marks them as syntax so Markdown write leaves them alone, HTML
-/// write skips them, and the view can hide them when the caret is elsewhere.
+/// The characters that spell rather than say — a style's delimiters, an
+/// escape's backslash, an entity, a hard break's spelling — which a view
+/// conceals while the caret is away. `inclusive: false`, with:
+///
+/// * `span` (`Int`, default 0) — shared by the opening and closing runs of one
+///   span, so a view reveals them together; an escape, an entity and a hard
+///   break each have their own. Numbered within the block in the order their
+///   first runs appear.
+/// * `display` (`Str`, default `""`) — what a reader sees in the run's place:
+///   the decoded character of an entity, nothing for every other run.
+///
+/// The attributes also keep two neighbouring runs apart: `**` next to a
+/// `` ` `` are two spans, not one run.
 pub const SYNTAX: &str = "syntax";
 
 /// The group holding [`STRONG`], [`EM`], [`STRIKETHROUGH`] and [`UNDERLINE`]:
@@ -223,6 +239,9 @@ pub const INLINE_GROUP: &str = "inline";
 /// The group holding [`LIST_ITEM`] and [`TASK_ITEM`], so both list types accept
 /// either kind of item.
 pub const ITEM_GROUP: &str = "item";
+
+/// What a paragraph and a heading hold: inline content and line breaks.
+const TEXTBLOCK_CONTENT: &str = "(inline | line_break)*";
 
 fn str_attr(name: &str, default: &str) -> AttrSpec {
     AttrSpec::new(name, AttrKind::Str, AttrValue::Str(default.to_string()))
@@ -241,9 +260,9 @@ fn str_attr(name: &str, default: &str) -> AttrSpec {
 pub fn commonmark_schema_spec() -> SchemaSpec {
     SchemaSpec::new()
         .node(NodeTypeSpec::new(DOC, "block+"))
-        .node(NodeTypeSpec::new(PARAGRAPH, "inline*").group(BLOCK_GROUP))
+        .node(NodeTypeSpec::new(PARAGRAPH, TEXTBLOCK_CONTENT).group(BLOCK_GROUP))
         .node(
-            NodeTypeSpec::new(HEADING, "inline*")
+            NodeTypeSpec::new(HEADING, TEXTBLOCK_CONTENT)
                 .group(BLOCK_GROUP)
                 .defining(true)
                 .attr(AttrSpec::new("level", AttrKind::Int, AttrValue::Int(1))),
@@ -328,11 +347,6 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
         .node(NodeTypeSpec::new(TABLE_CELL, "inline*").isolating(true))
         .node(NodeTypeSpec::text(TEXT).group(INLINE_GROUP))
         .node(
-            NodeTypeSpec::new(INLINE_SPAN, "inline*")
-                .inline(true)
-                .group(INLINE_GROUP),
-        )
-        .node(
             NodeTypeSpec::leaf(RAW_INLINE)
                 .inline(true)
                 .group(INLINE_GROUP)
@@ -365,14 +379,10 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                 .attr(str_attr("title", "")),
         )
         .node(
-            NodeTypeSpec::leaf(SOFT_BREAK)
+            NodeTypeSpec::leaf(LINE_BREAK)
                 .inline(true)
-                .group(format!("{INLINE_GROUP} soft_break")),
+                .group(markraft_core::projection::LINE_BREAK_GROUP),
         )
-        .node(NodeTypeSpec::leaf(HARD_BREAK).inline(true).group(format!(
-            "{INLINE_GROUP} {}",
-            markraft_core::projection::LINE_BREAK_GROUP
-        )))
         .mark(
             MarkTypeSpec::new(LINK)
                 .rank(10)
@@ -385,14 +395,12 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
         .mark(MarkTypeSpec::new(STRONG).rank(40).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(EM).rank(50).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(CODE).rank(60))
-        // Below style marks so a delimiter leaf never shares a set with them:
-        // wrap_mark skips nodes that already carry syntax. `delim` holds the
-        // characters so adjacent pairs (e.g. `**` next to `` ` ``) do not merge.
         .mark(
             MarkTypeSpec::new(SYNTAX)
                 .rank(70)
                 .inclusive(false)
-                .attr(str_attr("delim", "")),
+                .attr(str_attr("display", ""))
+                .attr(AttrSpec::new("span", AttrKind::Int, AttrValue::Int(0))),
         )
 }
 

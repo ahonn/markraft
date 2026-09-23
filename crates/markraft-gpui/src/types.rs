@@ -12,7 +12,6 @@ use markraft_core::{Attrs, DocTypeNames, EditorState, MarkTypeId, NodeTypeId, Sc
 /// The conventional schema names of the two roles [`DocTypeNames`] has no
 /// entry for.
 const RAW_INLINE: &str = "raw_inline";
-const INLINE_SPAN: &str = "inline_span";
 const WIKI_LINK: &str = "wiki_link";
 
 /// Which attributes of a block quote make it a callout, and where its header
@@ -83,7 +82,7 @@ pub struct DocTypes {
     pub table_row: Option<NodeTypeId>,
     /// One cell of a table row, which is a textblock. See [`DocTypes::table`].
     pub table_cell: Option<NodeTypeId>,
-    /// A hard line break. The view finds breaks through the projection's
+    /// A line break. The view finds breaks through the projection's
     /// `line_break` group rather than here, so this names the type for hosts
     /// and extensions that insert one.
     pub hard_break: Option<NodeTypeId>,
@@ -95,10 +94,6 @@ pub struct DocTypes {
     /// such an atom is drawn as a bare object-replacement character, which is
     /// blank.
     pub raw_inline: Option<NodeTypeId>,
-    /// A transparent inline container. The view draws nothing for one — a span
-    /// carries the marks that say what it is, and those are what is drawn — so
-    /// this names the type for hosts and extensions that build one.
-    pub inline_span: Option<NodeTypeId>,
     /// A wiki link, carrying `target`, `alias` and `embed` attributes. The view
     /// draws its alias, or its target, in the link colour, and a click on one
     /// asks the host to follow it — only the host knows what a target names.
@@ -119,8 +114,9 @@ pub struct DocTypes {
     /// A link, carrying an `href` attribute. Without it links cannot be set,
     /// followed or pasted as links.
     pub link: Option<MarkTypeId>,
-    /// The mark on the characters that spell another mark. Without it such a
-    /// run is drawn like any other text, so the spelling stays visible.
+    /// The mark on the characters that spell rather than say, carrying `span`
+    /// and `display` (see [`DocTypeNames::syntax`]). Without it such a run is
+    /// drawn like any other text, so the spelling stays visible.
     pub syntax: Option<MarkTypeId>,
     /// Which attributes of a [`DocTypes::blockquote`] spell a callout. Unset —
     /// which is what [`DocTypes::from_schema_names`] leaves it, since no role
@@ -138,8 +134,8 @@ impl DocTypes {
     /// Resolve every name in `names` against `schema`. A name the schema does
     /// not declare leaves its role unset.
     ///
-    /// [`DocTypes::raw_inline`], [`DocTypes::inline_span`] and
-    /// [`DocTypes::wiki_link`] have no entry in [`DocTypeNames`], so they are
+    /// [`DocTypes::raw_inline`] and [`DocTypes::wiki_link`] have no entry in
+    /// [`DocTypeNames`], so they are
     /// looked up under the names the CommonMark preset gives them. A schema
     /// that spells them differently sets those fields itself; leaving
     /// [`DocTypes::raw_inline`] unset costs the source text an inline primitive
@@ -168,7 +164,6 @@ impl DocTypes {
             hard_break: node(names.hard_break),
             image: node(names.image),
             raw_inline: node(Some(RAW_INLINE)),
-            inline_span: node(Some(INLINE_SPAN)),
             wiki_link: node(Some(WIKI_LINK)),
             strong: mark(names.strong),
             em: mark(names.em),

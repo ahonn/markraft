@@ -4,6 +4,7 @@ mod common;
 
 use common::{Codec, judge};
 use markraft_commonmark::schema as md;
+use markraft_commonmark::serialize::spell_document;
 use markraft_commonmark::{commonmark_schema, commonmark_schema_spec};
 use markraft_core::{Attrs, MarkSet, MarkTypeId, Node, attrs};
 
@@ -37,7 +38,7 @@ fn the_preset_compiles_and_names_everything_it_documents() {
         md::TEXT,
         md::IMAGE,
         md::WIKI_LINK,
-        md::HARD_BREAK,
+        md::LINE_BREAK,
     ] {
         assert!(schema.node_id(name).is_some(), "missing node type {name}");
     }
@@ -57,7 +58,7 @@ fn the_preset_compiles_and_names_everything_it_documents() {
     let bullet = schema.node_id(md::BULLET_LIST).expect("bullet_list");
     assert!(schema.can_contain(bullet, item) && schema.can_contain(bullet, task));
     // A hard break is tagged for the projection by its group, not a flag.
-    let hard_break = schema.node_id(md::HARD_BREAK).expect("hard_break");
+    let hard_break = schema.node_id(md::LINE_BREAK).expect("hard_break");
     assert!(markraft_core::projection::is_line_break(
         &schema, hard_break
     ));
@@ -198,13 +199,15 @@ fn every_alignment_survives_in_both_directions() {
 #[test]
 fn a_pipe_in_a_cell_is_escaped_even_inside_a_code_span() {
     // GFM splits the row on its pipes before it reads a cell at all, so the
-    // escape is resolved everywhere — code span included.
+    // escape is resolved everywhere — code span included — and its backslash
+    // is spelling there too.
     let source = "| a\\|b | `c\\|d` |\n| - | - |\n| x | y |";
     assert_eq!(
         shape(source),
         concat!(
             r#"doc(table[alignments=Str("none,none")]("#,
-            r#"table_row(table_cell("a|b"), table_cell("`"{code,syntax}, "c|d"{code}, "`"{code,syntax})), "#,
+            r#"table_row(table_cell("a", "\"{syntax}, "|b"), "#,
+            r#"table_cell("`"{code,syntax}, "c"{code}, "\"{code,syntax}, "|d"{code}, "`"{code,syntax})), "#,
             r#"table_row(table_cell("x"), table_cell("y"))))"#
         )
     );
@@ -257,15 +260,14 @@ fn a_cell_holds_the_marks_links_and_images_a_paragraph_holds() {
         shape(source),
         concat!(
             r#"doc(table[alignments=Str("none")](table_row(table_cell("#,
-            r#""**"{strong,syntax}, "b"{strong}, "**"{strong,syntax}, " ", "*"{em,syntax}, "i"{em}, "*"{em,syntax}, " ", "`"{code,syntax}, "c"{code}, "`"{code,syntax}, " ", "l"{link}, " ", "#,
+            r#""**"{strong,syntax}, "b"{strong}, "**"{strong,syntax}, " ", "*"{em,syntax}, "i"{em}, "*"{em,syntax}, " ", "`"{code,syntax}, "c"{code}, "`"{code,syntax}, " ", "["{link,syntax}, "l"{link}, "](u)"{link,syntax}, " ", "#,
             r#"image[alt=Str("alt"),src=Str("p"),title=Str("")])), "#,
-            r#"table_row(table_cell("u"{underline}))))"#
+            r#"table_row(table_cell("<u>"{underline,syntax}, "u"{underline}, "</u>"{underline,syntax}))))"#
         )
     );
-    // Underline drops on write; the rest settles.
+    // The cells are written as they were read.
     let once = round(source);
-    assert!(!once.contains("<u>"), "{once}");
-    assert!(once.contains("| u"), "{once}");
+    assert!(once.contains("| <u>u</u> "), "{once}");
     assert_eq!(once, round(&once));
 }
 
@@ -336,7 +338,7 @@ fn a_hard_break_in_a_cell_is_a_break_tag() {
             md::TABLE_CELL,
             [
                 schema.text("a"),
-                schema.node(md::HARD_BREAK, []).expect("a break"),
+                schema.node(md::LINE_BREAK, []).expect("a break"),
                 schema.text("b"),
             ],
         )
@@ -374,7 +376,7 @@ fn an_html_block_and_a_footnote_definition_are_kept_verbatim() {
     );
     // Footnotes are off, so a definition is the paragraph a plain CommonMark
     // reader sees — and no text is lost, which turning them on would risk.
-    assert_eq!(round("[^1]: a footnote"), "\\[^1\\]: a footnote");
+    assert_eq!(round("[^1]: a footnote"), "[^1]: a footnote");
     assert_eq!(
         shape("[^1]: a footnote"),
         r#"doc(paragraph("[^1]: a footnote"))"#
@@ -539,90 +541,64 @@ fn every_raw_block_shape_is_a_fixed_point_of_parse_and_write() {
 }
 
 #[test]
-fn an_empty_link_keeps_its_semantic_container() {
-    // The empty container carries the link without inventing text.
-    assert_eq!(shape("[](url)"), r#"doc(paragraph(inline_span{link}()))"#);
+fn an_empty_link_is_all_spelling() {
+    // Nothing is shown, and the link is still there to reveal and edit.
+    assert_eq!(
+        shape("[](url)"),
+        r#"doc(paragraph("[](url)"{link,syntax}))"#
+    );
     assert_eq!(round("[](url)"), "[](url)");
 }
 
 // -- marks ----------------------------------------------------------------
 
 #[test]
-fn underline_reads_from_html_but_writes_plain() {
-    // Kept on read for HTML paste / older files; no portable Markdown spelling.
-    assert_eq!(shape("<u>x</u>"), r#"doc(paragraph("x"{underline}))"#);
-    assert_eq!(round("<u>**kept**</u>"), "**kept**");
+fn underline_is_a_pair_of_u_tags() {
+    // The one tag pair that is a style: its tags are its delimiters.
     assert_eq!(
-        round("~~gone~~ and <u>**kept**</u>"),
-        "~~gone~~ and **kept**"
+        shape("<u>x</u>"),
+        r#"doc(paragraph("<u>"{underline,syntax}, "x"{underline}, "</u>"{underline,syntax}))"#
     );
+    assert_eq!(round("<u>**kept**</u>"), "<u>**kept**</u>");
+    // Half a pair is half of one being typed, and stays text.
+    assert_eq!(shape("<u>x"), r#"doc(paragraph("<u>x"))"#);
+    assert_eq!(round("<u>x"), "<u>x");
 }
 
 #[test]
-fn html_emphasis_tags_import_as_marks_and_stray_ones_stay_raw() {
+fn every_other_inline_tag_is_a_raw_atom() {
+    let codec = Codec::new();
     assert_eq!(
         shape("<em>a</em>"),
-        r#"doc(paragraph("*"{em,syntax}, "a"{em}, "*"{em,syntax}))"#
+        r#"doc(paragraph(raw_inline[source=Str("<em>")], "a", raw_inline[source=Str("</em>")]))"#
     );
-    assert_eq!(
-        shape("<strong>a</strong>"),
-        r#"doc(paragraph("**"{strong,syntax}, "a"{strong}, "**"{strong,syntax}))"#
-    );
-    assert_eq!(
-        shape("<del>a</del>"),
-        r#"doc(paragraph("~~"{strikethrough,syntax}, "a"{strikethrough}, "~~"{strikethrough,syntax}))"#
-    );
-    // An unpaired tag is a raw HTML primitive, not escaped text.
     assert_eq!(
         shape("<em>a"),
         r#"doc(paragraph(raw_inline[source=Str("<em>")], "a"))"#
     );
-    assert_eq!(round("<em>a"), "<em>a");
+    for source in ["<em>a</em>", "<strong>a</strong>", "<del>a</del>", "<em>a"] {
+        assert_eq!(round(source), source);
+        judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
+    }
 }
 
 #[test]
-fn an_anchor_with_nothing_but_a_destination_is_the_link_mark() {
+fn an_html_anchor_is_raw_source_around_its_text() {
     let codec = Codec::new();
     assert_eq!(
         shape("an <a href=\"https://example.com\">anchor</a> here"),
-        r#"doc(paragraph("an ", "anchor"{link}, " here"))"#
+        concat!(
+            r#"doc(paragraph("an ", raw_inline[source=Str("<a href=\"https://example.com\">")], "#,
+            r#""anchor", raw_inline[source=Str("</a>")], " here"))"#
+        )
     );
-    // The mark holds a destination and a title and nothing else, so the anchor
-    // is written back as the CommonMark link it is: a semantic round trip, and
-    // a fixed point from there on.
-    assert_eq!(
-        round("an <a href=\"/u\" title=\"t\">anchor</a> here"),
-        "an [anchor](/u \"t\") here"
-    );
-    assert_eq!(
-        round("an [anchor](/u \"t\") here"),
-        "an [anchor](/u \"t\") here"
-    );
-    // An entity in an attribute resolves on the way in and travels back out.
-    assert_eq!(
-        round("<a href=\"https://e.example/?a=1&amp;b=2\">x</a>"),
-        "[x](https://e.example/?a=1&amp;b=2)"
-    );
-    // An anchor nests with the marks around it the way `<em>` does.
-    assert_eq!(
-        shape("<a href=\"/u\"><em>x</em> y</a>"),
-        r#"doc(paragraph("*"{link,em,syntax}, "x"{link,em}, "*"{link,em,syntax}, " y"{link}))"#
-    );
-    // Anything the mark cannot hold keeps the tag as source text instead.
-    for source in [
-        "an <a>anchor</a> here",
-        "an <a href=\"/u\" target=\"_blank\">anchor</a> here",
-        "an <a class=\"x\" href=\"/u\">anchor</a> here",
-        "an <a href=\"/u\">anchor here",
-    ] {
-        assert_eq!(round(source), source, "{source:?}");
-        assert!(shape(source).contains("raw_inline"), "{source:?}");
-    }
     for source in [
         "an <a href=\"/u\" title=\"t\">anchor</a> here",
         "an <a>anchor</a> here",
         "an <a href=\"/u\" target=\"_blank\">anchor</a> here",
+        "<a href=\"https://e.example/?a=1&amp;b=2\">x</a>",
     ] {
+        assert_eq!(round(source), source, "{source:?}");
         judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
     }
 }
@@ -664,15 +640,15 @@ fn a_callout_marker_travels_in_the_quotes_attributes() {
         shape("> [!note]"),
         r#"doc(blockquote[callout=Str("note"),fold=Str(""),title=Str("")](paragraph()))"#
     );
-    // Body text that spells a marker is escaped on the way out, so nothing a
-    // quote holds can turn it into a callout — or into a second one.
+    // Only a quote's first line can be a marker, so body text that spells one
+    // is written as it was and stays text.
     assert_eq!(
         round("> [!note]\n> [!tip] is only text here"),
-        "> [!note]\n> \\[!tip\\] is only text here"
+        "> [!note]\n> [!tip] is only text here"
     );
     assert_eq!(
         round("> \\[!note] plain"),
-        "> \\[!note\\] plain",
+        "> \\[!note] plain",
         "an ordinary quote keeps its first line ordinary"
     );
     // What is not a marker is an ordinary quote, and the codec escapes text
@@ -756,56 +732,29 @@ fn a_wiki_link_is_an_atom_that_writes_back_the_bytes_it_took() {
 }
 
 #[test]
-fn an_image_tag_is_the_image_atom_unless_it_says_more_than_one_holds() {
+fn image_and_break_tags_are_raw_atoms_that_write_themselves_again() {
     let codec = Codec::new();
     for tag in [
         "<img src=\"x.png\" alt=\"img\">",
         "<img src=\"x.png\" alt=\"img\"/>",
-        "<img src=\"x.png\" alt=\"img\" />",
+        "<img src=\"x.png\" width=\"20\">",
+        "<br>",
+        "<br />",
     ] {
         let source = format!("see {tag} here");
         assert_eq!(
             shape(&source),
-            concat!(
-                r#"doc(paragraph("see ", "#,
-                r#"image[alt=Str("img"),src=Str("x.png"),title=Str("")], " here"))"#
-            ),
+            format!(r#"doc(paragraph("see ", raw_inline[source=Str({tag:?})], " here"))"#),
             "{tag}"
         );
-        assert_eq!(round(&source), "see ![img](x.png) here", "{tag}");
+        assert_eq!(round(&source), source, "{tag}");
         judge(&codec, &source).unwrap_or_else(|message| panic!("{message}"));
     }
-    // A width, a class or a style would be lost, and an image needs a source.
-    for source in [
-        "see <img src=\"x.png\" width=\"20\"> here",
-        "see <img class=\"icon\" src=\"x.png\"> here",
-        "see <img alt=\"img\"> here",
-    ] {
-        assert_eq!(round(source), source, "{source:?}");
-        assert!(shape(source).contains("raw_inline"), "{source:?}");
-    }
-}
-
-#[test]
-fn a_break_tag_is_a_hard_break_where_one_can_be_written_back() {
-    let codec = Codec::new();
-    for tag in ["<br>", "<br/>", "<br />"] {
-        let source = format!("a{tag}b");
-        assert_eq!(
-            shape(&source),
-            r#"doc(paragraph("a", hard_break, "b"))"#,
-            "{tag}"
-        );
-        assert_eq!(round(&source), "a\\\nb", "{tag}");
-        judge(&codec, &source).unwrap_or_else(|message| panic!("{message}"));
-    }
-    // A heading is one source line and a break at the end of a block is
-    // dropped, so in both places the tag stays the primitive that writes
-    // itself again. A tag carrying an attribute does too.
-    for source in ["# a<br>b", "a<br>", "a<br class=\"x\">b"] {
-        assert_eq!(round(source), source, "{source:?}");
-        assert!(shape(source).contains("raw_inline"), "{source:?}");
-    }
+    // A Markdown image is the image atom, written back in one spelling.
+    assert_eq!(
+        shape("see ![img](x.png \"t\") here"),
+        r#"doc(paragraph("see ", image[alt=Str("img"),src=Str("x.png"),title=Str("t")], " here"))"#
+    );
 }
 
 #[test]
@@ -820,19 +769,19 @@ fn a_code_span_carries_the_marks_around_it() {
     );
     assert_eq!(
         shape("[`x`](/u)"),
-        r#"doc(paragraph("`"{link,code,syntax}, "x"{link,code}, "`"{link,code,syntax}))"#
+        r#"doc(paragraph("["{link,syntax}, "`"{link,code,syntax}, "x"{link,code}, "`"{link,code,syntax}, "](/u)"{link,syntax}))"#
     );
     for source in ["**`x`**", "*`x`*", "[`x`](/u)"] {
         assert_eq!(round(source), source, "{source:?}");
     }
-    // Underline has no Markdown spelling — tags drop on write.
-    assert_eq!(round("<u>~~`x`~~</u>"), "~~`x`~~");
+    assert_eq!(round("<u>~~`x`~~</u>"), "<u>~~`x`~~</u>");
 }
 
-/// Combinations that CommonMark can flank around a code span round-trip;
-/// others write delimiters without an HTML fallback and may lose marks.
+/// Spelling semantic content: combinations that CommonMark can flank around a
+/// code span round-trip; others are spelled with delimiters without an HTML
+/// fallback and may lose marks.
 #[test]
-fn mark_combinations_on_a_code_span_prefer_delimiters() {
+fn mark_combinations_on_a_code_span_are_spelled_with_delimiters() {
     let codec = Codec::new();
     let schema = &codec.schema;
     let outer = [md::LINK, md::STRIKETHROUGH, md::STRONG, md::EM];
@@ -867,7 +816,7 @@ fn mark_combinations_on_a_code_span_prefer_delimiters() {
             let doc = schema
                 .doc([schema.node(md::PARAGRAPH, content).expect("a paragraph")])
                 .expect("a document");
-            let written = codec.write(&doc);
+            let written = codec.write(&spell_document(&codec.serializer, &doc));
             assert!(
                 !written.contains('<'),
                 "{bits:04b} between {before:?} and {after:?} used HTML: {written:?}"
@@ -877,7 +826,7 @@ fn mark_combinations_on_a_code_span_prefer_delimiters() {
 }
 
 #[test]
-fn a_mark_whose_delimiter_cannot_flank_is_still_written_as_delimiters() {
+fn a_mark_whose_delimiter_cannot_flank_is_still_spelled_as_delimiters() {
     // Portable Markdown has no HTML fallback. `a*!*` will not re-read as
     // emphasis — that loss is preferred over `<em>` tags other editors keep.
     let codec = Codec::new();
@@ -894,7 +843,10 @@ fn a_mark_whose_delimiter_cannot_flank_is_still_written_as_delimiters() {
             )
             .expect("a paragraph")])
         .expect("a document");
-    assert_eq!(codec.write(&doc), "a*!*");
+    assert_eq!(
+        codec.write(&spell_document(&codec.serializer, &doc)),
+        "a*!*"
+    );
 }
 
 // -- lists ----------------------------------------------------------------
@@ -1047,29 +999,30 @@ fn a_tilde_fence_and_an_info_string_survive() {
 // -- inline shapes --------------------------------------------------------
 
 #[test]
-fn a_soft_break_keeps_source_semantics_and_projects_as_space() {
+fn every_line_ending_is_a_line_break_and_a_hard_one_is_spelled() {
     assert_eq!(
         shape("one\ntwo"),
-        r#"doc(paragraph("one", soft_break, "two"))"#
+        r#"doc(paragraph("one", line_break, "two"))"#
     );
+    // What makes a break hard is the text before it, which is spelling.
     assert_eq!(
         shape("one\\\ntwo"),
-        r#"doc(paragraph("one", hard_break, "two"))"#
+        r#"doc(paragraph("one", "\"{syntax}, line_break, "two"))"#
     );
-    // Both spellings import; the backslash is what is written back, because it
-    // survives an editor that strips trailing whitespace.
     assert_eq!(
         shape("one  \ntwo"),
-        r#"doc(paragraph("one", hard_break, "two"))"#
+        r#"doc(paragraph("one", "  "{syntax}, line_break, "two"))"#
     );
-    assert_eq!(round("one  \ntwo"), "one\\\ntwo");
+    // Both spellings are written as they were read.
+    assert_eq!(round("one  \ntwo"), "one  \ntwo");
+    assert_eq!(round("one\\\ntwo"), "one\\\ntwo");
 }
 
 #[test]
 fn a_break_cmark_cannot_write_is_dropped_rather_than_faked() {
     let codec = Codec::new();
     let schema = &codec.schema;
-    let brk = || schema.node(md::HARD_BREAK, []).expect("a hard break");
+    let brk = || schema.node(md::LINE_BREAK, []).expect("a line break");
     let trailing = schema
         .node(md::PARAGRAPH, [schema.text("a"), brk()])
         .expect("a paragraph");
@@ -1077,16 +1030,31 @@ fn a_break_cmark_cannot_write_is_dropped_rather_than_faked() {
         codec.write(&schema.doc([trailing]).expect("a document")),
         "a"
     );
-    let heading = schema
-        .node_with(
-            md::HEADING,
-            attrs! {"level" => 1i64},
-            [schema.text("a"), brk(), schema.text("b")],
-        )
-        .expect("a heading");
+    let heading = |level: i64| {
+        schema
+            .node_with(
+                md::HEADING,
+                attrs! {"level" => level},
+                [schema.text("a"), brk(), schema.text("b")],
+            )
+            .expect("a heading")
+    };
+    // A setext heading holds lines; an ATX heading has only the one.
     assert_eq!(
-        codec.write(&schema.doc([heading]).expect("a document")),
-        "# a b"
+        codec.write(&schema.doc([heading(1)]).expect("a document")),
+        "a\nb\n==="
+    );
+    assert_eq!(
+        codec.write(&schema.doc([heading(2)]).expect("a document")),
+        "a\nb\n---"
+    );
+    assert_eq!(
+        codec.write(&schema.doc([heading(3)]).expect("a document")),
+        "### a b"
+    );
+    assert_eq!(
+        shape("a\nb\n==="),
+        r#"doc(heading[level=Int(1)]("a", line_break, "b"))"#
     );
 }
 
@@ -1114,19 +1082,37 @@ fn headings_import_from_both_spellings_and_leave_as_atx() {
     assert_eq!(round("### Deep ###"), "### Deep");
     // A heading whose text ends in a hash keeps it.
     assert_eq!(round("# a \\#"), "# a \\#");
-    assert_eq!(shape("# a \\#"), r#"doc(heading[level=Int(1)]("a #"))"#);
+    assert_eq!(
+        shape("# a \\#"),
+        r##"doc(heading[level=Int(1)]("a ", "\"{syntax}, "#"))"##
+    );
 }
 
 #[test]
-fn a_link_reference_definition_is_resolved_into_an_inline_link() {
+fn a_link_reference_definition_is_kept_where_it_stands() {
     assert_eq!(
         round("[foo][ref]\n\n[ref]: /url \"t\""),
-        "[foo](/url \"t\")"
+        "[foo][ref]\n\n[ref]: /url \"t\""
     );
+    // The definition is source the tree keeps verbatim; the reference is text
+    // until the tree resolves references.
     assert_eq!(
         shape("[foo]\n\n[foo]: /url"),
-        r#"doc(paragraph("foo"{link}))"#
+        r#"doc(paragraph("[foo]"), raw_block("[foo]: /url"))"#
     );
+    // At the start of a paragraph it is a block of its own.
+    assert_eq!(
+        shape("[foo]: /url\n[foo]"),
+        r#"doc(raw_block("[foo]: /url"), paragraph("[foo]"))"#
+    );
+    let codec = Codec::new();
+    for source in [
+        "[foo]: /url\n[foo]",
+        "> [foo]: /url\n>\n> [foo]",
+        "- a\n\n  [foo]: /url\n- [foo]",
+    ] {
+        judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
+    }
 }
 
 // -- autolinks ------------------------------------------------------------
@@ -1183,10 +1169,10 @@ fn a_bare_url_is_a_link_and_is_written_back_bare() {
         first_href("Mail foo@bar.example now"),
         "mailto:foo@bar.example"
     );
-    // An angle-bracket autolink is the same link, and reads back as the URL.
+    // An angle-bracket autolink is the same link, and keeps its brackets.
     assert_eq!(
         round("See <https://example.com> ok"),
-        "See https://example.com ok"
+        "See <https://example.com> ok"
     );
     // A URL is bare wherever a line can start, and inside a container.
     assert_eq!(round("# https://example.com"), "# https://example.com");
@@ -1229,7 +1215,7 @@ fn a_url_under_another_mark_is_not_a_link_of_its_own() {
     assert_eq!(round(source), source);
     assert_eq!(
         shape(source),
-        r#"doc(paragraph("https://a.example"{link}))"#
+        r#"doc(paragraph("["{link,syntax}, "https://a.example"{link}, "](https://b.example)"{link,syntax}))"#
     );
     assert_eq!(first_href(source), "https://b.example");
 }
@@ -1239,19 +1225,17 @@ fn a_link_keeps_its_brackets_where_a_bare_url_would_not_read_back() {
     // A bare URL has nowhere to carry a title.
     let titled = "[https://a.example](https://a.example \"t\")";
     assert_eq!(round(titled), titled);
-    // A host with no dot in it is no autolink, and neither is a label that
-    // only happens to equal its destination.
-    assert_eq!(
-        round("<http://localhost>"),
-        "[http://localhost](http://localhost)"
-    );
+    assert_eq!(round("<http://localhost>"), "<http://localhost>");
     assert_eq!(round("[foo](foo)"), "[foo](foo)");
-    // A URL the escaper has to touch would come back with the backslash in it.
     assert_eq!(
         round("https://a.example/a_(b) x"),
-        "[https://a.example/a\\_(b)](https://a.example/a_(b)) x"
+        "https://a.example/a_(b) x"
     );
-    // A hard break writes a backslash a reader would pull into the URL.
+    // Spelling a link mark — pasted, say — writes it bare only where a reader
+    // gives it back from the URL alone. A host with no dot in it is no
+    // autolink, a URL the escaper has to touch would come back with the
+    // backslash in it, and a hard break writes a backslash a reader would pull
+    // into the URL.
     let codec = Codec::new();
     let schema = &codec.schema;
     let mark = schema
@@ -1265,14 +1249,43 @@ fn a_link_keeps_its_brackets_where_a_bare_url_would_not_read_back() {
             md::PARAGRAPH,
             [
                 schema.text_marked("https://a.example", MarkSet::from_marks(schema, [mark])),
-                schema.node(md::HARD_BREAK, []).expect("a hard break"),
+                schema.node(md::LINE_BREAK, []).expect("a hard break"),
                 schema.text("x"),
             ],
         )
         .expect("a paragraph");
+    let spelled = |doc: &Node| codec.write(&spell_document(&codec.serializer, doc));
     assert_eq!(
-        codec.write(&schema.doc([paragraph]).expect("a document")),
+        spelled(&schema.doc([paragraph]).expect("a document")),
         "[https://a.example](https://a.example)\\\nx"
+    );
+    let linked = |text: &str, href: &str| {
+        let mark = schema
+            .mark(md::LINK, attrs! {"href" => href, "title" => ""})
+            .expect("a link mark");
+        schema
+            .doc([schema
+                .node(
+                    md::PARAGRAPH,
+                    [schema.text_marked(text, MarkSet::from_marks(schema, [mark]))],
+                )
+                .expect("a paragraph")])
+            .expect("a document")
+    };
+    assert_eq!(
+        spelled(&linked("http://localhost", "http://localhost")),
+        "[http://localhost](http://localhost)"
+    );
+    assert_eq!(
+        spelled(&linked(
+            "https://a.example/a_(b)",
+            "https://a.example/a_(b)"
+        )),
+        "[https://a.example/a\\_(b)](https://a.example/a_(b))"
+    );
+    assert_eq!(
+        spelled(&linked("https://a.example", "https://a.example")),
+        "https://a.example"
     );
 }
 
@@ -1282,11 +1295,11 @@ fn text_that_only_looks_like_a_url_is_kept_from_becoming_one() {
     // it leaves has to be written so that it stays out.
     assert_eq!(
         round("<foo\\+@bar.example.com>"),
-        "\\<foo+\\@bar.example.com>"
+        "<foo\\+@bar.example.com>"
     );
     assert_eq!(
         shape("<foo\\+@bar.example.com>"),
-        r#"doc(paragraph("<foo+@bar.example.com>"))"#
+        r#"doc(paragraph("<foo", "\"{syntax}, "+@bar.example.com>"))"#
     );
     let codec = Codec::new();
     // Each of the three shapes the extension reads keeps its escape.

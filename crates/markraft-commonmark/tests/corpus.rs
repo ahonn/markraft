@@ -8,118 +8,7 @@
 
 mod common;
 
-use common::{Codec, judge};
-
-/// Every Markdown source the old codec's tests fed to `from_markdown`.
-const CORPUS: &[&str] = &[
-    // Plain text.
-    "",
-    "a",
-    "ab",
-    "aaa",
-    "x",
-    "xz",
-    "text",
-    "abcdef",
-    "original",
-    "read this",
-    "a\nb",
-    "one\ntwo",
-    "first\nsecond\nthird",
-    "abcd\nef",
-    "tail",
-    "**paste**",
-    // Headings.
-    "# Title\nbody text",
-    "# a **bold** tail\n- item\n中文",
-    "# a **bold** tail\n- item\n中文\n```\n\ncode\n```\nlast",
-    "# h\n\n\npara\n\n- a\n\n- b\n\n> q\n> \n> r",
-    "Title\n=====",
-    "```rust\none\ntwo\n```\n# after",
-    // Lists.
-    "- item",
-    "- first\n  - ",
-    "- first\n  - child",
-    "- root\n  - child",
-    "- root\n  - child\n- sibling",
-    "- root\n  - child\nparagraph",
-    "- first\n- second\n  - child\n- third\n- last",
-    "- parent\n  - child\n    - grandchild\n  - second child\n- root",
-    "- [x] done\n- [ ] open\nuntouched",
-    "- first\n- \n- [ ] \n1. \n",
-    "- first\n    - child\n        - grandchild",
-    "1. one\n2. two\nbreak\n1. again",
-    "3) one\n9. two\nbreak\n1. again",
-    "1. first\n    1. child\n        - grandchild\n    2. child two\n2. second\n- [ ] task\n  - [x] nested\n> quote\n> > nested quote",
-    "-   lead",
-    // Quotes and dividers.
-    "> first\n> second\n",
-    "\\> not a quote",
-    "---\nafter",
-    "***\nafter",
-    "\\-\\-\\-",
-    "text\n---\nmore",
-    "> quote\nlazy\n- item\ncontinued",
-    "> - item\n> - two\n- > quoted\n  - > deep",
-    // Code.
-    "```\n```",
-    "```\nx\n```\nafter",
-    "```rust\na\nb\n```",
-    "```rust\nx\n```\nafter",
-    "```rust\ntext\n```",
-    "```rust\none\ntwo\n```",
-    "```rust\n\nafter\n```",
-    "before\n```rust\n\nafter\n```",
-    "```rust\nlet x = 1;\n```",
-    "```rust\none\n  two\nlast\n```",
-    "```rust\ncode\n\nmore\n```",
-    "```rust\nlet x = 1;\nprintln!(\"{x}\");\n```\nparagraph",
-    "```rust\n# not a heading\n\n**not bold**\n```\nafter\n````\n```\n````",
-    "~~~\n~~~",
-    "    indented\n    more\n\ntext",
-    "- item\n\n  ```rust\n  code\n  ```",
-    // Emphasis.
-    "ab**cd**\nef\ngh",
-    "~~gone~~ and <u>**kept**</u>",
-    "**bold** [link](https://example.com)",
-    "# Title\n- **bold** and *italic* and `code`\n- [ ] todo\n- [x] done\n\n***both***",
-    "# Title\n- **bold** and *italic* and `code`\n- [ ] todo\n- [x] done\n\n***both*** **`bold code`** \\*literal\\*",
-    // Links.
-    "see [the **docs**](https://example.com/a_(b)) and [x](<a b>)",
-    "see [the docs](https://example.com) end",
-    "[x](https://example.com/?q=&amp;copy;)",
-    "[ref]: https://example.com",
-    // Escaping, entities, whitespace.
-    "a \\* b &amp; c &copy;",
-    "1\\. not a list",
-    "  lead",
-    "one\ntwo  \nthree\\\nfour",
-    "&amp; &#32; \\* a",
-    "    four",
-    "\tfour",
-    "   \tfour",
-    // Constructs with no model of their own.
-    "| a | b |\n[text] (url)\n![alt](image.png)",
-    "| a | b |\n|---|---|\n| c | d |",
-    "<div>\nraw\n</div>",
-    "![alt](image.png)",
-    "term\n: definition",
-    "[^1]: a footnote",
-    "<br>",
-    "$$\nx = 1\n$$",
-    // Unicode.
-    "中😀\ntext",
-    "a😀b\nc",
-    "e\u{301}x",
-    "hello  é 👨‍👩‍👧‍👦\n中文",
-    "中😀e\u{301}👨‍👩‍👧‍👦\n末",
-    "a👨‍👩‍👧‍👦b",
-    "a👨‍👩‍👧‍👦\nb",
-    "\u{3000}你好",
-    "\u{a0}hello",
-    "  \u{3000}你好",
-    "first\n\u{3000}second",
-];
+use common::{CORPUS, Codec, judge};
 
 /// Corpus entries whose HTML this codec deliberately does not reproduce, for
 /// the same reasons the spec suite lists.
@@ -128,11 +17,6 @@ const ALLOWED: &[(&str, &str)] = &[
     // Markraft files), but an empty document writes as nothing — which is how
     // CommonMark spells an empty document.
     ("<br>", "an empty document writes as nothing"),
-    // Underline has no portable Markdown spelling; write strips `<u>`.
-    (
-        "~~gone~~ and <u>**kept**</u>",
-        "underline writes as plain text",
-    ),
 ];
 
 #[test]
@@ -169,7 +53,8 @@ fn the_old_corpus_normalises_to_a_fixed_point() {
 }
 
 /// The destinations the old codec round-tripped three times, to catch escapes
-/// that grow on every pass.
+/// that grow on every pass: spelled once from a link mark, then read and
+/// written again.
 #[test]
 fn link_destinations_survive_repeated_round_trips() {
     let codec = Codec::new();
@@ -206,14 +91,42 @@ fn link_destinations_survive_repeated_round_trips() {
                 )
                 .expect("a paragraph")])
             .expect("a document");
-        let mut current = doc.clone();
+        // A link mark with no spelling of its own is what pasted HTML reads
+        // as; spelling it is what gives it one. What must not change is the
+        // destination — then or on any pass after it.
+        let spelled = markraft_commonmark::serialize::spell(&codec.serializer, doc.child(0));
+        let mut current = codec.parse(&spelled);
+        let canonical = current.clone();
+        assert_eq!(
+            destination(&codec, &current).as_deref(),
+            Some(url),
+            "the first write changed the destination {url:?}"
+        );
         for pass in 0..3 {
             let written = codec.write(&current);
             current = codec.parse(&written);
             assert_eq!(
-                current, doc,
+                current, canonical,
                 "pass {pass} changed the destination {url:?}: {written:?}"
             );
         }
     }
+}
+
+/// The href of the first link mark in `doc`.
+fn destination(codec: &Codec, doc: &markraft_core::Node) -> Option<String> {
+    let mut out = None;
+    doc.nodes_between(0, doc.content_size(), &mut |node, _, _, _| {
+        for mark in node.marks().iter() {
+            if codec.schema.mark_type(mark.ty).name() == "link" {
+                out = mark
+                    .attrs
+                    .get("href")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned);
+            }
+        }
+        true
+    });
+    out
 }

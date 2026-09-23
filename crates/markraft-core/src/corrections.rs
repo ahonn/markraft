@@ -25,6 +25,20 @@
 //! applied — the alternative is refusing the user's edit — and the transaction
 //! is annotated [`corrections_diverged`], which is how a caller notices.
 //!
+//! # Settling what a selection left behind
+//!
+//! A correction may deliberately leave the content around a caret alone — a
+//! half-typed marker the writer is still completing. Such a correction is
+//! registered with [`Correction::when_selection_leaves`]: it then also runs,
+//! in the first round, for every node of its type that held an end of the
+//! selection before a transaction that moves the selection, even when the
+//! transaction changes nothing else — but not for one the history does not
+//! record, such as an undo, which restores a selection rather than moving it.
+//! [`CorrectionContext::selection_left`] says that is why it runs. What it asks for joins the transaction that moved
+//! the selection; when that transaction did not change the document itself,
+//! it is annotated [`fold_into_previous`](crate::fold_into_previous), so the
+//! history keeps the settling with the edit that left the content unsettled.
+//!
 //! They do **not** run for a transaction annotated
 //! [`remote(true)`](crate::remote): correcting another peer's edit makes every
 //! peer correct the same thing, which cascades.
@@ -85,6 +99,11 @@ pub struct CorrectionContext<'a> {
     pub content_start: usize,
     /// The position directly before `node`, or `None` for the top node.
     pub before: Option<usize>,
+    /// Whether the node held an end of the selection before the transaction
+    /// and the transaction moved the selection. Only ever set in the first
+    /// round, and only for a correction registered with
+    /// [`Correction::when_selection_leaves`].
+    pub selection_left: bool,
 }
 
 type CorrectFn = Arc<dyn Fn(&CorrectionContext<'_>) -> Vec<Change> + Send + Sync>;
@@ -94,6 +113,7 @@ type CorrectFn = Arc<dyn Fn(&CorrectionContext<'_>) -> Vec<Change> + Send + Sync
 pub struct Correction {
     node_type: NodeTypeId,
     trigger: CorrectionTrigger,
+    on_selection_leave: bool,
     correct: CorrectFn,
 }
 
@@ -102,6 +122,7 @@ impl std::fmt::Debug for Correction {
         f.debug_struct("Correction")
             .field("node_type", &self.node_type)
             .field("trigger", &self.trigger)
+            .field("on_selection_leave", &self.on_selection_leave)
             .finish()
     }
 }
@@ -116,6 +137,7 @@ impl Correction {
         Correction {
             node_type,
             trigger: CorrectionTrigger::ChildList,
+            on_selection_leave: false,
             correct: Arc::new(correct),
         }
     }
@@ -128,6 +150,7 @@ impl Correction {
         Correction {
             node_type,
             trigger: CorrectionTrigger::Content,
+            on_selection_leave: false,
             correct: Arc::new(correct),
         }
     }
@@ -141,8 +164,24 @@ impl Correction {
         Correction {
             node_type,
             trigger: CorrectionTrigger::Marks,
+            on_selection_leave: false,
             correct: Arc::new(correct),
         }
+    }
+
+    /// Also run this correction for a node the selection leaves.
+    ///
+    /// For a correction that leaves the content around a caret unsettled: the
+    /// transaction that moves the selection away — including one that changes
+    /// nothing else — is when to settle it. See the module documentation.
+    pub fn when_selection_leaves(mut self) -> Correction {
+        self.on_selection_leave = true;
+        self
+    }
+
+    /// Whether this correction also runs for a node the selection leaves.
+    pub fn runs_when_selection_leaves(&self) -> bool {
+        self.on_selection_leave
     }
 
     /// The type this correction watches.
@@ -201,7 +240,8 @@ pub fn corrections(corrections: impl IntoIterator<Item = Correction>) -> Extensi
 /// against its own output, until nothing more is asked for.
 fn run_corrections(tr: &Transaction) -> Option<TransactionSpec> {
     let list = tr.start_state().facet(correction()).clone();
-    if !corrections_apply(&list, tr) {
+    let mut left = selection_left(&list, tr);
+    if !corrections_apply(&list, tr) && left.is_empty() {
         return None;
     }
     let schema = tr.start_state().schema().clone();
@@ -210,7 +250,8 @@ fn run_corrections(tr: &Transaction) -> Option<TransactionSpec> {
     let mut accumulated: Option<ChangeSet> = None;
     let mut settled = false;
     for _ in 0..MAX_CORRECTION_ROUNDS {
-        let changes = corrections_for(&list, tr, &doc, &replaced, &marked);
+        let changes = corrections_for(&list, tr, &doc, &replaced, &marked, &left);
+        left.clear();
         if changes.is_empty() {
             settled = true;
             break;
@@ -241,7 +282,39 @@ fn run_corrections(tr: &Transaction) -> Option<TransactionSpec> {
     if !settled {
         spec = spec.annotate(corrections_diverged().of(true));
     }
+    if !tr.doc_changed() {
+        spec = spec.annotate(crate::history::fold_into_previous().of(true));
+    }
     Some(spec)
+}
+
+/// Where the ends of the selection stood before `tr`, in the coordinates of
+/// the document it produces, when `tr` moves the selection and some
+/// correction wants to hear about it. Empty otherwise.
+///
+/// A transaction the history does not record — an undo, a redo, a remote
+/// edit — restores or relays a selection rather than moving it, and settling
+/// in it would make undoing one thing do another.
+fn selection_left(corrections: &[Correction], tr: &Transaction) -> Vec<usize> {
+    if tr.selection().is_none()
+        || tr.annotation(remote()) == Some(&true)
+        || tr.annotation(crate::state::add_to_history()) == Some(&false)
+        || !corrections.iter().any(|c| c.on_selection_leave)
+    {
+        return Vec::new();
+    }
+    let start = tr.start_state();
+    let before = start
+        .selection()
+        .map(start.schema(), tr.new_doc(), &tr.changes().desc());
+    if before == tr.new_selection() {
+        return Vec::new();
+    }
+    before
+        .ranges(tr.new_doc())
+        .iter()
+        .flat_map(|range| [range.from, range.to])
+        .collect()
 }
 
 fn corrections_apply(corrections: &[Correction], tr: &Transaction) -> bool {
@@ -276,19 +349,25 @@ pub fn collect_corrections(corrections: &[Correction], tr: &Transaction) -> Vec<
         return Vec::new();
     }
     let (replaced, marked) = changed_ranges(tr.changes());
-    corrections_for(corrections, tr, tr.new_doc(), &replaced, &marked)
+    corrections_for(corrections, tr, tr.new_doc(), &replaced, &marked, &[])
 }
 
 /// One round: the changes `corrections` want to make to `doc`, given the ranges
-/// of `doc` that just changed.
+/// of `doc` that just changed and the positions the selection left.
 fn corrections_for(
     corrections: &[Correction],
     tr: &Transaction,
     doc: &Node,
     replaced: &[(usize, usize)],
     marked: &[(usize, usize)],
+    left: &[usize],
 ) -> Vec<Change> {
     let touched: Vec<(usize, usize)> = replaced.iter().chain(marked.iter()).copied().collect();
+    let visited: Vec<(usize, usize)> = touched
+        .iter()
+        .copied()
+        .chain(left.iter().map(|pos| (*pos, *pos)))
+        .collect();
     let mut out: Vec<Change> = Vec::new();
 
     let mut visit = |node: &Node, content_start: usize, before: Option<usize>| {
@@ -297,16 +376,19 @@ fn corrections_for(
             if correction.node_type != node.type_id() {
                 continue;
             }
-            let fires = match correction.trigger {
-                CorrectionTrigger::Content => {
-                    overlaps(&touched, content_start, end) || inserted(replaced, before, node)
-                }
-                CorrectionTrigger::ChildList => {
-                    child_list_changed(node, content_start, replaced)
-                        || inserted(replaced, before, node)
-                }
-                CorrectionTrigger::Marks => overlaps(marked, content_start, end),
-            };
+            let selection_left = correction.on_selection_leave
+                && left.iter().any(|pos| (content_start..=end).contains(pos));
+            let fires = selection_left
+                || match correction.trigger {
+                    CorrectionTrigger::Content => {
+                        overlaps(&touched, content_start, end) || inserted(replaced, before, node)
+                    }
+                    CorrectionTrigger::ChildList => {
+                        child_list_changed(node, content_start, replaced)
+                            || inserted(replaced, before, node)
+                    }
+                    CorrectionTrigger::Marks => overlaps(marked, content_start, end),
+                };
             if !fires {
                 continue;
             }
@@ -317,6 +399,7 @@ fn corrections_for(
                 node,
                 content_start,
                 before,
+                selection_left,
             };
             out.extend((correction.correct)(&cx));
         }
@@ -326,7 +409,7 @@ fn corrections_for(
     doc.descendants(&mut |node, pos, _, _| {
         let start = pos;
         let end = pos + node.node_size();
-        if !overlaps(&touched, start, end) {
+        if !overlaps(&visited, start, end) {
             return false;
         }
         if node.is_container() {

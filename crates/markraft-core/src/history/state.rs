@@ -28,7 +28,8 @@ const MAX_SELECTIONS: usize = 200;
 pub(crate) struct MergeHints {
     /// A composition was folding into the top entry before this transaction.
     pub(crate) was_composing: bool,
-    /// This transaction was produced by a transaction appender.
+    /// This transaction was produced by a transaction appender, or is
+    /// annotated [`fold_into_previous`](super::fold_into_previous).
     pub(crate) appended: bool,
 }
 

@@ -1,22 +1,75 @@
-//! The inline half of the serialiser: opening and closing marks around the
-//! runs of a textblock that carry them.
+//! The inline half of the serialiser.
 //!
-//! The algorithm is ProseMirror's. It keeps a stack of the marks that are
-//! currently open, and for each inline node works out the longest prefix of
-//! that stack it can keep, closing the rest and opening whatever the node adds.
-//! Two marks that may be written in either order are reordered rather than
-//! closed and reopened, and whitespace at the edges of a run moves out from
-//! under the marks that could not carry it.
+//! [`SerializerState::render_inline`] writes a textblock whose text is its own
+//! inline source: as it stands, with the guard's backslashes, one output line
+//! per line break.
+//!
+//! [`SerializerState::spell_inline`] spells *semantic* inline content — text
+//! with style marks and nothing else — as Markdown, which is how pasted HTML
+//! becomes source. Its algorithm is ProseMirror's. It keeps a stack of the
+//! marks that are currently open, and for each inline node works out the
+//! longest prefix of that stack it can keep, closing the rest and opening
+//! whatever the node adds. Two marks that may be written in either order are
+//! reordered rather than closed and reopened, and whitespace at the edges of a
+//! run moves out from under the marks that could not carry it.
 
 use markraft_core::projection::is_line_break;
 use markraft_core::{Mark, Node};
 
 use super::{MarkTarget, SerializerState};
+use crate::derive::BlockKind;
+use crate::textblock::{Item, Items, block_kind};
 
 impl SerializerState<'_> {
-    /// Write the inline content of a textblock, opening and closing marks
-    /// around the runs that carry them.
+    /// Write a textblock's text, which is its inline source.
+    ///
+    /// The text goes out as it stands, with the backslashes
+    /// [`guard`](crate::derive::guard) names so it reads back as the same
+    /// block. A few shapes the canonicalising correction leaves alone while the
+    /// caret is on them are settled here instead, since no reader could give
+    /// them back: whitespace starting a line is dropped, and so is a line
+    /// break at the start or end of the block. On a line that cannot end — an
+    /// ATX heading, a table row — a break is written as
+    /// [`SerializerState::line_break`].
     pub fn render_inline(&mut self, parent: &Node) {
+        let schema = self.schema();
+        let kind = block_kind(schema, parent.type_id()).unwrap_or(BlockKind::Paragraph);
+        let items = canonical_lines(Items::from_nodes(schema, parent.children()));
+        let insertions = items.guard_insertions(schema, kind);
+        let mut out = String::new();
+        let mut next = insertions.iter().peekable();
+        for (index, item) in items.0.iter().enumerate() {
+            while next.next_if(|at| **at == index).is_some() {
+                out.push('\\');
+            }
+            match item {
+                Item::Char(c) => out.push(*c),
+                Item::Break if self.single_line => out.push_str(self.line_break),
+                Item::Break => out.push('\n'),
+                Item::Atom(node) => {
+                    let spelled = self.capture_node(node);
+                    // A `!` before a link's `[[` would make it an embed.
+                    if spelled.starts_with('[') && out.ends_with('!') {
+                        out.pop();
+                        out.push_str("\\!");
+                    }
+                    out.push_str(&spelled);
+                }
+            }
+        }
+        if !out.is_empty() {
+            self.text(&out, false);
+        }
+    }
+
+    /// An inline atom as its rule writes it, on its own.
+    fn capture_node(&mut self, node: &Node) -> String {
+        self.capture(self.line_break, |state| state.render(node, None, 0))
+    }
+
+    /// Spell `parent`'s semantic inline content as Markdown, opening and
+    /// closing marks around the runs that carry them.
+    pub(crate) fn spell_inline(&mut self, parent: &Node) {
         let mut active: Vec<Mark> = Vec::new();
         let mut trailing = String::new();
         for index in 0..=parent.child_count() {
@@ -32,35 +85,6 @@ impl SerializerState<'_> {
         trailing: &mut String,
     ) {
         let mut node = parent.maybe_child(index).cloned();
-        // Pure Method-B delimiter leaves are transparent to the mark stack: their
-        // characters are the spelling of an enclosing style. Delimiters that also
-        // carry another mark (e.g. backticks inside a link label) follow the
-        // normal stack so that mark stays open around them.
-        //
-        // When a style mark is configured to write HTML tags instead of Markdown
-        // delimiters (strict CommonMark strikethrough), skip the delimiter
-        // characters — the mark rule supplies the spelling.
-        if let Some(current) = node.as_ref()
-            && crate::inline::is_syntax(self.schema(), current)
-        {
-            let write_chars = self.syntax_chars_authoritative(current);
-            if current.marks().len() == 1 {
-                let leading = std::mem::take(trailing);
-                if !leading.is_empty() {
-                    self.text(&leading, true);
-                }
-                if write_chars && let Some(text) = current.text() {
-                    self.text(text, false);
-                }
-                self.after_mark_close = false;
-                return;
-            }
-            if !write_chars {
-                // Fall through to the mark stack without emitting delimiter text:
-                // pretend this leaf is empty text carrying the same marks.
-                node = Some(current.clone().with_text(""));
-            }
-        }
         let mut marks = self.marks_of(node.as_ref(), parent, index);
         let mut leading = std::mem::take(trailing);
         if let Some(current) = node.clone()
@@ -144,41 +168,6 @@ impl SerializerState<'_> {
         }
     }
 
-    /// Whether a Method-B delimiter leaf's characters should be written, or
-    /// suppressed because a style mark on it spells itself as HTML (or another
-    /// non-delimiter form) instead.
-    fn syntax_chars_authoritative(&self, node: &Node) -> bool {
-        let Some(delim) = node.text() else {
-            return false;
-        };
-        for mark in node.marks().iter() {
-            let name = self.schema().mark_type(mark.ty).name();
-            // Only judge the mark this delimiter leaf belongs to — an outer
-            // style that uses HTML tags must not suppress an inner `*` leaf.
-            let belongs = match name {
-                crate::schema::STRONG => delim == "**",
-                crate::schema::EM => delim == "*",
-                crate::schema::STRIKETHROUGH => delim == "~~",
-                crate::schema::CODE => !delim.is_empty() && delim.chars().all(|c| c == '`'),
-                _ => continue,
-            };
-            if !belongs {
-                continue;
-            }
-            let Some(rule) = self.serializer.mark_rule(mark.ty) else {
-                continue;
-            };
-            // Emphasis/code leads match their delimiter; an HTML spelling such
-            // as `<del>` has a lead that the delimiter does not start with.
-            if let Some(lead) = rule.lead
-                && !delim.starts_with(lead)
-            {
-                return false;
-            }
-        }
-        true
-    }
-
     /// Whether a link already encloses the node, so a reader reads no autolink
     /// out of a URL in its text.
     fn inside_link(&self, node: &Node) -> bool {
@@ -196,9 +185,6 @@ impl SerializerState<'_> {
         let Some(node) = node else {
             return Vec::new();
         };
-        if self.schema().node_type(node.type_id()).name() == crate::schema::INLINE_SPAN {
-            return Vec::new();
-        }
         let mut marks: Vec<Mark> = node
             .marks()
             .iter()
@@ -277,4 +263,32 @@ impl SerializerState<'_> {
         };
         f(self, &target)
     }
+}
+
+/// `items` without the whitespace that starts each line and the line breaks
+/// at either end of the block.
+fn canonical_lines(items: Items) -> Items {
+    let mut out: Vec<Item> = Vec::with_capacity(items.len());
+    let mut line_start = true;
+    for item in items.0 {
+        match item {
+            Item::Char(' ' | '\t') if line_start => {}
+            Item::Break => {
+                // A break at the start of the block would leave an empty line
+                // the block does not have.
+                if !out.is_empty() {
+                    out.push(Item::Break);
+                }
+                line_start = true;
+            }
+            item => {
+                out.push(item);
+                line_start = false;
+            }
+        }
+    }
+    while out.last() == Some(&Item::Break) {
+        out.pop();
+    }
+    Items(out)
 }

@@ -57,7 +57,7 @@ fn escape(text: &str, at_line_start: bool, unlinked: bool) -> String {
     };
     for (index, ch) in chars.iter().copied().enumerate() {
         // A line ending inside inline content is not a break the model asked
-        // for — those are `hard_break` nodes — so it travels as a reference
+        // for — those are `line_break` nodes — so it travels as a reference
         // rather than ending the block.
         if matches!(ch, '\n' | '\r') {
             out.push_str(if ch == '\n' { "&#10;" } else { "&#13;" });

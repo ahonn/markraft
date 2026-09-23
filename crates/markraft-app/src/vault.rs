@@ -1529,10 +1529,12 @@ mod tests {
         );
         let (mut store, mut library) = open(root.path());
         let id = library.active_id.clone();
-        // Keep the title line so the stem stays put; only the body and link change.
+        // Keep the title line so the stem stays put; only a word of the body
+        // changes. The reference link and its definition are text and a block
+        // of the document, and are written back as they were.
         library.set_document(
             &id,
-            doc::from_markdown("Keep This Name\n\nchanged [site](https://example.com)"),
+            doc::from_markdown("Keep This Name\n\nchanged [site][s]\n\n[s]: https://example.com"),
         );
         store.save(&library).unwrap();
         assert_eq!(

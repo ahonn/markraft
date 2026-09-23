@@ -1,10 +1,16 @@
 //! `parse(serialize(doc)) == doc` for random documents on the CommonMark
 //! schema.
 //!
+//! The generator builds *semantic* documents — text carrying style marks, the
+//! way a host or a clipboard describes content — and brings each into the
+//! inline source model with [`spell_document`], which is where its marks get
+//! their spelling. That document has to survive being written and read back
+//! exactly: text, marks, atoms, attributes and structure.
+//!
 //! The generator stays inside what CommonMark can write down, because the codec
 //! cannot promise more than the format does. It therefore avoids:
 //!
-//! * a `hard_break` at the end of a textblock, or inside a heading — CommonMark
+//! * a line break at the end of a textblock, or inside a heading — CommonMark
 //!   cannot end a block with a line break;
 //! * whitespace at the edges of a marked run, or of a textblock — a reader
 //!   strips the first and refuses to read the second as emphasis at all;
@@ -12,26 +18,22 @@
 //!   them, and a loose list with nowhere to put a blank line — one item holding
 //!   one block always reads back tight;
 //! * two lists of the same kind side by side, which a reader joins;
-//! * underline, which has no CommonMark spelling;
 //! * a fence character run inside a code block, which forces the fence to grow;
 //! * a line ending inside a code span, which CommonMark turns into a space;
-//! * a hard break inside a table cell, which a row of one source line cannot
+//! * a line break inside a table cell, which a row of one source line cannot
 //!   hold, and a table or a raw block inside a list item, whose blank lines
 //!   decide the list's tightness for it — `cases.rs` pins all three.
 //!
 //! It does generate the two shapes GFM's autolink extension reads: a link
-//! whose text is its own URL, which is written back bare, and plain text that
-//! only looks like one, which has to be kept from becoming a link.
-//!
-//! Every one of those is pinned by a test of its own in `cases.rs`, with the
-//! behaviour the codec falls back to. Nothing else is excepted: attributes,
-//! marks and structure come back exactly.
+//! whose text is its own URL, which is spelled bare, and plain text that only
+//! looks like one, which has to be kept from becoming a link.
 
 mod common;
 
 use common::{Codec, Rng};
 use markraft_commonmark::html::{HtmlParser, HtmlSerializer};
 use markraft_commonmark::schema as md;
+use markraft_commonmark::serialize::spell_document;
 use markraft_core::{Attrs, Mark, MarkSet, Node, Schema, attrs};
 
 /// Words with no whitespace at their edges, covering the characters a
@@ -124,8 +126,10 @@ const ALIGNMENTS: &[&str] = &["none", "left", "center", "right"];
 struct Gen<'a> {
     schema: &'a Schema,
     rng: Rng,
-    /// Markdown has no underline spelling; HTML clipboard round-trips keep it.
+    /// Whether to generate underline, spelled `<u>…</u>`.
     allow_underline: bool,
+    /// Whether to generate code spans.
+    allow_code: bool,
 }
 
 impl Gen<'_> {
@@ -143,9 +147,6 @@ impl Gen<'_> {
         let style: &[&str] = if self.allow_underline {
             &[md::UNDERLINE, md::STRIKETHROUGH, md::STRONG, md::EM]
         } else {
-            // Strong+em together writes `***…***`, which CommonMark re-reads with
-            // a nesting order that becomes an `inline_span` — not a flat mark set.
-            // Portable Markdown keeps them separate so the tree round-trips.
             &[md::STRIKETHROUGH, md::STRONG, md::EM]
         };
         for name in style {
@@ -153,23 +154,7 @@ impl Gen<'_> {
                 picked.push(self.mark(name, Attrs::empty()));
             }
         }
-        if !self.allow_underline {
-            let has_strong = picked
-                .iter()
-                .any(|m| self.schema.mark_type(m.ty).name() == md::STRONG);
-            let has_em = picked
-                .iter()
-                .any(|m| self.schema.mark_type(m.ty).name() == md::EM);
-            if has_strong && has_em {
-                let drop = if self.rng.one_in(2) {
-                    md::STRONG
-                } else {
-                    md::EM
-                };
-                picked.retain(|m| self.schema.mark_type(m.ty).name() != drop);
-            }
-        }
-        if self.rng.one_in(5) {
+        if self.rng.one_in(5) && self.allow_code {
             picked.push(self.mark(md::CODE, Attrs::empty()));
         }
         MarkSet::from_marks(self.schema, picked)
@@ -203,7 +188,7 @@ impl Gen<'_> {
             }
             after_break = make_break;
             if make_break {
-                out.push(self.schema.node(md::HARD_BREAK, []).expect("a hard break"));
+                out.push(self.schema.node(md::LINE_BREAK, []).expect("a hard break"));
                 continue;
             }
             if self.rng.one_in(9) {
@@ -508,24 +493,27 @@ fn random_documents_survive_a_round_trip() {
         let mut generator = Gen {
             schema: &codec.schema,
             rng: Rng::new(seed),
-            allow_underline: false,
+            allow_underline: seed % 2 == 0,
+            allow_code: seed % 3 == 0,
         };
         let blocks = generator.blocks(2, false, 1, 4);
-        let doc = codec.schema.doc(blocks).expect("a document");
-        doc.check(&codec.schema).expect("the generator is valid");
+        let semantic = codec.schema.doc(blocks).expect("a document");
+        semantic
+            .check(&codec.schema)
+            .expect("the generator is valid");
+        let doc = spell_document(&codec.serializer, &semantic);
+        doc.check(&codec.schema)
+            .expect("spelling keeps the document valid");
         let written = codec.write(&doc);
-        // The generator still builds old-style marks; Method-B is the form the
-        // codecs settle on after a write/parse.
-        let expected = codec.parse(&written);
-        let back = codec.parse(&written);
+        let again = codec.parse(&written);
         assert_eq!(
-            codec.describe(&back),
-            codec.describe(&expected),
-            "seed {seed} did not survive:\n{written:?}\n{doc:?}"
+            codec.describe(&again),
+            codec.describe(&doc),
+            "seed {seed} did not survive:\n{written:?}"
         );
-        assert_eq!(back, expected, "seed {seed}: attributes differ\n{written}");
+        assert_eq!(again, doc, "seed {seed}: attributes differ\n{written}");
         assert_eq!(
-            codec.write(&back),
+            codec.write(&again),
             written,
             "seed {seed} is not a fixed point"
         );
@@ -542,16 +530,18 @@ fn random_documents_survive_an_html_round_trip() {
             schema: &codec.schema,
             rng: Rng::new(seed),
             allow_underline: true,
+            allow_code: true,
         };
         let blocks = generator.blocks(2, false, 1, 4);
-        let doc = codec.schema.doc(blocks).expect("a document");
+        let semantic = codec.schema.doc(blocks).expect("a document");
+        let doc = spell_document(&codec.serializer, &semantic);
         let written = serializer.serialize(&doc);
         let back = parser
             .parse(&written)
             .unwrap_or_else(|error| panic!("seed {seed} did not parse: {error}\n{written}"));
         back.check(&codec.schema).expect("a valid document");
-        // Method-B delimiter nesting and soft-break spelling inside marked runs
-        // can differ across an HTML hop; the judge collapses that noise.
+        // HTML spells a soft break and the whitespace around a marked run
+        // however it likes; the judge collapses that noise.
         assert_eq!(
             common::normalize_html(&serializer.serialize(&back)),
             common::normalize_html(&written),

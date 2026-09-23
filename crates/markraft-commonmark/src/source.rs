@@ -29,8 +29,8 @@ pub struct SourceDocument {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceError {
     /// The change lands inside source kept verbatim: math, a block anchor, a
-    /// link reference definition, a callout's marker line or a `[[…]]`
-    /// spelling this codec does not read as a wiki link.
+    /// callout's marker line or a `[[…]]` spelling this codec does not read as
+    /// a wiki link.
     ProtectedSpan,
     /// Writing the change needs its whole block replaced, and that block carries
     /// source the semantic document does not, such as a reference definition.
@@ -69,15 +69,14 @@ impl SourceDocument {
         let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
         let root = parse_document(&arena, &normalized, &commonmark_options());
         let lines = line_ranges(body);
-        let blocks: Vec<_> = root
-            .children()
-            .filter_map(|node| {
-                let pos = node.data.borrow().sourcepos;
-                let first = lines.get(pos.start.line.checked_sub(1)?)?;
-                let last = lines.get(pos.end.line.checked_sub(1)?)?;
+        let blocks = block_lines(schema, &document, root, &normalized)
+            .into_iter()
+            .filter_map(|(start, end)| {
+                let first = lines.get(start.checked_sub(1)?)?;
+                let last = lines.get(end.checked_sub(1)?)?;
                 Some(body_start + first.start..body_start + last.end)
             })
-            .collect();
+            .collect::<Vec<_>>();
         let mapped = blocks.len() == document.child_count()
             && blocks.windows(2).all(|pair| pair[0].end <= pair[1].start);
         let newline = if body.contains("\r\n") {
@@ -344,6 +343,59 @@ impl SourceDocument {
             Err(SourceError::UnsupportedEdit)
         }
     }
+}
+
+/// The one-based first and last line of each of the document's top-level
+/// blocks.
+///
+/// comrak leaves no node for link reference definitions, and the parser keeps
+/// each run of them as a raw block of its own — between blocks, or split off
+/// the start of the paragraph they opened. Such a block takes the first lines
+/// not yet accounted for that are not blank, as many as its text has; every
+/// other block is the next of comrak's.
+fn block_lines<'a>(
+    schema: &Schema,
+    document: &Node,
+    root: &'a comrak::nodes::AstNode<'a>,
+    source: &str,
+) -> Vec<(usize, usize)> {
+    let lines: Vec<&str> = source.split('\n').collect();
+    let raw = schema.node_id(crate::schema::RAW_BLOCK);
+    let mut nodes = root.children();
+    let mut next = 1;
+    let mut out = Vec::new();
+    for child in document.children() {
+        let text: String = child.children().filter_map(|leaf| leaf.text()).collect();
+        let definitions = Some(child.type_id()) == raw && is_definitions(&text);
+        if definitions {
+            while lines
+                .get(next - 1)
+                .is_some_and(|line| line.trim().is_empty())
+            {
+                next += 1;
+            }
+            let end = next + text.split('\n').count() - 1;
+            out.push((next, end));
+            next = end + 1;
+            continue;
+        }
+        let Some(node) = nodes.next() else {
+            break;
+        };
+        let pos = node.data.borrow().sourcepos;
+        out.push((pos.start.line.max(next), pos.end.line));
+        next = pos.end.line + 1;
+    }
+    out
+}
+
+/// Whether `text` reads as nothing but link reference definitions.
+fn is_definitions(text: &str) -> bool {
+    let arena = Arena::new();
+    !text.trim().is_empty()
+        && parse_document(&arena, &format!("{text}\n"), &commonmark_options())
+            .first_child()
+            .is_none()
 }
 
 fn without_trailing_spaces(schema: &Schema, node: &Node) -> Node {
@@ -642,9 +694,9 @@ impl Protected {
 /// the document's own text rather than the file's, so a quote's `> ` and a code
 /// fence's backticks are already gone.
 ///
-/// This is the inline half of [`protected_ranges`]. A callout's marker line and
-/// a link reference definition are whole lines a view draws differently anyway,
-/// and display math opened on one line and closed on another is not found here.
+/// This is the inline half of [`protected_ranges`]. A callout's marker line is
+/// a whole line a view draws differently anyway, and display math opened on
+/// one line and closed on another is not found here.
 pub fn protected_spans(line: &str) -> Vec<Range<usize>> {
     let code = code_ranges(line);
     let mut spans = comment_ranges(line, &code);
@@ -691,7 +743,6 @@ fn protected_ranges(source: &str) -> Protected {
     protected.extend(unread_wiki_links(source, &code));
     for range in line_ranges(source) {
         let line = &source[range.clone()];
-        let trimmed = line.trim_start();
         // A callout's marker line is in the tree as attributes rather than as
         // text, so nothing an edit says can rebuild it; the body it opened is
         // ordinary content. `[!…]` anywhere else is the plain text it has
@@ -705,16 +756,6 @@ fn protected_ranges(source: &str) -> Protected {
         {
             protected.push(range.clone());
             rebuildable.push(range.clone());
-        }
-        // Reference definitions can disappear from the semantic tree, so never
-        // treat them as replaceable whitespace inside a structural range.
-        if trimmed.starts_with('[')
-            && trimmed.contains("]:")
-            && !code
-                .iter()
-                .any(|span| span.start <= range.start && range.end <= span.end)
-        {
-            protected.push(range.clone());
         }
         if let Some(at) = line.rfind(" ^")
             && !code

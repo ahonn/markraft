@@ -1,8 +1,10 @@
 //! Plain text, for the `text/plain` flavour of a clipboard and for search.
 //!
-//! One line per block, and one line per hard break inside a block. An atom
-//! contributes the text a reader would see in its place: an image's `alt`, a
-//! wiki link's label. A thematic break contributes nothing, because it has no
+//! One line per block, and one line per line break inside a block. A
+//! textblock's text is Markdown source, so what it spells rather than says —
+//! a delimiter, an escape's backslash — is left out, and an entity reads as
+//! the character it displays. An atom contributes the text a reader would see
+//! in its place: an image's `alt`, a wiki link's label. A thematic break contributes nothing, because it has no
 //! text; a raw block contributes its source, which is its text already.
 //!
 //! A table is the one block that is not one line: its cells are separated by
@@ -15,8 +17,8 @@ use crate::schema as md;
 
 /// The plain text of a whole document.
 ///
-/// Method-B delimiter leaves are omitted so the result reads as prose, not as
-/// Markdown source.
+/// Concealed runs read as what they display, so the result reads as prose,
+/// not as Markdown source.
 ///
 /// ```
 /// use markraft_commonmark::{commonmark_schema, from_markdown, to_plain_text};
@@ -32,7 +34,7 @@ pub fn to_plain_text(schema: &Schema, doc: &Node) -> String {
     prose_between(schema, doc, 0, doc.content_size(), Some("\n"))
 }
 
-/// Like [`Node::text_between`], but skips Method-B delimiter leaves.
+/// Like [`Node::text_between`], but reads concealed runs as what they display.
 fn prose_between(
     schema: &Schema,
     node: &Node,
@@ -40,11 +42,11 @@ fn prose_between(
     to: usize,
     block_separator: Option<&str>,
 ) -> String {
-    let syntax = schema.mark_id(md::SYNTAX);
     let mut text = String::new();
     let mut first = true;
     node.nodes_between(from, to, &mut |child, pos, _, _| {
-        if syntax.is_some_and(|ty| child.marks().get(ty).is_some()) {
+        if let Some(display) = concealed(schema, child) {
+            text.push_str(display);
             return true;
         }
         let piece = if let Some(node_text) = child.text() {
@@ -86,7 +88,7 @@ fn prose_between(
 /// The plain text of a slice — what a copied selection puts on the clipboard
 /// beside its Markdown.
 ///
-/// Method-B delimiter leaves are omitted so the clipboard reads as prose.
+/// Concealed runs read as what they display, so the clipboard reads as prose.
 /// Tables are laid out as rows of tab-separated cells first.
 pub fn slice_to_plain_text(schema: &Schema, slice: &Slice) -> String {
     let cell = |cell: &Node| {
@@ -99,15 +101,26 @@ pub fn slice_to_plain_text(schema: &Schema, slice: &Slice) -> String {
     markraft_core::projection::slice_to_plain_text(schema, &flattened)
 }
 
-/// Drop Method-B delimiter leaves from a fragment (recursively through
-/// containers) so plain-text views read as prose.
+/// What a concealed run displays, or `None` for anything that is not one.
+fn concealed<'n>(schema: &Schema, node: &'n Node) -> Option<&'n str> {
+    let syntax = schema.mark_id(md::SYNTAX)?;
+    let mark = node.marks().get(syntax)?;
+    Some(
+        mark.attrs
+            .get("display")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
+    )
+}
+
+/// A fragment with each concealed run replaced by what it displays
+/// (recursively through containers), so plain-text views read as prose.
 fn strip_syntax(schema: &Schema, content: &Fragment) -> Fragment {
-    let syntax = schema.mark_id(md::SYNTAX);
     let children: Vec<Node> = content
         .iter()
         .filter_map(|node| {
-            if syntax.is_some_and(|ty| node.marks().get(ty).is_some()) {
-                return None;
+            if let Some(display) = concealed(schema, node) {
+                return (!display.is_empty()).then(|| schema.text(display));
             }
             if node.is_container() {
                 Some(node.copy(strip_syntax(schema, node.content())))
@@ -130,8 +143,7 @@ fn leaf_text(schema: &Schema, node: &Node) -> String {
             .to_string()
     };
     match name {
-        md::SOFT_BREAK => " ".to_string(),
-        md::HARD_BREAK => "\n".to_string(),
+        md::LINE_BREAK => "\n".to_string(),
         md::IMAGE => attr("alt"),
         // An atom keeps the source's own spacing in its attributes, so `[[ a ]]`
         // reads as the label without it, the way the editor draws one. An embed

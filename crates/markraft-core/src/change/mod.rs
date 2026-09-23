@@ -20,7 +20,7 @@ mod transform;
 
 use crate::error::ChangeError;
 use crate::fit::{Fit, fit_replacement};
-use crate::mark::Mark;
+use crate::mark::{Mark, MarkSet};
 use crate::node::Node;
 use crate::schema::{MarkTypeId, Schema};
 use crate::slice::{Slice, Token, tokens_size};
@@ -47,6 +47,8 @@ pub enum ChangeKind {
     RemoveMark(Mark),
     /// Remove every mark of a type over the range.
     RemoveMarkType(MarkTypeId),
+    /// Make the range carry exactly this mark set.
+    SetMarks(MarkSet),
 }
 
 /// One change, in starting-document coordinates.
@@ -109,6 +111,25 @@ impl Change {
             from,
             to,
             kind: ChangeKind::RemoveMarkType(ty),
+            fit: Fit::No,
+        }
+    }
+
+    /// Make every inline node in `from..to` carry exactly `marks`.
+    ///
+    /// Like the other mark changes this is resolved against the document when
+    /// the set is created: each inline run records the removals and additions
+    /// that take it from its current marks to `marks` (restricted to the mark
+    /// types its parent allows), so inversion, composition and mapping treat
+    /// it exactly like a sequence of [`Change::add_mark`] and
+    /// [`Change::remove_mark`] calls — but a caller that knows the whole
+    /// target set can express it as one change over one range, instead of
+    /// several overlapping ones.
+    pub fn set_marks(from: usize, to: usize, marks: MarkSet) -> Change {
+        Change {
+            from,
+            to,
+            kind: ChangeKind::SetMarks(marks),
             fit: Fit::No,
         }
     }
@@ -478,7 +499,7 @@ impl ChangeSet {
         // ranges.
         enum Part {
             Replace(usize, usize, Vec<Token>, (usize, usize)),
-            Mark(usize, usize, MarkChange),
+            Mark(usize, usize, Vec<MarkChange>),
         }
         /// Record a mark change, split into the runs whose parent allows it.
         fn push_mark_parts(
@@ -491,14 +512,25 @@ impl ChangeSet {
         ) -> Result<(), ChangeError> {
             let mods = [modification];
             let runs = crate::change::apply::split_mark_change(schema, doc, from, to, &mods)?;
+            push_mark_runs(from, runs, parts);
+            Ok(())
+        }
+        /// Record resolved runs, merging neighbours that do the same thing.
+        fn push_mark_runs(from: usize, runs: Vec<(usize, Vec<MarkChange>)>, parts: &mut Vec<Part>) {
             let mut pos = from;
-            for (len, allowed) in runs {
-                if let Some(modification) = allowed.into_iter().next() {
-                    parts.push(Part::Mark(pos, pos + len, modification));
+            for (len, mods) in runs {
+                if !mods.is_empty() {
+                    if let Some(Part::Mark(_, end, last)) = parts.last_mut()
+                        && *end == pos
+                        && *last == mods
+                    {
+                        *end = pos + len;
+                    } else {
+                        parts.push(Part::Mark(pos, pos + len, mods));
+                    }
                 }
                 pos += len;
             }
-            Ok(())
         }
 
         let mut parts: Vec<Part> = Vec::new();
@@ -528,6 +560,11 @@ impl ChangeSet {
                         MarkChange::RemoveType(ty),
                         &mut parts,
                     )?;
+                }
+                ChangeKind::SetMarks(marks) => {
+                    let runs =
+                        crate::change::apply::split_set_marks(schema, doc, from, to, &marks)?;
+                    push_mark_runs(from, runs, &mut parts);
                 }
             }
         }
@@ -577,7 +614,7 @@ impl ChangeSet {
             builder.keep(from - pos);
             match part {
                 Part::Replace(_, _, tokens, _) => builder.replace(to - from, tokens),
-                Part::Mark(_, _, change) => builder.mark(to - from, vec![change]),
+                Part::Mark(_, _, mods) => builder.mark(to - from, mods),
             }
             pos = to;
         }

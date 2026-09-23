@@ -307,12 +307,22 @@ fn structural_edits_preserve_outside_source() {
     }
 }
 
+/// A link reference definition is a block of the document, kept verbatim, so
+/// an edit that removes it removes it on purpose.
 #[test]
-fn structural_changes_cannot_remove_unrepresented_definitions() {
+fn a_definition_is_a_block_an_edit_may_remove() {
     let original = "first\n\n[unused]: /keep\n\nlast\n";
+    let schema = commonmark_schema();
+    let removed = edit(original, "first\n\nlast\n").unwrap();
     assert_eq!(
-        edit(original, "replacement"),
-        Err(SourceError::ProtectedBlock)
+        SourceDocument::parse(&schema, &removed).unwrap().document(),
+        SourceDocument::parse(&schema, "first\n\nlast\n")
+            .unwrap()
+            .document()
+    );
+    assert_eq!(
+        edit(original, "first\n\n[unused]: /keep\n\nchanged\n").unwrap(),
+        "first\n\n[unused]: /keep\n\nchanged\n"
     );
 }
 
@@ -374,10 +384,10 @@ fn new_content_keeps_an_existing_reference_only_document() {
     let schema = commonmark_schema();
     let original = "[unused]: /keep\n";
     let source = SourceDocument::parse(&schema, original).unwrap();
-    let target = SourceDocument::parse(&schema, "hello").unwrap();
+    let target = SourceDocument::parse(&schema, "[unused]: /keep\n\nhello").unwrap();
     let result = source.render(&schema, target.document()).unwrap();
-    assert!(result.starts_with(original));
-    assert!(result.ends_with("hello"));
+    assert!(result.starts_with(original), "{result:?}");
+    assert!(result.trim_end().ends_with("hello"), "{result:?}");
 }
 
 #[test]
