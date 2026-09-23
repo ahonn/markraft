@@ -39,12 +39,24 @@ pub fn move_by_grapheme(dir: Direction, extend: bool) -> Command {
 
 /// Move the caret one word. See [`move_by_grapheme`].
 pub fn move_by_word(dir: Direction, extend: bool) -> Command {
+    move_by(dir, extend, move |projection, pos| match dir {
+        Direction::Forward => projection.next_word_boundary(pos),
+        Direction::Backward => projection.prev_word_boundary(pos),
+    })
+}
+
+/// Move the caret to where `step` says the next boundary in `dir` lies. See
+/// [`move_by_grapheme`].
+///
+/// For a view whose boundaries are not the projection's own — one that hides
+/// some of the text, say, and must not stop inside what it hides.
+pub fn move_by(
+    dir: Direction,
+    extend: bool,
+    step: impl Fn(&Projection, usize) -> Option<usize> + Send + Sync + 'static,
+) -> Command {
     command(move |state| {
-        move_selection(state, extend, |projection, pos| match dir {
-            Direction::Forward => projection.next_word_boundary(pos),
-            Direction::Backward => projection.prev_word_boundary(pos),
-        })
-        .or_else(|| collapse(state, dir, extend))
+        move_selection(state, extend, &step).or_else(|| collapse(state, dir, extend))
     })
 }
 
@@ -66,12 +78,18 @@ pub fn delete_by_grapheme(dir: Direction) -> Command {
 
 /// Delete one word in `dir`. See [`delete_by_grapheme`].
 pub fn delete_by_word(dir: Direction) -> Command {
-    command(move |state| {
-        delete_to(state, |projection, pos| match dir {
-            Direction::Forward => projection.next_word_boundary(pos),
-            Direction::Backward => projection.prev_word_boundary(pos),
-        })
+    delete_by(move |projection, pos| match dir {
+        Direction::Forward => projection.next_word_boundary(pos),
+        Direction::Backward => projection.prev_word_boundary(pos),
     })
+}
+
+/// Delete from the caret to where `step` says the next boundary lies, or the
+/// selection when there is one. See [`delete_by_grapheme`] and [`move_by`].
+pub fn delete_by(
+    step: impl Fn(&Projection, usize) -> Option<usize> + Send + Sync + 'static,
+) -> Command {
+    command(move |state| delete_to(state, &step))
 }
 
 fn delete_to(

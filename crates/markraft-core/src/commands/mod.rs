@@ -75,7 +75,10 @@ pub use input_rules::{
 };
 pub use list::{lift_list_item, sink_list_item, split_list_item, wrap_in_list};
 pub use marks::{mark_applies, range_has_mark, remove_mark, set_mark, toggle_mark};
-pub use motion::{Direction, delete_by_grapheme, delete_by_word, move_by_grapheme, move_by_word};
+pub use motion::{
+    Direction, delete_by, delete_by_grapheme, delete_by_word, move_by, move_by_grapheme,
+    move_by_word,
+};
 pub use table::{
     CellPos, ColumnAlignment, TableTypes, add_column_after, add_column_before, add_row_after,
     add_row_before, cell_at, column_alignments, delete_column, delete_empty_table, delete_row,

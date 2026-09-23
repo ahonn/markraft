@@ -12,12 +12,12 @@ use crate::types::DocTypes;
 use markraft_core::commands::structure::markup_of;
 use markraft_core::commands::{
     Command, Direction, add_row_after, chain, changes_spec, command, create_paragraph_near,
-    delete_by_grapheme, delete_by_word, delete_empty_table, delete_selection, exit_code,
+    delete_by, delete_by_grapheme, delete_empty_table, delete_selection, exit_code,
     goto_cell_below, goto_next_cell, goto_prev_cell, guard_cell_boundary, guard_cell_range,
-    guard_cell_split, join_backward, join_forward, lift, lift_empty_block, lift_list_item,
-    move_by_grapheme, move_by_word, new_line_in_code, select_node_backward, select_node_forward,
-    set_block_type, sink_list_item, split_block_keep_marks, split_list_item, undo_input_rule,
-    wrap_in, wrap_in_list,
+    guard_cell_split, join_backward, join_forward, lift, lift_empty_block, lift_list_item, move_by,
+    move_by_grapheme, new_line_in_code, select_node_backward, select_node_forward, set_block_type,
+    sink_list_item, split_block_keep_marks, split_list_item, undo_input_rule, wrap_in,
+    wrap_in_list,
 };
 use markraft_core::projection::projection_of;
 use markraft_core::{
@@ -395,11 +395,16 @@ pub(crate) fn delete_forward(types: &DocTypes) -> Command {
     ])
 }
 
+/// ⌥⌫ and ⌥⌦: delete to the word boundary a reader sees. See
+/// [`crate::conceal::word_boundary`].
 pub(crate) fn delete_word(types: &DocTypes, dir: Direction) -> Command {
+    let syntax = types.syntax;
     some([
         types.table_types().map(guard_cell_range),
         Some(delete_selection()),
-        Some(delete_by_word(dir)),
+        Some(delete_by(move |projection, pos| {
+            crate::conceal::word_boundary(syntax, projection, pos, dir)
+        })),
         types.table_types().map(guard_cell_boundary),
         Some(match dir {
             Direction::Backward => join_backward(),
@@ -412,8 +417,13 @@ pub(crate) fn move_grapheme(dir: Direction, extend: bool) -> Command {
     move_by_grapheme(dir, extend)
 }
 
-pub(crate) fn move_word(dir: Direction, extend: bool) -> Command {
-    move_by_word(dir, extend)
+/// ⌥← and ⌥→, shifted or not: move to the word boundary a reader sees. See
+/// [`crate::conceal::word_boundary`].
+pub(crate) fn move_word(types: &DocTypes, dir: Direction, extend: bool) -> Command {
+    let syntax = types.syntax;
+    move_by(dir, extend, move |projection, pos| {
+        crate::conceal::word_boundary(syntax, projection, pos, dir)
+    })
 }
 
 /// ⌘↑ / ⌘↓ and their shifted forms.
@@ -1355,5 +1365,63 @@ mod tests {
                 "{source:?}"
             );
         }
+    }
+
+    /// Word motion steps over what a reader sees: never between the two `*`
+    /// of a hidden `**`, and over a hidden span's delimiters to the word they
+    /// open, so what is typed there lands outside the span.
+    #[test]
+    fn word_motion_steps_over_hidden_delimiters() {
+        let state = state_of("hello **world** end");
+        let types = types_of(&state);
+        let end = caret_in(&state, "hello **world** end") + "hello **world** end".len();
+        let back = move_word(&types, Direction::Backward, false);
+        let once = applied(&at(&state, end), &back).expect("⌥← applies");
+        let twice = applied(&once, &back).expect("⌥← applies again");
+        let typed = markraft_core::commands::insert_text("X");
+        assert_eq!(
+            after(&once, &typed).as_deref(),
+            Some("hello **world** Xend")
+        );
+        assert_eq!(
+            after(&twice, &typed).as_deref(),
+            Some("hello X**world** end")
+        );
+
+        let start = caret_in(&state, "hello **world** end") + "hello".len();
+        let forward = move_word(&types, Direction::Forward, false);
+        let moved = applied(&at(&state, start), &forward).expect("⌥→ applies");
+        assert_eq!(
+            after(&moved, &typed).as_deref(),
+            Some("hello **world**X end")
+        );
+    }
+
+    /// ⌥⌫ deletes a hidden span whole rather than one of its delimiter
+    /// characters at a time.
+    #[test]
+    fn word_deletion_takes_a_hidden_span_whole() {
+        let state = state_of("hello **world** end");
+        let types = types_of(&state);
+        let end = caret_in(&state, "hello **world** end") + "hello **world** end".len();
+        let delete = delete_word(&types, Direction::Backward);
+        let once = applied(&at(&state, end), &delete).expect("⌥⌫ applies");
+        let twice = applied(&once, &delete).expect("⌥⌫ applies again");
+        let typed = markraft_core::commands::insert_text("X");
+        assert_eq!(after(&once, &typed).as_deref(), Some("hello **world** X"));
+        assert_eq!(after(&twice, &typed).as_deref(), Some("hello X"));
+    }
+
+    /// Inside a revealed span its delimiters are text a reader sees, but a run
+    /// of them is still one stop, not one per character.
+    #[test]
+    fn word_motion_never_stops_inside_a_revealed_delimiter_run() {
+        let state = state_of("a **bc** d");
+        let types = types_of(&state);
+        let inside = caret_in(&state, "a **bc** d") + "a **bc".len();
+        let forward = move_word(&types, Direction::Forward, false);
+        let moved = applied(&at(&state, inside), &forward).expect("⌥→ applies");
+        let typed = markraft_core::commands::insert_text("X");
+        assert_eq!(after(&moved, &typed).as_deref(), Some("a **bc**X d"));
     }
 }

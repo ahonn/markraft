@@ -18,8 +18,9 @@
 
 use std::ops::Range;
 
+use markraft_core::commands::Direction;
 use markraft_core::kind::{SYNTAX_DISPLAY_ATTR, SYNTAX_SPAN_ATTR};
-use markraft_core::projection::{Line, RunContent};
+use markraft_core::projection::{Line, Projection, RunContent};
 use markraft_core::{Fragment, MarkSet, MarkTypeId, Node, Schema, Slice};
 
 /// What a run marked with the conceal role says about itself.
@@ -178,6 +179,109 @@ pub fn concealed_steps(syntax: Option<MarkTypeId>, line: &Line, caret: usize) ->
         }
     }
     out
+}
+
+/// Where a word motion from `caret` in `dir` stops, over what a reader sees.
+///
+/// The projection's own word boundaries segment the source, where each `*` of
+/// a `**` is a word of its own, so a caret stepping by them lands between two
+/// delimiter characters — and whatever is typed or deleted there breaks the
+/// span. Here no stop falls strictly inside a run that spells markup, a stop
+/// next to a run the caret leaves concealed moves past it, and a step that
+/// covers nothing a reader sees does not count: from the end of
+/// `a **b** c`, word motion back stops before `c`, then before `**b`.
+pub(crate) fn word_boundary(
+    syntax: Option<MarkTypeId>,
+    projection: &Projection,
+    caret: usize,
+    dir: Direction,
+) -> Option<usize> {
+    let backward = dir == Direction::Backward;
+    let step = |pos| {
+        if backward {
+            projection.prev_word_boundary(pos)
+        } else {
+            projection.next_word_boundary(pos)
+        }
+    };
+    let Some(index) = projection.line_at(caret) else {
+        return step(caret);
+    };
+    let line = &projection.lines()[index];
+    let hidden = concealed_steps(syntax, line, caret);
+    let spelled = spelling(syntax, line);
+    let mut at = caret;
+    loop {
+        let mut target = step(at)?;
+        if projection.line_at(target) != Some(index) {
+            return Some(target);
+        }
+        if let Some(run) = spelled
+            .iter()
+            .find(|run| run.start < target && target < run.end)
+        {
+            target = if backward { run.start } else { run.end };
+        }
+        while let Some(run) = hidden.iter().find(|run| {
+            if backward {
+                run.end == target && run.start < target
+            } else {
+                run.start == target && run.end > target
+            }
+        }) {
+            target = if backward { run.start } else { run.end };
+        }
+        let edge = target == line.from() || target == line.to();
+        if target == at || edge || shows_something(projection, line, &hidden, at, target) {
+            return Some(target);
+        }
+        at = target;
+    }
+}
+
+/// The runs of `line` that spell markup, concealed or not, with neighbours
+/// merged, as document ranges.
+fn spelling(syntax: Option<MarkTypeId>, line: &Line) -> Vec<Range<usize>> {
+    let mut out: Vec<Range<usize>> = Vec::new();
+    for run in line.runs() {
+        let RunContent::Text(_) = run.content else {
+            continue;
+        };
+        if concealed(syntax, &run.marks).is_none() {
+            continue;
+        }
+        let range = line.abs(run.start)..line.abs(run.end);
+        match out.last_mut() {
+            Some(last) if last.end == range.start => last.end = range.end,
+            _ => out.push(range),
+        }
+    }
+    out
+}
+
+/// Whether a reader sees anything but whitespace between `a` and `b` on
+/// `line`, given the runs a caret there leaves `hidden`.
+fn shows_something(
+    projection: &Projection,
+    line: &Line,
+    hidden: &[Range<usize>],
+    a: usize,
+    b: usize,
+) -> bool {
+    let (from, to) = (a.min(b), a.max(b));
+    line.runs().iter().any(|run| {
+        let start = line.abs(run.start).max(from);
+        let end = line.abs(run.end).min(to);
+        if start >= end || hidden.iter().any(|h| h.start <= start && end <= h.end) {
+            return false;
+        }
+        match run.content {
+            RunContent::Atom(_) => true,
+            RunContent::Text(_) => projection
+                .text_between(start, end)
+                .is_none_or(|text| !text.chars().all(char::is_whitespace)),
+        }
+    })
 }
 
 /// One stretch of what a line shows, and the stretch of the line's text it

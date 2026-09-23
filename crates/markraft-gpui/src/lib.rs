@@ -1983,19 +1983,23 @@ impl EditorView {
             Direction::Forward,
             true
         ));
-        run!(WordLeft, |_: &DocTypes| keymap::move_word(
+        run!(WordLeft, |types: &DocTypes| keymap::move_word(
+            types,
             Direction::Backward,
             false
         ));
-        run!(WordRight, |_: &DocTypes| keymap::move_word(
+        run!(WordRight, |types: &DocTypes| keymap::move_word(
+            types,
             Direction::Forward,
             false
         ));
-        run!(SelectWordLeft, |_: &DocTypes| keymap::move_word(
+        run!(SelectWordLeft, |types: &DocTypes| keymap::move_word(
+            types,
             Direction::Backward,
             true
         ));
-        run!(SelectWordRight, |_: &DocTypes| keymap::move_word(
+        run!(SelectWordRight, |types: &DocTypes| keymap::move_word(
+            types,
             Direction::Forward,
             true
         ));
