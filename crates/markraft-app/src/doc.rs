@@ -92,8 +92,9 @@ pub fn split_wrap() -> SplitWrap {
     Arc::new(markraft_commonmark::keeping_styles)
 }
 
-/// What Enter makes of a line that spells a whole block's opening: a fence, a
-/// table's header row.
+/// What Enter makes of a line that spells a whole block's opening — a fence, a
+/// table's header row, a thematic break — and where it goes on after a
+/// footnote definition.
 pub fn enter_rule() -> Command {
     markraft_commonmark::block_from_line()
 }

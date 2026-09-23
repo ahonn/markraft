@@ -7,10 +7,18 @@
 //! be becoming ```` ```rust ```` — so [`block_from_line`] makes them when Enter
 //! ends the line, the way Typora does. The input rule that opens a fence on a
 //! space stays as it is.
+//!
+//! A thematic break of stars or underscores is the same: `***` may still be
+//! opening `***bold italic***`, so only Enter makes it a divider. Three dashes
+//! have an input rule of their own.
+//!
+//! A footnote definition, too, ends on Enter the way Typora ends it: at the
+//! end of its last paragraph, the next paragraph goes after the definition
+//! rather than into it.
 
 use markraft_core::commands::{Command, command};
 use markraft_core::{
-    Change, EditorState, Fragment, MarkSet, Node, Selection, Slice, TransactionSpec, attrs,
+    Attrs, Change, EditorState, Fragment, MarkSet, Selection, Slice, TransactionSpec, attrs,
 };
 
 use crate::from_markdown;
@@ -20,13 +28,66 @@ use crate::textblock::{Item, Items};
 /// Enter at the end of a paragraph whose whole text opens a block: a fence
 /// becomes an empty code block in that language, and a row of `|`-separated
 /// cells a table with that header and one empty row, the caret in it. Does
-/// not apply anywhere else, so Enter carries on as usual.
+/// not apply anywhere else, so Enter carries on as usual. A thematic break
+/// becomes a divider with an empty paragraph after it to carry on typing in.
 pub fn block_from_line() -> Command {
     command(|state| {
+        if let Some(spec) = out_of_footnote(state) {
+            return Some(spec);
+        }
         let line = Line::at_caret(state)?;
-        let block = fence(state, &line.text).or_else(|| table(state, &line.text))?;
+        let block = fence(state, &line.text)
+            .or_else(|| table(state, &line.text))
+            .or_else(|| divider(state, &line.text))?;
         line.replace_with(state, block)
     })
+}
+
+/// An empty paragraph after the footnote definition whose last paragraph the
+/// caret ends, the caret in it. Not for an empty paragraph, which is a
+/// definition's own, nor anywhere but the end of the last one.
+fn out_of_footnote(state: &EditorState) -> Option<TransactionSpec> {
+    let doc = state.doc();
+    let schema = state.schema();
+    if !state.selection().is_cursor() {
+        return None;
+    }
+    let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+    let depth = resolved.depth().checked_sub(1)?;
+    let paragraph = resolved.parent();
+    let definition = resolved.node(depth);
+    if paragraph.type_id() != schema.node_id(md::PARAGRAPH)?
+        || definition.type_id() != schema.node_id(md::FOOTNOTE_DEFINITION)?
+        || paragraph.content_size() == 0
+        || resolved.parent_offset() != paragraph.content_size()
+        || resolved.index(depth) + 1 != definition.child_count()
+    {
+        return None;
+    }
+    let at = resolved.after(depth);
+    let empty = schema
+        .create(
+            schema.node_id(md::PARAGRAPH)?,
+            Attrs::empty(),
+            MarkSet::empty(),
+            Fragment::empty(),
+        )
+        .ok()?;
+    let spec = TransactionSpec::new().changes(vec![Change::replace(
+        at,
+        at,
+        Slice::from_fragment(Fragment::from_node(empty)),
+    )]);
+    let applied = state.update([spec]).ok()?;
+    let selection = Selection::cursor(at + 1);
+    selection.check(applied.new_doc(), schema).ok()?;
+    Some(
+        TransactionSpec::new()
+            .change_set(applied.changes().clone())
+            .selection(selection)
+            .user_event("input")
+            .scroll_into_view(),
+    )
 }
 
 /// The paragraph the caret ends, and its text.
@@ -65,17 +126,17 @@ impl Line {
         })
     }
 
-    /// Put `block` where the paragraph is, with the caret in its first
+    /// Put `blocks` where the paragraph is, with the caret in their first
     /// textblock after `skip` others.
     fn replace_with(
         &self,
         state: &EditorState,
-        (block, skip): (Node, usize),
+        (blocks, skip): (Fragment, usize),
     ) -> Option<TransactionSpec> {
         let spec = TransactionSpec::new().changes(vec![Change::replace(
             self.before,
             self.after,
-            Slice::from_fragment(Fragment::from_node(block)),
+            Slice::from_fragment(blocks),
         )]);
         let applied = state.update([spec]).ok()?;
         let doc = applied.new_doc();
@@ -110,7 +171,7 @@ impl Line {
 /// An empty code block, when `text` is a fence: three or more backticks or
 /// tildes and an info string whose first word is the language. A backtick
 /// fence's info string holds no backtick, or the line is inline code.
-fn fence(state: &EditorState, text: &str) -> Option<(Node, usize)> {
+fn fence(state: &EditorState, text: &str) -> Option<(Fragment, usize)> {
     let text = text.trim_end_matches([' ', '\t']);
     let fence_char = text.chars().next().filter(|c| matches!(c, '`' | '~'))?;
     let length = text.chars().take_while(|c| *c == fence_char).count();
@@ -132,12 +193,12 @@ fn fence(state: &EditorState, text: &str) -> Option<(Node, usize)> {
             Fragment::empty(),
         )
         .ok()?;
-    Some((code, 0))
+    Some((Fragment::from_node(code), 0))
 }
 
 /// A table with `text` as its header row and one empty row, when `text` is a
 /// row of cells between pipes: it starts and ends with an unescaped `|`.
-fn table(state: &EditorState, text: &str) -> Option<(Node, usize)> {
+fn table(state: &EditorState, text: &str) -> Option<(Fragment, usize)> {
     let cells = header_cells(text)?;
     let row = |cell: &str| format!("|{}", format!(" {cell} |").repeat(cells));
     let source = format!("{text}\n{}\n{}\n", row("---"), row(""));
@@ -148,7 +209,44 @@ fn table(state: &EditorState, text: &str) -> Option<(Node, usize)> {
         return None;
     }
     // The caret goes to the first cell of the empty row, after the header's.
-    Some((table.clone(), cells))
+    Some((Fragment::from_node(table.clone()), cells))
+}
+
+/// A divider and an empty paragraph after it, when `text` is a thematic break:
+/// three or more of one of `*`, `_` or `-`, with nothing else but spaces.
+fn divider(state: &EditorState, text: &str) -> Option<(Fragment, usize)> {
+    if !is_thematic_break(text) {
+        return None;
+    }
+    let schema = state.schema();
+    let create = |name| {
+        schema
+            .create(
+                schema.node_id(name)?,
+                Attrs::empty(),
+                MarkSet::empty(),
+                Fragment::empty(),
+            )
+            .ok()
+    };
+    let divider = create(md::HORIZONTAL_RULE)?;
+    let paragraph = create(md::PARAGRAPH)?;
+    Some((Fragment::from_nodes([divider, paragraph]), 0))
+}
+
+fn is_thematic_break(text: &str) -> bool {
+    let mut marks = text.chars().filter(|c| !matches!(c, ' ' | '\t'));
+    let Some(first) = marks.next().filter(|c| matches!(c, '*' | '_' | '-')) else {
+        return false;
+    };
+    let mut count = 1;
+    for mark in marks {
+        if mark != first {
+            return false;
+        }
+        count += 1;
+    }
+    count >= 3
 }
 
 /// How many cells a header row `|a|b|` has, or `None` when `text` is not one.
@@ -175,7 +273,17 @@ fn header_cells(text: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::header_cells;
+    use super::{header_cells, is_thematic_break};
+
+    #[test]
+    fn a_thematic_break_is_three_of_one_mark() {
+        for text in ["***", "___", "---", "* * *", "_____", "- - -"] {
+            assert!(is_thematic_break(text), "{text:?}");
+        }
+        for text in ["**", "*-*", "**a", "", "==="] {
+            assert!(!is_thematic_break(text), "{text:?}");
+        }
+    }
 
     #[test]
     fn a_header_row_is_cells_between_pipes() {

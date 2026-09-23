@@ -604,3 +604,51 @@ fn a_footnote_marker_makes_a_definition_its_references_then_resolve_to() {
         "see[^n]\n\n[^n]: the note"
     );
 }
+
+#[test]
+fn enter_at_the_end_of_a_footnote_goes_on_after_the_definition() {
+    let schema = commonmark_schema();
+    let doc = markraft_commonmark::from_markdown(&schema, "see[^n]\n\n[^n]: the note\n")
+        .expect("a document");
+    let end = doc.content_size() - 2;
+    let state = start_from(doc, &schema, end);
+    let state = run_command(&state, &markraft_commonmark::block_from_line())
+        .expect("Enter leaves the footnote")
+        .expect("the transaction resolves")
+        .state()
+        .clone();
+    let state = type_all(&state, "## after");
+    assert_eq!(
+        markraft_commonmark::to_markdown(&schema, state.doc()),
+        "see[^n]\n\n[^n]: the note\n\n## after"
+    );
+    // Anywhere but the end of the definition's last paragraph, Enter is the
+    // ordinary split.
+    let doc = markraft_commonmark::from_markdown(&schema, "see[^n]\n\n[^n]: the note\n")
+        .expect("a document");
+    let middle = doc.content_size() - 4;
+    let state = start_from(doc, &schema, middle);
+    assert!(run_command(&state, &markraft_commonmark::block_from_line()).is_none());
+}
+
+#[test]
+fn enter_after_a_thematic_break_of_stars_or_underscores_makes_a_divider() {
+    let schema = commonmark_schema();
+    for line in ["***", "___", "*****", "_ _ _"] {
+        let state = entered(line).unwrap_or_else(|| panic!("{line:?} makes a divider"));
+        assert_eq!(
+            schema.describe(state.doc()),
+            "doc(horizontal_rule, paragraph())",
+            "{line:?}"
+        );
+        let typed = type_all(&state, "x");
+        assert_eq!(
+            markraft_commonmark::to_markdown(&schema, typed.doc()),
+            "---\n\nx",
+            "{line:?}: the caret is in the paragraph after it"
+        );
+    }
+    for line in ["**", "***a", "*_*"] {
+        assert!(entered(line).is_none(), "{line:?}");
+    }
+}
