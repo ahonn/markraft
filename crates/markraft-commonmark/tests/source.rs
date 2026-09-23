@@ -1,4 +1,4 @@
-//! Source-preserving persistence and protected-syntax regression cases.
+//! Source-preserving persistence regression cases.
 
 use markraft_commonmark::{SourceDocument, SourceError, commonmark_schema};
 
@@ -87,23 +87,55 @@ fn untouched_extension_tokens_survive_adjacent_text_edits() {
     }
 }
 
+/// Syntax the codec gives no meaning — math, block anchors, `%%` comments, a
+/// `[[…]]` it does not read as a wiki link, a callout marker it would spell
+/// differently — is ordinary text of its block, so an edit inside or beside it
+/// patches exactly the bytes it changed and reparses to the edited document.
 #[test]
-fn modifications_inside_unsupported_extension_syntax_are_refused() {
+fn edits_inside_syntax_the_codec_gives_no_meaning_save_exactly() {
+    let schema = commonmark_schema();
     for original in [
-        // A `[[…]]` this codec does not read as a wiki link is still source it
-        // cannot rebuild; the ones it does read are nodes, tested below.
-        "Read [[old|]] here\n",
-        // A callout whose source is not what the codec would write cannot be
-        // rebuilt either, so its marker line stays untouchable.
-        ">[!old]\n>contents\n",
+        "energy $old^2$ here\n",
+        "inline $a + old$ and more\n",
+        "$$\nx = old\n$$\n",
+        "Intro\n\nmath $old$ ^anchor\n\nOutro\n",
+        "text old ^anchor\n",
         "text ^old\n",
-        "math $old$\n",
+        "a %%old comment%% b\n",
+        "tail %%open old\n",
+        "Read [[old|]] here\n",
+        "Read [[a|]] and old here\n",
+        "unterminated [[old here\n",
+        "> [!note]\n> $old$ and ^id\n",
+        ">[!old]\n>contents\n",
     ] {
+        let expected = original.replace("old", "new");
+        let saved =
+            edit(original, &expected).unwrap_or_else(|error| panic!("{original:?}: {error}"));
+        assert_eq!(saved, expected, "{original:?}");
         assert_eq!(
-            edit(original, &original.replace("old", "new")),
-            Err(SourceError::ProtectedSpan),
+            SourceDocument::parse(&schema, &saved).unwrap().document(),
+            SourceDocument::parse(&schema, &expected)
+                .unwrap()
+                .document(),
             "{original:?}"
         );
+    }
+}
+
+/// Typing a character right against the syntax, where the old guard drew its
+/// boundary, is no different from typing anywhere else.
+#[test]
+fn typing_at_the_edge_of_math_anchors_and_comments_saves() {
+    for (original, expected) in [
+        ("x $a$ y\n", "x $ab$ y\n"),
+        ("x $a$ y\n", "x $a$! y\n"),
+        ("para ^id\n", "para ^id2\n"),
+        ("para ^id\n", "para. ^id\n"),
+        ("a %%c%% b\n", "a %%cc%% b\n"),
+        ("a [[x|]] b\n", "a [[xy|]] b\n"),
+    ] {
+        assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
     }
 }
 
@@ -115,21 +147,6 @@ fn prices_in_prose_are_not_read_as_math() {
         ("$5, $10 and $20 each\n", "$5, $10 or $20 each\n"),
     ] {
         assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
-    }
-}
-
-#[test]
-fn modifications_inside_dollar_math_are_still_refused() {
-    for original in [
-        "energy $old^2$ here\n",
-        "$$\nx = old\n$$\n",
-        "inline $a + old$ and more\n",
-    ] {
-        assert_eq!(
-            edit(original, &original.replace("old", "new")),
-            Err(SourceError::ProtectedSpan),
-            "{original:?}"
-        );
     }
 }
 
@@ -181,7 +198,7 @@ fn editing_a_callouts_body_leaves_its_marker_line_and_prefixes_alone() {
 }
 
 #[test]
-fn a_callout_can_be_rewritten_whole_but_not_patched_through_its_marker() {
+fn a_callout_can_be_rewritten_whole_or_patched_through_its_marker() {
     // The marker's bytes are in the quote's attributes, so writing the block
     // again writes the marker again: retyping it, dropping it and deleting the
     // whole callout all go through.
@@ -202,11 +219,11 @@ fn a_callout_can_be_rewritten_whole_but_not_patched_through_its_marker() {
         SourceDocument::parse(&schema, expected).unwrap().document()
     );
     assert!(!result.contains("[!note]"));
-    // A callout the codec would not spell the same way cannot be rebuilt, so
-    // an edit reaching its marker is refused rather than respelling the block.
+    // A callout the codec would spell differently is not rewritten whole, but
+    // retyping its marker patches just the bytes that changed.
     assert_eq!(
-        edit(">[!note]\n>Body\n", ">[!tip]\n>Body\n"),
-        Err(SourceError::ProtectedSpan)
+        edit(">[!note]\n>Body\n", ">[!tip]\n>Body\n").unwrap(),
+        ">[!tip]\n>Body\n"
     );
 }
 
@@ -636,31 +653,18 @@ fn typing_consecutive_and_trailing_spaces_survives_each_guard_check() {
     }
 }
 
-/// What a view shades. The same scan the guard runs, reported per line so the
-/// boundary of a refused edit can be drawn before one is attempted.
+/// Nothing inline is guarded any more. What is still refused is a change the
+/// codec can neither patch in place nor rewrite whole: here the setext
+/// underline is block-level spelling the writer would respell as `#`, so the
+/// block is not rewritten and no local patch turns it into a level-three
+/// heading.
 #[test]
-fn protected_spans_mark_the_source_a_line_keeps_exactly() {
-    let spans = |line: &str| {
-        markraft_commonmark::protected_spans(line)
-            .into_iter()
-            .map(|span| line[span].to_owned())
-            .collect::<Vec<_>>()
-    };
-    let none: Vec<String> = Vec::new();
-    // Inline and display math, a comment, and a trailing block anchor.
-    assert_eq!(spans("costs $x^2$ here"), ["$x^2$"]);
-    assert_eq!(spans("a $$E = mc^2$$ b"), ["$$E = mc^2$$"]);
-    assert_eq!(spans("a %%hidden%% b"), ["%%hidden%%"]);
-    assert_eq!(spans("A paragraph. ^my-anchor"), ["^my-anchor"]);
-    // Prose with money in it is not math, which is why the blanket scan went.
-    assert_eq!(spans("costs $5 and $10 today"), none);
-    // A `[[…]]` this codec cannot rebuild stays protected. A plain one is an atom
-    // by the time a view asks, so its source never reaches the line text.
-    assert_eq!(spans("see [[a|]] here"), ["[[a|]]"]);
-    // Several on one line come back in order.
-    assert_eq!(spans("$a$ then %%b%% then $c$"), ["$a$", "%%b%%", "$c$"]);
-    // An unterminated comment runs to the end, which is what the guard covers.
-    assert_eq!(spans("tail %%open"), ["%%open"]);
-    // Ordinary prose is not shaded at all.
-    assert_eq!(spans("A plain sentence."), none);
+fn a_block_the_writer_would_respell_is_not_rewritten_whole() {
+    assert_eq!(
+        edit(
+            "Title\n=====\n\nmath $x$ ^id\n",
+            "### Title\n\nmath $x$ ^id\n"
+        ),
+        Err(SourceError::UnsupportedEdit)
+    );
 }

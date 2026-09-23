@@ -370,10 +370,6 @@ pub enum EditRejection {
     ReadOnly(String),
     /// This change cannot be kept where it lands, though others still can.
     Protected(String),
-    /// The same, where the view already draws the boundary that refused it. The
-    /// host says nothing further: the reason is on screen where the edit landed,
-    /// and a sentence in the corner would only say it a second time.
-    Marked(String),
     /// The transaction itself could not be built.
     Invalid(String),
     /// The document kind has no way to write this edit here — a style its
@@ -386,7 +382,6 @@ impl EditRejection {
     pub fn message(&self) -> &str {
         let (Self::ReadOnly(message)
         | Self::Protected(message)
-        | Self::Marked(message)
         | Self::Invalid(message)
         | Self::Refused(message)) = self;
         message
@@ -405,12 +400,6 @@ type DocumentGuard = Box<dyn Fn(&Node) -> Result<(), EditRejection>>;
 /// say, and it is asked once per link per layout, so it answers from what it already
 /// knows rather than by looking at the disk.
 pub type WikiResolver = Box<dyn Fn(&str) -> bool>;
-
-/// The parts of a line of text the host keeps exactly as written, as byte ranges
-/// within it. The view shades them so that the boundary of an edit it will refuse
-/// is visible before the edit is attempted. Which syntax those are is the host's
-/// question, not the view's — this crate knows no Markdown.
-pub type ProtectedSpans = Box<dyn Fn(&str) -> Vec<std::ops::Range<usize>>>;
 
 /// Build all transactions before publishing any state. Unlike a transaction
 /// filter, this boundary also covers no-filter edits, undo and appender output.
@@ -639,18 +628,6 @@ impl EditorView {
         cx.notify();
     }
 
-    /// Say which parts of a line are kept exactly as written, so the view can shade
-    /// them. An editor whose host says nothing shades nothing, which is what an
-    /// editor with no protected syntax should do.
-    pub fn set_protected_spans(
-        &mut self,
-        spans: impl Fn(&str) -> Vec<std::ops::Range<usize>> + 'static,
-        cx: &mut Context<Self>,
-    ) {
-        self.shaping.set_protected(Box::new(spans));
-        cx.notify();
-    }
-
     /// Validate a complete candidate before changing state, including undo and IME.
     pub fn with_document_guard(
         mut self,
@@ -758,7 +735,6 @@ impl EditorView {
             single_line: self.single_line,
             images: self.shaping.images(),
             wiki: self.shaping.wiki(),
-            protected: self.shaping.protected(),
             spelling: self.spelling.as_deref(),
             selection: selection.from(doc)..selection.to(doc),
             composition: markraft_core::composition_range(&self.state)

@@ -152,7 +152,7 @@ pub use schema::{commonmark_schema, commonmark_schema_spec};
 pub use serialize::{
     MarkRule, MarkRules, MarkTarget, MarkdownSerializer, NodeRule, NodeRules, SerializerState,
 };
-pub use source::{SourceDocument, SourceError, protected_spans};
+pub use source::{SourceDocument, SourceError};
 pub use text::{slice_to_plain_text, to_plain_text};
 pub use wiki::{WikiLink, read_wiki_link, whole_wiki_link};
 

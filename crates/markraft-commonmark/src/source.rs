@@ -1,13 +1,17 @@
 //! Conservative, source-preserving writes for documents shared with other editors.
 //!
-//! The canonical serializer remains useful for newly authored fragments. This
-//! codec retains the original source and only accepts a patch when reparsing it
-//! produces the requested document. Unmapped or opaque source is never silently
-//! replaced by canonical Markdown.
+//! A textblock's text is its inline source, so the serializer already writes
+//! every inline spelling as it was read. What it does not keep is the block
+//! level: container prefixes and indentation, setext underlines, table
+//! padding, blank-line runs, line endings, front matter. This codec retains the
+//! original source, maps each top-level block to the lines it came from, and
+//! patches only the blocks an edit changed — accepting a patch only when
+//! reparsing the result produces the requested document. Unmapped source is
+//! never silently replaced by canonical Markdown.
 
 use std::ops::Range;
 
-use comrak::{Arena, nodes::NodeValue, parse_document};
+use comrak::{Arena, parse_document};
 use markraft_core::{Fragment, Node, Schema};
 
 use crate::{ParseError, commonmark_options, from_markdown, to_markdown};
@@ -23,34 +27,21 @@ pub struct SourceDocument {
     newline: &'static str,
 }
 
-/// A source-preserving save could not safely represent an editor operation. The
-/// variants say which part of the source stood in the way, so a host can tell the
-/// user what to do about it rather than only that something failed.
+/// A source-preserving save could not safely represent an editor operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceError {
-    /// The change lands inside source kept verbatim: math, a block anchor, a
-    /// callout's marker line or a `[[…]]` spelling this codec does not read as
-    /// a wiki link.
-    ProtectedSpan,
-    /// Writing the change needs its whole block replaced, and that block carries
-    /// source the semantic document does not, such as a reference definition.
-    ProtectedBlock,
-    /// Rewritten source did not reparse into the edited document. Retain the editor
-    /// buffer and offer a separate export instead of overwriting.
+    /// Rewritten source did not reparse into the edited document, or the block
+    /// the change needs rewritten whole is not spelled the way the codec would
+    /// write it. Retain the editor buffer and offer a separate export instead
+    /// of overwriting.
     UnsupportedEdit,
 }
 
 impl std::fmt::Display for SourceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::ProtectedSpan => {
-                "This edit falls inside Markdown that is kept exactly as written, such as math, a block anchor or a callout's marker line."
-            }
-            Self::ProtectedBlock => {
-                "This edit would have to replace a block that also carries source the document does not, such as a link reference definition."
-            }
             Self::UnsupportedEdit => {
-                "This edit cannot be saved without changing protected Markdown source. Your edits are retained; save a separate copy or use another editor."
+                "This edit cannot be saved without rewriting Markdown source the editor does not represent. Your edits are retained; save a separate copy or use another editor."
             }
         })
     }
@@ -253,28 +244,19 @@ impl SourceDocument {
         let inserted = self.with_newlines(inserted);
         let prefix = self.with_newlines(prefix);
         let suffix = self.with_newlines(suffix);
-        let protected = protected_ranges(raw);
-        // Whether a location the edit wanted was refused for overlapping protected
-        // source, which is what separates "not here" from "not like this".
-        let mut blocked = false;
-        // Source and canonical Markdown can differ around the edit (reference
-        // links, Setext headings, escapes). Prefer matching local context, then
-        // prove the chosen location by parsing the entire resulting document.
-        for spelling in emphasis_spellings(&removed) {
-            for offset in candidate_offsets(raw, &spelling, &prefix, &suffix) {
-                let changed = offset..offset + spelling.len();
-                if protected.overlaps(&changed) {
-                    blocked = true;
-                    continue;
-                }
-                let mut candidate = source.clone();
-                candidate.replace_range(
-                    range.start + changed.start..range.start + changed.end,
-                    &inserted,
-                );
-                if let Ok(valid) = self.validate(schema, target, candidate) {
-                    return Ok(valid);
-                }
+        // Source and canonical Markdown can differ around the edit — a setext
+        // underline, a continuation line's prefix, a table's padding. Prefer
+        // matching local context, then prove the chosen location by parsing
+        // the entire resulting document.
+        for offset in candidate_offsets(raw, &removed, &prefix, &suffix) {
+            let changed = offset..offset + removed.len();
+            let mut candidate = source.clone();
+            candidate.replace_range(
+                range.start + changed.start..range.start + changed.end,
+                &inserted,
+            );
+            if let Ok(valid) = self.validate(schema, target, candidate) {
+                return Ok(valid);
             }
         }
         // A save can cover several keystrokes separated by an untouched link
@@ -290,16 +272,10 @@ impl SourceDocument {
                 let removed = self.with_newlines(removed);
                 let prefix = self.with_newlines(&format!("{}{left}", &before[..old.start]));
                 let suffix = self.with_newlines(&format!("{right}{}", &before[old.end..]));
-                let found = emphasis_spellings(&removed)
+                let found = candidate_offsets(raw, &removed, &prefix, &suffix)
                     .into_iter()
-                    .find_map(|spelling| {
-                        candidate_offsets(raw, &spelling, &prefix, &suffix)
-                            .into_iter()
-                            .find_map(|offset| {
-                                let changed = offset..offset + spelling.len();
-                                (!protected.overlaps(&changed)).then_some(changed)
-                            })
-                    });
+                    .next()
+                    .map(|offset| offset..offset + removed.len());
                 let Some(changed) = found else {
                     patches.clear();
                     break;
@@ -325,23 +301,18 @@ impl SourceDocument {
             }
         }
         // A structural operation may require replacing its containing block.
-        // Only canonical original source is eligible: any unknown spelling,
-        // definition or trivia makes this fallback unsafe rather than
-        // expendable. A callout's marker line is the exception — the document
-        // holds its bytes in the quote's attributes, so writing the block again
-        // writes the marker again.
-        if raw == self.with_newlines(before) && protected.all_rebuildable() {
+        // Only canonical original source is eligible: block-level trivia the
+        // writer would respell makes this fallback unsafe rather than
+        // expendable. Inline source needs no such care — a textblock's text is
+        // its source, so the writer puts every inline spelling back as it was —
+        // and a callout's marker line lives in its quote's attributes, which
+        // the writer spells again exactly.
+        if raw == self.with_newlines(before) {
             let mut candidate = source;
             candidate.replace_range(range, &self.with_newlines(after));
             return self.validate(schema, target, candidate);
         }
-        if blocked {
-            Err(SourceError::ProtectedSpan)
-        } else if !protected.is_empty() {
-            Err(SourceError::ProtectedBlock)
-        } else {
-            Err(SourceError::UnsupportedEdit)
-        }
+        Err(SourceError::UnsupportedEdit)
     }
 }
 
@@ -366,7 +337,8 @@ fn block_lines<'a>(
     let mut out = Vec::new();
     for child in document.children() {
         let text: String = child.children().filter_map(|leaf| leaf.text()).collect();
-        let definitions = Some(child.type_id()) == raw && is_definitions(&text);
+        let definitions =
+            Some(child.type_id()) == raw && crate::textblock::reads_as_definitions(&text);
         if definitions {
             while lines
                 .get(next - 1)
@@ -389,15 +361,14 @@ fn block_lines<'a>(
     out
 }
 
-/// Whether `text` reads as nothing but link reference definitions.
-fn is_definitions(text: &str) -> bool {
-    let arena = Arena::new();
-    !text.trim().is_empty()
-        && parse_document(&arena, &format!("{text}\n"), &commonmark_options())
-            .first_child()
-            .is_none()
-}
-
+/// `node` without the spaces and tabs ending each paragraph's and heading's
+/// text, which a reader drops.
+///
+/// While a caret stands at the end of a block they are real content — the
+/// next keystroke can make them internal — and the correction only settles
+/// them once it leaves, so a save in between writes them and reads back
+/// without them. Nothing styled can end in one: a style's span ends with its
+/// closing delimiter.
 fn without_trailing_spaces(schema: &Schema, node: &Node) -> Node {
     if node.is_text() || node.child_count() == 0 {
         return node.clone();
@@ -411,20 +382,6 @@ fn without_trailing_spaces(schema: &Schema, node: &Node) -> Node {
         .any(|name| schema.node_id(name) == Some(node.type_id()))
     {
         while let Some(last) = children.last() {
-            // Emphasis rules expel whitespace outside their delimiters. Link,
-            // code, HTML and custom marks may retain meaningful internal
-            // whitespace, so they must continue to pass strict validation.
-            if last.marks().iter().any(|mark| {
-                ![
-                    crate::schema::EM,
-                    crate::schema::STRONG,
-                    crate::schema::STRIKETHROUGH,
-                ]
-                .iter()
-                .any(|name| schema.mark_id(name) == Some(mark.ty))
-            }) {
-                break;
-            }
             let Some(text) = last.text() else { break };
             let trimmed = text.trim_end_matches([' ', '\t']);
             if trimmed.len() == text.len() {
@@ -492,14 +449,6 @@ fn difference<'a>(before: &'a str, after: &'a str) -> (&'a str, &'a str, &'a str
         &before[..prefix],
         &before[before.len() - suffix..],
     )
-}
-
-fn emphasis_spellings(source: &str) -> Vec<String> {
-    let mut spellings = vec![source.to_owned()];
-    if source.contains('*') {
-        spellings.push(source.replace('*', "_"));
-    }
-    spellings
 }
 
 fn candidate_offsets(raw: &str, removed: &str, prefix: &str, suffix: &str) -> Vec<usize> {
@@ -604,14 +553,6 @@ fn context_score(left: &str, prefix: &str, right: &str, suffix: &str) -> usize {
             .count()
 }
 
-fn overlaps(change: &Range<usize>, protected: &Range<usize>) -> bool {
-    if change.is_empty() {
-        protected.start < change.start && change.start < protected.end
-    } else {
-        change.start < protected.end && protected.start < change.end
-    }
-}
-
 fn body_start(source: &str) -> usize {
     let bom = if source.starts_with('\u{feff}') {
         '\u{feff}'.len_utf8()
@@ -654,265 +595,4 @@ fn line_ranges(source: &str) -> Vec<Range<usize>> {
         lines.push(start..source.len());
     }
     lines
-}
-
-/// Where an edit may not land, and which of those spans the document itself can
-/// put back.
-#[derive(Debug, Default)]
-struct Protected {
-    /// Every span an edit must not overlap.
-    spans: Vec<Range<usize>>,
-    /// The spans whose bytes the *document* carries — a callout's marker line,
-    /// which lives in its quote's attributes — so replacing the whole block
-    /// writes them again exactly as they were. Everything else here is source
-    /// the tree has no record of, and a rewrite would lose or respell it.
-    rebuildable: Vec<Range<usize>>,
-}
-
-impl Protected {
-    fn is_empty(&self) -> bool {
-        self.spans.is_empty()
-    }
-
-    fn overlaps(&self, change: &Range<usize>) -> bool {
-        self.spans.iter().any(|span| overlaps(change, span))
-    }
-
-    /// Whether a rewrite of the whole block puts every protected span back.
-    fn all_rebuildable(&self) -> bool {
-        self.spans
-            .iter()
-            .all(|span| self.rebuildable.contains(span))
-    }
-}
-
-/// The parts of one line of text this codec keeps exactly as written.
-///
-/// A view draws these so the boundary is visible *before* an edit is attempted:
-/// everything inside one is source the codec cannot rebuild, so a keystroke
-/// landing there is refused. Byte ranges within `line`, sorted, and the line is
-/// the document's own text rather than the file's, so a quote's `> ` and a code
-/// fence's backticks are already gone.
-///
-/// This is the inline half of [`protected_ranges`]. A callout's marker line is
-/// a whole line a view draws differently anyway, and display math opened on
-/// one line and closed on another is not found here.
-pub fn protected_spans(line: &str) -> Vec<Range<usize>> {
-    let code = code_ranges(line);
-    let mut spans = comment_ranges(line, &code);
-    spans.extend(math_ranges(line, &code));
-    spans.extend(unread_wiki_links(line, &code));
-    if let Some(at) = line.rfind(" ^")
-        && !code.iter().any(|span| span.contains(&(at + 1)))
-    {
-        spans.push(at + 1..line.len());
-    }
-    spans.sort_by_key(|span| span.start);
-    spans.dedup();
-    spans
-}
-
-/// The `%%…%%` comments in `source`. An unterminated one runs to the end, which
-/// is what the codec guards and so what a view shades.
-fn comment_ranges(source: &str, code: &[Range<usize>]) -> Vec<Range<usize>> {
-    let mut ranges = Vec::new();
-    let (open, close) = ("%%", "%%");
-    let mut offset = 0;
-    while let Some(start) = source[offset..].find(open).map(|at| offset + at) {
-        if let Some(span) = code.iter().find(|span| span.contains(&start)) {
-            offset = span.end;
-            continue;
-        }
-        if let Some(end) = source[start + open.len()..].find(close) {
-            let end = start + open.len() + end + close.len();
-            ranges.push(start..end);
-            offset = end;
-        } else {
-            ranges.push(start..source.len());
-            break;
-        }
-    }
-    ranges
-}
-
-fn protected_ranges(source: &str) -> Protected {
-    let mut rebuildable = Vec::new();
-    let code = code_ranges(source);
-    let mut protected = comment_ranges(source, &code);
-    protected.extend(math_ranges(source, &code));
-    protected.extend(unread_wiki_links(source, &code));
-    for range in line_ranges(source) {
-        let line = &source[range.clone()];
-        // A callout's marker line is in the tree as attributes rather than as
-        // text, so nothing an edit says can rebuild it; the body it opened is
-        // ordinary content. `[!…]` anywhere else is the plain text it has
-        // always been and is not guarded at all.
-        if crate::callout::quote_content(line)
-            .and_then(crate::callout::read_callout)
-            .is_some()
-            && !code
-                .iter()
-                .any(|span| span.start <= range.start && range.end <= span.end)
-        {
-            protected.push(range.clone());
-            rebuildable.push(range.clone());
-        }
-        if let Some(at) = line.rfind(" ^")
-            && !code
-                .iter()
-                .any(|span| span.contains(&(range.start + at + 1)))
-        {
-            protected.push(range.start + at + 1..range.end);
-        }
-    }
-    Protected {
-        spans: protected,
-        rebuildable,
-    }
-}
-
-/// The `[[…]]` spans this codec does *not* read as a
-/// [`WIKI_LINK`](crate::schema::WIKI_LINK) atom.
-///
-/// A recognised one is a node of its own now: its source is ordinary content
-/// that an edit may replace, insert or delete, and the guard would otherwise
-/// refuse the very operations the atom exists for. Everything else — an empty
-/// alias, a `[` inside the brackets, an unterminated `[[` — is still source
-/// this codec cannot rebuild, so it stays untouchable.
-fn unread_wiki_links(source: &str, code: &[Range<usize>]) -> Vec<Range<usize>> {
-    let mut protected = Vec::new();
-    let mut offset = 0;
-    while let Some(start) = source[offset..].find("[[").map(|at| offset + at) {
-        if let Some(span) = code.iter().find(|span| span.contains(&start)) {
-            offset = span.end;
-            continue;
-        }
-        // An embed's `!` is part of its source, and an escaped one is not an
-        // embed at all.
-        let from = if source[..start].ends_with('!') && !source[..start].ends_with("\\!") {
-            start - 1
-        } else {
-            start
-        };
-        if let Some((_, len)) = crate::wiki::read_wiki_link(&source[from..]) {
-            offset = from + len;
-            continue;
-        }
-        match source[start + 2..].find("]]") {
-            Some(end) => {
-                let end = start + 2 + end + 2;
-                protected.push(start..end);
-                offset = end;
-            }
-            None => {
-                protected.push(start..source.len());
-                break;
-            }
-        }
-    }
-    protected
-}
-
-/// The `$`-delimited math spans in `source`.
-///
-/// Math is unsupported and has to stay byte-preserved, but a `$` is also an
-/// ordinary character: `costs $5 and $10` is prose, not a formula between two
-/// prices. The usual dollar-math delimiter rules separate the two — an opening
-/// `$` is not followed by whitespace, a closing one is not preceded by
-/// whitespace and not followed by a digit, `$$…$$` is display math, neither
-/// kind spans a blank line, and `\$` is not a delimiter at all.
-fn math_ranges(source: &str, code: &[Range<usize>]) -> Vec<Range<usize>> {
-    let bytes = source.as_bytes();
-    let mut ranges = Vec::new();
-    let mut offset = 0;
-    while offset < bytes.len() {
-        if bytes[offset] == b'\\' {
-            offset += 2;
-            continue;
-        }
-        if bytes[offset] != b'$' || code.iter().any(|span| span.contains(&offset)) {
-            offset += 1;
-            continue;
-        }
-        let display = bytes.get(offset + 1) == Some(&b'$');
-        let open = if display { 2 } else { 1 };
-        // Inline math opens only on a `$` with something other than whitespace
-        // after it, which is what keeps `costs $5 and $10` prose.
-        if !display && bytes.get(offset + 1).is_none_or(u8::is_ascii_whitespace) {
-            offset += 1;
-            continue;
-        }
-        match math_end(bytes, offset + open, display) {
-            Some(end) => {
-                ranges.push(offset..end);
-                offset = end;
-            }
-            None => offset += open,
-        }
-    }
-    ranges
-}
-
-/// Where the math opened before `from` closes, or `None` where nothing closes
-/// it before a blank line or the end of the source.
-fn math_end(bytes: &[u8], from: usize, display: bool) -> Option<usize> {
-    let mut offset = from;
-    while offset < bytes.len() {
-        match bytes[offset] {
-            b'\\' => offset += 2,
-            b'\n' => {
-                let mut ahead = offset + 1;
-                while bytes.get(ahead).is_some_and(|b| matches!(b, b' ' | b'\t')) {
-                    ahead += 1;
-                }
-                if bytes.get(ahead).is_none_or(|b| *b == b'\n') {
-                    return None;
-                }
-                offset = ahead;
-            }
-            b'$' if display => {
-                if bytes.get(offset + 1) == Some(&b'$') {
-                    return Some(offset + 2);
-                }
-                offset += 1;
-            }
-            b'$' => {
-                let closes = offset > from
-                    && !bytes[offset - 1].is_ascii_whitespace()
-                    && !bytes.get(offset + 1).is_some_and(u8::is_ascii_digit);
-                if closes {
-                    return Some(offset + 1);
-                }
-                offset += 1;
-            }
-            _ => offset += 1,
-        }
-    }
-    None
-}
-
-/// Unknown-syntax guards do not apply inside ordinary Markdown code literals.
-fn code_ranges(source: &str) -> Vec<Range<usize>> {
-    let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
-    let arena = Arena::new();
-    let root = parse_document(&arena, &normalized, &commonmark_options());
-    let lines = line_ranges(source);
-    root.descendants()
-        .filter_map(|node| {
-            let data = node.data.borrow();
-            let block = matches!(data.value, NodeValue::CodeBlock(_));
-            if !block && !matches!(data.value, NodeValue::Code(_)) {
-                return None;
-            }
-            let first = lines.get(data.sourcepos.start.line.checked_sub(1)?)?;
-            let last = lines.get(data.sourcepos.end.line.checked_sub(1)?)?;
-            if block {
-                Some(first.start..last.end)
-            } else {
-                let start = first.start + data.sourcepos.start.column.saturating_sub(1);
-                let end = (last.start + data.sourcepos.end.column).min(last.end);
-                (start <= end).then_some(start..end)
-            }
-        })
-        .collect()
 }

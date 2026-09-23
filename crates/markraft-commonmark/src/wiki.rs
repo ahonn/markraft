@@ -18,8 +18,8 @@
 //!   the atom's own source must be one line to be written where a paragraph's
 //!   line breaks are nodes rather than characters.
 //!
-//! Whatever is refused stays the text a reader sees, and
-//! [`protected_ranges`](crate::source) keeps guarding it.
+//! Whatever is refused stays the text a reader sees: ordinary characters of
+//! its textblock, which the writer puts back exactly as they were.
 
 /// The label length comrak stops a wiki link component at.
 const MAX_COMPONENT: usize = 1000;

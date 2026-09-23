@@ -13,10 +13,10 @@
 //! assignment that forgot would leave the editor drawing a document it no
 //! longer holds.
 
+use crate::WikiResolver;
 use crate::images::Images;
 use crate::style::EditorStyle;
 use crate::surface::LayoutLine;
-use crate::{ProtectedSpans, WikiResolver};
 use gpui::Pixels;
 use markraft_core::projection::Projection;
 use std::cell::RefCell;
@@ -44,10 +44,6 @@ pub(crate) struct Shaping {
     /// nowhere is not drawn as one that leads somewhere. Absent until the host
     /// says, and then every link is drawn as followable.
     wiki: Option<WikiResolver>,
-    /// What the host keeps exactly as written. Absent until the host says, and
-    /// then nothing is shaded, which is right for an editor whose text is all
-    /// alike.
-    protected: Option<ProtectedSpans>,
     /// Bumped by every change above. The rows of a shaping that read an older
     /// revision are not the rows this one would produce.
     revision: u64,
@@ -102,15 +98,6 @@ impl Shaping {
 
     pub(crate) fn set_wiki(&mut self, resolves: WikiResolver) {
         self.wiki = Some(resolves);
-        self.changed();
-    }
-
-    pub(crate) fn protected(&self) -> Option<&ProtectedSpans> {
-        self.protected.as_ref()
-    }
-
-    pub(crate) fn set_protected(&mut self, spans: ProtectedSpans) {
-        self.protected = Some(spans);
         self.changed();
     }
 
@@ -232,13 +219,6 @@ mod tests {
         let mut shaping = kept();
         shaping.set_wiki(Box::new(|_| true));
         assert!(shaping.rows(&projection, px(600.), 0).is_none(), "wiki");
-
-        let mut shaping = kept();
-        shaping.set_protected(Box::new(|_| Vec::new()));
-        assert!(
-            shaping.rows(&projection, px(600.), 0).is_none(),
-            "protected"
-        );
 
         let mut shaping = kept();
         shaping.set_image_base(Some("/tmp".into()));

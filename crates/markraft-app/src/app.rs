@@ -496,8 +496,6 @@ impl NotesApp {
                 | EditRejection::Refused(message) => {
                     self.feedback.queue(message);
                 }
-                // The shading said it where the edit landed.
-                EditRejection::Marked(_) => {}
             }
         }
         if self.interaction.panel() == Panel::Editor {
@@ -1609,27 +1607,11 @@ impl NotesApp {
         .detach();
     }
 }
-/// What to tell someone whose keystroke the source-preserving codec refused. Each
-/// case names the syntax that stood in the way and something they can do about it,
-/// because "not saved" on its own leaves nowhere to go.
-fn rejection_message(error: &markraft_commonmark::SourceError) -> String {
-    use markraft_commonmark::SourceError;
-    match error {
-        SourceError::ProtectedSpan => {
-            "Markraft leaves this Markdown exactly as written — math, a block anchor or a \
-             callout's own first line. Edit that part in another editor."
-        }
-        SourceError::ProtectedBlock => {
-            "This change would rewrite a whole block that holds Markdown Markraft keeps exactly \
-             as written, such as math or a block anchor. Edit this section in another editor."
-        }
-        SourceError::UnsupportedEdit => {
-            "Markraft could not write this change back without rewriting source it does not \
-             represent. Your text is still here; use Export Markdown… for a copy."
-        }
-    }
-    .to_owned()
-}
+/// What to tell someone whose keystroke the source-preserving codec could not
+/// write back, with something they can do about it, because "not saved" on its
+/// own leaves nowhere to go.
+const UNSAVABLE_EDIT: &str = "Markraft could not write this change back without rewriting \
+     source it does not represent. Your text is still here; use Export Markdown… for a copy.";
 
 /// Why a formatting command left the note alone, naming the syntax that could
 /// not be written where it was asked for.
@@ -1942,7 +1924,7 @@ mod tests {
     // are ordinary unit tests.
     use super::{
         classify_drop, folder_label, linked_file, location_budget, note_location, refusal_message,
-        rejection_message, resolve_wiki_link, shorten_location, wiki_link_page,
+        resolve_wiki_link, shorten_location, wiki_link_page,
     };
     use std::{
         collections::HashSet,
@@ -2128,32 +2110,7 @@ mod tests {
     }
 
     #[test]
-    fn every_refusal_says_which_syntax_stood_in_the_way() {
-        use markraft_commonmark::SourceError;
-        let messages: Vec<_> = [
-            SourceError::ProtectedSpan,
-            SourceError::ProtectedBlock,
-            SourceError::UnsupportedEdit,
-        ]
-        .iter()
-        .map(rejection_message)
-        .collect();
-        assert_eq!(
-            messages.iter().collect::<HashSet<_>>().len(),
-            messages.len(),
-            "each case needs its own sentence: {messages:?}"
-        );
-        // A wiki link is a node of its own now, so it is not on the list.
-        assert!(messages[0].contains("callout"), "{}", messages[0]);
-        assert!(!messages[0].contains("wiki link"), "{}", messages[0]);
-        // Reference definitions are blocks of the document now, so a whole
-        // block is only protected for what the codec keeps verbatim.
-        assert!(
-            messages[1].contains("math") && !messages[1].contains("reference definition"),
-            "{}",
-            messages[1]
-        );
-
+    fn every_formatting_refusal_names_what_would_not_be_read() {
         // A formatting command Markdown cannot spell names the delimiters that
         // would not be read, in a sentence of their own.
         use markraft_commonmark::{CommandRefusal, Inexpressible, schema as md};
@@ -2165,7 +2122,7 @@ mod tests {
             (md::CODE, "`"),
             (md::LINK, "[…](…)"),
         ];
-        let mut all = messages.clone();
+        let mut all = Vec::new();
         for (mark, delimiter) in formats {
             let message = refused(Inexpressible::Delimiters { mark });
             assert!(message.contains(delimiter), "{message}");

@@ -201,11 +201,6 @@ struct Widening {
     broken: bool,
 }
 
-/// The corner of the fill behind source kept exactly as written. Smaller than an
-/// inline code pill's, because it sits inside a sentence rather than replacing a
-/// word in it.
-const PROTECTED_RADIUS: Pixels = px(3.);
-
 /// How many quote levels can carry a tone of their own; deeper ones fall back to
 /// the ordinary bar.
 const QUOTE_TONES: usize = 8;
@@ -353,9 +348,6 @@ pub(crate) struct LayoutLine {
     code_hitboxes: Option<(Hitbox, Hitbox)>,
     /// Sorted by `source`; see [`Widening`].
     widenings: Vec<Widening>,
-    /// `char` ranges of the line the host keeps exactly as written, drawn behind the
-    /// text so the boundary of a refused edit is visible before one is attempted.
-    protected: Vec<Range<usize>>,
     atoms: Vec<InlineAtom>,
     /// Where the line sits in a table, when it is a cell of one.
     pub(crate) table: Option<TableCell>,
@@ -786,9 +778,6 @@ pub(crate) struct ShapeInput<'a> {
     /// Whether a wiki link target names something the host can open. Only the host
     /// knows, and one that has not said treats every link as followable.
     pub wiki: Option<&'a crate::WikiResolver>,
-    /// Which parts of a line the host keeps exactly as written. A host that has not
-    /// said has no protected syntax, so nothing is shaded.
-    pub protected: Option<&'a crate::ProtectedSpans>,
     /// How the host's kind spells the parts of itself a focused line shows as
     /// source. Without it a line is drawn the same focused or not.
     pub spelling: Option<&'a dyn markraft_core::SourceSpelling>,
@@ -1026,13 +1015,6 @@ fn shape_line(
         index,
         from: line.from,
         char_len: line.len(),
-        protected: if code {
-            // A code block keeps everything in it literal already, and says so with
-            // its own fill; shading inside one would be saying it twice.
-            Vec::new()
-        } else {
-            protected_of(input, line, index)
-        },
         rows,
         origin: point(indent, px(0.)),
         line_height,
@@ -1912,37 +1894,6 @@ fn atom_label<'a>(types: &DocTypes, node: &'a Node) -> Option<(AtomShape, &'a st
     } else {
         None
     }
-}
-
-/// Where the row draws source the host keeps exactly as written, in `char` offsets
-/// of the projection line.
-///
-/// Inline code keeps what is typed in it literal, so a `$` there opens nothing and
-/// the host's scan, which sees the document's text rather than the file's, cannot
-/// tell: the runs carrying the code mark are taken out here instead.
-fn protected_of(input: &ShapeInput<'_>, line: &Line, index: usize) -> Vec<Range<usize>> {
-    let Some(spans) = input.protected else {
-        return Vec::new();
-    };
-    let Some(text) = input.projection.line_text(index) else {
-        return Vec::new();
-    };
-    let coded: Vec<Range<usize>> = line
-        .runs
-        .iter()
-        .filter(|run| has(input.types.code, &run.marks))
-        .map(|run| run.char_from..run.char_to)
-        .collect();
-    spans(text)
-        .into_iter()
-        .map(|span| byte_to_char(text, span.start)..byte_to_char(text, span.end))
-        .filter(|span| {
-            span.start < span.end
-                && !coded
-                    .iter()
-                    .any(|code| code.start < span.end && span.start < code.end)
-        })
-        .collect()
 }
 
 /// The file an atom draws a picture of, where it draws one. `![](path)` and
@@ -3020,17 +2971,6 @@ impl Element for EditorSurface {
             // The grids first: their bands and lines sit under everything a cell
             // draws, including the selection.
             paint_tables(rows, &style, caret_pos, &scroll, window);
-            // Protected source sits under everything the row draws, the selection
-            // included: it says what the text *is*, not what is happening to it.
-            for row in rows.iter() {
-                for span in &row.protected {
-                    for bounds in row.rectangles(span.clone(), false) {
-                        window.paint_quad(
-                            fill(bounds, style.protected_source).corner_radii(PROTECTED_RADIUS),
-                        );
-                    }
-                }
-            }
             for row in rows.iter() {
                 for inner in &row.rows {
                     for code in &inner.inline_code {
@@ -3803,7 +3743,6 @@ mod tests {
             index,
             from: line.from,
             char_len: line.len(),
-            protected: Vec::new(),
             rows: Vec::new(),
             origin: point(px(0.), px(0.)),
             line_height: px(10.),
@@ -3975,7 +3914,6 @@ mod tests {
             images: &images,
             spelling: Some(&spelling),
             wiki: None,
-            protected: None,
             doc: state.doc(),
             types: &types,
             projection: &projection,
@@ -4139,7 +4077,6 @@ mod tests {
             images: &images,
             spelling: Some(&spelling),
             wiki: None,
-            protected: None,
             doc: state.doc(),
             types: &types,
             projection: &projection,
@@ -4943,7 +4880,6 @@ mod tests {
             style: &style,
             single_line: false,
             wiki: None,
-            protected: None,
             selection: heading_pos..heading_pos,
             composition: None,
         };
@@ -4995,7 +4931,6 @@ mod tests {
             style: &style,
             single_line: false,
             wiki: None,
-            protected: None,
             selection: pos..pos,
             composition: None,
         };
@@ -5024,7 +4959,6 @@ mod tests {
             style: &style,
             single_line: false,
             wiki: None,
-            protected: None,
             selection: quote_pos..quote_pos,
             composition: None,
         };
@@ -5180,7 +5114,6 @@ mod tests {
                 images: &images,
                 spelling: None,
                 wiki: None,
-                protected: None,
                 doc: state.doc(),
                 types: &types,
                 projection: &projection,
@@ -5223,7 +5156,6 @@ mod tests {
             images: &images,
             spelling: Some(&spelling),
             wiki: None,
-            protected: None,
             doc: state.doc(),
             types: &types,
             projection: &projection,
