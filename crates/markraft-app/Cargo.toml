@@ -14,6 +14,7 @@ updater-mock = []
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
+gpui-base.workspace = true
 markraft-core.workspace = true
 markraft-commonmark.workspace = true
 markraft-gpui.workspace = true

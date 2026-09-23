@@ -133,6 +133,9 @@ fn main() {
         cx.dispatch_action(&app::Show);
     });
     application.run(move |cx: &mut App| {
+        // Its controls' bindings live in their own key contexts, so binding it first
+        // leaves every editor and app binding free to answer where it applies.
+        gpui_base::init(cx);
         markraft_gpui::bind_keys(cx);
         // After the editor's own bindings, so that at the editor's context depth vim's
         // win; its predicates stand aside for the typeahead where that matters.

@@ -17,8 +17,9 @@ license = "MIT"
 repository = "https://github.com/ahonn/markraft"
 
 [workspace.dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.4" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.4", features = ["font-kit", "runtime_shaders"] }
+gpui = { package = "gpui-pre", version = "=0.3.6" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.6", features = ["font-kit", "runtime_shaders"] }
+gpui-base = "=0.6.6"
 markraft-core = { path = "crates/markraft-core" }
 markraft-commonmark = { path = "crates/markraft-commonmark" }
 markraft-gpui = { path = "crates/markraft-gpui" }
