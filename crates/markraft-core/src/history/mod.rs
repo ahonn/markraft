@@ -54,7 +54,9 @@
 //! [`add_to_history(false)`](crate::protocol::add_to_history) is not recorded. When it changes the document, every stored entry is rebased
 //! over it instead, so an undo after a remote edit still applies. Only the top
 //! entry of each branch is rebased eagerly; what the rest still owe is carried
-//! with that entry and paid when it is popped.
+//! with that entry and paid when it is popped. An entry that cannot be rebased
+//! empties both branches, and [`history_lost`] reports it for the state that
+//! transaction produced.
 //!
 //! # Relation to the old core
 //!
@@ -197,6 +199,21 @@ pub fn redo_depth(state: &EditorState) -> usize {
         .unwrap_or(0)
 }
 
+/// Whether the transaction that produced `state` cost the history its entries.
+///
+/// A transaction the history does not record (annotated
+/// [`add_to_history(false)`](crate::protocol::add_to_history), such as a remote
+/// edit) has every stored entry rebased over it. When an entry cannot be
+/// rebased, both branches are cleared — an entry that no longer applies must
+/// not be undone — and this reports `true` for the resulting state, so a host
+/// can tell the user their undo history is gone. The next transaction resets
+/// it. Always `false` without the [`history`] extension, and not serialised.
+pub fn history_lost(state: &EditorState) -> bool {
+    state
+        .field(history_field())
+        .is_some_and(|history| history.lost)
+}
+
 /// A spec that undoes the most recent event, or `None` when there is nothing to
 /// undo.
 pub fn undo(state: &EditorState) -> Option<TransactionSpec> {
@@ -316,11 +333,15 @@ fn update_history(value: &HistoryState, tr: &Transaction) -> HistoryState {
             group_depth: 0,
             group_started: false,
             composing: false,
+            lost: false,
         };
     }
 
     let was_composing = value.composing;
-    let mut state = value.clone();
+    let mut state = HistoryState {
+        lost: false,
+        ..value.clone()
+    };
     for effect in tr.effects() {
         if effect.is(begin_undo_group()) {
             state.group_depth += 1;

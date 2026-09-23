@@ -256,12 +256,12 @@ impl SectionBuilder {
                 *tokens = canonical;
             }
         }
-        let len_after = self.sections.iter().map(Section::len_after).sum();
+        let desc = ChangeDesc::of_sections(&self.sections, len_before);
         ChangeSet {
             schema: schema.clone(),
             sections: self.sections,
-            len_before,
-            len_after,
+            desc,
+            dropped_tokens: 0,
         }
     }
 }
@@ -295,6 +295,21 @@ pub struct ChangeDesc {
 }
 
 impl ChangeDesc {
+    /// The shape of a section list covering `len_before` tokens.
+    pub(crate) fn of_sections(sections: &[Section], len_before: usize) -> ChangeDesc {
+        ChangeDesc {
+            sections: sections
+                .iter()
+                .map(|s| match &s.op {
+                    SectionOp::Keep | SectionOp::Mark(_) => (s.len, None),
+                    SectionOp::Replace(tokens) => (s.len, Some(tokens_size(tokens))),
+                })
+                .collect(),
+            len_before,
+            len_after: sections.iter().map(Section::len_after).sum(),
+        }
+    }
+
     /// A description that changes nothing in a document of `len` tokens.
     pub fn empty(len: usize) -> ChangeDesc {
         ChangeDesc {
@@ -427,13 +442,17 @@ pub struct MappedRange {
 pub struct ChangeSet {
     schema: Schema,
     pub(crate) sections: Vec<Section>,
-    len_before: usize,
-    len_after: usize,
+    /// The sections' shape, built once with them: every mapping reads it.
+    desc: ChangeDesc,
+    /// See [`ChangeSet::dropped_tokens`].
+    dropped_tokens: usize,
 }
 
+/// Equality compares what the sets do. How many tokens a repair dropped on the
+/// way is a note about how a set was made, not part of it.
 impl PartialEq for ChangeSet {
     fn eq(&self, other: &Self) -> bool {
-        self.len_before == other.len_before && self.sections == other.sections
+        self.desc.len_before == other.desc.len_before && self.sections == other.sections
     }
 }
 
@@ -534,13 +553,15 @@ impl ChangeSet {
         }
 
         let mut parts: Vec<Part> = Vec::new();
+        let mut dropped = 0usize;
         for change in changes {
             let (from, to) = (change.from, change.to);
             match change.kind {
                 ChangeKind::Replace(slice) => {
                     let asked = (change.from, change.to);
-                    let fitted =
+                    let (fitted, lost) =
                         fit_replacement(schema, doc, change.from, change.to, &slice, &change.fit)?;
+                    dropped += lost;
                     for (from, to, tokens) in fitted {
                         parts.push(Part::Replace(from, to, tokens, asked));
                     }
@@ -619,7 +640,9 @@ impl ChangeSet {
             pos = to;
         }
         builder.keep(size - pos);
-        Ok(builder.finish(schema, size))
+        let mut set = builder.finish(schema, size);
+        set.dropped_tokens = dropped;
+        Ok(set)
     }
 
     /// The schema this set was created against.
@@ -629,12 +652,34 @@ impl ChangeSet {
 
     /// Size of the starting document.
     pub fn length_before(&self) -> usize {
-        self.len_before
+        self.desc.len_before
     }
 
     /// Size of the resulting document.
     pub fn length_after(&self) -> usize {
-        self.len_after
+        self.desc.len_after
+    }
+
+    /// How many tokens of the requested content a [`Fit`] repair had to drop
+    /// to make the set produce a valid document.
+    ///
+    /// Zero means every change was recorded with all of its content, reshaped
+    /// perhaps but not reduced. [`ChangeSet::create`] counts what its repairs
+    /// dropped, [`ChangeSet::compose`] adds up both sides, and
+    /// [`ChangeSet::transform_over`] keeps the count of the set it rebases;
+    /// every other way of building a set starts from zero. The count is not
+    /// part of what a set does, so [`PartialEq`] ignores it and it is not
+    /// serialised.
+    ///
+    /// A transaction whose changes dropped content is annotated
+    /// [`content_dropped`](crate::protocol::content_dropped).
+    pub fn dropped_tokens(&self) -> usize {
+        self.dropped_tokens
+    }
+
+    pub(crate) fn with_dropped_tokens(mut self, dropped: usize) -> ChangeSet {
+        self.dropped_tokens = dropped;
+        self
     }
 
     /// Whether the set changes nothing.
@@ -643,19 +688,10 @@ impl ChangeSet {
     }
 
     /// The set's shape, without content.
-    pub fn desc(&self) -> ChangeDesc {
-        ChangeDesc {
-            sections: self
-                .sections
-                .iter()
-                .map(|s| match &s.op {
-                    SectionOp::Keep | SectionOp::Mark(_) => (s.len, None),
-                    SectionOp::Replace(tokens) => (s.len, Some(tokens_size(tokens))),
-                })
-                .collect(),
-            len_before: self.len_before,
-            len_after: self.len_after,
-        }
+    ///
+    /// Built once with the set, so mapping through it costs no allocation.
+    pub fn desc(&self) -> &ChangeDesc {
+        &self.desc
     }
 
     /// Map a position through this change. See [`ChangeDesc::map_pos`].

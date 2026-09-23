@@ -418,3 +418,24 @@ fn an_ancestor_is_told_which_nodes_a_round_reaches() {
         .unwrap();
     assert_eq!(*told_probe.lock().unwrap(), [vec![false, true]]);
 }
+
+#[test]
+fn corrections_whose_first_round_cannot_combine_still_report_divergence() {
+    let schema = shared_schema();
+    let paragraph = schema.node_id("paragraph").unwrap();
+    // Both corrections want to rewrite the same character, so the first round
+    // is not one change set and nothing can be applied.
+    let start = state(
+        doc(&schema, [n(&schema, "paragraph", [t(&schema, "x")])]),
+        corrections([
+            Correction::on_content(paragraph, |cx| replace_last(cx, "a")),
+            Correction::on_content(paragraph, |cx| replace_last(cx, "b")),
+        ]),
+    );
+    let tr = start
+        .update([TransactionSpec::new().changes([insert_text(&schema, 2, "y")])])
+        .unwrap();
+    assert_eq!(tr.annotation(corrections_diverged()), Some(&true));
+    // The user's own edit still goes through, untouched.
+    assert_eq!(schema.describe(tr.new_doc()), r#"doc(paragraph("xy"))"#);
+}

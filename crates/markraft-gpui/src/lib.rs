@@ -1406,7 +1406,7 @@ impl EditorView {
             && self
                 .projection
                 .line(last_line)
-                .is_some_and(|line| line.to == head && self.types.is_verbatim_block(line))
+                .is_some_and(|line| line.to() == head && self.types.is_verbatim_block(line))
         {
             let command = markraft_core::commands::exit_code();
             if self.run_command(&command, cx) {
@@ -1589,7 +1589,7 @@ impl EditorView {
             if let Some((index, _)) = self.projection.pos_to_line_offset(head)
                 && let Some(line) = self.projection.line(index)
             {
-                self.select_range(line.from, line.to, cx);
+                self.select_range(line.from(), line.to(), cx);
             }
         } else if event.click_count == 2 {
             let from = self.projection.prev_word_boundary(head).unwrap_or(head);

@@ -83,5 +83,6 @@ pub(crate) fn history_from_json(value: &Value, schema: &Schema) -> Result<Histor
         group_depth: 0,
         group_started: false,
         composing: false,
+        lost: false,
     })
 }

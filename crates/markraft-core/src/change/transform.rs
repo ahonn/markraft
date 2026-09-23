@@ -31,15 +31,19 @@ impl ChangeSet {
         other: &ChangeSet,
         before: bool,
     ) -> Result<ChangeSet, ChangeError> {
-        if doc.content_size() != self.len_before {
+        if doc.content_size() != self.length_before() {
             return Err(ChangeError::LengthMismatch {
-                expected: self.len_before,
+                expected: self.length_before(),
                 actual: doc.content_size(),
             });
         }
         let rebased = self.rebase(other, before)?;
         let target = other.apply(doc)?;
-        rebased.repair_against(&target)
+        // Whatever this set's own repair dropped stays dropped in the rebased
+        // set, on top of anything the repair against `target` drops.
+        let repaired = rebased.repair_against(&target)?;
+        let dropped = self.dropped_tokens() + repaired.dropped_tokens();
+        Ok(repaired.with_dropped_tokens(dropped))
     }
 
     /// The raw rebase, before any repair.
@@ -48,10 +52,10 @@ impl ChangeSet {
         if !self.schema.same(&other.schema) {
             return Err(ChangeError::SchemaMismatch);
         }
-        if self.len_before != other.len_before {
+        if self.length_before() != other.length_before() {
             return Err(ChangeError::LengthMismatch {
-                expected: self.len_before,
-                actual: other.len_before,
+                expected: self.length_before(),
+                actual: other.length_before(),
             });
         }
         let mut out = SectionBuilder::new();
@@ -117,8 +121,8 @@ impl ChangeSet {
             }
             if a_done || b_done {
                 return Err(ChangeError::LengthMismatch {
-                    expected: self.len_before,
-                    actual: other.len_before,
+                    expected: self.length_before(),
+                    actual: other.length_before(),
                 });
             }
 
@@ -166,7 +170,7 @@ impl ChangeSet {
             }
         }
         flush!();
-        Ok(out.finish(&self.schema, other.len_after))
+        Ok(out.finish(&self.schema, other.length_after()))
     }
 
     /// Keep only the modifications that do not fight with `theirs`.

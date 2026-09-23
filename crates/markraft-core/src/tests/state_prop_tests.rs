@@ -195,7 +195,7 @@ fn selections_map_into_valid_positions() {
 
         let spots = textblock_positions(&schema, &document);
         for (_, pos) in spots.iter().take(12) {
-            let mapped = Selection::cursor(*pos).map(&schema, &after, &desc);
+            let mapped = Selection::cursor(*pos).map(&schema, &after, desc);
             mapped
                 .check(&after, &schema)
                 .unwrap_or_else(|error| panic!("seed {seed}: invalid mapped selection: {error}"));
@@ -210,7 +210,7 @@ fn selections_map_into_valid_positions() {
             if !Selection::is_selectable(&schema, &document, pos) {
                 continue;
             }
-            let mapped = Selection::node(pos).map(&schema, &after, &desc);
+            let mapped = Selection::node(pos).map(&schema, &after, desc);
             mapped
                 .check(&after, &schema)
                 .unwrap_or_else(|error| panic!("seed {seed}: invalid mapped selection: {error}"));

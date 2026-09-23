@@ -1096,7 +1096,7 @@ fn escape_after_a_longer_commit_steps_back_one_grapheme() {
 #[test]
 fn an_external_selection_at_a_line_end_is_settled_onto_the_last_grapheme() {
     let mut keys = Keys::new("end").at(0, 0);
-    let end = keys.host.projection().lines()[0].to;
+    let end = keys.host.projection().lines()[0].to();
     keys.external(vec![
         TransactionSpec::new().selection(Selection::cursor(end)),
     ]);
@@ -1124,11 +1124,8 @@ fn the_caret_after_an_undo_rests_on_a_grapheme() {
 #[test]
 fn an_external_node_selection_is_settled_into_the_text() {
     let mut keys = Keys::new("one\n\n***\n\ntwo").at(0, 0);
-    let rule = keys.host.projection().lines()[1]
-        .ancestors
-        .last()
-        .expect("the rule's own node")
-        .before;
+    let line = keys.host.projection().lines()[1].clone();
+    let rule = line.block_before().expect("the rule's own node");
     keys.external(vec![
         TransactionSpec::new().selection(Selection::node(rule)),
     ]);

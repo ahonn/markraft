@@ -426,8 +426,8 @@ pub fn set_block_type(node_type: NodeTypeId, attrs: Attrs) -> Command {
             .user_event("settype")
             .scroll_into_view();
         if let Selection::Text { anchor, head } = state.selection() {
-            let before = crate::projection::Projection::of(doc, schema);
-            let after = crate::projection::Projection::of(&next_doc, schema);
+            let before = crate::projection::projection_of(state);
+            let after = before.update(schema, doc, &next_doc);
             if let (Some((a_line, a_offset)), Some((h_line, h_offset))) = (
                 before.pos_to_line_offset(*anchor),
                 before.pos_to_line_offset(*head),

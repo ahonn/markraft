@@ -47,14 +47,15 @@ pub(crate) fn types(types: &DocTypes) -> Option<TableTypes> {
 /// Where a line sits in a table: the position before the table, and the line's
 /// row and column within it. `None` for a line that is not a cell.
 fn cell_of(types: &DocTypes, line: &Line) -> Option<(usize, usize, usize)> {
-    let cell = line.ancestors.last()?;
+    let cell = line.ancestors().last()?;
     if Some(cell.node_type) != types.table_cell {
         return None;
     }
-    let row = line.ancestors.iter().nth_back(1)?;
-    let table = line.ancestors.iter().nth_back(2)?;
+    let row = line.ancestors().iter().nth_back(1)?;
+    let table_index = line.depth().checked_sub(3)?;
+    let table = &line.ancestors()[table_index];
     (Some(row.node_type) == types.table_row && Some(table.node_type) == types.table).then_some((
-        table.before,
+        line.ancestor_before(table_index),
         row.index,
         cell.index,
     ))
@@ -300,7 +301,7 @@ pub(crate) fn paste_level(
     match cell_at(types, projection, pos) {
         // The cursor's own ancestors are `[.., table, row, cell]`.
         Some(cursor) => {
-            let depth = projection.line(cursor.line)?.ancestors.len();
+            let depth = projection.line(cursor.line)?.ancestors().len();
             depth.checked_sub(if row { 2 } else { 3 })
         }
         None => (row || cell).then_some(0),

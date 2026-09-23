@@ -164,9 +164,9 @@ impl ChangeSet {
     /// Fails when `doc` has a different size than the set was created for, or
     /// when the resulting token run does not describe a well-formed tree.
     pub fn apply(&self, doc: &Node) -> Result<Node, ChangeError> {
-        if doc.content_size() != self.len_before {
+        if doc.content_size() != self.length_before() {
             return Err(ChangeError::LengthMismatch {
-                expected: self.len_before,
+                expected: self.length_before(),
                 actual: doc.content_size(),
             });
         }
@@ -236,9 +236,9 @@ impl ChangeSet {
     /// record the content and marks the change removed. For any change `a`,
     /// `a.invert(doc).apply(a.apply(doc)) == doc`.
     pub fn invert(&self, doc: &Node) -> Result<ChangeSet, ChangeError> {
-        if doc.content_size() != self.len_before {
+        if doc.content_size() != self.length_before() {
             return Err(ChangeError::LengthMismatch {
-                expected: self.len_before,
+                expected: self.length_before(),
                 actual: doc.content_size(),
             });
         }
@@ -264,7 +264,7 @@ impl ChangeSet {
             }
             pos_a = end_a;
         }
-        Ok(builder.finish(&self.schema, self.len_after))
+        Ok(builder.finish(&self.schema, self.length_after()))
     }
 }
 

@@ -366,7 +366,7 @@ mod tests {
             let caret = projection_of(&state)
                 .lines()
                 .last()
-                .map(|line| line.to)
+                .map(|line| line.to())
                 .expect("a line");
             assert!(found_in(&state, caret).is_none(), "{source}");
         }
@@ -378,7 +378,7 @@ mod tests {
         assert!(found_in(&state, caret).is_none());
         // Code that merely abuts the run does not stop it.
         let state = state_of("`x` :smile:");
-        let caret = projection_of(&state).lines()[0].to;
+        let caret = projection_of(&state).lines()[0].to();
         assert_eq!(found_in(&state, caret).map(|(_, emoji)| emoji), Some("😄"));
     }
 
@@ -491,7 +491,7 @@ mod tests {
         ] {
             let state = state_of(text);
             let projection = projection_of(&state);
-            let caret = projection.lines()[0].to;
+            let caret = projection.lines()[0].to();
             let slash = open_match(&projection, false, caret, &SLASHES, 0).is_some();
             let emoji = open_match(&projection, false, caret, &COLONS, MIN_QUERY).is_some();
             assert!(!(slash && emoji), "{text:?} opened both menus");

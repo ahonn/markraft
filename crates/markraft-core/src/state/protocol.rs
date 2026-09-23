@@ -24,8 +24,8 @@
 //!   [`time`], [`remote`], [`origin`], [`add_to_history`].
 //! * Shaping the undo history: [`isolate_history`] (and [`isolate`]),
 //!   [`fold_into_previous`].
-//! * Reporting what a hook did: [`appended`], [`appenders_diverged`],
-//!   [`corrections_diverged`].
+//! * Reporting what a hook or the model did: [`appended`],
+//!   [`appenders_diverged`], [`corrections_diverged`], [`content_dropped`].
 //! * Compositions: [`COMPOSE_USER_EVENT`], [`end_composition`].
 //! * Rolling fields back: [`restore_fields_from`].
 //! * Changing the configuration: [`reconfigure`], [`append_config`],
@@ -48,6 +48,7 @@ static APPENDERS_DIVERGED: LazyLock<AnnotationType<bool>> = LazyLock::new(Annota
 static ISOLATE: LazyLock<AnnotationType<IsolateHistory>> = LazyLock::new(AnnotationType::define);
 static FOLD: LazyLock<AnnotationType<bool>> = LazyLock::new(AnnotationType::define);
 static CORRECTIONS_DIVERGED: LazyLock<AnnotationType<bool>> = LazyLock::new(AnnotationType::define);
+static CONTENT_DROPPED: LazyLock<AnnotationType<usize>> = LazyLock::new(AnnotationType::define);
 static END_COMPOSITION: LazyLock<StateEffectType<()>> = LazyLock::new(StateEffectType::define);
 static RESTORE_FIELDS_FROM: LazyLock<StateEffectType<EditorState>> =
     LazyLock::new(StateEffectType::define);
@@ -183,6 +184,18 @@ pub fn fold_into_previous() -> &'static AnnotationType<bool> {
 /// [`MAX_CORRECTION_ROUNDS`](crate::corrections::MAX_CORRECTION_ROUNDS) rounds.
 pub fn corrections_diverged() -> &'static AnnotationType<bool> {
     &CORRECTIONS_DIVERGED
+}
+
+/// Set on a transaction whose changes lost content to a repair: how many
+/// tokens were dropped, as [`ChangeSet::dropped_tokens`](crate::ChangeSet::dropped_tokens)
+/// reports.
+///
+/// Added automatically when a transaction is built, unless a spec already
+/// supplies it. A [`Fit`](crate::Fit) repair drops what it can place nowhere —
+/// a paste of blocks into a node that only takes text, say — rather than
+/// refusing the edit; this is how a host finds out and tells the user.
+pub fn content_dropped() -> &'static AnnotationType<usize> {
+    &CONTENT_DROPPED
 }
 
 /// The user event every composition update carries.

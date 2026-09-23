@@ -13,6 +13,7 @@
 //! `doc.content_size()`: the top node's own tokens sit outside the coordinate
 //! frame.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::attr::Attrs;
@@ -559,6 +560,50 @@ impl Node {
     /// calling `check` on a document validates every mark in it except any on
     /// the top node itself.
     pub fn check(&self, schema: &Schema) -> Result<(), NodeError> {
+        self.check_local(schema)?;
+        for child in self.children() {
+            child.check(schema)?;
+        }
+        Ok(())
+    }
+
+    /// Validate this node against `schema`, assuming `old` is a valid node it
+    /// was derived from.
+    ///
+    /// Gives the same answer as [`Node::check`] whenever `old` passes
+    /// [`Node::check`], but only visits what changed: a subtree this node
+    /// shares with `old` (the same allocation, see [`Node::ptr_eq`]) is taken
+    /// to be valid. At each level the children are matched against `old`'s
+    /// from both ends by identity; the unmatched middle ones are paired with
+    /// `old`'s unmatched middle ones by index and checked the same way, and
+    /// any left over are checked in full. The node's own rules, which cover
+    /// its whole child list, are always checked.
+    ///
+    /// Passing an `old` that is not valid makes the answer meaningless.
+    pub fn check_from(&self, old: &Node, schema: &Schema) -> Result<(), NodeError> {
+        if self.ptr_eq(old) {
+            return Ok(());
+        }
+        self.check_local(schema)?;
+        let new_children = self.content().as_slice();
+        let old_children = old.content().as_slice();
+        let (old_range, new_range) = unshared_middles(old_children, new_children);
+        let new_middle = &new_children[new_range];
+        let old_middle = &old_children[old_range];
+        for (index, child) in new_middle.iter().enumerate() {
+            match old_middle.get(index) {
+                Some(previous) => child.check_from(previous, schema)?,
+                None => child.check(schema)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// The rules that concern this node itself: its type, attributes and marks
+    /// exist in `schema`, its body matches its type, and its direct children
+    /// satisfy its content expression, carry only marks it allows and have
+    /// their adjacent text merged. The children's own content is not visited.
+    fn check_local(&self, schema: &Schema) -> Result<(), NodeError> {
         let ty = schema
             .try_node_type(self.type_id())
             .ok_or_else(|| NodeError::Json("node type does not belong to this schema".into()))?;
@@ -654,9 +699,6 @@ impl Node {
                     });
                 }
                 previous = Some(child);
-            }
-            for child in self.children() {
-                child.check(schema)?;
             }
         }
         Ok(())
@@ -792,6 +834,96 @@ fn nodes_between_inner(
             );
         }
         pos = end;
+    }
+}
+
+/// The unmatched middles of two child lists, as ranges into `old` and `new`:
+/// what is left once the children both lists share by identity
+/// ([`Node::ptr_eq`]) are matched from the front and then from the back. Both
+/// ranges start at the same index, since everything before it is shared.
+pub(crate) fn unshared_middles(old: &[Node], new: &[Node]) -> (Range<usize>, Range<usize>) {
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a.ptr_eq(b)).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a.ptr_eq(b))
+        .count();
+    (prefix..old.len() - suffix, prefix..new.len() - suffix)
+}
+
+/// A pair of children [`diff_region`] walked into.
+#[derive(Debug, Clone)]
+pub(crate) struct DiffStep {
+    /// The pair's index in both parents. Every child before it is shared, so
+    /// the index is the same on both sides.
+    pub(crate) index: usize,
+    /// The child in the old tree.
+    pub(crate) old: Node,
+    /// The child in the new tree.
+    pub(crate) new: Node,
+}
+
+/// The smallest run of sibling children that holds every difference between
+/// two trees, as [`diff_region`] finds it.
+#[derive(Debug, Clone)]
+pub(crate) struct DiffRegion {
+    /// The pairs walked into, from the top down. The last pair (or the two
+    /// tops, when the path is empty) is the region's parent; the pairs above
+    /// it are its ancestors, each differing from its counterpart in that one
+    /// child only.
+    pub(crate) path: Vec<DiffStep>,
+    /// The region within the old parent's children.
+    pub(crate) old: Range<usize>,
+    /// The region within the new parent's children. It starts where
+    /// [`DiffRegion::old`] does.
+    pub(crate) new: Range<usize>,
+}
+
+/// Where two trees differ, as the path down to the smallest run of siblings
+/// that holds every difference.
+///
+/// At each level, starting from the tops, the children are matched from both
+/// ends by identity ([`unshared_middles`]). When the unmatched middle is
+/// exactly one child on each side, and that child is a block container that
+/// is not a textblock and keeps its markup, the walk enters the pair and goes
+/// on. Otherwise it stops, and the middles are the region: a change of type or
+/// attributes concerns everything inside a node, and a textblock's inline
+/// content is rebuilt as a whole. Identical trees give an empty path and empty
+/// middles.
+pub(crate) fn diff_region(old: &Node, new: &Node, schema: &Schema) -> DiffRegion {
+    let mut path = Vec::new();
+    let (mut old, mut new) = (old.clone(), new.clone());
+    loop {
+        let (old_range, new_range) =
+            unshared_middles(old.content().as_slice(), new.content().as_slice());
+        let pair = match (old_range.len(), new_range.len()) {
+            (1, 1) => {
+                let next_old = old.child(old_range.start).clone();
+                let next_new = new.child(new_range.start).clone();
+                let ty = schema.node_type(next_new.type_id());
+                (next_new.is_container()
+                    && ty.is_block()
+                    && !ty.is_textblock()
+                    && next_new.same_markup(&next_old))
+                .then_some((next_old, next_new))
+            }
+            _ => None,
+        };
+        let Some((next_old, next_new)) = pair else {
+            return DiffRegion {
+                path,
+                old: old_range,
+                new: new_range,
+            };
+        };
+        path.push(DiffStep {
+            index: old_range.start,
+            old: next_old.clone(),
+            new: next_new.clone(),
+        });
+        old = next_old;
+        new = next_new;
     }
 }
 

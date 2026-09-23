@@ -109,8 +109,8 @@ pub(crate) fn header_of(types: &DocTypes, line: &Line, previous: Option<&Line>) 
     // quote's first block passes `opens_quote`, so the line above settles it:
     // the first one has no line of the same quote before it.
     let continues = previous
-        .and_then(|previous| innermost_quote(types, previous))
-        .is_some_and(|above| above.before == quote.before);
+        .and_then(|previous| innermost_quote_before(types, previous))
+        .is_some_and(|above| Some(above) == innermost_quote_before(types, line));
     if continues || !opens_quote(types, line) {
         return None;
     }
@@ -122,7 +122,7 @@ pub(crate) fn header_of(types: &DocTypes, line: &Line, previous: Option<&Line>) 
 /// drawn beside it — `None` for an ordinary quote. Each bar keeps its own
 /// callout's tone, so an outer callout still reads as itself beside a nested one.
 pub(crate) fn tones_beside(types: &DocTypes, line: &Line) -> Vec<Option<Tone>> {
-    line.ancestors
+    line.ancestors()
         .iter()
         .filter(|ancestor| Some(ancestor.node_type) == types.blockquote)
         .map(|quote| {
@@ -136,21 +136,29 @@ pub(crate) fn tones_beside(types: &DocTypes, line: &Line) -> Vec<Option<Tone>> {
 }
 
 fn innermost_quote<'a>(types: &DocTypes, line: &'a Line) -> Option<&'a Ancestor> {
-    line.ancestors
+    line.ancestors()
         .iter()
         .rev()
         .find(|ancestor| Some(ancestor.node_type) == types.blockquote)
+}
+
+/// The position directly before the innermost block quote a line sits in.
+fn innermost_quote_before(types: &DocTypes, line: &Line) -> Option<usize> {
+    line.ancestors()
+        .iter()
+        .rposition(|ancestor| Some(ancestor.node_type) == types.blockquote)
+        .map(|index| line.ancestor_before(index))
 }
 
 /// Whether the line is the first one inside the quote it sits in: every
 /// ancestor below the quote is that ancestor's first child.
 fn opens_quote(types: &DocTypes, line: &Line) -> bool {
     let at = line
-        .ancestors
+        .ancestors()
         .iter()
         .rposition(|ancestor| Some(ancestor.node_type) == types.blockquote);
     at.is_some_and(|at| {
-        line.ancestors[at + 1..]
+        line.ancestors()[at + 1..]
             .iter()
             .all(|below| below.index == 0)
     })

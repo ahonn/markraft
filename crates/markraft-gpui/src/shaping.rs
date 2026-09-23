@@ -12,6 +12,14 @@
 //! would be writable from every one of the view's sibling modules, and one
 //! assignment that forgot would leave the editor drawing a document it no
 //! longer holds.
+//!
+//! A document that did change still mostly did not: an edit rebuilds the lines
+//! it reached and hands every other line of the projection over with the same
+//! body. So a shaping that misses here is not started from nothing — the rows
+//! of the last shaping at the same width and the same inputs are handed to it
+//! through [`Shaping::previous`], and it keeps each line whose body and
+//! surroundings it can show are unchanged; see
+//! [`crate::surface::shape_reusing`].
 
 use crate::WikiResolver;
 use crate::images::Images;
@@ -19,7 +27,7 @@ use crate::style::EditorStyle;
 use crate::surface::LayoutLine;
 use gpui::Pixels;
 use markraft_core::projection::Projection;
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::sync::Arc;
 
 /// The rows one shaping produced, beside what it read to produce them.
@@ -115,6 +123,20 @@ impl Shaping {
             .iter()
             .find(|shaped| self.matches(shaped, projection, width, reveal))
             .map(|shaped| shaped.lines.clone())
+    }
+
+    /// The rows of the most recent shaping at `width` that read the same inputs
+    /// held here, whatever document and caret it shaped. A shaping that missed
+    /// [`Shaping::rows`] reuses what it can of these; nothing else about them
+    /// is known to still hold, so each line has to show it applies.
+    pub(crate) fn previous(&self, width: Pixels) -> Option<Ref<'_, [LayoutLine]>> {
+        Ref::filter_map(self.shaped.borrow(), |shaped| {
+            shaped
+                .iter()
+                .find(|shaped| shaped.width == width && shaped.revision == self.revision)
+                .map(|shaped| shaped.lines.as_slice())
+        })
+        .ok()
     }
 
     /// Keep `lines` as the rows of `projection` at `width`.

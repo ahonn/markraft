@@ -396,22 +396,22 @@ impl CommonMarkSpelling {
     /// bullet of its own.
     fn item_of<'a>(&self, line: &'a Line) -> Option<(&'a Ancestor, &'a Ancestor)> {
         let index = line
-            .ancestors
+            .ancestors()
             .iter()
             .rposition(|ancestor| self.is_item(ancestor.node_type))?;
-        let starts = index + 1 < line.ancestors.len()
-            && line.ancestors[index + 1..]
+        let starts = index + 1 < line.ancestors().len()
+            && line.ancestors()[index + 1..]
                 .iter()
                 .all(|ancestor| ancestor.index == 0);
         if !starts {
             return None;
         }
-        let list = line.ancestors.get(index.checked_sub(1)?)?;
+        let list = line.ancestors().get(index.checked_sub(1)?)?;
         matches!(
             self.name(list.node_type),
             schema::BULLET_LIST | schema::ORDERED_LIST
         )
-        .then(|| (&line.ancestors[index], list))
+        .then(|| (&line.ancestors()[index], list))
     }
 }
 
@@ -431,7 +431,7 @@ fn attr_int(attrs: &Attrs, name: &str, default: i64) -> i64 {
 
 impl SourceSpelling for CommonMarkSpelling {
     fn line_prefix(&self, line: &Line) -> Option<String> {
-        let block = line.ancestors.last()?;
+        let block = line.ancestors().last()?;
         if self.name(block.node_type) == schema::HEADING {
             let level = attr_int(&block.attrs, "level", 1).clamp(1, 6) as usize;
             return Some(format!("{} ", "#".repeat(level)));
@@ -455,7 +455,7 @@ impl SourceSpelling for CommonMarkSpelling {
     }
 
     fn verbatim_fence(&self, line: &Line) -> Option<(String, String)> {
-        let block = line.ancestors.last()?;
+        let block = line.ancestors().last()?;
         if self.name(block.node_type) != schema::CODE_BLOCK {
             return None;
         }

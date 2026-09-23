@@ -154,7 +154,7 @@ fn projected_delimiters_keep_their_caret_stops() {
     }
     assert!(positions.len() > 7, "delimiters add caret stops");
     let strong = codec.schema.mark_id(md::STRONG).unwrap();
-    assert!(line.runs.iter().any(|run| {
+    assert!(line.runs().iter().any(|run| {
         run.marks.contains_type(strong)
             && matches!(run.content, markraft_core::projection::RunContent::Text(_))
     }));

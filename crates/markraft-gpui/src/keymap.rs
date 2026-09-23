@@ -117,9 +117,9 @@ impl DocTypes {
         };
         let line = &projection.lines()[index];
         line.pos_to_offset(selection.head(doc)) == Some(0)
-            && line.ancestors.last().is_some_and(|own| own.index == 0)
+            && line.ancestors().last().is_some_and(|own| own.index == 0)
             && line
-                .ancestors
+                .ancestors()
                 .iter()
                 .nth_back(1)
                 .is_some_and(|parent| self.is_item(parent.node_type))
@@ -521,16 +521,15 @@ fn convert_items(types: &DocTypes, item: NodeTypeId) -> Command {
         let projection = projection_of(state);
         let mut positions = std::collections::BTreeSet::new();
         for line in projection.lines() {
-            if line.to < from || line.from > to || (from != to && line.from == to) {
+            if line.to() < from || line.from() > to || (from != to && line.from() == to) {
                 continue;
             }
-            if let Some(ancestor) = line
-                .ancestors
+            if let Some(index) = line
+                .ancestors()
                 .iter()
-                .rev()
-                .find(|a| types.is_item(a.node_type))
+                .rposition(|a| types.is_item(a.node_type))
             {
-                positions.insert(ancestor.before);
+                positions.insert(line.ancestor_before(index));
             }
         }
         let mut changes = Vec::new();
@@ -739,11 +738,11 @@ mod tests {
             .iter()
             .find(|line| {
                 projection
-                    .line_text(projection.line_at(line.from).expect("a line"))
+                    .line_text(projection.line_at(line.from()).expect("a line"))
                     .is_some_and(|text| text == needle)
             })
             .expect("a line holding the text");
-        line.from
+        line.from()
     }
 
     #[test]
@@ -756,7 +755,7 @@ mod tests {
         // becomes a paragraph. CommonMark has no empty-paragraph spelling, so
         // the file just ends after the list's blank separator.
         let state = state_of("- one\n-\n");
-        let state = at(&state, projection_of(&state).lines()[1].to);
+        let state = at(&state, projection_of(&state).lines()[1].to());
         let lifted = after(&state, &enter(&types_of(&state))).expect("the lift applies");
         assert_eq!(lifted, "- one");
     }
@@ -801,7 +800,7 @@ mod tests {
         );
         // A grapheme cluster goes as a whole.
         let state = state_of("a👩‍👩‍👧");
-        let end = projection_of(&state).lines()[0].to;
+        let end = projection_of(&state).lines()[0].to();
         let state = at(&state, end);
         assert_eq!(
             after(&state, &backspace(&types_of(&state))).as_deref(),
@@ -835,7 +834,7 @@ mod tests {
         let (state, markdown) = table_state();
         let types = types_of(&state);
         let lines = projection_of(&state);
-        let (first, last) = (lines.lines()[0].from, lines.lines()[3].to);
+        let (first, last) = (lines.lines()[0].from(), lines.lines()[3].to());
         let stepped = applied(&at(&state, first), &indent(&types)).expect("Tab steps right");
         assert_eq!(to_markdown(state.schema(), stepped.doc()), markdown);
         assert_eq!(cell_of(&stepped), Some((0, 1)));
@@ -844,8 +843,8 @@ mod tests {
         assert_eq!(cell_of(&grown), Some((2, 0)));
         // ⇧Tab steps back, and stops rather than lifting the first cell out of
         // its row, which would leave that row one cell short.
-        let back =
-            applied(&at(&state, lines.lines()[1].from), &outdent(&types)).expect("⇧Tab steps left");
+        let back = applied(&at(&state, lines.lines()[1].from()), &outdent(&types))
+            .expect("⇧Tab steps left");
         assert_eq!(cell_of(&back), Some((0, 0)));
         let stopped = applied(&at(&state, first), &outdent(&types));
         assert!(stopped.is_none(), "⇧Tab in the first cell does nothing");
@@ -858,7 +857,7 @@ mod tests {
         let (state, markdown) = table_state();
         let types = types_of(&state);
         let lines = projection_of(&state);
-        let inside = lines.lines()[0].to;
+        let inside = lines.lines()[0].to();
         let moved = applied(&at(&state, inside), &enter(&types)).expect("Enter applies");
         assert_eq!(
             to_markdown(state.schema(), moved.doc()),
@@ -866,7 +865,7 @@ mod tests {
             "nothing was split"
         );
         assert_eq!(cell_of(&moved), Some((1, 0)));
-        let grown = applied(&at(&state, lines.lines()[3].to), &enter(&types)).expect("Enter");
+        let grown = applied(&at(&state, lines.lines()[3].to()), &enter(&types)).expect("Enter");
         assert_eq!(projection_of(&grown).lines().len(), 6, "a row was appended");
         assert_eq!(cell_of(&grown), Some((2, 1)));
         // ⌘⏎ adds a row under the caret's own row rather than at the bottom,
@@ -883,7 +882,7 @@ mod tests {
         let (state, markdown) = table_state();
         let types = types_of(&state);
         let lines = projection_of(&state);
-        let (start, end) = (lines.lines()[1].from, lines.lines()[1].to);
+        let (start, end) = (lines.lines()[1].from(), lines.lines()[1].to());
         let stopped = applied(&at(&state, start), &backspace(&types)).expect("the guard applies");
         assert_eq!(to_markdown(state.schema(), stopped.doc()), markdown);
         assert_eq!(cell_of(&stopped), Some((0, 1)), "and the caret stays put");
@@ -898,8 +897,10 @@ mod tests {
         assert_ne!(to_markdown(state.schema(), deleted.doc()), markdown);
         // A selection reaching out of the cell is refused outright.
         let across = state
-            .update([TransactionSpec::new()
-                .selection(Selection::text(lines.lines()[0].from, lines.lines()[1].to))])
+            .update([TransactionSpec::new().selection(Selection::text(
+                lines.lines()[0].from(),
+                lines.lines()[1].to(),
+            ))])
             .expect("a selection")
             .state()
             .clone();
@@ -915,7 +916,7 @@ mod tests {
     fn backspace_at_the_start_of_an_empty_table_takes_it() {
         let state = state_of("|   |   |\n| - | - |");
         let types = types_of(&state);
-        let start = projection_of(&state).lines()[0].from;
+        let start = projection_of(&state).lines()[0].from();
         let taken = applied(&at(&state, start), &backspace(&types)).expect("the table goes");
         assert_eq!(to_markdown(state.schema(), taken.doc()), "");
     }
@@ -939,7 +940,7 @@ mod tests {
     fn backspace_at_heading_start_demotes_and_hash_promotes() {
         let state = state_of("## title");
         let types = types_of(&state);
-        let start = projection_of(&state).lines()[0].from;
+        let start = projection_of(&state).lines()[0].from();
         let demoted = applied(&at(&state, start), &backspace(&types)).expect("demotes");
         assert_eq!(to_markdown(state.schema(), demoted.doc()), "# title");
         let head = demoted.selection().head(demoted.doc());
@@ -947,7 +948,7 @@ mod tests {
         assert_eq!(to_markdown(state.schema(), promoted.doc()), "## title");
         let h1 = state_of("# title");
         let cleared = applied(
-            &at(&h1, projection_of(&h1).lines()[0].from),
+            &at(&h1, projection_of(&h1).lines()[0].from()),
             &backspace(&types_of(&h1)),
         )
         .expect("clears to paragraph");
@@ -958,7 +959,7 @@ mod tests {
     fn backspace_at_quote_start_lifts() {
         let state = state_of("> quoted");
         let types = types_of(&state);
-        let start = projection_of(&state).lines()[0].from;
+        let start = projection_of(&state).lines()[0].from();
         let lifted = applied(&at(&state, start), &backspace(&types)).expect("lifts");
         assert_eq!(to_markdown(state.schema(), lifted.doc()), "quoted");
     }
@@ -1000,7 +1001,7 @@ mod tests {
     #[test]
     fn enter_in_an_empty_completed_task_leaves_the_list() {
         let state = state_of("- [x] ");
-        let state = at(&state, projection_of(&state).lines()[0].from);
+        let state = at(&state, projection_of(&state).lines()[0].from());
         assert_eq!(
             after(&state, &enter(&types_of(&state))).as_deref(),
             Some("")
@@ -1019,7 +1020,7 @@ mod tests {
         // Outside a task item the same key leaves a code block: a new, empty
         // block after it. Empty paragraphs have no Markdown spelling.
         let state = state_of("```\ncode\n```");
-        let end = projection_of(&state).lines()[0].to;
+        let end = projection_of(&state).lines()[0].to();
         let state = at(&state, end);
         assert_eq!(
             after(&state, &toggle_task(&types_of(&state))).as_deref(),
@@ -1058,7 +1059,7 @@ mod tests {
     fn typing_at_the_end_of_a_raw_block_stays_inside_it() {
         let state = state_of("<div>\nab\n</div>");
         let raw = state.doc().child(0).type_id();
-        let state = at(&state, projection_of(&state).lines()[0].to);
+        let state = at(&state, projection_of(&state).lines()[0].to());
         let typed = applied(&state, &insert_plain(&types_of(&state), "\nc"))
             .expect("the insertion applies");
         assert_eq!(
@@ -1076,13 +1077,14 @@ mod tests {
         let state = state_of("<div>");
         let types = types_of(&state);
         let line = projection_of(&state).lines()[0].clone();
-        let emptied = applied(&state, &delete_range(line.from, line.to)).expect("the text goes");
-        let emptied = at(&emptied, projection_of(&emptied).lines()[0].from);
+        let emptied =
+            applied(&state, &delete_range(line.from(), line.to())).expect("the text goes");
+        let emptied = at(&emptied, projection_of(&emptied).lines()[0].from());
         let cleared = applied(&emptied, &backspace(&types)).expect("Backspace applies");
         assert_eq!(cleared.doc().child_count(), 1);
         assert_eq!(Some(cleared.doc().child(0).type_id()), types.paragraph);
         // A raw block with text in it still loses one character at a time.
-        let state = at(&state, line.to);
+        let state = at(&state, line.to());
         let deleted = applied(&state, &backspace(&types)).expect("a grapheme goes");
         assert_eq!(to_markdown(state.schema(), deleted.doc()), "<div");
     }
@@ -1095,17 +1097,18 @@ mod tests {
         let state = state_of("a\n\n[r]: https://x.y");
         let types = types_of(&state);
         let line = projection_of(&state).lines()[1].clone();
-        let emptied = applied(&state, &delete_range(line.from, line.to)).expect("the text goes");
-        let emptied = at(&emptied, projection_of(&emptied).lines()[1].from);
+        let emptied =
+            applied(&state, &delete_range(line.from(), line.to())).expect("the text goes");
+        let emptied = at(&emptied, projection_of(&emptied).lines()[1].from());
         let joined = applied(&emptied, &backspace(&types)).expect("Backspace applies");
         assert_eq!(to_markdown(state.schema(), joined.doc()), "a");
         assert_eq!(joined.doc().child_count(), 1);
         assert_eq!(Some(joined.doc().child(0).type_id()), types.paragraph);
-        let end = projection_of(&joined).lines()[0].to;
+        let end = projection_of(&joined).lines()[0].to();
         assert_eq!(joined.selection().head(joined.doc()), end);
 
         let state = state_of("a\n\n```\n```");
-        let state = at(&state, projection_of(&state).lines()[1].from);
+        let state = at(&state, projection_of(&state).lines()[1].from());
         let cleared = applied(&state, &backspace(&types_of(&state))).expect("Backspace applies");
         assert_eq!(cleared.doc().child_count(), 2);
         assert_eq!(Some(cleared.doc().child(1).type_id()), types.paragraph);
@@ -1120,7 +1123,7 @@ mod tests {
             Some("one\n\ntwo")
         );
         let state = state_of("```\n\n```");
-        let state = at(&state, projection_of(&state).lines()[0].to);
+        let state = at(&state, projection_of(&state).lines()[0].to());
         assert_eq!(
             after(&state, &insert_plain(&types_of(&state), "a\nb")).as_deref(),
             Some("```\na\nb\n```")

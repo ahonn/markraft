@@ -38,12 +38,13 @@ pub(crate) fn active_marks(state: &EditorState, syntax: Option<MarkTypeId>) -> M
     let mut common: Option<MarkSet> = None;
     let projection = markraft_core::projection::projection_of(state);
     for line in projection.lines() {
-        if line.to <= from || line.from >= to {
+        if line.to() <= from || line.from() >= to {
             continue;
         }
         let shown = crate::conceal::shown(syntax, line, &Reveal::nothing());
-        for (run, shown) in line.runs.iter().zip(shown) {
-            if run.from.max(from) >= run.to.min(to) || shown == Shown::Hidden {
+        for (run, shown) in line.runs().iter().zip(shown) {
+            if line.abs(run.start).max(from) >= line.abs(run.end).min(to) || shown == Shown::Hidden
+            {
                 continue;
             }
             common = Some(match common.take() {
@@ -67,11 +68,11 @@ pub(crate) fn active_block_type(
 ) -> Option<(NodeTypeId, Attrs)> {
     let mut lines = touched_lines(state, projection).peekable();
     let first = lines.next()?;
-    let own = first.ancestors.last()?;
+    let own = first.ancestors().last()?;
     let (ty, attrs) = (own.node_type, own.attrs.clone());
     lines
         .all(|line| {
-            line.ancestors
+            line.ancestors()
                 .last()
                 .is_some_and(|other| other.node_type == ty && other.attrs == attrs)
         })
@@ -245,7 +246,7 @@ mod tests {
         let heading = schema.node_id(md::HEADING).unwrap();
         let strong = schema.mark_id(md::STRONG).unwrap();
         let projection = projection_of(&state);
-        let para_start = projection.lines()[1].from;
+        let para_start = projection.lines()[1].from();
         let to_next_block = select(&state, 1, para_start);
         assert!(active_marks(&to_next_block, syntax()).contains_type(strong));
         assert_eq!(
@@ -291,7 +292,7 @@ mod tests {
             Some(paragraph)
         );
         // A cursor in the empty middle paragraph carries nothing.
-        let empty_line = projection.lines()[1].from;
+        let empty_line = projection.lines()[1].from();
         let cursor = select(&state, empty_line, empty_line);
         assert!(active_marks(&cursor, syntax()).is_empty());
     }

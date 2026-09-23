@@ -19,25 +19,29 @@ impl ChangeSet {
     /// Return a version of this set that applies to `doc` and leaves a valid
     /// document behind.
     ///
-    /// `doc` must have the size this set starts from. When the set is already
-    /// sound the sections are returned as they are, so mapping stays precise.
+    /// `doc` must have the size this set starts from and be valid itself: only
+    /// the part of the result the set rebuilt is validated
+    /// ([`Node::check_from`]), the rest is taken to be as valid as `doc`. When
+    /// the set is already sound the sections are returned as they are, so
+    /// mapping stays precise.
     /// Otherwise the touched span is collapsed into a single replacement and
     /// repaired with [`Fit::Auto`]: the content the set wanted to produce is
     /// kept, the structure around it is made valid, and position mapping inside
     /// the span becomes coarse.
     ///
     /// Verifying soundness costs one application plus one validation of the
-    /// result, so this is meant for rebasing, not for every edit.
+    /// rebuilt part of the result, so this is meant for rebasing, not for
+    /// every edit.
     pub fn repair_against(&self, doc: &Node) -> Result<ChangeSet, ChangeError> {
-        if doc.content_size() != self.len_before {
+        if doc.content_size() != self.length_before() {
             return Err(ChangeError::LengthMismatch {
-                expected: self.len_before,
+                expected: self.length_before(),
                 actual: doc.content_size(),
             });
         }
         let filtered = self.refilter_marks(doc)?;
         if let Ok(result) = filtered.apply(doc)
-            && result.check(&self.schema).is_ok()
+            && result.check_from(doc, &self.schema).is_ok()
         {
             return Ok(filtered);
         }
@@ -77,7 +81,7 @@ impl ChangeSet {
             }
             pos = end;
         }
-        Ok(builder.finish(&self.schema, self.len_before))
+        Ok(builder.finish(&self.schema, self.length_before()))
     }
 
     /// The tokens this set produces for the span `lo..hi` of `doc`.

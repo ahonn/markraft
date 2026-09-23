@@ -119,6 +119,10 @@ pub struct HistoryState {
     pub(crate) group_started: bool,
     /// Whether an IME composition is folding into the top entry.
     pub(crate) composing: bool,
+    /// Whether the transaction that produced this value threw the branches
+    /// away because an entry could not be rebased over it. Cleared by the next
+    /// transaction; see [`history_lost`](super::history_lost).
+    pub(crate) lost: bool,
 }
 
 impl std::fmt::Debug for HistoryState {
@@ -128,6 +132,7 @@ impl std::fmt::Debug for HistoryState {
             .field("undone", &self.undone.len())
             .field("group_depth", &self.group_depth)
             .field("composing", &self.composing)
+            .field("lost", &self.lost)
             .finish()
     }
 }
@@ -143,6 +148,7 @@ impl HistoryState {
             group_depth: 0,
             group_started: false,
             composing: false,
+            lost: false,
         }
     }
 
@@ -281,8 +287,9 @@ impl HistoryState {
 
     /// Move every event into the frame `changes` produces.
     ///
-    /// Returns an empty history when a rebase fails, which is the only safe
-    /// answer: an event that cannot be rebased cannot be applied either.
+    /// Returns an empty history, marked `lost`, when a rebase fails, which is
+    /// the only safe answer: an event that cannot be rebased cannot be applied
+    /// either.
     pub(crate) fn add_mapping(
         &self,
         schema: &Schema,
@@ -300,6 +307,7 @@ impl HistoryState {
             _ => HistoryState {
                 done: Vec::new(),
                 undone: Vec::new(),
+                lost: true,
                 ..self.clone()
             },
         }
@@ -316,14 +324,10 @@ fn merge_events(event: &HistEvent, last: &HistEvent) -> HistEvent {
         (Some(new), Some(old)) => new.compose(old).ok(),
         (new, _) => new.clone(),
     };
-    let mut effects = StateEffect::map_all(
-        &event.effects,
-        &last
-            .changes
-            .as_ref()
-            .map(ChangeSet::desc)
-            .unwrap_or_else(|| crate::change::ChangeDesc::empty(0)),
-    );
+    let mut effects = match &last.changes {
+        Some(changes) => StateEffect::map_all(&event.effects, changes.desc()),
+        None => StateEffect::map_all(&event.effects, &crate::change::ChangeDesc::empty(0)),
+    };
     effects.extend(last.effects.iter().cloned());
     HistEvent {
         changes,
@@ -428,13 +432,13 @@ fn map_event(
     let mut selections: Vec<Selection> = event
         .selections_after
         .iter()
-        .map(|selection| selection.map(schema, &mapped_doc, &desc))
+        .map(|selection| selection.map(schema, &mapped_doc, desc))
         .collect();
     selections.extend(partial);
 
     let Some(event_changes) = &event.changes else {
         let mut mapped = HistEvent::selection(selections);
-        mapped.effects = StateEffect::map_all(&event.effects, &desc);
+        mapped.effects = StateEffect::map_all(&event.effects, desc);
         return Some((mapped, None));
     };
 
@@ -455,10 +459,10 @@ fn map_event(
     let start_selection = event
         .start_selection
         .as_ref()
-        .map(|selection| selection.map(schema, &new_lower_doc, &changes_over_event.desc()));
+        .map(|selection| selection.map(schema, &new_lower_doc, changes_over_event.desc()));
     let mapped = HistEvent {
         changes: Some(event_over_changes),
-        effects: StateEffect::map_all(&event.effects, &desc),
+        effects: StateEffect::map_all(&event.effects, desc),
         mapped: Some(owed.clone()),
         start_selection,
         selections_after: selections,

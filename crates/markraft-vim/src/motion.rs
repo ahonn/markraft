@@ -152,7 +152,7 @@ pub(crate) fn line_from(projection: &Projection, pos: usize) -> usize {
     projection
         .lines()
         .iter()
-        .position(|line| line.to >= pos)
+        .position(|line| line.to() >= pos)
         .unwrap_or_else(|| last_line(projection))
 }
 
@@ -164,27 +164,27 @@ pub(crate) fn last_line(projection: &Projection) -> usize {
 /// tokens are structural positions, not additional stops for Vim motions.
 pub(crate) fn line_start(projection: &Projection, index: usize) -> usize {
     let line = &projection.lines()[index.min(last_line(projection))];
-    line.offset_to_pos(0).unwrap_or(line.from)
+    line.offset_to_pos(0).unwrap_or(line.from())
 }
 
 pub(crate) fn line_end(projection: &Projection, index: usize) -> usize {
     let line = &projection.lines()[index.min(last_line(projection))];
-    line.offset_to_pos(line.len()).unwrap_or(line.to)
+    line.offset_to_pos(line.len()).unwrap_or(line.to())
 }
 
 /// `pos` brought inside a line of the document.
 pub(crate) fn clamp(projection: &Projection, pos: usize) -> usize {
     let line = &projection.lines()[line_of(projection, pos)];
-    let pos = pos.clamp(line.from, line.to);
+    let pos = pos.clamp(line.from(), line.to());
     line.pos_to_offset(pos)
         .and_then(|offset| line.offset_to_pos(offset))
-        .unwrap_or(line.from)
+        .unwrap_or(line.from())
 }
 
 /// The words of one whole line, as document position ranges.
 fn line_words(projection: &Projection, line: usize) -> Vec<Range<usize>> {
     let entry = &projection.lines()[line.min(last_line(projection))];
-    words(projection, entry.from, entry.to)
+    words(projection, entry.from(), entry.to())
 }
 
 /// The words between `from` and `to` as vim sees them: a run of keyword
@@ -317,8 +317,8 @@ pub(crate) fn first_non_blank(projection: &Projection, line: usize) -> usize {
 pub(crate) fn last_grapheme_of(projection: &Projection, line: usize) -> usize {
     let entry = &projection.lines()[line.min(last_line(projection))];
     projection
-        .prev_grapheme_in_line(entry.to)
-        .unwrap_or(entry.from)
+        .prev_grapheme_in_line(entry.to())
+        .unwrap_or(entry.from())
 }
 
 /// The position one grapheme before `pos`, never leaving its line.
@@ -357,7 +357,7 @@ fn previous_word_start(projection: &Projection, from: usize) -> usize {
     let from = clamp(projection, from);
     // Only the text before the cursor is segmented, so a cursor inside a word finds
     // that word's own start rather than skipping to the one before it.
-    if let Some(word) = words(projection, projection.lines()[index].from, from).last() {
+    if let Some(word) = words(projection, projection.lines()[index].from(), from).last() {
         return word.start;
     }
     if index == 0 {

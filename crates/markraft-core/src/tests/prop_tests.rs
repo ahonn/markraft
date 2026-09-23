@@ -731,3 +731,183 @@ fn transform_survives_concurrent_structural_edits() {
         "{diverged} of {ran} structural rounds diverged"
     );
 }
+
+/// One random edit of `d`, or `None` when the drawn edit does not apply.
+///
+/// The mix covers structural edits both repaired and taken at face value, text
+/// typed and deleted inside a textblock, deletions and insertions anywhere
+/// with no repair, and mark changes — so the result is sometimes valid and
+/// sometimes not.
+fn random_mutation(schema: &Schema, rng: &mut Rng, d: &Node) -> Option<Node> {
+    let size = d.content_size();
+    let a = rng.below(size + 1);
+    let b = rng.below(size + 1);
+    let (from, to) = (a.min(b), a.max(b));
+    let changes: Vec<Change> = match rng.below(7) {
+        0 => random_structural_change(schema, rng, d)?,
+        1 => random_structural_change(schema, rng, d)?
+            .into_iter()
+            .map(|change| change.with_fit(Fit::No))
+            .collect(),
+        2 => vec![random_inline_change(schema, rng, d)?],
+        3 => vec![Change::delete(from, to)],
+        4 => vec![match rng.below(3) {
+            0 => Change::add_mark(from, to, m(schema, "strong")),
+            1 => Change::add_mark(from, to, link(schema, "https://example.com")),
+            _ => Change::remove_mark(from, to, m(schema, "em")),
+        }],
+        5 => vec![Change::insert(
+            from,
+            Slice::from_fragment(Fragment::from_node(match rng.below(3) {
+                0 => tm(schema, "s", &["strong"]),
+                1 => n(schema, "horizontal_rule", []),
+                _ => img(schema, "pic.png"),
+            })),
+        )],
+        _ => vec![Change::replace(from, to, random_slice(schema, rng))],
+    };
+    let set = ChangeSet::create(schema, d, changes).ok()?;
+    set.apply(d).ok()
+}
+
+#[test]
+fn check_from_agrees_with_a_full_check() {
+    let schema = test_schema();
+    let (mut valid, mut invalid) = (0, 0);
+    for seed in 0..ROUNDS as u64 {
+        let mut rng = Rng::new(seed + 104_729);
+        // Chain a few edits, always from the last valid document, since that
+        // is what `check_from` assumes of its baseline.
+        let mut current = random_doc(&schema, &mut rng);
+        for step in 0..4 {
+            let Some(next) = random_mutation(&schema, &mut rng, &current) else {
+                continue;
+            };
+            let full = next.check(&schema);
+            let incremental = next.check_from(&current, &schema);
+            assert_eq!(
+                full.is_ok(),
+                incremental.is_ok(),
+                "seed {seed} step {step}: check says {full:?}, check_from says {incremental:?} \
+                 for {} from {}",
+                schema.describe(&next),
+                schema.describe(&current),
+            );
+            if full.is_ok() {
+                valid += 1;
+                current = next;
+            } else {
+                invalid += 1;
+            }
+        }
+    }
+    assert!(
+        valid > ROUNDS && invalid > ROUNDS / 4,
+        "too little coverage: {valid} valid, {invalid} invalid results"
+    );
+}
+
+/// The cached description, next to one computed from the sections now.
+fn assert_desc_is_fresh(set: &ChangeSet, what: &str, seed: u64) {
+    let fresh = crate::change::ChangeDesc::of_sections(&set.sections, set.length_before());
+    assert_eq!(
+        set.desc(),
+        &fresh,
+        "seed {seed}: stale description after {what}"
+    );
+    assert_eq!(set.desc().length_after(), set.length_after());
+}
+
+#[test]
+fn a_change_sets_cached_description_matches_its_sections() {
+    let schema = test_schema();
+    let mut ran = 0;
+    for seed in 0..ROUNDS as u64 {
+        let mut rng = Rng::new(seed + 15_485_863);
+        let d = random_doc(&schema, &mut rng);
+        assert_desc_is_fresh(&ChangeSet::empty(&schema, d.content_size()), "empty", seed);
+        let Some(a) = make(&schema, &d, vec![random_change(&schema, &mut rng, &d)]) else {
+            continue;
+        };
+        assert_desc_is_fresh(&a, "create", seed);
+        let Ok(after_a) = a.apply(&d) else { continue };
+        assert_desc_is_fresh(&a.invert(&d).expect("invertible"), "invert", seed);
+        let json = ChangeSet::from_json(&schema, &a.to_json()).expect("round trip");
+        assert_desc_is_fresh(&json, "from_json", seed);
+        let size = d.content_size();
+        let cut = rng.below(size + 1);
+        let restricted = crate::state::filters::restrict_changes(&a, &[(0, cut)]);
+        assert_desc_is_fresh(&restricted, "restrict_changes", seed);
+        if let Some(b) = make(
+            &schema,
+            &after_a,
+            vec![random_change(&schema, &mut rng, &after_a)],
+        ) {
+            assert_desc_is_fresh(&b, "create", seed);
+            assert_desc_is_fresh(&a.compose(&b).expect("composable"), "compose", seed);
+        }
+        if let Some(c) = make(&schema, &d, vec![random_change(&schema, &mut rng, &d)])
+            && let Ok((a_over_c, c_over_a)) = a.transform(&d, &c, true)
+        {
+            assert_desc_is_fresh(&a_over_c, "transform", seed);
+            assert_desc_is_fresh(&c_over_a, "transform", seed);
+        }
+        ran += 1;
+    }
+    assert!(ran > ROUNDS / 2, "only {ran} of {ROUNDS} rounds ran");
+}
+
+/// The tokens that are content rather than structure: one per character and
+/// one per non-text leaf.
+fn leaf_tokens(fragment: &Fragment) -> usize {
+    fragment
+        .iter()
+        .map(|node| {
+            if node.is_text() {
+                node.text_len()
+            } else if node.is_leaf() {
+                1
+            } else {
+                leaf_tokens(node.content())
+            }
+        })
+        .sum()
+}
+
+#[test]
+fn a_fitted_replacement_that_reports_nothing_dropped_keeps_all_its_content() {
+    let schema = test_schema();
+    let (mut kept, mut dropped) = (0, 0);
+    for seed in 0..ROUNDS as u64 {
+        let mut rng = Rng::new(seed + 32_452_843);
+        let d = random_doc(&schema, &mut rng);
+        let size = d.content_size();
+        let a = rng.below(size + 1);
+        let b = rng.below(size + 1);
+        let (from, to) = (a.min(b), a.max(b));
+        let slice = random_slice(&schema, &mut rng);
+        let change = Change::replace(from, to, slice.clone()).with_fit(Fit::Auto);
+        let Some(set) = make(&schema, &d, vec![change]) else {
+            continue;
+        };
+        let out = set.apply(&d).expect("a fitted set applies");
+        let removed = leaf_tokens(d.slice(from, to).expect("in range").content());
+        let expected = leaf_tokens(d.content()) - removed + leaf_tokens(slice.content());
+        let actual = leaf_tokens(out.content());
+        if set.dropped_tokens() == 0 {
+            assert_eq!(
+                actual,
+                expected,
+                "seed {seed}: content went missing from {} without a report",
+                schema.describe(&out)
+            );
+            kept += 1;
+        } else {
+            dropped += 1;
+        }
+    }
+    assert!(
+        kept > ROUNDS / 4 && dropped > 0,
+        "{kept} kept, {dropped} dropped"
+    );
+}

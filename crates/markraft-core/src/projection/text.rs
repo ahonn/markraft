@@ -80,22 +80,20 @@ impl Projection {
     /// belong to no line and answer `None`.
     pub fn line_at(&self, pos: usize) -> Option<usize> {
         let lines = self.lines();
-        let index = match lines.binary_search_by(|line| line.from.cmp(&pos)) {
+        let index = match lines.binary_search_by(|line| line.from().cmp(&pos)) {
             Ok(index) => index,
             Err(0) => return None,
             Err(index) => index - 1,
         };
         let line = lines.get(index)?;
-        (pos >= line.from && pos <= line.to).then_some(index)
+        (pos >= line.from() && pos <= line.to()).then_some(index)
     }
 
     /// Whether a caret may sit at `pos`: inside some line's text.
     pub fn is_caret_position(&self, pos: usize) -> bool {
         self.line_at(pos)
             .and_then(|index| self.line(index))
-            .is_some_and(|line| {
-                line.kind == LineKind::Textblock && line.positions.binary_search(&pos).is_ok()
-            })
+            .is_some_and(|line| line.kind() == LineKind::Textblock && line.is_position(pos))
     }
 
     /// `pos` as a line index and a `char` offset into that line's text.
@@ -128,7 +126,7 @@ impl Projection {
     /// The UTF-16 offset of `pos` inside line `line`'s text.
     pub fn utf16_offset(&self, line: usize, pos: usize) -> Option<usize> {
         let entry = self.line(line)?;
-        if pos < entry.from || pos > entry.to {
+        if pos < entry.from() || pos > entry.to() {
             return None;
         }
         let text = self.line_text(line)?;
@@ -156,7 +154,7 @@ impl Projection {
     /// A document position as a UTF-16 offset into [`Projection::plain_text`].
     pub fn pos_to_utf16(&self, pos: usize) -> Option<usize> {
         let line = self.line_at(pos)?;
-        Some(self.line(line)?.utf16_start + self.utf16_offset(line, pos)?)
+        Some(self.line(line)?.utf16_start() + self.utf16_offset(line, pos)?)
     }
 
     /// A UTF-16 offset into [`Projection::plain_text`] as a document position.
@@ -165,13 +163,13 @@ impl Projection {
         if lines.is_empty() {
             return None;
         }
-        let index = match lines.binary_search_by(|line| line.utf16_start.cmp(&offset)) {
+        let index = match lines.binary_search_by(|line| line.utf16_start().cmp(&offset)) {
             Ok(index) => index,
             Err(0) => 0,
             Err(index) => index - 1,
         };
         let line = &lines[index];
-        self.pos_from_utf16(index, offset.saturating_sub(line.utf16_start))
+        self.pos_from_utf16(index, offset.saturating_sub(line.utf16_start()))
     }
 
     /// A UTF-16 range over [`Projection::plain_text`] as a position range.
@@ -310,7 +308,7 @@ impl Projection {
     pub fn text_between(&self, from: usize, to: usize) -> Option<&str> {
         let (line, offset) = self.pos_to_line_offset(from)?;
         let entry = self.line(line)?;
-        if to < from || to > entry.to {
+        if to < from || to > entry.to() {
             return None;
         }
         let text = self.line_text(line)?;

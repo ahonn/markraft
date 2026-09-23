@@ -985,3 +985,70 @@ fn transform_diverges_only_on_overlapping_conflicts() {
             .expect("applies")
     );
 }
+
+#[test]
+fn a_paste_that_cannot_fit_reports_what_it_dropped() {
+    use crate::fit::Fit;
+    use crate::protocol::content_dropped;
+    use crate::state::{Extension, TransactionSpec};
+
+    let schema = shared_schema();
+    let d = doc(&schema, [n(&schema, "code_block", [t(&schema, "code")])]);
+    // A code block takes only text: the image cannot go anywhere, and the
+    // blockquote and its paragraph are taken apart to keep their text.
+    let pasted = Slice::from_fragment(Fragment::from_nodes([
+        img(&schema, "a.png"),
+        n(
+            &schema,
+            "blockquote",
+            [n(&schema, "paragraph", [t(&schema, "kept")])],
+        ),
+    ]));
+    let change = Change::insert(3, pasted).with_fit(Fit::Auto);
+    let fitted = set(&schema, &d, vec![change.clone()]);
+    assert_eq!(fitted.dropped_tokens(), 1 + 2 + 2);
+    assert_eq!(
+        schema.describe(&fitted.apply(&d).unwrap()),
+        r#"doc(code_block("cokeptde"))"#
+    );
+
+    let start = state(d.clone(), Extension::none());
+    let tr = start
+        .update([TransactionSpec::new().changes([change])])
+        .unwrap();
+    assert_eq!(tr.annotation(content_dropped()), Some(&5));
+
+    // Text fits as it is: nothing is dropped and nothing is reported.
+    let plain = Change::insert(3, text_slice(&schema, "xy")).with_fit(Fit::Auto);
+    assert_eq!(set(&schema, &d, vec![plain.clone()]).dropped_tokens(), 0);
+    let tr = start
+        .update([TransactionSpec::new().changes([plain])])
+        .unwrap();
+    assert_eq!(tr.annotation(content_dropped()), None);
+}
+
+#[test]
+fn dropped_tokens_add_up_under_composition_and_do_not_affect_equality() {
+    use crate::fit::Fit;
+
+    let schema = shared_schema();
+    let d = doc(&schema, [n(&schema, "code_block", [t(&schema, "code")])]);
+    let rule = Slice::from_fragment(Fragment::from_node(n(&schema, "horizontal_rule", [])));
+    let first = set(
+        &schema,
+        &d,
+        vec![Change::insert(2, rule.clone()).with_fit(Fit::Auto)],
+    );
+    assert_eq!(first.dropped_tokens(), 1);
+    // Dropping the rule left nothing to insert, so the set is the empty one.
+    assert!(first.is_empty());
+    assert_eq!(first, ChangeSet::empty(&schema, d.content_size()));
+
+    let second = set(
+        &schema,
+        &d,
+        vec![Change::insert(4, rule).with_fit(Fit::Auto)],
+    );
+    assert_eq!(first.compose(&second).unwrap().dropped_tokens(), 2);
+    assert_eq!(first.invert(&d).unwrap().dropped_tokens(), 0);
+}

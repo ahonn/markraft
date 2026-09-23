@@ -152,7 +152,7 @@ pub(crate) fn resolve_changes(
         return None;
     }
     let doc = set.apply(state.doc()).ok()?;
-    doc.check(state.schema()).ok()?;
+    doc.check_from(state.doc(), state.schema()).ok()?;
     Some((set, doc))
 }
 
@@ -183,7 +183,10 @@ pub(crate) fn resolve_rounds(
     if set.is_empty() {
         return None;
     }
-    doc.check(schema).ok()?;
+    // Only the final document has to be valid — a round may pass through a
+    // shape the schema rejects — so it is checked against the one document
+    // known to be valid, which it shares every untouched subtree with.
+    doc.check_from(state.doc(), schema).ok()?;
     Some((set, doc))
 }
 

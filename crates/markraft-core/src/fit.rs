@@ -15,7 +15,9 @@
 //!
 //! The repair is returned as an adjusted change — a list of token-level
 //! replacements — rather than applied as a side effect, so that inversion and
-//! position mapping stay exact.
+//! position mapping stay exact. How many tokens of the input it had to drop is
+//! returned with it, so a caller can tell a repair that reshaped content from
+//! one that lost some.
 
 use crate::error::ChangeError;
 use crate::node::{Markup, Node};
@@ -66,6 +68,8 @@ struct Fitter<'a> {
     fit: &'a Fit,
     frames: Vec<Frame<'a>>,
     out: Vec<Token>,
+    /// Tokens of the input the repair gave up on.
+    dropped: usize,
 }
 
 impl<'a> Fitter<'a> {
@@ -254,6 +258,15 @@ impl<'a> Fitter<'a> {
                 }
                 None => {
                     if let Some(open_at) = frame.open_at {
+                        // The frame cannot be completed, so what it holds goes
+                        // with it.
+                        self.dropped += self.out[open_at..]
+                            .iter()
+                            .map(|token| match token {
+                                Token::Node(node) => node.node_size(),
+                                Token::Open(_) | Token::Close(_) => 0,
+                            })
+                            .sum::<usize>();
                         self.out.truncate(open_at);
                         if let Some(parent) = frame.parent_match {
                             self.set_top_match(parent);
@@ -295,11 +308,7 @@ impl<'a> Fitter<'a> {
             for token in crate::slice::node_tokens(node) {
                 match token {
                     Token::Open(markup) => self.place_open(&markup),
-                    Token::Close(_) => {
-                        if self.frames.len() > 1 {
-                            self.close();
-                        }
-                    }
+                    Token::Close(_) => self.place_close(),
                     Token::Node(child) => self.place_node(&child, depth + 1),
                 }
             }
@@ -337,11 +346,15 @@ impl<'a> Fitter<'a> {
             }
             break;
         }
-        // The node cannot be placed. Salvage its content if it has any.
+        // The node cannot be placed. Salvage its content if it has any; only
+        // the container's own open and close tokens are lost then.
         if node.is_container() && node.child_count() > 0 && depth < PLACE_GUARD {
+            self.dropped += 2;
             for child in node.children() {
                 self.place_node(child, depth + 1);
             }
+        } else {
+            self.dropped += node.node_size();
         }
     }
 
@@ -372,7 +385,9 @@ impl<'a> Fitter<'a> {
             }
             break;
         }
-        // Keep the content but forget the container.
+        // Keep the content but forget the container. Its open token is lost
+        // here, its close token when `place_close` swallows it.
+        self.dropped += 1;
         let m = self.top().m;
         self.frames.push(Frame {
             markup: markup.clone(),
@@ -383,20 +398,30 @@ impl<'a> Fitter<'a> {
         });
     }
 
+    /// Handle a close token of the input.
+    fn place_close(&mut self) {
+        if self.frames.len() > 1 {
+            if self.top().dropped {
+                self.dropped += 1;
+            }
+            self.close();
+        }
+    }
+
     fn repair(&mut self, tokens: &[Token]) {
         for token in tokens {
             match token {
                 Token::Node(node) => self.place_node(node, 0),
                 Token::Open(markup) => self.place_open(markup),
-                Token::Close(_) => {
-                    if self.frames.len() > 1 {
-                        self.close();
-                    }
-                }
+                Token::Close(_) => self.place_close(),
             }
         }
     }
 }
+
+/// The concrete replacements a fitted change becomes, and how many tokens the
+/// repair dropped. See [`fit_replacement`].
+pub(crate) type FittedReplacement = (Vec<(usize, usize, Vec<Token>)>, usize);
 
 /// Turn a replacement into concrete token-level replacements.
 ///
@@ -404,6 +429,13 @@ impl<'a> Fitter<'a> {
 /// [`Fit::No`] that is always the change as given. Otherwise the range may be
 /// widened and a second part may be added further along, where the repair
 /// needs to close containers the replacement left open.
+///
+/// The second value counts the tokens the repair dropped: a node it could
+/// place nowhere counts in full, a container it took apart to salvage the
+/// content counts its own two tokens, and so does a container whose open and
+/// close tokens it discarded while keeping what was between them. Zero means
+/// nothing of the input — the replacement, or the content the repair pulled
+/// into it — was lost.
 pub(crate) fn fit_replacement(
     schema: &Schema,
     doc: &Node,
@@ -411,9 +443,9 @@ pub(crate) fn fit_replacement(
     to: usize,
     slice: &Slice,
     fit: &Fit,
-) -> Result<Vec<(usize, usize, Vec<Token>)>, ChangeError> {
+) -> Result<FittedReplacement, ChangeError> {
     if *fit == Fit::No {
-        return Ok(vec![(from, to, slice.tokens())]);
+        return Ok((vec![(from, to, slice.tokens())], 0));
     }
     let resolved_from = doc.resolve(from)?;
     let resolved_to = doc.resolve(to)?;
@@ -443,6 +475,7 @@ pub(crate) fn fit_replacement(
             dropped: false,
         }],
         out: Vec::new(),
+        dropped: 0,
     };
     fitter.simulate(&left)?;
     let left_frames = fitter.frames.len();
@@ -486,7 +519,7 @@ pub(crate) fn fit_replacement(
     if validates(
         schema, &container, &left, &middle, &right, to, tail_pos, &tail,
     ) {
-        return Ok(parts);
+        return Ok((parts, fitter.dropped));
     }
 
     // Second attempt: pull the rest of the enclosing node into the change and
@@ -502,6 +535,7 @@ pub(crate) fn fit_replacement(
             dropped: false,
         }],
         out: Vec::new(),
+        dropped: 0,
     };
     fitter.simulate(&left)?;
     debug_assert_eq!(fitter.frames.len(), left_frames);
@@ -525,7 +559,7 @@ pub(crate) fn fit_replacement(
         region_end,
         &[],
     ) {
-        return Ok(vec![(from, region_end, wide)]);
+        return Ok((vec![(from, region_end, wide)], fitter.dropped));
     }
     Err(ChangeError::Unfittable(
         "the replacement cannot be made to fit the schema".into(),

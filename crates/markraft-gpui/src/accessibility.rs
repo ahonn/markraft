@@ -205,7 +205,7 @@ impl AccessibleText {
                     .map(|piece| piece.text)
                     .collect()
             };
-            for run in &line.runs {
+            for run in line.runs() {
                 let markraft_core::projection::RunContent::Atom(node) = &run.content else {
                     continue;
                 };
@@ -215,11 +215,14 @@ impl AccessibleText {
                         .get("source")
                         .and_then(|value| value.as_str())
                         .unwrap_or_default();
-                    Some((ControlAction::EditHtml(run.from), html_label(source)))
+                    Some((
+                        ControlAction::EditHtml(line.abs(run.start)),
+                        html_label(source),
+                    ))
                 } else if Some(node.type_id()) == types.wiki_link {
                     let label = crate::wiki::wiki_link_label(node);
                     Some((
-                        ControlAction::OpenWikiLink(run.from),
+                        ControlAction::OpenWikiLink(line.abs(run.start)),
                         wiki_link_label(label),
                     ))
                 } else {
@@ -228,7 +231,8 @@ impl AccessibleText {
                 if let Some((action, label)) = control
                     && let Some(bounds) = row
                         .rectangles(
-                            row.pos_to_offset(run.from)..row.pos_to_offset(run.to),
+                            row.pos_to_offset(line.abs(run.start))
+                                ..row.pos_to_offset(line.abs(run.end)),
                             false,
                         )
                         .first()
@@ -323,13 +327,13 @@ impl AccessibleText {
                 self.runs.push(TextRun {
                     node_id: None,
                     from: if inner.start == 0 {
-                        line.from
+                        line.from()
                     } else {
                         line.offset_to_pos(inner.start)
                             .expect("a row starts in its line")
                     },
                     content_end: if inner.end == line.len() {
-                        line.to
+                        line.to()
                     } else {
                         line.offset_to_pos(inner.end)
                             .expect("a row ends in its line")
@@ -450,7 +454,7 @@ impl crate::EditorView {
         let line = self.projection.line(index)?;
         self.types
             .is_code_block(line)
-            .then(|| line.ancestors.last().map(|a| a.before))
+            .then(|| line.block_before())
             .flatten()
     }
 
@@ -517,13 +521,12 @@ impl crate::EditorView {
                         .iter()
                         .enumerate()
                         .find(|(_, line)| {
-                            self.types.is_code_block(line)
-                                && line.ancestors.last().is_some_and(|a| a.before == pos)
+                            self.types.is_code_block(line) && line.block_before() == Some(pos)
                         })
                 else {
                     return;
                 };
-                (index, line.from)
+                (index, line.from())
             }
         };
         if !activate
@@ -753,15 +756,15 @@ mod tests {
         let text = AccessibleText {
             runs: vec![TextRun {
                 node_id: Some(accesskit::NodeId(1)),
-                from: line.from,
-                content_end: line.to,
+                from: line.from(),
+                content_end: line.to(),
                 text: value.into(),
                 offsets,
                 positions: positions.clone(),
                 bounds: accesskit::Rect::ZERO,
                 cell: None,
             }],
-            selection: (line.from, line.to),
+            selection: (line.from(), line.to()),
             controls: Vec::new(),
         };
         for (index, pos) in positions.into_iter().enumerate() {
@@ -769,7 +772,7 @@ mod tests {
             assert_eq!(accessible.character_index, index);
             assert_eq!(text.position(accessible), Some(pos));
         }
-        assert_eq!(text.text_position(line.from).unwrap().character_index, 0);
+        assert_eq!(text.text_position(line.from()).unwrap().character_index, 0);
     }
 
     #[test]

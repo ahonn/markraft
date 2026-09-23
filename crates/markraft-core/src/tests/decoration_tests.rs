@@ -54,7 +54,7 @@ fn mapping_honours_the_inclusivity_flags() {
     let document = doc(&schema, [n(&schema, "paragraph", [t(&schema, "abcdef")])]);
     // Insert "XY" exactly at position 3, the start of one range and the end of
     // another.
-    let changes = edit(&document, 3, 3, "XY").desc();
+    let changes = edit(&document, 3, 3, "XY").desc().clone();
 
     let exclusive = RangeSet::from_items([RangeItem::new(3, 5, "a")]);
     let inclusive = RangeSet::from_items([RangeItem::new(3, 5, "a").inclusive(true, true)]);
@@ -71,7 +71,7 @@ fn mapping_honours_the_inclusivity_flags() {
 fn a_range_whose_content_is_deleted_is_dropped() {
     let schema = shared_schema();
     let document = doc(&schema, [n(&schema, "paragraph", [t(&schema, "abcdef")])]);
-    let changes = edit(&document, 2, 5, "").desc();
+    let changes = edit(&document, 2, 5, "").desc().clone();
     let set = RangeSet::from_items([
         RangeItem::new(2, 5, "gone"),
         RangeItem::new(1, 6, "kept"),
@@ -86,7 +86,7 @@ fn a_range_whose_content_is_deleted_is_dropped() {
 fn points_map_with_their_own_side() {
     let schema = shared_schema();
     let document = doc(&schema, [n(&schema, "paragraph", [t(&schema, "abcdef")])]);
-    let changes = edit(&document, 3, 3, "XY").desc();
+    let changes = edit(&document, 3, 3, "XY").desc().clone();
     let set = PointSet::from_items([PointItem::new(3, -1, "left"), PointItem::new(3, 1, "right")]);
     let mapped = set.map(&changes);
     assert_eq!(mapped.as_slice()[0].pos, 3);
@@ -113,7 +113,7 @@ fn a_decoration_set_maps_every_kind() {
     assert!(!set.is_empty());
     assert_eq!(set.find(2, 3).len(), 3); // inline, widget, tag
 
-    let changes = edit(&document, 1, 1, "XY").desc();
+    let changes = edit(&document, 1, 1, "XY").desc().clone();
     let mapped = set.map(&changes);
     assert_eq!(mapped.inline().as_slice()[0].from, 4);
     assert_eq!(mapped.nodes().as_slice()[0].from, 10);
@@ -157,7 +157,7 @@ fn the_facet_gathers_static_and_computed_sources() {
         |_| DecorationSet::from_decorations([Decoration::inline(1, 3, spec("field"))]),
         |value, tr| {
             if tr.doc_changed() {
-                value.map(&tr.changes().desc())
+                value.map(tr.changes().desc())
             } else {
                 value.clone()
             }

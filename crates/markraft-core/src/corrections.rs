@@ -291,7 +291,13 @@ fn run_corrections(tr: &Transaction) -> Option<TransactionSpec> {
         });
         doc = next;
     }
-    let accumulated = accumulated?;
+    let Some(accumulated) = accumulated else {
+        // Nothing could be applied. When the corrections still wanted
+        // something — the first round's changes could not be combined — that
+        // is divergence all the same, and the caller must hear about it.
+        return (!settled)
+            .then(|| TransactionSpec::new().annotate(corrections_diverged().of(true)));
+    };
     let mut spec = TransactionSpec::new().change_set(accumulated).sequential();
     if !settled {
         spec = spec.annotate(corrections_diverged().of(true));
@@ -320,7 +326,7 @@ fn selection_left(corrections: &[Correction], tr: &Transaction) -> Vec<usize> {
     let start = tr.start_state();
     let before = start
         .selection()
-        .map(start.schema(), tr.new_doc(), &tr.changes().desc());
+        .map(start.schema(), tr.new_doc(), tr.changes().desc());
     if before == tr.new_selection() {
         return Vec::new();
     }

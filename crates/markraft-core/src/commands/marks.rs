@@ -239,7 +239,7 @@ fn change_mark_spec(
     .ok()?;
     let changes = split.compose(&replacement).ok()?;
     let next = changes.apply(doc).ok()?;
-    next.check(schema).ok()?;
+    next.check_from(doc, schema).ok()?;
     let selection = if state.selection().anchor(doc) <= state.selection().head(doc) {
         Selection::text(start, end)
     } else {

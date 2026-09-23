@@ -103,7 +103,7 @@ pub(crate) fn shown<'l>(
     reveal: &Reveal,
 ) -> Vec<Shown<'l>> {
     let concealed: Vec<Option<Concealed<'l>>> = line
-        .runs
+        .runs()
         .iter()
         .map(|run| match run.content {
             RunContent::Text(_) => concealed(syntax, &run.marks),
@@ -113,17 +113,17 @@ pub(crate) fn shown<'l>(
     // Where each span runs on this line: from its first run's start to its
     // last run's end. A line holds a handful of spans at most.
     let mut extents: Vec<(i64, usize, usize)> = Vec::new();
-    for (run, concealed) in line.runs.iter().zip(&concealed) {
+    for (run, concealed) in line.runs().iter().zip(&concealed) {
         let Some(concealed) = concealed else { continue };
         match extents
             .iter_mut()
             .find(|(span, ..)| *span == concealed.span)
         {
             Some((_, from, to)) => {
-                *from = (*from).min(run.from);
-                *to = (*to).max(run.to);
+                *from = (*from).min(line.abs(run.start));
+                *to = (*to).max(line.abs(run.end));
             }
-            None => extents.push((concealed.span, run.from, run.to)),
+            None => extents.push((concealed.span, line.abs(run.start), line.abs(run.end))),
         }
     }
     concealed
@@ -159,17 +159,19 @@ pub fn concealed_steps(syntax: Option<MarkTypeId>, line: &Line, caret: usize) ->
     let shown = shown(syntax, line, &Reveal::at(caret..caret, None));
     let mut out: Vec<Range<usize>> = Vec::new();
     let mut joinable = false;
-    for (run, shown) in line.runs.iter().zip(shown) {
+    for (run, shown) in line.runs().iter().zip(shown) {
         match shown {
             Shown::Hidden => {
                 match out.last_mut() {
-                    Some(last) if joinable && last.end == run.from => last.end = run.to,
-                    _ => out.push(run.from..run.to),
+                    Some(last) if joinable && last.end == line.abs(run.start) => {
+                        last.end = line.abs(run.end)
+                    }
+                    _ => out.push(line.abs(run.start)..line.abs(run.end)),
                 }
                 joinable = true;
             }
             Shown::Display(_) => {
-                out.push(run.from..run.to);
+                out.push(line.abs(run.start)..line.abs(run.end));
                 joinable = false;
             }
             Shown::Source | Shown::Revealed => joinable = false,
@@ -193,13 +195,13 @@ pub(crate) struct Piece<'a> {
 /// What `line`, whose projected text is `text`, shows under `shown`, run by
 /// run — an atom as the projection's own placeholder.
 pub(crate) fn pieces<'a>(line: &Line, text: &'a str, shown: &[Shown<'a>]) -> Vec<Piece<'a>> {
-    let mut out = Vec::with_capacity(line.runs.len());
+    let mut out = Vec::with_capacity(line.runs().len());
     let mut chars = text
         .char_indices()
         .map(|(byte, _)| byte)
         .chain([text.len()]);
     let mut byte = chars.next().unwrap_or(0);
-    for (run, shown) in line.runs.iter().zip(shown) {
+    for (run, shown) in line.runs().iter().zip(shown) {
         let start = byte;
         for _ in run.char_from..run.char_to {
             byte = chars.next().unwrap_or(text.len());
@@ -379,7 +381,7 @@ mod tests {
     fn a_composition_inside_a_span_reveals_it() {
         let reveal = |line: &Line| {
             let pos = line.offset_to_pos(3).expect("a position");
-            Reveal::at(line.from..line.from, Some(pos..pos + 1))
+            Reveal::at(line.from()..line.from(), Some(pos..pos + 1))
         };
         assert_eq!(showing("x **ab** y", reveal), "x **ab** y");
     }

@@ -678,3 +678,199 @@ fn block_range_works_from_positions_between_blocks() {
     assert_eq!(range.depth(), 1);
     assert_eq!((range.start(), range.end()), (1, 9));
 }
+
+/// A document whose subtrees can be edited one at a time: a paragraph, a
+/// blockquote around a paragraph, and a bullet list whose item holds a
+/// paragraph.
+fn layered(schema: &crate::schema::Schema) -> Node {
+    doc(
+        schema,
+        [
+            n(schema, "paragraph", [t(schema, "top")]),
+            n(
+                schema,
+                "blockquote",
+                [n(schema, "paragraph", [t(schema, "quoted")])],
+            ),
+            n(
+                schema,
+                "bullet_list",
+                [n(
+                    schema,
+                    "list_item",
+                    [n(schema, "paragraph", [t(schema, "item")])],
+                )],
+            ),
+        ],
+    )
+}
+
+/// `node` with its child at `index` replaced, sharing every other child.
+fn with_child(node: &Node, index: usize, child: Node) -> Node {
+    node.copy(node.content().replace_child(index, child))
+}
+
+#[test]
+fn check_from_only_visits_what_changed_but_agrees_with_check() {
+    let schema = test_schema();
+    let old = layered(&schema);
+    old.check(&schema).expect("valid");
+    assert_eq!(old.check_from(&old, &schema), Ok(()));
+
+    // A valid edit deep inside the blockquote.
+    let quote = old.child(1);
+    let edited = with_child(
+        &old,
+        1,
+        with_child(quote, 0, n(&schema, "paragraph", [t(&schema, "quoted!")])),
+    );
+    assert_eq!(edited.check_from(&old, &schema), Ok(()));
+    assert_eq!(edited.check(&schema), Ok(()));
+
+    // An invalid child somewhere the edit reached is still found: the list
+    // item loses the paragraph its `paragraph block*` rule requires.
+    let list = old.child(2);
+    let emptied = with_child(
+        &old,
+        2,
+        with_child(list, 0, list.child(0).copy(Fragment::empty())),
+    );
+    assert!(emptied.check(&schema).is_err());
+    assert!(emptied.check_from(&old, &schema).is_err());
+
+    // The node's own rules cover its whole child list, shared children
+    // included: moving a strong text node, shared as it is, into a code block
+    // breaks the code block's mark rule.
+    let paragraph = doc(
+        &schema,
+        [n(&schema, "paragraph", [tm(&schema, "a", &["strong"])])],
+    );
+    let code = paragraph.copy(Fragment::from_node(Node::container(
+        crate::node::Markup::new(schema.node_id("code_block").unwrap()),
+        paragraph.child(0).content().clone(),
+    )));
+    assert!(code.child(0).child(0).ptr_eq(paragraph.child(0).child(0)));
+    assert!(code.check(&schema).is_err());
+    assert!(code.check_from(&paragraph, &schema).is_err());
+
+    // Children beyond the old list are checked in full: an appended
+    // blockquote whose paragraph holds a block.
+    let broken = Node::container(
+        crate::node::Markup::new(schema.node_id("blockquote").unwrap()),
+        Fragment::from_node(Node::container(
+            crate::node::Markup::new(schema.node_id("paragraph").unwrap()),
+            Fragment::from_node(n(&schema, "horizontal_rule", [])),
+        )),
+    );
+    let grown = old.copy(old.content().append(&Fragment::from_node(broken)));
+    assert!(grown.check(&schema).is_err());
+    assert!(grown.check_from(&old, &schema).is_err());
+}
+
+#[test]
+fn diff_region_is_empty_for_identical_trees() {
+    let schema = test_schema();
+    let d = layered(&schema);
+    let region = crate::node::diff_region(&d, &d, &schema);
+    assert!(region.path.is_empty());
+    assert!(region.old.is_empty() && region.new.is_empty());
+}
+
+#[test]
+fn diff_region_descends_to_the_changed_textblock() {
+    let schema = test_schema();
+    let old = layered(&schema);
+    let list = old.child(2);
+    let item = list.child(0);
+    let paragraph = n(&schema, "paragraph", [t(&schema, "items")]);
+    let new_item = with_child(item, 0, paragraph);
+    let new_list = with_child(list, 0, new_item.clone());
+    let new = with_child(&old, 2, new_list.clone());
+
+    let region = crate::node::diff_region(&old, &new, &schema);
+    let indexes: Vec<usize> = region.path.iter().map(|step| step.index).collect();
+    assert_eq!(indexes, [2, 0]);
+    let path = &region.path;
+    assert!(path[0].old.ptr_eq(list) && path[0].new.ptr_eq(&new_list));
+    assert!(path[1].old.ptr_eq(item) && path[1].new.ptr_eq(&new_item));
+    // The walk stops at the textblock: its inline content is one region.
+    assert_eq!((region.old, region.new), (0..1, 0..1));
+}
+
+#[test]
+fn diff_region_stops_where_the_difference_is_not_one_child() {
+    let schema = test_schema();
+    let old = layered(&schema);
+    let count = old.child_count();
+
+    // A block appended at the top: the region is empty in the old tree.
+    let grown = old.copy(old.content().append(&Fragment::from_node(n(
+        &schema,
+        "horizontal_rule",
+        [],
+    ))));
+    let region = crate::node::diff_region(&old, &grown, &schema);
+    assert!(region.path.is_empty());
+    assert_eq!((region.old, region.new), (count..count, count..count + 1));
+
+    // Two top-level blocks edited at once: the region covers both.
+    let both = with_child(
+        &with_child(&old, 0, n(&schema, "paragraph", [t(&schema, "x")])),
+        1,
+        n(
+            &schema,
+            "blockquote",
+            [n(&schema, "paragraph", [t(&schema, "y")])],
+        ),
+    );
+    let region = crate::node::diff_region(&old, &both, &schema);
+    assert!(region.path.is_empty());
+    assert_eq!((region.old, region.new), (0..2, 0..2));
+
+    // One changed child at the top, but two inside it: the walk enters the
+    // blockquote and the region is its whole content.
+    let quote = old.child(1);
+    let doubled = quote.copy(Fragment::from_nodes([
+        n(&schema, "paragraph", [t(&schema, "one")]),
+        n(&schema, "paragraph", [t(&schema, "two")]),
+    ]));
+    let new = with_child(&old, 1, doubled.clone());
+    let region = crate::node::diff_region(&old, &new, &schema);
+    assert_eq!(region.path.len(), 1);
+    assert_eq!(region.path[0].index, 1);
+    assert!(region.path[0].old.ptr_eq(quote) && region.path[0].new.ptr_eq(&doubled));
+    assert_eq!((region.old, region.new), (0..quote.child_count(), 0..2));
+}
+
+#[test]
+fn diff_region_does_not_enter_a_container_whose_markup_changed() {
+    let schema = test_schema();
+    let old = layered(&schema);
+    let list = old.child(2);
+    // Same items, different list type: everything inside is affected.
+    let ordered = Node::container(
+        crate::node::Markup::new(schema.node_id("ordered_list").unwrap()),
+        list.content().clone(),
+    );
+    let new = with_child(&old, 2, ordered.clone());
+    let region = crate::node::diff_region(&old, &new, &schema);
+    assert!(region.path.is_empty());
+    assert_eq!((region.old, region.new), (2..3, 2..3));
+}
+
+#[test]
+fn diff_region_stops_at_a_leaf_block() {
+    let schema = test_schema();
+    let old = doc(
+        &schema,
+        [
+            n(&schema, "paragraph", [t(&schema, "a")]),
+            n(&schema, "horizontal_rule", []),
+        ],
+    );
+    let rule = n(&schema, "horizontal_rule", []);
+    let new = with_child(&old, 1, rule.clone());
+    let region = crate::node::diff_region(&old, &new, &schema);
+    assert!(region.path.is_empty());
+    assert_eq!((region.old, region.new), (1..2, 1..2));
+}

@@ -41,7 +41,7 @@ mod effect;
 mod extension;
 mod facet;
 mod field;
-mod filters;
+pub(crate) mod filters;
 mod json;
 pub mod protocol;
 mod transaction;

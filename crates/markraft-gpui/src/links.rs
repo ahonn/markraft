@@ -63,8 +63,12 @@ pub(crate) fn active_link(state: &EditorState, ty: MarkTypeId) -> Option<String>
     let mut common: Option<String> = None;
     let mut all = true;
     let projection = markraft_core::projection::projection_of(state);
-    for run in projection.lines().iter().flat_map(|line| &line.runs) {
-        if run.from.max(from) >= run.to.min(to) {
+    let runs = projection
+        .lines()
+        .iter()
+        .flat_map(|line| line.runs().iter().map(move |run| (line, run)));
+    for (line, run) in runs {
+        if line.abs(run.start).max(from) >= line.abs(run.end).min(to) {
             continue;
         }
         match run.marks.get(ty) {

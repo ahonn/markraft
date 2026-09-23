@@ -84,13 +84,18 @@ static SNAPSHOT: LazyLock<StateField<Option<CompositionSnapshot>>> = LazyLock::n
                 return None;
             }
             if let Some(snapshot) = value {
-                let mut snapshot = snapshot.clone();
-                snapshot.changes = snapshot
-                    .changes
-                    .compose(tr.changes())
-                    .expect("composition changes share a document boundary");
-                Some(snapshot)
-            } else if tr.has_effect(set_composition_range()) {
+                // A change that does not continue from the snapshot's document
+                // makes the way back unknown. Forget the snapshot rather than
+                // restore something else; see `cancel_composition`.
+                let changes = snapshot.changes.compose(tr.changes()).ok()?;
+                Some(CompositionSnapshot {
+                    state: snapshot.state.clone(),
+                    changes,
+                })
+            } else if tr.has_effect(set_composition_range()) && !is_composing(tr.start_state()) {
+                // Only the composition's first transaction takes a snapshot: a
+                // later one would record a state that already holds
+                // uncommitted text.
                 Some(CompositionSnapshot {
                     state: tr.start_state().clone(),
                     changes: tr.changes().clone(),
@@ -118,6 +123,12 @@ pub fn committed_document(state: &EditorState) -> &Node {
 }
 
 /// Restore the content and selection from before the active composition.
+///
+/// Returns `None` when nothing is composing, and also when the composition's
+/// record of where it started was lost — a transaction during the composition
+/// whose changes could not be composed onto the ones before it. The
+/// composition then has to be finished instead, and
+/// [`committed_document`] reports the live document until it is.
 ///
 /// The inverse changes preserve unaffected positions. The spec carries
 /// [`restore_fields_from`] with the state from before the composition, so every

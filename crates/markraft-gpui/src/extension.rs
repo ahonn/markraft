@@ -56,7 +56,7 @@ impl Update {
     pub fn changes(&self) -> Vec<ChangeDesc> {
         self.transactions
             .iter()
-            .map(|tr| tr.changes().desc())
+            .map(|tr| tr.changes().desc().clone())
             .collect()
     }
 

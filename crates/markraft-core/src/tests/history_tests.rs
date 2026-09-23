@@ -506,3 +506,59 @@ fn a_later_spec_has_the_last_word_on_an_annotation() {
     let undone = run(&state, undo(&state).expect("something to undo"));
     assert_eq!(schema.describe(undone.doc()), r#"doc(paragraph("ab"))"#);
 }
+
+#[test]
+fn a_failed_rebase_is_reported_once_and_cleared_by_the_next_transaction() {
+    use crate::history::history_lost;
+    use crate::state::{EditorStateConfig, StateJsonFields};
+
+    let schema = shared_schema();
+    let document = doc(&schema, [n(&schema, "paragraph", [t(&schema, "hello")])]);
+    // A persisted entry that belongs to some other document: its change set
+    // starts from 99 tokens, so no edit of this one can be rebased under it.
+    let fields = StateJsonFields::new().add("history", crate::history::history_field());
+    let mut json = history_state(document.clone()).to_json(&fields);
+    json["history"] = serde_json::json!({
+        "done": [{"changes": {"length": 99, "sections": [{"len": 99}]}}],
+        "undone": [],
+    });
+    let start = EditorState::from_json(
+        &json,
+        EditorStateConfig::new(schema.clone()).extensions(history(HistoryConfig::default())),
+        &fields,
+    )
+    .unwrap();
+    assert_eq!(undo_depth(&start), 1);
+    assert!(!history_lost(&start));
+
+    let remote = run(
+        &start,
+        TransactionSpec::new()
+            .changes([insert_text(&schema, 1, "X")])
+            .add_to_history(false),
+    );
+    assert!(history_lost(&remote), "the entry could not be rebased");
+    assert_eq!(undo_depth(&remote), 0);
+    assert!(undo(&remote).is_none());
+
+    // The next transaction, of any kind, clears the report.
+    let moved = run(
+        &remote,
+        TransactionSpec::new().selection(Selection::cursor(2)),
+    );
+    assert!(!history_lost(&moved));
+    let typed_after = run(&remote, typed(&schema, 2, "y", 0));
+    assert!(!history_lost(&typed_after));
+
+    // A rebase that succeeds reports nothing.
+    let fine = history_state(document);
+    let fine = run(&fine, typed(&schema, 1, "a", 0));
+    let fine = run(
+        &fine,
+        TransactionSpec::new()
+            .changes([insert_text(&schema, 1, "Z")])
+            .add_to_history(false),
+    );
+    assert!(!history_lost(&fine));
+    assert_eq!(undo_depth(&fine), 1);
+}

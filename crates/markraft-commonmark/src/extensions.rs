@@ -552,7 +552,7 @@ fn left_a_line(cx: &CorrectionContext<'_>, items: &Items, carets: &[usize]) -> b
     let start = cx.tr.start_state();
     let before = start
         .selection()
-        .map(start.schema(), cx.tr.new_doc(), &cx.tr.changes().desc());
+        .map(start.schema(), cx.tr.new_doc(), cx.tr.changes().desc());
     let ends = before
         .ranges(cx.tr.new_doc())
         .iter()

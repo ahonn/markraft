@@ -92,7 +92,7 @@ impl ChangeSet {
             })
             .collect();
         let mut map = Map::new();
-        map.insert("length".into(), Value::from(self.len_before));
+        map.insert("length".into(), Value::from(self.length_before()));
         map.insert("sections".into(), Value::Array(sections));
         Value::Object(map)
     }

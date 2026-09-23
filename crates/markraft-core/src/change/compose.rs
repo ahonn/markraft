@@ -33,10 +33,10 @@ impl ChangeSet {
         if !self.schema.same(&other.schema) {
             return Err(ChangeError::SchemaMismatch);
         }
-        if self.len_after != other.len_before {
+        if self.length_after() != other.length_before() {
             return Err(ChangeError::LengthMismatch {
-                expected: self.len_after,
-                actual: other.len_before,
+                expected: self.length_after(),
+                actual: other.length_before(),
             });
         }
         let items: Vec<Item> = self
@@ -109,8 +109,8 @@ impl ChangeSet {
             }
             if a_done || b_done {
                 return Err(ChangeError::LengthMismatch {
-                    expected: self.len_after,
-                    actual: other.len_before,
+                    expected: self.length_after(),
+                    actual: other.length_before(),
                 });
             }
             // The second change's replacement content enters the buffer once,
@@ -175,6 +175,8 @@ impl ChangeSet {
             }
         }
         flush!();
-        Ok(out.finish(&self.schema, self.len_before))
+        Ok(out
+            .finish(&self.schema, self.length_before())
+            .with_dropped_tokens(self.dropped_tokens() + other.dropped_tokens()))
     }
 }

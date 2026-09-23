@@ -135,7 +135,7 @@ mod tests {
         assert_eq!(projection.line_count(), 1);
         assert!(
             projection.lines()[0]
-                .runs
+                .runs()
                 .iter()
                 .all(|run| run.marks.is_empty())
         );

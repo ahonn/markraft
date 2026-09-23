@@ -69,18 +69,19 @@ impl EditorView {
         use markraft_core::projection::RunContent;
         for row in &self.layout {
             let line = self.projection.line(row.index)?;
-            for run in &line.runs {
+            for run in line.runs() {
                 if let RunContent::Atom(node) = &run.content
                     && Some(node.type_id()) == self.types.raw_inline
                     && row
                         .rectangles(
-                            row.pos_to_offset(run.from)..row.pos_to_offset(run.to),
+                            row.pos_to_offset(line.abs(run.start))
+                                ..row.pos_to_offset(line.abs(run.end)),
                             false,
                         )
                         .iter()
                         .any(|bounds| bounds.contains(&point))
                 {
-                    return Some(run.from);
+                    return Some(line.abs(run.start));
                 }
             }
         }

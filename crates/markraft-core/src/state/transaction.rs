@@ -252,6 +252,14 @@ impl Transaction {
         if !annotations.iter().any(|a| a.is(protocol::time())) {
             annotations.push(protocol::time().of(now_millis()));
         }
+        let dropped = resolved.changes.dropped_tokens();
+        if dropped > 0
+            && !annotations
+                .iter()
+                .any(|a| a.is(protocol::content_dropped()))
+        {
+            annotations.push(protocol::content_dropped().of(dropped));
+        }
         let reconfigured = resolved.effects.iter().any(|effect| {
             effect.is(reconfigure())
                 || effect.is(append_config())
@@ -308,7 +316,7 @@ impl Transaction {
             None => self.0.start_state.selection().map(
                 self.0.start_state.schema(),
                 &self.0.new_doc,
-                &self.0.changes.desc(),
+                self.0.changes.desc(),
             ),
         }
     }
@@ -468,13 +476,13 @@ fn merge(
     sequential: bool,
 ) -> Result<Resolved, StateError> {
     let (changes, map_for_a, map_for_b) = if sequential {
-        let map_for_a = b.changes.desc();
+        let map_for_a = b.changes.desc().clone();
         let map_for_b = ChangeDesc::empty(b.changes.length_after());
         (a.changes.compose(&b.changes)?, map_for_a, map_for_b)
     } else {
         let (a_over_b, b_over_a) = a.changes.transform(state.doc(), &b.changes, true)?;
-        let map_for_a = b_over_a.desc();
-        let map_for_b = a_over_b.desc();
+        let map_for_a = b_over_a.desc().clone();
+        let map_for_b = a_over_b.desc().clone();
         (a.changes.compose(&b_over_a)?, map_for_a, map_for_b)
     };
     let doc = changes.apply(state.doc())?;
@@ -596,8 +604,8 @@ fn apply_change_filters(tr: Transaction) -> Result<Transaction, StateError> {
     let new_doc = filtered.apply(state.doc())?;
     let selection = tr
         .selection()
-        .map(|selection| selection.map(state.schema(), &new_doc, &back_desc));
-    let effects = StateEffect::map_all(tr.effects(), &back_desc);
+        .map(|selection| selection.map(state.schema(), &new_doc, back_desc));
+    let effects = StateEffect::map_all(tr.effects(), back_desc);
     Transaction::create(
         &state,
         Resolved {

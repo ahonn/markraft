@@ -147,14 +147,14 @@ pub fn count(doc: &Node, projection: &Projection, words: bool) -> usize {
     for line in projection.lines() {
         // Reference definitions are where links go, not text a reader sees,
         // and no break stands for the block they fill.
-        if line.ancestors.last().is_some_and(|block| {
-            doc.node_at(block.before)
+        if line.block_before().is_some_and(|block| {
+            doc.node_at(block)
                 .is_some_and(|node| holds_definitions(schema(), &node))
         }) {
             continue;
         }
         let text = doc
-            .slice(line.from, line.to)
+            .slice(line.from(), line.to())
             .map(|slice| codecs.to_text(&slice))
             .unwrap_or_default();
         total += units(&text);
@@ -213,10 +213,10 @@ fn one_line(line: &str) -> String {
 /// line, so this is what tells a break between two cells from a break between blocks.
 pub fn table_of(line: &Line) -> Option<usize> {
     let table = node(md::TABLE);
-    line.ancestors
+    line.ancestors()
         .iter()
-        .find(|ancestor| ancestor.node_type == table)
-        .map(|ancestor| ancestor.before)
+        .position(|ancestor| ancestor.node_type == table)
+        .map(|index| line.ancestor_before(index))
 }
 
 /// The readable text of raw markup: everything outside `<…>`. Nothing is
@@ -331,7 +331,7 @@ impl Block {
     fn at(state: &EditorState, projection: &Projection, pos: usize) -> Option<Block> {
         let index = projection.line_at(pos)?;
         let line = projection.line(index)?;
-        let own = line.ancestors.last()?;
+        let own = line.ancestors().last()?;
         if own.node_type == node(md::HORIZONTAL_RULE) {
             return Some(Block::Divider);
         }
@@ -349,7 +349,7 @@ impl Block {
         }
         // The innermost wrapper decides: a paragraph in a quote in a list item is
         // a quote, and one in an item is that item's list.
-        for (index, ancestor) in line.ancestors.iter().enumerate().rev() {
+        for (index, ancestor) in line.ancestors().iter().enumerate().rev() {
             let ty = ancestor.node_type;
             if ty == node(md::BLOCKQUOTE) {
                 // A callout is a quote with a type on it, and it is the kind
@@ -370,7 +370,7 @@ impl Block {
                 return Some(Block::Task);
             }
             if ty == node(md::LIST_ITEM) {
-                let list = line.ancestors.get(index.checked_sub(1)?)?;
+                let list = line.ancestors().get(index.checked_sub(1)?)?;
                 return Some(if list.node_type == node(md::ORDERED_LIST) {
                     Block::Ordered
                 } else {
@@ -391,14 +391,14 @@ impl Block {
         let first = projection.line_at(from)?;
         let last = match projection.line_at(to) {
             // A range that stops at a later block's start leaves that block alone.
-            Some(index) if index > first && projection.lines()[index].from == to => index - 1,
+            Some(index) if index > first && projection.lines()[index].from() == to => index - 1,
             Some(index) => index,
             None => projection.line_count().saturating_sub(1),
         };
-        let format = Block::at(state, projection, projection.lines()[first].from)?;
+        let format = Block::at(state, projection, projection.lines()[first].from())?;
         (first..=last.max(first))
             .all(|index| {
-                Block::at(state, projection, projection.lines()[index].from) == Some(format)
+                Block::at(state, projection, projection.lines()[index].from()) == Some(format)
             })
             .then_some(format)
     }
@@ -453,7 +453,7 @@ mod tests {
 
     fn at(state: &EditorState, line: usize) -> EditorState {
         let projection = projection_of(state);
-        let pos = projection.lines()[line].from;
+        let pos = projection.lines()[line].from();
         state
             .update([TransactionSpec::new().selection(Selection::cursor(pos))])
             .expect("a selection")

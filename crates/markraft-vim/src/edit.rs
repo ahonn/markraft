@@ -7,7 +7,7 @@
 
 use crate::motion::{self, Span};
 use markraft_core::commands::delete_range_changes;
-use markraft_core::projection::Projection;
+use markraft_core::projection::{Line, Projection};
 use markraft_core::{
     Change, ChangeSet, EditorState, Fit, Fragment, Node, Selection, Slice, TrackMode,
     TransactionSpec,
@@ -48,9 +48,9 @@ pub(crate) fn linewise_unit(
     let last = projection.line(lines.end.saturating_sub(1).min(last_line))?;
     // Node boundaries rather than text positions, so a block-level leaf — which holds
     // no text for a position to sit inside — is covered like any other line.
-    let start = first.ancestors.last()?.before;
-    let own = last.ancestors.last()?;
-    let end = own.before + doc.node_at(own.before)?.node_size();
+    let start = first.block_before()?;
+    let own = last.block_before()?;
+    let end = own + doc.node_at(own)?.node_size();
     let from = doc.resolve(start).ok()?;
     let to = doc.resolve(end).ok()?;
     let range = from.block_range(state.schema(), &to, None)?;
@@ -77,7 +77,7 @@ fn linewise_content(
         .lines()
         .get(lines.start..lines.end.min(projection.line_count()))?
         .iter()
-        .filter_map(|line| line.ancestors.last().map(|own| own.before))
+        .filter_map(Line::block_before)
         .collect();
 
     fn collect(
@@ -253,13 +253,13 @@ pub(crate) fn change_linewise(
     changes.extend(delete_range_changes(
         state.schema(),
         state.doc(),
-        first.from,
-        first.to,
+        first.from(),
+        first.to(),
     ));
     let (set, doc) = resolve(state, changes)?;
     let caret = set
-        .map_pos(first.from, -1, TrackMode::Simple)
-        .unwrap_or(first.from);
+        .map_pos(first.from(), -1, TrackMode::Simple)
+        .unwrap_or(first.from());
     Some(spec(
         set,
         Selection::near(state.schema(), &doc, caret.min(doc.content_size()), 1),
@@ -339,8 +339,8 @@ fn linewise_paste_position(
     let line = projection.line(motion::line_of(projection, cursor))?;
     // Projection paths include the line's own node, including leaves that a
     // resolved position cannot enter.
-    let level = register.depth.min(line.ancestors.len().checked_sub(1)?);
-    let before = line.ancestors[level].before;
+    let level = register.depth.min(line.ancestors().len().checked_sub(1)?);
+    let before = line.ancestor_before(level);
     Some(if after {
         before + doc.node_at(before)?.node_size()
     } else {
@@ -371,7 +371,7 @@ pub(crate) fn delete_chars_range(
 /// `D` and `C`: from the cursor to the end of its line.
 pub(crate) fn to_line_end(projection: &Projection, cursor: usize) -> Range<usize> {
     let line = &projection.lines()[motion::line_of(projection, cursor)];
-    cursor..line.to
+    cursor..line.to()
 }
 
 /// The inclusive charwise range a Visual selection covers: from the anchor grapheme to
@@ -466,7 +466,7 @@ mod tests {
         let projection = projection_of(&state);
         let plain = |slice: &Slice| slice_to_plain_text(state.schema(), slice);
         let register = linewise_register(&state, &projection, 0..1, &plain).expect("a register");
-        let cursor = projection.lines()[1].from;
+        let cursor = projection.lines()[1].from();
         let below = paste(&state, &projection, cursor, &register, true, false).expect("a paste");
         assert_eq!(applied(&state, below), "- one\n- two\n- one");
         let above = paste(&state, &projection, cursor, &register, false, false).expect("a paste");
@@ -502,7 +502,7 @@ mod tests {
         // A horizontal rule holds no text, so `x` finds nothing to remove.
         let state = state_of("***");
         let projection = projection_of(&state);
-        let rule = projection.lines()[0].from;
+        let rule = projection.lines()[0].from();
         assert_eq!(
             delete_chars_range(&projection, &motion::Hidden::none(), rule, 1),
             rule..rule

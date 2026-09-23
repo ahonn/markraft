@@ -370,6 +370,9 @@ pub(crate) struct LayoutLine {
     atoms: Vec<InlineAtom>,
     /// Where the line sits in a table, when it is a cell of one.
     pub(crate) table: Option<TableCell>,
+    /// What the line was shaped from beyond its own body, when a later shaping
+    /// may keep it; see [`LineKey`].
+    reuse: Option<LineKey>,
 }
 
 /// Host popovers also anchor document and node selections, whose opening token can
@@ -391,9 +394,27 @@ pub(crate) fn selection_anchor_row(
 }
 
 impl LayoutLine {
+    /// This line's rows, for `line`, which shares its body and sits at `index`.
+    ///
+    /// Everything a shaped line holds is relative to its own start except
+    /// these fields, so they are all a kept line has to be told. The rest —
+    /// rows, widenings, atoms, markers, the origin's indent — is measured from
+    /// the line's own start. A table cell also holds where the grid placed it,
+    /// which is why a cell is never kept.
+    fn moved_to(&self, line: &Line, index: usize) -> LayoutLine {
+        debug_assert!(self.source.same_body(line) && self.table.is_none());
+        LayoutLine {
+            source: line.clone(),
+            index,
+            from: line.from(),
+            code_pos: self.code_pos.and(line.block_before()),
+            ..self.clone()
+        }
+    }
+
     /// The document position just past the line's own content.
     pub(crate) fn to(&self) -> usize {
-        self.source.to
+        self.source.to()
     }
 
     pub(crate) fn pos_to_offset(&self, pos: usize) -> usize {
@@ -832,6 +853,10 @@ enum CellWidth {
 /// and the inputs [`Shaping`](crate::shaping::Shaping) holds. An image file that
 /// changed under the editor reaches those through
 /// [`EditorView::refresh_images`], which the host polls.
+///
+/// A redraw after an edit does shape again, but only the lines the edit
+/// reached: the rest are kept from the last shaping at this width; see
+/// [`shape_reusing`].
 pub(crate) fn shape_cached(
     view: &crate::EditorView,
     width: Pixels,
@@ -840,17 +865,52 @@ pub(crate) fn shape_cached(
     let projection = view.projection_arc();
     let input = view.shape_input();
     let reveal = reveal_key(&input);
-    if let Some(lines) = view.shaping().rows(projection, width, reveal) {
+    let shaping = view.shaping();
+    if let Some(lines) = shaping.rows(projection, width, reveal) {
         return lines;
     }
-    let lines = shape(&input, width, text_system);
-    view.shaping().keep(projection, width, reveal, &lines);
+    let lines = {
+        let previous = shaping.previous(width);
+        shape_reusing(
+            &input,
+            width,
+            previous.as_deref().unwrap_or(&[]),
+            text_system,
+        )
+    };
+    shaping.keep(projection, width, reveal, &lines);
     lines
 }
 
+/// Every line of the projection, shaped afresh.
+#[cfg(test)]
 pub(crate) fn shape(
     input: &ShapeInput<'_>,
     width: Pixels,
+    text_system: &WindowTextSystem,
+) -> Vec<LayoutLine> {
+    shape_reusing(input, width, &[], text_system)
+}
+
+/// Every line of the projection, keeping the rows of `previous` wherever they
+/// are what shaping the line again would produce.
+///
+/// `previous` has to have been shaped at `width` from the same inputs
+/// [`Shaping`](crate::shaping::Shaping) holds; the document and the selection
+/// it was shaped with may be any. A line of it is kept for a line of this
+/// projection when the two share a body ([`Line::same_body`]) and were shaped
+/// with the same [`LineKey`], and is then only moved to where the line now
+/// starts ([`LayoutLine::moved_to`]).
+///
+/// Lines are paired by position from either end: an edit rebuilds one run of
+/// lines and hands those before and after it over with their bodies, so the
+/// kept prefix and suffix are exactly what can be kept. A pairing that is wrong
+/// costs a reshape, never a stale row, since a kept row is checked against the
+/// line it is kept for.
+pub(crate) fn shape_reusing(
+    input: &ShapeInput<'_>,
+    width: Pixels,
+    previous: &[LayoutLine],
     text_system: &WindowTextSystem,
 ) -> Vec<LayoutLine> {
     input.images.retain_sources(
@@ -858,20 +918,129 @@ pub(crate) fn shape(
             .projection
             .lines()
             .iter()
-            .flat_map(|line| &line.runs)
+            .flat_map(|line| line.runs())
             .filter_map(|run| match &run.content {
                 RunContent::Atom(node) => picture_source(input.types, node),
                 _ => None,
             }),
     );
-    let mut lines: Vec<LayoutLine> = (0..input.projection.line_count())
-        .map(|index| {
+    let current = input.projection.lines();
+    let (prefix, suffix) = kept_ends(previous, current);
+    let mut lines: Vec<LayoutLine> = current
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let key = line_key(input, index);
+            let kept = if index < prefix {
+                previous.get(index)
+            } else if current.len() - index <= suffix {
+                previous.get(previous.len() - (current.len() - index))
+            } else {
+                None
+            };
+            if let Some(kept) = kept
+                .filter(|kept| key.is_some() && kept.reuse == key && kept.source.same_body(line))
+            {
+                return kept.moved_to(line, index);
+            }
             let cell = table_cell(input, index).map(|_| CellWidth::Natural);
-            shape_line(input, index, width, cell, text_system)
+            let mut layout = shape_line(input, index, width, cell, text_system);
+            layout.reuse = key;
+            layout
         })
         .collect();
     shape_tables(input, &mut lines, width, text_system);
     lines
+}
+
+/// How many lines at the start and at the end of `current` have a line with
+/// the same body at the same place from that end of `previous`. The two never
+/// overlap in either list.
+fn kept_ends(previous: &[LayoutLine], current: &[Line]) -> (usize, usize) {
+    let shorter = previous.len().min(current.len());
+    let prefix = previous
+        .iter()
+        .zip(current)
+        .take_while(|(kept, line)| kept.source.same_body(line))
+        .count();
+    let suffix = previous
+        .iter()
+        .rev()
+        .zip(current.iter().rev())
+        .take(shorter - prefix)
+        .take_while(|(kept, line)| kept.source.same_body(line))
+        .count();
+    (prefix, suffix)
+}
+
+/// What shaping one line reads besides its own body, the width and the inputs
+/// [`Shaping`](crate::shaping::Shaping) revises.
+///
+/// A body ([`Line::same_body`]) fixes the line's content, marks, ancestors and
+/// their indices and attributes. What shaping reads past that is the lines
+/// around it, the list it numbers in, and the host's answer about each wiki
+/// link — and those are what this holds, as the values shaping reads rather
+/// than as the neighbours they come from, so a neighbour that changed in a way
+/// the line never looks at does not cost it a reshape.
+///
+/// A line gets no key, and is always shaped afresh, where shaping reads
+/// something this cannot hold cheaply: a line the selection or marked text
+/// touches (what it reveals, and the host's source spelling of it), a table
+/// cell (whose size is settled by the whole grid), and a line with a picture
+/// (whose file is read off the disk on every shaping).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LineKey {
+    /// The first line has no gap above a heading.
+    first: bool,
+    /// How many items the ordered list the line numbers in holds, which sets
+    /// the widest number and so the indent of every item.
+    list_len: Option<usize>,
+    /// How many of the line's quote bars join the line below.
+    joined_quotes: usize,
+    /// Whether the line below is in a list item, and how many quotes it sits
+    /// in, which together set the gap below this one.
+    next_in_item: bool,
+    next_quote_depth: usize,
+    /// Whether the line opens a callout, which depends on the line above.
+    callout_header: bool,
+    /// Whether the host can open each wiki link on the line, in order.
+    links: Vec<bool>,
+}
+
+/// The key the line at `index` is shaped under, or `None` where it has to be
+/// shaped afresh every time; see [`LineKey`].
+fn line_key(input: &ShapeInput<'_>, index: usize) -> Option<LineKey> {
+    let ShapeInput {
+        types, projection, ..
+    } = *input;
+    let line = &projection.lines()[index];
+    if line_focused(input, line) || types.table_cell_of(line).is_some() {
+        return None;
+    }
+    let mut links = Vec::new();
+    for run in line.runs() {
+        let RunContent::Atom(node) = &run.content else {
+            continue;
+        };
+        if picture_source(types, node).is_some() {
+            return None;
+        }
+        if Some(node.type_id()) == types.wiki_link {
+            let target = crate::wiki::wiki_link_target(node);
+            links.push(input.wiki.is_none_or(|resolves| resolves(&target)));
+        }
+    }
+    let next = projection.line(index + 1);
+    let above = index.checked_sub(1).map(|above| &projection.lines()[above]);
+    Some(LineKey {
+        first: index == 0,
+        list_len: ordered_list_len(input.doc, types, line),
+        joined_quotes: joined_quote_levels(projection, index, types),
+        next_in_item: next.is_some_and(|next| types.item_of(next).is_some()),
+        next_quote_depth: next.map_or(0, |next| types.quote_depth(next)),
+        callout_header: crate::callout::header_of(types, line, above).is_some(),
+        links,
+    })
 }
 
 /// Which table, row and column a projection line is a cell of.
@@ -886,6 +1055,8 @@ fn shape_line(
     cell: Option<CellWidth>,
     text_system: &WindowTextSystem,
 ) -> LayoutLine {
+    #[cfg(test)]
+    tests::SHAPED_LINES.with(|count| count.set(count.get() + 1));
     let ShapeInput {
         doc,
         types,
@@ -1032,7 +1203,7 @@ fn shape_line(
     let mut layout = LayoutLine {
         source: line.clone(),
         index,
-        from: line.from,
+        from: line.from(),
         char_len: line.len(),
         rows,
         origin: point(indent, px(0.)),
@@ -1045,9 +1216,7 @@ fn shape_line(
         },
         min_width: px(0.),
         top_gap,
-        code_pos: code
-            .then(|| line.ancestors.last().map(|a| a.before))
-            .flatten(),
+        code_pos: code.then(|| line.block_before()).flatten(),
         marker,
         decoration,
         code_header,
@@ -1058,6 +1227,7 @@ fn shape_line(
         widenings: text.widenings,
         atoms: Vec::new(),
         table: None,
+        reuse: None,
     };
     if single_line && let Some(row) = layout.rows.first() {
         layout.width = row.line.size(line_height).width.max(wrap_width);
@@ -1681,7 +1851,7 @@ fn display_text(
     text_system: &WindowTextSystem,
 ) -> DisplayText {
     let projection = input.projection;
-    if line.kind == LineKind::LeafBlock {
+    if line.kind() == LineKind::LeafBlock {
         return DisplayText::stand_in(" ".to_owned());
     }
     let source = projection.line_text(index).unwrap_or_default();
@@ -1690,22 +1860,22 @@ fn display_text(
     }
     // An image that has its line to itself is drawn at full size; one sharing
     // its line with text has to stay within a row.
-    let alone = line.runs.len() == 1 && line.len() == 1;
+    let alone = line.runs().len() == 1 && line.len() == 1;
     let shown = crate::conceal::shown(input.types.syntax, line, &reveal_of(input));
     let mut text = String::with_capacity(source.len());
-    let mut run_bytes = Vec::with_capacity(line.runs.len());
+    let mut run_bytes = Vec::with_capacity(line.runs().len());
     let mut widenings = Vec::new();
     let mut atoms = Vec::new();
     let mut byte = 0usize;
     let mut display = 0usize;
     let mut filler: Option<Pixels> = None;
     let mut line_height = None;
-    for (index_in_line, run) in line.runs.iter().enumerate() {
+    for (index_in_line, run) in line.runs().iter().enumerate() {
         let chars = run.char_to - run.char_from;
         let len: usize = source[byte..].chars().take(chars).map(char::len_utf8).sum();
         let slice = &source[byte..byte + len];
         byte += len;
-        match atom_of(input, run, font_size, column, alone, text_system) {
+        match atom_of(input, line, run, font_size, column, alone, text_system) {
             Some(atom) => {
                 // An atom the row can shape *is* its text: writing the label
                 // into the display text gives it exactly the width its glyphs
@@ -1809,14 +1979,15 @@ pub(crate) fn reveal_key(input: &ShapeInput<'_>) -> u64 {
     for line in input.projection.lines() {
         // Only a line the selection or the marked text reaches can have
         // anything revealed on it.
-        if reveal.touches(line.from, line.to) {
+        if reveal.touches(line.from(), line.to()) {
             let shown = crate::conceal::shown(input.types.syntax, line, &reveal);
-            for (run, shown) in line.runs.iter().zip(shown) {
+            for (run, shown) in line.runs().iter().zip(shown) {
+                let (from, to) = (line.abs(run.start), line.abs(run.end));
                 if shown == Shown::Revealed {
-                    run.from.hash(&mut hasher);
+                    from.hash(&mut hasher);
                 }
-                if matches!(run.content, RunContent::Atom(_)) && reveal.touches(run.from, run.to) {
-                    run.from.hash(&mut hasher);
+                if matches!(run.content, RunContent::Atom(_)) && reveal.touches(from, to) {
+                    from.hash(&mut hasher);
                     1u8.hash(&mut hasher);
                 }
             }
@@ -1825,8 +1996,8 @@ pub(crate) fn reveal_key(input: &ShapeInput<'_>) -> u64 {
         // hashes, a list marker's spelling, a fence, a quote's marker. Asking
         // the kind only for the lines the caret actually touches keeps this to
         // a couple of calls per move.
-        if affinity_touches(input, line.from, line.to) && focus_chrome(input, line) {
-            line.from.hash(&mut hasher);
+        if affinity_touches(input, line.from(), line.to()) && focus_chrome(input, line) {
+            line.from().hash(&mut hasher);
             2u8.hash(&mut hasher);
         }
     }
@@ -1933,6 +2104,7 @@ fn picture_source<'a>(types: &DocTypes, node: &'a Node) -> Option<&'a str> {
 /// The atom an inline run is drawn as, shaped and measured.
 fn atom_of(
     input: &ShapeInput<'_>,
+    line: &Line,
     run: &Run,
     font_size: Pixels,
     column: Pixels,
@@ -1950,11 +2122,12 @@ fn atom_of(
         ..
     } = *input;
     let revealed = {
+        let (from, to) = (line.abs(run.start), line.abs(run.end));
         let touches = |range: &Range<usize>| {
             if range.start == range.end {
-                range.start >= run.from && range.start <= run.to
+                range.start >= from && range.start <= to
             } else {
-                range.start < run.to && range.end > run.from
+                range.start < to && range.end > from
             }
         };
         touches(&input.selection) || input.composition.as_ref().is_some_and(touches)
@@ -2157,10 +2330,10 @@ fn text_runs(
             code: Vec::new(),
         };
     }
-    let mut runs = Vec::with_capacity(line.runs.len());
+    let mut runs = Vec::with_capacity(line.runs().len());
     let mut code = Vec::new();
     let mut byte = 0usize;
-    for (index, run) in line.runs.iter().enumerate() {
+    for (index, run) in line.runs().iter().enumerate() {
         let len = text.run_bytes.get(index).copied().unwrap_or(0);
         let range = byte..byte + len;
         byte += len;
@@ -2346,7 +2519,7 @@ fn indent_of(
     number_width: Option<Pixels>,
 ) -> Pixels {
     let mut indent = px(0.);
-    for (index, ancestor) in line.ancestors.iter().enumerate() {
+    for (index, ancestor) in line.ancestors().iter().enumerate() {
         let ty = ancestor.node_type;
         if Some(ty) == types.blockquote {
             indent += style.quote_indent;
@@ -2354,7 +2527,7 @@ fn indent_of(
             indent += style.list_indent;
         } else if Some(ty) == types.task_item
             && index > 0
-            && Some(line.ancestors[index - 1].node_type) == types.ordered_list
+            && Some(line.ancestors()[index - 1].node_type) == types.ordered_list
         {
             // Nested blocks and lists keep the checkbox slot of every enclosing item.
             indent += px(22.);
@@ -2380,17 +2553,12 @@ fn ordered_marker(
     text_system: &WindowTextSystem,
 ) -> Option<(Rc<ShapedLine>, Pixels)> {
     let (item, list) = types.item_of(line)?;
-    if Some(list.node_type) != types.ordered_list {
-        return None;
-    }
+    let count = ordered_list_len(doc, types, line)?;
     let start = list
         .attrs
         .get("start")
         .and_then(|value| value.as_int())
         .unwrap_or(1);
-    let count = doc
-        .node_at(list.before)
-        .map_or(item.index + 1, |node| node.child_count());
     let shape_number = |ordinal: i64| {
         let text = format!("{ordinal}.");
         Rc::new(text_system.shape_line(
@@ -2411,6 +2579,20 @@ fn ordered_marker(
     Some((shape_number(start + item.index as i64), widest))
 }
 
+/// How many items the ordered list a line's item sits in holds, which is the
+/// one thing about the line's numbering its own ancestors do not say.
+fn ordered_list_len(doc: &Node, types: &DocTypes, line: &Line) -> Option<usize> {
+    let (item, list) = types.item_of(line)?;
+    if Some(list.node_type) != types.ordered_list {
+        return None;
+    }
+    let list_before = line.ancestor_before(types.item_index(line)? - 1);
+    Some(
+        doc.node_at(list_before)
+            .map_or(item.index + 1, |node| node.child_count()),
+    )
+}
+
 /// Whether a line is its list item's very first line, which is where the marker
 /// is drawn.
 ///
@@ -2421,14 +2603,14 @@ fn ordered_marker(
 /// second check box beside such a quote.
 fn starts_item(types: &DocTypes, line: &Line) -> bool {
     let Some(item) = line
-        .ancestors
+        .ancestors()
         .iter()
         .rposition(|ancestor| types.is_item(ancestor.node_type))
     else {
         return false;
     };
-    item + 1 < line.ancestors.len()
-        && line.ancestors[item + 1..]
+    item + 1 < line.ancestors().len()
+        && line.ancestors()[item + 1..]
             .iter()
             .all(|ancestor| ancestor.index == 0)
 }
@@ -2440,7 +2622,7 @@ fn starts_item(types: &DocTypes, line: &Line) -> bool {
 /// shaped rows.
 fn focus_chrome(input: &ShapeInput<'_>, line: &Line) -> bool {
     let quoted = input.types.blockquote.is_some_and(|quote| {
-        line.ancestors
+        line.ancestors()
             .iter()
             .any(|ancestor| ancestor.node_type == quote)
     });
@@ -2452,7 +2634,7 @@ fn focus_chrome(input: &ShapeInput<'_>, line: &Line) -> bool {
 
 /// Whether the selection or composition touches this projection line.
 fn line_focused(input: &ShapeInput<'_>, line: &Line) -> bool {
-    affinity_touches(input, line.from, line.to)
+    affinity_touches(input, line.from(), line.to())
 }
 
 fn affinity_touches(input: &ShapeInput<'_>, from: usize, to: usize) -> bool {
@@ -2563,11 +2745,15 @@ fn joined_quote_levels(projection: &Projection, index: usize, types: &DocTypes) 
         return 0;
     };
     let line = &projection.lines()[index];
-    line.ancestors
+    line.ancestors()
         .iter()
-        .zip(next.ancestors.iter())
-        .take_while(|(a, b)| a.before == b.before && a.node_type == b.node_type)
-        .filter(|(a, _)| Some(a.node_type) == types.blockquote)
+        .zip(next.ancestors().iter())
+        .enumerate()
+        .take_while(|(depth, (a, b))| {
+            line.ancestor_before(*depth) == next.ancestor_before(*depth)
+                && a.node_type == b.node_type
+        })
+        .filter(|(_, (a, _))| Some(a.node_type) == types.blockquote)
         .count()
 }
 
@@ -3779,12 +3965,14 @@ mod tests {
         table_overflows, text_runs, unbreakable_units, visible_strips,
     };
     use crate::style::EditorStyle;
-    use crate::typeahead::tests::state_of;
+    use crate::typeahead::tests::{at, run, state_of};
     use crate::types::DocTypes;
     use gpui::{Bounds, NoopTextSystem, Pixels, TextSystem, WindowTextSystem, point, px, size};
     use gpui::{TextRun, font};
     use markraft_commonmark::{commonmark_doc_type_names, commonmark_schema};
+    use markraft_core::EditorState;
     use markraft_core::commands::ColumnAlignment;
+    use markraft_core::commands::insert_text;
     use markraft_core::projection::{Line, RunContent, projection_of};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -3795,7 +3983,7 @@ mod tests {
         LayoutLine {
             source: line.clone(),
             index,
-            from: line.from,
+            from: line.from(),
             char_len: line.len(),
             rows: Vec::new(),
             origin: point(px(0.), px(0.)),
@@ -3815,6 +4003,7 @@ mod tests {
             widenings: Vec::new(),
             atoms: Vec::new(),
             table: None,
+            reuse: None,
         }
     }
 
@@ -3871,7 +4060,7 @@ mod tests {
         let projection = projection_of(&state);
         let divider = &projection.lines()[1];
         let row = probe(1, divider);
-        assert_eq!(row.hit_position(0, &projection), divider.from);
+        assert_eq!(row.hit_position(0, &projection), divider.from());
     }
 
     #[test]
@@ -4325,7 +4514,7 @@ mod tests {
         let schema = commonmark_schema();
         let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
         let drawn: Vec<(AtomShape, &str)> = projection.lines()[0]
-            .runs
+            .runs()
             .iter()
             .filter_map(|run| match &run.content {
                 RunContent::Atom(node) => atom_label(&types, node),
@@ -4360,7 +4549,7 @@ mod tests {
         let schema = commonmark_schema();
         let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
         let drawn: Vec<(AtomShape, &str)> = projection.lines()[0]
-            .runs
+            .runs()
             .iter()
             .filter_map(|run| match &run.content {
                 RunContent::Atom(node) => atom_label(&types, node),
@@ -4381,7 +4570,7 @@ mod tests {
         // An embed is the same picture as `![](…)` written another way, so both name
         // the same file to load; a plain link names no picture at all.
         let sources: Vec<Option<&str>> = projection.lines()[0]
-            .runs
+            .runs()
             .iter()
             .filter_map(|run| match &run.content {
                 RunContent::Atom(node) => Some(picture_source(&types, node)),
@@ -5009,7 +5198,7 @@ mod tests {
         let images = crate::images::Images::default();
         let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
         // Caret in the heading.
-        let heading_pos = projection.lines()[0].from;
+        let heading_pos = projection.lines()[0].from();
         let input = ShapeInput {
             images: &images,
             spelling: Some(&spelling),
@@ -5028,7 +5217,7 @@ mod tests {
             "focused heading shows ATX hashes"
         );
         // Caret in the bullet item.
-        let bullet_pos = projection.lines()[1].from;
+        let bullet_pos = projection.lines()[1].from();
         let input = ShapeInput {
             selection: bullet_pos..bullet_pos,
             ..input
@@ -5060,7 +5249,7 @@ mod tests {
         let style = EditorStyle::default();
         let images = crate::images::Images::default();
         let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
-        let pos = projection.lines()[0].from + 1;
+        let pos = projection.lines()[0].from() + 1;
         let input = ShapeInput {
             images: &images,
             spelling: Some(&spelling),
@@ -5088,7 +5277,7 @@ mod tests {
         let style = EditorStyle::default();
         let images = crate::images::Images::default();
         let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
-        let quote_pos = projection.lines()[0].from;
+        let quote_pos = projection.lines()[0].from();
         let input = ShapeInput {
             images: &images,
             spelling: Some(&spelling),
@@ -5114,7 +5303,7 @@ mod tests {
             Some(expected.len()),
             "focused quote shows its own spelling"
         );
-        let para_pos = projection.lines()[1].from;
+        let para_pos = projection.lines()[1].from();
         let input = ShapeInput {
             selection: para_pos..para_pos,
             ..input
@@ -5277,6 +5466,320 @@ mod tests {
             key(0, Some(9)),
             key(1, None),
             "marked text outside every span"
+        );
+    }
+
+    thread_local! {
+        /// How many lines this thread has run through `shape_line`.
+        pub(super) static SHAPED_LINES: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+    }
+
+    /// A document with most of what a line's shaping reads from around it: a
+    /// heading at the top, a wiki link the host can and one it cannot open, an
+    /// ordered list one item short of a wider number, a callout, a quote and a
+    /// code block.
+    const REUSED: &str = "# Title\n\nA [[Target]] and a [[Missing]] link, `code` and ^sup^.\n\nSecond paragraph to edit.\n\n1. one\n2. two\n3. three\n4. four\n5. five\n6. six\n7. seven\n8. eight\n9. nine\n\n> [!note] Heads up\n> Callout body\n\n> quote one\n>\n> quote two\n\nOutside\n\n```rust\nlet x = 1;\n```\n\nLast paragraph.";
+
+    /// `state` laid out, keeping what it can of `previous`, and how many lines
+    /// were shaped to do it.
+    fn shape_state(state: &EditorState, previous: &[LayoutLine]) -> (Vec<LayoutLine>, usize) {
+        let projection = projection_of(state);
+        let images = crate::images::Images::default();
+        let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
+        // The two gaps differ, so a gap kept from the wrong neighbour shows.
+        let style = EditorStyle {
+            list_gap: px(3.),
+            ..EditorStyle::notes()
+        };
+        let types = callout_types();
+        let wiki: crate::WikiResolver = Box::new(|target| target != "Missing");
+        let doc = state.doc();
+        let selection = state.selection();
+        let input = ShapeInput {
+            images: &images,
+            spelling: Some(&spelling),
+            wiki: Some(&wiki),
+            doc,
+            types: &types,
+            projection: &projection,
+            style: &style,
+            single_line: false,
+            selection: selection.from(doc)..selection.to(doc),
+            composition: None,
+        };
+        let before = SHAPED_LINES.with(|count| count.get());
+        let lines = super::shape_reusing(&input, px(600.), previous, &text_system());
+        (lines, SHAPED_LINES.with(|count| count.get()) - before)
+    }
+
+    /// Everything a laid-out line holds that can be compared, as text.
+    fn fingerprint(line: &LayoutLine) -> String {
+        use std::fmt::Write;
+        let text = |shaped: &Option<std::rc::Rc<gpui::ShapedLine>>| {
+            shaped
+                .as_ref()
+                .map(|shaped| (shaped.text.to_string(), shaped.width))
+        };
+        let mut out = format!(
+            "{} {:?} {}..{} {} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+            line.index,
+            line.source.start(),
+            line.from,
+            line.to(),
+            line.char_len,
+            line.origin,
+            line.line_height,
+            line.height,
+            line.width,
+            line.min_width,
+            line.top_gap,
+            line.code_pos,
+        );
+        for row in &line.rows {
+            write!(
+                out,
+                "\n row {:?} {} {} {} {:?}",
+                row.text(),
+                row.char_start,
+                row.visual_start,
+                row.visual_rows(),
+                row.line.size(line.line_height),
+            )
+            .unwrap();
+            for code in &row.inline_code {
+                write!(
+                    out,
+                    " code {:?} {} {:?} {:?} {:?} {} {:?}",
+                    code.range,
+                    code.visual_row,
+                    code.left,
+                    code.slot,
+                    code.line.text,
+                    code.raised,
+                    code.lift,
+                )
+                .unwrap();
+            }
+        }
+        let marker = match &line.marker {
+            None => "none".to_owned(),
+            Some(Marker::Number(label)) => format!("number {:?}", label.text),
+            Some(Marker::Bullet { depth }) => format!("bullet {depth}"),
+            Some(Marker::Task {
+                checked,
+                number,
+                source,
+            }) => format!("task {checked} {:?} {:?}", text(number), text(source)),
+            Some(Marker::Source(label)) => format!("source {:?}", label.text),
+        };
+        let decoration = match &line.decoration {
+            None => "none".to_owned(),
+            Some(Decoration::Quote {
+                levels,
+                joined,
+                tones,
+            }) => format!("quote {levels} {joined} {tones:?}"),
+            Some(Decoration::Divider) => "divider".to_owned(),
+            Some(Decoration::Code) => "code".to_owned(),
+        };
+        write!(
+            out,
+            "\n marker {marker}\n decoration {decoration}\n chrome {:?} {:?} {:?} {:?}",
+            text(&line.code_header),
+            text(&line.code_footer),
+            text(&line.quote_marker),
+            line.callout_header
+                .as_ref()
+                .map(|header| (header.text.clone(), header.label.text.to_string())),
+        )
+        .unwrap();
+        for widening in &line.widenings {
+            write!(
+                out,
+                "\n widening {} {} {} {} {:?} {}",
+                widening.source,
+                widening.source_len,
+                widening.display,
+                widening.len,
+                widening.shape,
+                widening.broken,
+            )
+            .unwrap();
+        }
+        for atom in &line.atoms {
+            write!(
+                out,
+                "\n atom {:?} {:?} {} {:?} {} {}",
+                atom.left,
+                atom.slot,
+                atom.visual_row,
+                atom.label.text,
+                atom.image.is_some(),
+                atom.note,
+            )
+            .unwrap();
+        }
+        if let Some(cell) = &line.table {
+            write!(
+                out,
+                "\n cell {} {} {} {} {} {:?} {} {:?} {:?}",
+                cell.table,
+                cell.row,
+                cell.column,
+                cell.rows,
+                cell.columns,
+                cell.alignment,
+                cell.quotes,
+                cell.offset,
+                cell.size,
+            )
+            .unwrap();
+        }
+        out
+    }
+
+    /// Shape `state` keeping what it can of `previous`, check the result is
+    /// what shaping it from nothing gives, and say how many lines it shaped.
+    fn reshaped(state: &EditorState, previous: &[LayoutLine]) -> (Vec<LayoutLine>, usize) {
+        let (kept, shaped) = shape_state(state, previous);
+        let (fresh, _) = shape_state(state, &[]);
+        assert_eq!(kept.len(), fresh.len());
+        for (kept, fresh) in kept.iter().zip(&fresh) {
+            assert!(kept.source == fresh.source, "line {}", fresh.index);
+            assert_eq!(fingerprint(kept), fingerprint(fresh));
+        }
+        (kept, shaped)
+    }
+
+    /// The position at the end of the line whose text is `text`.
+    fn end_of(state: &EditorState, text: &str) -> usize {
+        let projection = projection_of(state);
+        let index = (0..projection.line_count())
+            .find(|&index| projection.line_text(index) == Some(text))
+            .expect("a line with that text");
+        projection.lines()[index].to()
+    }
+
+    /// Typing a character reshapes the line it went into and nothing else, and
+    /// what it keeps is what shaping the whole document again would draw.
+    #[test]
+    fn typing_reshapes_only_the_line_it_types_into() {
+        let state = state_of(REUSED);
+        let state = at(&state, end_of(&state, "Outside"));
+        let (first, shaped) = reshaped(&state, &[]);
+        assert_eq!(shaped, first.len(), "nothing to keep yet");
+
+        let caret = end_of(&state, "Second paragraph to edit.");
+        let state = at(&state, caret);
+        let (moved, shaped) = reshaped(&state, &first);
+        assert_eq!(shaped, 2, "the line the caret left, and the one it entered");
+
+        let state = run(&state, &insert_text("!"));
+        let (typed, shaped) = reshaped(&state, &moved);
+        assert_eq!(shaped, 1, "only the line typed into");
+        // Every line after it moved one position along and was still kept.
+        let edited = typed
+            .iter()
+            .position(|line| line.to() == caret + 1)
+            .expect("the edited line");
+        assert_eq!(typed[edited + 1].from, moved[edited + 1].from + 1);
+
+        // Deleting it again moves them all back.
+        let state = run(
+            &state,
+            &markraft_core::commands::delete_range(caret, caret + 1),
+        );
+        let (_, shaped) = reshaped(&state, &typed);
+        assert_eq!(shaped, 1);
+    }
+
+    /// What a line reads from around it is part of what it is kept under: a
+    /// tenth item widens every number of the list, a quote opening below a
+    /// quoted line changes the gap under it, and a table and a picture are
+    /// always shaped again.
+    #[test]
+    fn a_line_is_reshaped_when_what_it_reads_around_it_changes() {
+        let source = format!("{REUSED}\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n![alt](missing.png)");
+        let state = state_of(&source);
+        let (first, _) = reshaped(&state, &[]);
+
+        // Enter at the end of the ninth item makes a tenth.
+        let types = callout_types();
+        let state = at(&state, end_of(&state, "nine"));
+        let (before, _) = reshaped(&state, &first);
+        let item = types.list_item.expect("a list item type");
+        let state = run(&state, &markraft_core::commands::split_list_item(item));
+        let (after, shaped) = reshaped(&state, &before);
+        // The two halves of the split item, the eight items before it whose
+        // number widened, four cells shaped twice each and the picture.
+        assert_eq!(shaped, 2 + 8 + 8 + 1);
+        assert_ne!(
+            row_of(&before, "one").map(|line| line.origin.x),
+            row_of(&after, "one").map(|line| line.origin.x),
+            "the list's indent follows its widest number"
+        );
+
+        // Quoting the paragraph under a quote: the quoted line above keeps its
+        // body but not its gap.
+        let state = at(&state, end_of(&state, "Outside"));
+        let (before, _) = reshaped(&state, &after);
+        let quote = state
+            .schema()
+            .node_id("blockquote")
+            .expect("a block quote type");
+        let state = run(
+            &state,
+            &markraft_core::commands::wrap_in(quote, Default::default()),
+        );
+        let (after, _) = reshaped(&state, &before);
+        let above = |lines: &[LayoutLine]| row_of(lines, "quote two").map(|line| line.height);
+        assert!(above(&before).is_some());
+        assert_ne!(above(&before), above(&after));
+
+        // Listing the paragraph under a list: the gap under the list's last
+        // item becomes the list's own.
+        let state = state_of("- a\n- b\n\npara");
+        let state = at(&state, end_of(&state, "para"));
+        let (before, _) = reshaped(&state, &[]);
+        let list = state
+            .schema()
+            .node_id("bullet_list")
+            .expect("a bullet list type");
+        let state = run(
+            &state,
+            &markraft_core::commands::wrap_in(list, Default::default()),
+        );
+        let (after, _) = reshaped(&state, &before);
+        let above = |lines: &[LayoutLine]| row_of(lines, "b").map(|line| line.height);
+        assert!(above(&before).is_some());
+        assert_ne!(above(&before), above(&after));
+    }
+
+    /// The laid-out line whose first row reads `text`.
+    fn row_of<'a>(lines: &'a [LayoutLine], text: &str) -> Option<&'a LayoutLine> {
+        lines
+            .iter()
+            .find(|line| line.rows.first().is_some_and(|row| row.text() == text))
+    }
+
+    /// Two ends of a list of lines kept from a shaping: the lines before an
+    /// edit and the lines after it, never overlapping.
+    #[test]
+    fn kept_ends_meet_but_never_overlap() {
+        let state = state_of("a\n\nb\n\nc");
+        let (lines, _) = shape_state(&state, &[]);
+        let projection = projection_of(&state);
+        assert_eq!(super::kept_ends(&lines, projection.lines()), (3, 0));
+        assert_eq!(super::kept_ends(&[], projection.lines()), (0, 0));
+        // A document of other lines altogether shares nothing.
+        let other = projection_of(&state_of("a\n\nb\n\nc"));
+        assert_eq!(super::kept_ends(&lines, other.lines()), (0, 0));
+        // Typing into the middle line keeps one line at either end.
+        let typed = run(&at(&state, end_of(&state, "b")), &insert_text("!"));
+        assert_eq!(
+            super::kept_ends(&lines, projection_of(&typed).lines()),
+            (1, 1)
         );
     }
 

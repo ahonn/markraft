@@ -202,7 +202,7 @@ fn range_sets_stay_inside_the_mapped_document() {
             RangeItem::new(from, from, "empty"),
         ];
         let set = RangeSet::from_items(items);
-        let mapped = set.map(&desc);
+        let mapped = set.map(desc);
         let kept: Vec<&str> = mapped.iter().map(|item| item.value).collect();
         assert!(
             !kept.contains(&"inside"),
@@ -243,7 +243,7 @@ fn a_random_insertion_never_moves_a_range_out_of_the_document() {
                 .step_by(3)
                 .map(|pos| RangeItem::new(pos, (pos + 2).min(document.content_size()), "r")),
         );
-        for item in set.map(&desc).iter() {
+        for item in set.map(desc).iter() {
             assert!(item.from <= item.to);
             assert!(item.to <= desc.length_after());
         }
@@ -274,7 +274,7 @@ fn projection_round_trips_for_random_documents() {
                 projection.utf16_offset(line, pos),
                 projection
                     .pos_to_utf16(pos)
-                    .map(|u| u - projection.line(line).expect("line").utf16_start)
+                    .map(|u| u - projection.line(line).expect("line").utf16_start())
             );
 
             // Boundary helpers stay inside the document and on real boundaries.

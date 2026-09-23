@@ -37,7 +37,7 @@ pub(crate) fn cursor(state: &State, cx: &impl Host) -> usize {
         Mode::VisualLine => motion::line_start(&projection, motion::line_of(&projection, head)),
         Mode::Visual if head > anchor => {
             let line = &projection.lines()[motion::line_of(&projection, head)];
-            if head > line.from {
+            if head > line.from() {
                 motion::previous_in_line(&projection, head)
             } else {
                 clamp(&projection, head)
@@ -264,7 +264,7 @@ fn linewise(state: &mut State, cx: &mut impl Host, operator: Operator, lines: Ra
         // every cell of one is a great deal to ask of a keystroke that in vim never
         // leaves the text it is on, and `dd` is still there for the row itself.
         let line = &projection.lines()[cell.line];
-        charwise(state, cx, operator, line.from..line.to);
+        charwise(state, cx, operator, line.from()..line.to());
         return;
     }
     if let Some(register) =
@@ -524,9 +524,9 @@ pub(crate) fn open_line(state: &mut State, cx: &mut impl Host, below: bool) {
         return;
     }
     enter_insert(state, cx);
-    if line.kind == LineKind::LeafBlock {
+    if line.kind() == LineKind::LeafBlock {
         // A horizontal rule holds no text to split, so a paragraph is created beside it.
-        let pos = line.ancestors.last().map_or(line.from, |own| own.before);
+        let pos = line.block_before().unwrap_or(line.from());
         cx.select(Selection::node(pos), false);
         cx.run(&markraft_core::commands::create_paragraph_near());
         return;
@@ -546,13 +546,13 @@ pub(crate) fn open_line(state: &mut State, cx: &mut impl Host, below: bool) {
     if below {
         return;
     }
-    if line.ancestors.last().is_some_and(|own| {
+    if line.ancestors().last().is_some_and(|own| {
         let types = cx.types();
         Some(own.node_type) == types.code_block || Some(own.node_type) == types.raw_block
     }) {
         // Code and raw rows share one projection line; Enter inserted a newline
         // without creating a new block. Return to the original insertion position.
-        cx.select(Selection::cursor(line.from), false);
+        cx.select(Selection::cursor(line.from()), false);
         return;
     }
     // `O` split the line in two: the empty half is above, so the caret moves back to it.

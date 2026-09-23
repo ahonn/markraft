@@ -202,7 +202,7 @@ impl DocTypes {
 
     /// The heading level of a line's own block, when it is a heading.
     pub(crate) fn heading_level(&self, line: &Line) -> Option<u8> {
-        let own = line.ancestors.last()?;
+        let own = line.ancestors().last()?;
         (Some(own.node_type) == self.heading).then(|| {
             own.attrs
                 .get("level")
@@ -253,7 +253,7 @@ impl DocTypes {
 
     /// The language attribute of a code block line.
     pub(crate) fn code_language<'a>(&self, line: &'a Line) -> Option<&'a str> {
-        let own = line.ancestors.last()?;
+        let own = line.ancestors().last()?;
         (Some(own.node_type) == self.code_block).then(|| {
             own.attrs
                 .get("language")
@@ -262,21 +262,26 @@ impl DocTypes {
         })
     }
 
+    /// The index in [`Line::ancestors`] of the innermost list item a line sits
+    /// in.
+    pub(crate) fn item_index(&self, line: &Line) -> Option<usize> {
+        line.ancestors()
+            .iter()
+            .rposition(|ancestor| self.is_item(ancestor.node_type))
+    }
+
     /// The innermost list item ancestor of a line, with the list holding it.
     pub(crate) fn item_of<'a>(&self, line: &'a Line) -> Option<(&'a Ancestor, &'a Ancestor)> {
-        let index = line
-            .ancestors
-            .iter()
-            .rposition(|ancestor| self.is_item(ancestor.node_type))?;
-        let list = line.ancestors.get(index.checked_sub(1)?)?;
+        let index = self.item_index(line)?;
+        let list = line.ancestors().get(index.checked_sub(1)?)?;
         self.is_list(list.node_type)
-            .then(|| (&line.ancestors[index], list))
+            .then(|| (&line.ancestors()[index], list))
     }
 
     /// How many list levels a line sits in, counting from zero for a top-level
     /// item. Used for the marker shape, which cycles with depth.
     pub(crate) fn list_depth(&self, line: &Line) -> usize {
-        line.ancestors
+        line.ancestors()
             .iter()
             .filter(|ancestor| self.is_list(ancestor.node_type))
             .count()
@@ -285,7 +290,7 @@ impl DocTypes {
 
     /// How many block quotes a line sits in.
     pub(crate) fn quote_depth(&self, line: &Line) -> usize {
-        line.ancestors
+        line.ancestors()
             .iter()
             .filter(|ancestor| Some(ancestor.node_type) == self.blockquote)
             .count()
@@ -310,14 +315,15 @@ impl DocTypes {
     /// The projection gives a cell one line of its own, so this doubles as the
     /// test for "is this line a table cell".
     pub(crate) fn table_cell_of(&self, line: &Line) -> Option<(usize, usize, usize)> {
-        let cell = line.ancestors.last()?;
+        let cell = line.ancestors().last()?;
         if Some(cell.node_type) != self.table_cell {
             return None;
         }
-        let row = line.ancestors.iter().nth_back(1)?;
-        let table = line.ancestors.iter().nth_back(2)?;
+        let row = line.ancestors().iter().nth_back(1)?;
+        let table_index = line.depth().checked_sub(3)?;
+        let table = &line.ancestors()[table_index];
         (Some(row.node_type) == self.table_row && Some(table.node_type) == self.table).then_some((
-            table.before,
+            line.ancestor_before(table_index),
             row.index,
             cell.index,
         ))
@@ -338,7 +344,7 @@ impl DocTypes {
     /// so a caller never has to bounds-check the result.
     pub(crate) fn column_alignments(&self, line: &Line, columns: usize) -> Vec<ColumnAlignment> {
         let declared = line
-            .ancestors
+            .ancestors()
             .iter()
             .nth_back(2)
             .filter(|table| Some(table.node_type) == self.table)

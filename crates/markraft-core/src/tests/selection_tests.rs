@@ -168,7 +168,7 @@ fn a_text_selection_stays_in_inline_content_when_mapped() {
     let selection = Selection::cursor(7);
     let set = changes(&schema, &document, vec![Change::delete(5, 10)]);
     let after = set.apply(&document).unwrap();
-    let mapped = selection.map(&schema, &after, &set.desc());
+    let mapped = selection.map(&schema, &after, set.desc());
     mapped.check(&after, &schema).unwrap();
     let head = mapped.head(&after);
     assert!(
@@ -196,13 +196,13 @@ fn a_node_selection_follows_its_node_and_drops_when_it_is_deleted() {
     );
     let after = inserted.apply(&document).unwrap();
     assert_eq!(
-        selection.map(&schema, &after, &inserted.desc()),
+        selection.map(&schema, &after, inserted.desc()),
         Selection::node(3)
     );
 
     let deleted = changes(&schema, &document, vec![Change::delete(2, 3)]);
     let after = deleted.apply(&document).unwrap();
-    let mapped = selection.map(&schema, &after, &deleted.desc());
+    let mapped = selection.map(&schema, &after, deleted.desc());
     assert!(
         matches!(mapped, Selection::Text { .. }),
         "a deleted node falls back to a text selection, got {mapped:?}"
@@ -231,7 +231,7 @@ fn a_custom_kind_maps_compares_and_serialises() {
         )],
     );
     let after = set.apply(&document).unwrap();
-    let mapped = selection.map(&schema, &after, &set.desc());
+    let mapped = selection.map(&schema, &after, set.desc());
     assert_eq!(
         mapped,
         Selection::custom(Box::new(BlockSelection { from: 3, to: 5 }))
