@@ -8,7 +8,8 @@
 //!   for the space that ends its info string — ```` ``` ```` opens a code block
 //!   with no language and ```` ```rust ```` opens one with `rust` — because the
 //!   two cannot be told apart before it. `[!note] ` at the start of a block
-//!   quote turns it into a callout on the same space a check box waits for.
+//!   quote turns it into a callout on the same space a check box waits for,
+//!   and `[^label]: ` at the start of a block makes a footnote definition.
 //! * **Corrections** — a list merge, the repair that puts a required child
 //!   back into an emptied container, and the canonicalising correction that
 //!   keeps every textblock's marks what its source says. Two lists of the same
@@ -154,6 +155,7 @@ pub fn commonmark_input_rules() -> Vec<InputRule> {
         divider_rule(),
         task_rule(),
         callout_rule(),
+        footnote_rule(),
     ]
 }
 
@@ -303,6 +305,31 @@ fn divider_rule() -> InputRule {
             Slice::from_fragment(Fragment::from_nodes([rule_node, next])),
         )]))
     })
+}
+
+fn footnote_rule() -> InputRule {
+    InputRule::new(
+        |before| footnote_label(before).map(|_| before.chars().count()),
+        |m| {
+            let label = footnote_label(m.text)?;
+            let definition = m.schema.node_id(md::FOOTNOTE_DEFINITION)?;
+            let markups = [markup_of(
+                m.schema,
+                definition,
+                &attrs! {md::FOOTNOTE_LABEL_ATTR => label},
+            )];
+            Some(spec(wrap_block(m, &markups)))
+        },
+    )
+}
+
+/// The label of a footnote definition's marker, `[^label]: `, when that is
+/// all `before` is.
+fn footnote_label(before: &str) -> Option<&str> {
+    let label = before.strip_prefix("[^")?.strip_suffix("]: ")?;
+    (!label.is_empty()
+        && !label.contains(|c: char| c.is_whitespace() || matches!(c, '[' | ']' | '^')))
+    .then_some(label)
 }
 
 fn task_rule() -> InputRule {

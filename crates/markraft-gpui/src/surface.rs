@@ -137,8 +137,15 @@ struct Repaint {
 }
 
 impl InlineCode {
+    /// Code sits centred in its pill. A script sits at the start of its slot,
+    /// against the word it belongs to, so the room the full-size text would
+    /// have taken falls after it.
     fn text_left(&self) -> Pixels {
-        self.left + (self.slot - self.line.width) / 2.
+        if self.raised {
+            self.left
+        } else {
+            self.left + (self.slot - self.line.width) / 2.
+        }
     }
 }
 
@@ -274,6 +281,9 @@ enum Marker {
     },
     /// Markdown source prefix shown while a heading or list line is focused.
     Source(Rc<ShapedLine>),
+    /// A footnote definition's label, right-aligned against its first line.
+    /// Clicking it goes back to the first reference.
+    Footnote(Rc<ShapedLine>),
 }
 
 /// Where a table cell sits in its grid, once the table pass has placed it.
@@ -605,7 +615,7 @@ impl LayoutLine {
 
     pub(crate) fn marker_bounds(&self) -> Option<Bounds<Pixels>> {
         let (offset, width, height) = match self.marker.as_ref()? {
-            Marker::Number(line) | Marker::Source(line) => {
+            Marker::Number(line) | Marker::Source(line) | Marker::Footnote(line) => {
                 (line.width + NUMBER_GAP, line.width, self.line_height)
             }
             Marker::Task {
@@ -619,6 +629,14 @@ impl LayoutLine {
             self.origin + point(-offset, (self.line_height - height) * 0.5),
             size(width, height),
         ))
+    }
+
+    /// Where a footnote definition's label is drawn, on the definition's first
+    /// line.
+    pub(crate) fn footnote_marker(&self) -> Option<Bounds<Pixels>> {
+        matches!(self.marker, Some(Marker::Footnote(_)))
+            .then(|| self.marker_bounds())
+            .flatten()
     }
 
     pub(crate) fn task_marker(&self) -> Option<(bool, Bounds<Pixels>)> {
@@ -1089,6 +1107,12 @@ fn shape_line(
     let font_size = style.font_size(heading, code);
     let max_indent = max_indent(style, width);
     let number = ordered_marker(doc, types, line, style, font_size, text_system);
+    // A footnote's label takes the place an ordinal would, unless a list inside
+    // the definition already numbers the line.
+    let footnote = number
+        .is_none()
+        .then(|| footnote_marker(types, line, style, font_size, text_system))
+        .flatten();
     let focused = line_focused(input, line);
     let marker = chrome_marker(
         input,
@@ -1097,7 +1121,13 @@ fn shape_line(
         focused,
         font_size,
         text_system,
-    );
+    )
+    .or_else(|| {
+        footnote
+            .as_ref()
+            .filter(|_| types.starts_footnote(line))
+            .map(|(label, _)| Marker::Footnote(label.clone()))
+    });
     let decoration = decoration_of(input, index, line, cell.is_some(), max_indent);
     // Headings park ATX hashes in a dedicated gutter. List source spellings
     // reuse the ordered-number reserve so `- `, `1. `, and `- [ ] ` all fit.
@@ -1111,7 +1141,10 @@ fn shape_line(
             source: Some(label),
             ..
         }) => Some(label.width),
-        _ => number.as_ref().map(|(_, w)| *w),
+        _ => number
+            .as_ref()
+            .or(footnote.as_ref())
+            .map(|(_, width)| *width),
     };
     let indent = (indent_of(types, line, style, marker_width) + heading_gutter).min(max_indent);
 
@@ -2380,7 +2413,10 @@ fn text_runs(
         let marks = &run.marks;
         let is_math = has(types.math, marks) && !code_block;
         let is_code = code_block || raw || has(types.code, marks) || is_math;
-        let is_link = has(types.link, marks);
+        // A footnote reference is drawn in the link colour, raised, and without
+        // the underline a link has.
+        let footnote = has(types.footnote_reference, marks);
+        let is_link = has(types.link, marks) || footnote;
         let mut face = font(if is_code { CODE_FONT } else { ".SystemUIFont" });
         if has(types.strong, marks) || heading.is_some() || header {
             face.weight = FontWeight::BOLD;
@@ -2423,7 +2459,7 @@ fn text_runs(
         let inline_code = has(types.code, marks) && !code_block;
         let script = !code_block && !raw && !atom;
         let lowered = has(types.subscript, marks) && script;
-        let raised = (has(types.superscript, marks) && script) || lowered;
+        let raised = ((has(types.superscript, marks) || footnote) && script) || lowered;
         let color = if widened {
             gpui::transparent_black()
         } else if inline_code || raised {
@@ -2444,13 +2480,14 @@ fn text_runs(
             color,
             background_color: (has(types.highlight, marks) && !code_block)
                 .then_some(style.highlight),
-            underline: (!widened && !markup && (has(types.underline, marks) || is_link)).then_some(
-                UnderlineStyle {
-                    thickness: px(1.),
-                    color: Some(ink),
-                    wavy: false,
-                },
-            ),
+            underline: (!widened
+                && !markup
+                && (has(types.underline, marks) || has(types.link, marks)))
+            .then_some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(ink),
+                wavy: false,
+            }),
             strikethrough: (has(types.strikethrough, marks) && !markup)
                 .then_some(StrikethroughStyle {
                     thickness: px(1.),
@@ -2577,6 +2614,8 @@ fn indent_of(
             indent += px(22.);
         } else if Some(ty) == types.code_block {
             indent += CODE_PADDING;
+        } else if Some(ty) == types.footnote_definition {
+            indent += style.list_indent;
         }
     }
     if let Some(width) = number_width {
@@ -2621,6 +2660,40 @@ fn ordered_marker(
     };
     let widest = shape_number(start + count.saturating_sub(1) as i64).width;
     Some((shape_number(start + item.index as i64), widest))
+}
+
+/// The shaped label of the footnote definition a line sits in, and the width
+/// every line of it reserves. Only its first line paints the label, but the
+/// others align with it, as an ordered item's do with its number.
+fn footnote_marker(
+    types: &DocTypes,
+    line: &Line,
+    style: &EditorStyle,
+    font_size: Pixels,
+    text_system: &WindowTextSystem,
+) -> Option<(Rc<ShapedLine>, Pixels)> {
+    let definition = types.footnote_of(line)?;
+    let label = definition
+        .attrs
+        .get(markraft_core::kind::FOOTNOTE_LABEL_ATTR)
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let text = format!("[{label}]");
+    let shaped = Rc::new(text_system.shape_line(
+        text.clone().into(),
+        font_size,
+        &[TextRun {
+            len: text.len(),
+            font: font(".SystemUIFont"),
+            color: style.link,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    ));
+    let width = shaped.width;
+    Some((shaped, width))
 }
 
 /// How many items the ordered list a line's item sits in holds, which is the
@@ -3857,7 +3930,7 @@ fn paint_marker(
 ) {
     let bounds = row.marker_bounds().expect("marker has bounds");
     match marker {
-        Marker::Number(line) | Marker::Source(line) => {
+        Marker::Number(line) | Marker::Source(line) | Marker::Footnote(line) => {
             let _ = line.paint(
                 bounds.origin,
                 row.line_height,
@@ -4611,6 +4684,26 @@ mod tests {
     }
 
     #[test]
+    fn a_footnote_reference_is_raised_and_its_definition_labelled() {
+        let lines = shaped("see[^n]\n\n[^n]: the note\n    more");
+        let row = &lines[0].rows[0];
+        let raised: Vec<&str> = row
+            .inline_code
+            .iter()
+            .filter(|code| code.raised && code.lift > px(0.))
+            .map(|code| &row.text()[code.range.clone()])
+            .collect();
+        assert_eq!(raised, ["n"]);
+        let Some(Marker::Footnote(label)) = &lines[1].marker else {
+            panic!("the definition's first line carries its label");
+        };
+        assert_eq!(label.text.as_ref(), "[n]");
+        assert!(lines[1].footnote_marker().is_some());
+        // Its later lines are indented with it, and carry no label.
+        assert!(lines[1].origin.x > lines[0].origin.x);
+    }
+
+    #[test]
     fn subscript_is_painted_again_smaller_and_lowered() {
         let lines = shaped("H~2~O");
         let row = &lines[0].rows[0];
@@ -5171,6 +5264,7 @@ mod tests {
                     Marker::Bullet { .. } => "bullet",
                     Marker::Task { .. } => "task",
                     Marker::Source(_) => "source",
+                    Marker::Footnote(_) => "footnote",
                 })
             })
             .collect()
@@ -5808,6 +5902,7 @@ mod tests {
                 source,
             }) => format!("task {checked} {:?} {:?}", text(number), text(source)),
             Some(Marker::Source(label)) => format!("source {:?}", label.text),
+            Some(Marker::Footnote(label)) => format!("footnote {:?}", label.text),
         };
         let decoration = match &line.decoration {
             None => "none".to_owned(),

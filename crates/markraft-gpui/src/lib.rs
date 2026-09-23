@@ -14,6 +14,7 @@ mod completion;
 mod conceal;
 mod emoji;
 mod extension;
+mod footnotes;
 mod format_state;
 mod html;
 mod images;
@@ -1067,6 +1068,38 @@ impl EditorView {
             })
     }
 
+    /// Where the definition of the footnote reference drawn under `point`
+    /// starts.
+    fn footnote_definition_under(&self, point: Point<Pixels>) -> Option<usize> {
+        let ty = self.types.footnote_reference?;
+        let pos = self.hit(point);
+        let doc = self.state.doc();
+        let (range, _) = links::link_at(doc, ty, pos)?;
+        let (row, offset) = self.row_at(range.start)?;
+        let drawn = row
+            .rectangles(offset..row.pos_to_offset(range.end), false)
+            .iter()
+            .any(|bounds| bounds.contains(&point));
+        let label = footnotes::reference_at(doc, &self.types, pos).filter(|_| drawn)?;
+        footnotes::definition(self.state.schema(), doc, &self.types, &label)
+    }
+
+    /// Put the caret at `pos` and bring it into view.
+    fn go_to(&mut self, pos: usize, cx: &mut Context<Self>) {
+        self.edit(
+            cx,
+            false,
+            vec![
+                TransactionSpec::new()
+                    .selection(Selection::cursor(pos))
+                    .user_event("select.pointer")
+                    .scroll_into_view(),
+            ],
+        );
+        self.reset_caret_blink(cx);
+        cx.notify();
+    }
+
     /// Open `url` in the browser if it is a web or mail address.
     pub fn open_link(url: &str, cx: &mut App) {
         if let Some(url) = openable_url(url) {
@@ -1594,7 +1627,28 @@ impl EditorView {
             Self::open_link(&url, cx);
             return;
         }
+        // ⌘-click on a footnote reference goes to its definition, as it follows
+        // a link; the definition's label goes back to the first reference.
+        if event.modifiers.platform
+            && let Some(target) = self.footnote_definition_under(event.position)
+        {
+            self.selecting = false;
+            self.go_to(target, cx);
+            return;
+        }
         let position = self.hit(event.position);
+        if let Some((row, _)) = self.row_at(position)
+            && row
+                .footnote_marker()
+                .is_some_and(|bounds| bounds.contains(&event.position))
+            && let Some(label) =
+                footnotes::definition_label_at(self.state.doc(), &self.types, row.from)
+            && let Some(target) = footnotes::first_reference(self.state.doc(), &self.types, &label)
+        {
+            self.selecting = false;
+            self.go_to(target, cx);
+            return;
+        }
         if !event.modifiers.shift
             && let Some(pos) = self.raw_html_under(event.position)
         {

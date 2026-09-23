@@ -668,3 +668,21 @@ fn a_block_the_writer_would_respell_is_not_rewritten_whole() {
         Err(SourceError::UnsupportedEdit)
     );
 }
+
+/// Footnote definitions stand where they were written, so an edit inside one
+/// or around it patches exactly those bytes.
+#[test]
+fn edits_in_and_around_footnote_definitions_save_exactly() {
+    for original in [
+        "a[^n] old\n\n[^n]: the note\n\nafter\n",
+        "a[^n]\n\n[^n]: old note\n    continued\n\n    old second\n\nafter\n",
+        "x\n\n[^unused]: old\n\ny\n",
+        "> q\n>\n> [^q]: old in a quote\n\nt[^q]\n",
+    ] {
+        let expected = original.replace("old", "new");
+        assert_eq!(
+            edit(original, &expected).unwrap_or_else(|error| panic!("{original:?}: {error}")),
+            expected
+        );
+    }
+}

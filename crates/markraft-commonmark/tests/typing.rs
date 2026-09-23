@@ -143,6 +143,9 @@ fn a_list_marker_and_a_check_box_type_through_to_a_task() {
             "- [x] done",
             "```js",
             "~~~",
+            "[^1]: note",
+            "a[^1] b",
+            "H~2~O",
         ] {
             type_at(&schema, place, text);
         }

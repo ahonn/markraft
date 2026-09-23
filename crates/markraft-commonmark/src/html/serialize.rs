@@ -420,6 +420,19 @@ pub fn commonmark_html_node_rules() -> HtmlNodeRules {
         }),
     );
     rules.insert(
+        md::FOOTNOTE_DEFINITION.to_string(),
+        rule(|state, node, _| {
+            state.write("<div class=\"footnote\"");
+            state.attr(
+                "id",
+                &format!("fn-{}", attr_str(node, md::FOOTNOTE_LABEL_ATTR, "")),
+            );
+            state.write(">\n");
+            state.render_content(node);
+            state.write("\n</div>");
+        }),
+    );
+    rules.insert(
         md::BLOCKQUOTE.to_string(),
         rule(|state, node, _| {
             // A callout's marker is not content, so it travels in data
@@ -668,6 +681,22 @@ pub fn commonmark_html_mark_rules() -> HtmlMarkRules {
             }
             open.push('>');
             (open, "</a>".to_string())
+        }),
+    );
+    // The label is the text inside, which is what a reader of the HTML sees;
+    // the link goes to the definition's `id`.
+    rules.insert(
+        md::FOOTNOTE_REFERENCE.to_string(),
+        Arc::new(|mark: &Mark| {
+            let label = mark
+                .attrs
+                .get(md::FOOTNOTE_LABEL_ATTR)
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            (
+                format!("<sup><a href=\"#fn-{}\">", escape_attr(label)),
+                "</a></sup>".to_string(),
+            )
         }),
     );
     rules.insert(md::UNDERLINE.to_string(), tags("<u>", "</u>"));

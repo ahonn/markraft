@@ -37,6 +37,7 @@ pub fn commonmark_doc_type_names() -> DocTypeNames {
         paragraph: Some(schema::PARAGRAPH),
         heading: Some(schema::HEADING),
         blockquote: Some(schema::BLOCKQUOTE),
+        footnote_definition: Some(schema::FOOTNOTE_DEFINITION),
         code_block: Some(schema::CODE_BLOCK),
         bullet_list: Some(schema::BULLET_LIST),
         ordered_list: Some(schema::ORDERED_LIST),
@@ -60,6 +61,7 @@ pub fn commonmark_doc_type_names() -> DocTypeNames {
         math: Some(schema::MATH),
         link: Some(schema::LINK),
         syntax: Some(schema::SYNTAX),
+        footnote_reference: Some(schema::FOOTNOTE_REFERENCE),
     }
 }
 

@@ -50,6 +50,10 @@ pub const LINK_HREF_ATTR: &str = "href";
 /// table.
 pub const TABLE_ALIGNMENTS_ATTR: &str = "alignments";
 
+/// The string attribute of the [`DocTypeNames::footnote_definition`] node and
+/// the [`DocTypeNames::footnote_reference`] mark holding the footnote's label.
+pub const FOOTNOTE_LABEL_ATTR: &str = "label";
+
 /// The name a schema gives each role an editing surface and its key bindings
 /// need.
 ///
@@ -65,6 +69,8 @@ pub struct DocTypeNames {
     pub heading: Option<&'static str>,
     /// A block quote.
     pub blockquote: Option<&'static str>,
+    /// A footnote definition, carrying a [`FOOTNOTE_LABEL_ATTR`] attribute.
+    pub footnote_definition: Option<&'static str>,
     /// A code block, carrying a [`CODE_BLOCK_LANGUAGE_ATTR`] attribute.
     pub code_block: Option<&'static str>,
     /// A bullet list.
@@ -136,6 +142,9 @@ pub struct DocTypeNames {
     /// writes its marks some other way leaves this `None` and nothing is
     /// concealed.
     pub syntax: Option<&'static str>,
+    /// A reference to a footnote, carrying a [`FOOTNOTE_LABEL_ATTR`]
+    /// attribute that names its definition.
+    pub footnote_reference: Option<&'static str>,
 }
 
 /// How a document kind turns a [`Slice`] into the flavours a clipboard carries,

@@ -39,6 +39,7 @@
 //! | rank | mark | spelled as |
 //! |-----:|------|------------|
 //! | 10 | [`LINK`] | `[…](href "title")` — outermost, so a link wraps its styling |
+//! | 12 | [`FOOTNOTE_REFERENCE`] | `[^label]` |
 //! | 20 | [`UNDERLINE`] | `<u>…</u>` |
 //! | 25 | [`HIGHLIGHT`] | `==…==` |
 //! | 30 | [`STRIKETHROUGH`] | `~~…~~` |
@@ -118,6 +119,22 @@ pub const HEADING: &str = "heading";
 /// command, key binding and correction that works on a block quote keeps
 /// working on it. [`crate::callout`] says which first lines are markers.
 pub const BLOCKQUOTE: &str = "blockquote";
+/// A footnote definition: `block+`, attribute `label` (`Str`, required) —
+/// the label as written between `[^` and `]`. Written `[^label]: ` before its
+/// first line, with its other lines indented four columns, where the source
+/// had it: comrak moves every definition to the end of the document, and
+/// [`parse_ast`](crate::parse::parse_ast) puts each back.
+///
+/// A reference is text, `[^label]`, read as [`FOOTNOTE_REFERENCE`] against
+/// the definitions the document holds.
+pub const FOOTNOTE_DEFINITION: &str = "footnote_definition";
+/// The attribute holding a footnote's label, on [`FOOTNOTE_DEFINITION`] and
+/// [`FOOTNOTE_REFERENCE`].
+pub use markraft_core::kind::FOOTNOTE_LABEL_ATTR;
+/// A reference to a footnote, `[^label]`, derived over the whole spelling
+/// wherever the document defines that label: `inclusive: false`, attribute
+/// `label` (`Str`, required). `[^label]` with no definition is text.
+pub const FOOTNOTE_REFERENCE: &str = "footnote_reference";
 /// A code block: `text*`, no marks, `code: true`.
 ///
 /// Attributes:
@@ -296,6 +313,12 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                 )),
         )
         .node(
+            NodeTypeSpec::new(FOOTNOTE_DEFINITION, "block+")
+                .group(BLOCK_GROUP)
+                .defining(true)
+                .attr(AttrSpec::required(FOOTNOTE_LABEL_ATTR, AttrKind::Str)),
+        )
+        .node(
             NodeTypeSpec::new(BLOCKQUOTE, "block+")
                 .group(BLOCK_GROUP)
                 .defining(true)
@@ -420,6 +443,12 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                 .inclusive(false)
                 .attr(AttrSpec::required(LINK_HREF_ATTR, AttrKind::Str))
                 .attr(str_attr("title", "")),
+        )
+        .mark(
+            MarkTypeSpec::new(FOOTNOTE_REFERENCE)
+                .rank(12)
+                .inclusive(false)
+                .attr(AttrSpec::required(FOOTNOTE_LABEL_ATTR, AttrKind::Str)),
         )
         .mark(MarkTypeSpec::new(UNDERLINE).rank(20).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(HIGHLIGHT).rank(25).group(STYLE_GROUP))

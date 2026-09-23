@@ -51,6 +51,10 @@ pub struct DocTypes {
     pub heading: Option<NodeTypeId>,
     /// A block quote. Without it ⌘⇧B does nothing and no quote bar is drawn.
     pub blockquote: Option<NodeTypeId>,
+    /// A footnote definition, carrying a label. Its content is indented under
+    /// the label, and clicking the label goes back to the first reference.
+    /// Without it a definition is drawn as the blocks it holds.
+    pub footnote_definition: Option<NodeTypeId>,
     /// A code block, carrying a `language` attribute. Without it ⌘⌥C does
     /// nothing, no code chrome or highlighting is drawn, and Tab, ⌘A and a
     /// paste behave inside one exactly as they do anywhere else.
@@ -128,6 +132,10 @@ pub struct DocTypes {
     /// A link, carrying an `href` attribute. Without it links cannot be set,
     /// followed or pasted as links.
     pub link: Option<MarkTypeId>,
+    /// A reference to a footnote, carrying the label of its definition. Drawn
+    /// raised in the link colour; ⌘-click goes to the definition. Without it
+    /// a reference is drawn as the text it is.
+    pub footnote_reference: Option<MarkTypeId>,
     /// The mark on the characters that spell rather than say, carrying `span`
     /// and `display` (see [`DocTypeNames::syntax`]). Without it such a run is
     /// drawn like any other text, so the spelling stays visible.
@@ -165,6 +173,7 @@ impl DocTypes {
             paragraph: node(names.paragraph),
             heading: node(names.heading),
             blockquote: node(names.blockquote),
+            footnote_definition: node(names.footnote_definition),
             code_block: node(names.code_block),
             bullet_list: node(names.bullet_list),
             ordered_list: node(names.ordered_list),
@@ -189,6 +198,7 @@ impl DocTypes {
             subscript: mark(names.subscript),
             math: mark(names.math),
             link: mark(names.link),
+            footnote_reference: mark(names.footnote_reference),
             syntax: mark(names.syntax),
             callout: None,
         }
@@ -290,6 +300,35 @@ impl DocTypes {
             .filter(|ancestor| self.is_list(ancestor.node_type))
             .count()
             .saturating_sub(1)
+    }
+
+    /// The innermost footnote definition a line sits in.
+    pub(crate) fn footnote_of<'a>(&self, line: &'a Line) -> Option<&'a Ancestor> {
+        let ty = self.footnote_definition?;
+        line.ancestors()
+            .iter()
+            .rev()
+            .find(|ancestor| ancestor.node_type == ty)
+    }
+
+    /// Whether a line is the first of its footnote definition, where the label
+    /// is drawn: every block between the definition and the line is the first
+    /// of its parent.
+    pub(crate) fn starts_footnote(&self, line: &Line) -> bool {
+        let Some(ty) = self.footnote_definition else {
+            return false;
+        };
+        let Some(at) = line
+            .ancestors()
+            .iter()
+            .rposition(|ancestor| ancestor.node_type == ty)
+        else {
+            return false;
+        };
+        at + 1 < line.ancestors().len()
+            && line.ancestors()[at + 1..]
+                .iter()
+                .all(|ancestor| ancestor.index == 0)
     }
 
     /// How many block quotes a line sits in.

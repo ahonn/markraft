@@ -260,17 +260,21 @@ fn derived_meaning(text: &str, derived: &Derived) -> Meaning {
         derived
             .styles_at(offset)
             .into_iter()
-            .map(|style| match style {
-                Style::Strong => Seen::Strong,
-                Style::Emphasis => Seen::Em,
-                Style::Strikethrough => Seen::Del,
-                Style::Code => Seen::Code,
-                Style::Link { href: url, title } => Seen::Link(href(url), title.clone()),
-                Style::Underline => Seen::U,
-                Style::Highlight => Seen::Mark,
-                Style::Superscript => Seen::Sup,
-                Style::Subscript => Seen::Sub,
-                Style::Math { .. } => Seen::Math,
+            .flat_map(|style| match style {
+                Style::Strong => vec![Seen::Strong],
+                Style::Emphasis => vec![Seen::Em],
+                Style::Strikethrough => vec![Seen::Del],
+                Style::Code => vec![Seen::Code],
+                Style::Link { href: url, title } => vec![Seen::Link(href(url), title.clone())],
+                Style::Underline => vec![Seen::U],
+                Style::Highlight => vec![Seen::Mark],
+                Style::Superscript => vec![Seen::Sup],
+                Style::Subscript => vec![Seen::Sub],
+                Style::Math { .. } => vec![Seen::Math],
+                // comrak writes a reference as a link to the note, raised.
+                Style::FootnoteReference { label } => {
+                    vec![Seen::Sup, Seen::Link(format!("#fn-{label}"), String::new())]
+                }
             })
             .collect()
     };

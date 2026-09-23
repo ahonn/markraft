@@ -132,6 +132,16 @@ impl<'a> Walk<'a> {
                 Some(padding) if number == parent_pos.start.line => {
                     slice_from(line, parent_pos.start.column + padding).to_string()
                 }
+                // A footnote definition's first line starts with its marker.
+                _ if number == parent_pos.start.line
+                    && matches!(&*self.value(parent), NodeValue::FootnoteDefinition(_)) =>
+                {
+                    let rest = slice_from(line, parent_pos.start.column);
+                    rest.split_once("]:")
+                        .map_or("", |(_, content)| content)
+                        .trim_start_matches([' ', '\t'])
+                        .to_string()
+                }
                 _ if number == parent_pos.start.line
                     && !matches!(&*self.value(parent), NodeValue::Document) =>
                 {
@@ -161,11 +171,15 @@ impl<'a> Walk<'a> {
 /// Whether `source` reads as nothing but link reference definitions.
 ///
 /// comrak does not read a definition whose destination is `<>` when nothing
-/// follows it, so the source is given the line ending it had in the file.
+/// follows it, so the source is given the line ending it had in the file. It
+/// also drops a footnote definition nothing refers to, which is not a link
+/// reference definition, so footnotes are off for the question.
 fn reads_as_definitions(source: &str, walk: &Walk<'_>) -> bool {
     let arena = Arena::new();
+    let mut options = walk.options.clone();
+    options.extension.footnotes = false;
     !source.trim().is_empty()
-        && parse_document(&arena, &format!("{source}\n"), walk.options)
+        && parse_document(&arena, &format!("{source}\n"), &options)
             .first_child()
             .is_none()
 }

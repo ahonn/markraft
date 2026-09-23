@@ -103,6 +103,10 @@ pub fn commonmark_node_rules() -> NodeRules {
     );
     rules.insert(md::HEADING.to_string(), rule(heading));
     rules.insert(md::BLOCKQUOTE.to_string(), rule(blockquote));
+    rules.insert(
+        md::FOOTNOTE_DEFINITION.to_string(),
+        rule(footnote_definition),
+    );
     rules.insert(md::CODE_BLOCK.to_string(), rule(code_block));
     rules.insert(md::BULLET_LIST.to_string(), rule(bullet_list));
     rules.insert(md::ORDERED_LIST.to_string(), rule(ordered_list));
@@ -224,6 +228,21 @@ fn thematic_break(state: &SerializerState<'_>) -> &'static str {
 /// *looks* like one at the start of an ordinary quote goes out with a
 /// backslash before its `[`, so no edit can turn a quote into a callout behind
 /// the user's back.
+/// `[^label]: ` before the first line, and the content column four columns in,
+/// which is where CommonMark reads a definition's later blocks.
+fn footnote_definition(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: usize) {
+    let label = attr_str(node, md::FOOTNOTE_LABEL_ATTR, "");
+    // An empty definition ends at its colon, with no space after it.
+    let marker = if is_empty_container(state, node) {
+        format!("[^{label}]:")
+    } else {
+        format!("[^{label}]: ")
+    };
+    state.wrap_block("    ", Some(&marker), node, |state| {
+        state.render_content(node)
+    });
+}
+
 fn blockquote(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: usize) {
     let callout = crate::callout::Callout {
         kind: attr_str(node, "callout", "").to_string(),
@@ -560,6 +579,10 @@ fn interrupts_paragraph(state: &SerializerState<'_>, node: &Node) -> bool {
 pub fn commonmark_mark_rules() -> MarkRules {
     let mut rules = MarkRules::new();
     rules.insert(md::LINK.to_string(), autolink_link_rule());
+    rules.insert(
+        md::FOOTNOTE_REFERENCE.to_string(),
+        MarkRule::fixed("[^", "]"),
+    );
     rules.insert(md::STRONG.to_string(), emphasis_rule("**", '*'));
     rules.insert(md::EM.to_string(), emphasis_rule("*", '*'));
     rules.insert(md::STRIKETHROUGH.to_string(), emphasis_rule("~~", '~'));

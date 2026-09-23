@@ -11,7 +11,7 @@
 
 use std::ops::Range;
 
-use comrak::{Arena, parse_document};
+use comrak::Arena;
 use markraft_core::{Fragment, Node, Schema};
 
 use crate::textblock::{Item, Items, block_kind};
@@ -59,7 +59,7 @@ impl SourceDocument {
         let document = from_markdown(schema, body)?;
         let arena = Arena::new();
         let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
-        let root = parse_document(&arena, &normalized, &commonmark_options());
+        let root = crate::parse::parse_ast(&arena, &normalized, &commonmark_options());
         let lines = line_ranges(body);
         let blocks = block_lines(schema, &document, root, &normalized)
             .into_iter()

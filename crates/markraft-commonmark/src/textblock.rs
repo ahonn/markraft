@@ -362,6 +362,7 @@ pub(crate) fn build(schema: &Schema, kind: BlockKind, source: &str) -> Vec<Node>
 pub(crate) fn derived_mark_types(schema: &Schema) -> Vec<MarkTypeId> {
     [
         md::LINK,
+        md::FOOTNOTE_REFERENCE,
         md::UNDERLINE,
         md::HIGHLIGHT,
         md::STRIKETHROUGH,
@@ -384,6 +385,7 @@ pub(crate) fn style_mark(schema: &Schema, style: &Style) -> Option<Mark> {
     let given = match style {
         Style::Link { href, title } => attrs! {"href" => href.clone(), "title" => title.clone()},
         Style::Math { display } => attrs! {md::MATH_DISPLAY_ATTR => AttrValue::Bool(*display)},
+        Style::FootnoteReference { label } => attrs! {md::FOOTNOTE_LABEL_ATTR => label.clone()},
         _ => Attrs::empty(),
     };
     let attrs = schema.build_mark_attrs(ty, &given).ok()?;
@@ -432,8 +434,19 @@ pub(crate) fn definition_candidates(schema: &Schema, doc: &Node) -> Vec<String> 
     let Some(raw) = schema.node_id(md::RAW_BLOCK) else {
         return Vec::new();
     };
+    let footnote = schema.node_id(md::FOOTNOTE_DEFINITION);
     let mut out = Vec::new();
     doc.descendants(&mut |node, _, _, _| {
+        // A footnote's label is all a reference needs of it, so it stands in
+        // as a definition whose content is a placeholder.
+        if Some(node.type_id()) == footnote {
+            let label = node
+                .attrs()
+                .get(md::FOOTNOTE_LABEL_ATTR)
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            out.push(format!("[^{label}]: x"));
+        }
         if node.type_id() == raw {
             let text: String = node.children().filter_map(|leaf| leaf.text()).collect();
             if text.trim_start().starts_with('[') {
@@ -480,11 +493,15 @@ pub fn holds_definitions(schema: &Schema, block: &Node) -> bool {
 /// Whether `text` reads as nothing but link reference definitions.
 ///
 /// comrak does not read a definition whose destination is `<>` when nothing
-/// follows it, so the text is given the line ending it had in the file.
+/// follows it, so the text is given the line ending it had in the file. It
+/// also drops a footnote definition nothing refers to, which is not a link
+/// reference definition, so footnotes are off for the question.
 pub(crate) fn reads_as_definitions(text: &str) -> bool {
     let arena = comrak::Arena::new();
+    let mut options = crate::commonmark_options();
+    options.extension.footnotes = false;
     !text.trim().is_empty()
-        && comrak::parse_document(&arena, &format!("{text}\n"), &crate::commonmark_options())
+        && comrak::parse_document(&arena, &format!("{text}\n"), &options)
             .first_child()
             .is_none()
 }

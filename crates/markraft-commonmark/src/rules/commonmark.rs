@@ -16,7 +16,7 @@ use crate::table::{Alignment, format_alignments};
 
 /// The rule set for the CommonMark/GFM preset.
 ///
-/// Everything the preset does not name — footnote definitions, HTML blocks,
+/// Everything the preset does not name — HTML blocks,
 /// and any construct a comrak extension this crate does not enable might
 /// produce — falls through to [`ParseRule::Raw`], so it survives as source
 /// text rather than being dropped.
@@ -137,13 +137,11 @@ pub fn commonmark_rules() -> ParseRules {
         // it is always the first, which is what the schema says too.
         .with(&NodeValue::TableRow(false), ParseRule::block(md::TABLE_ROW))
         .with(&NodeValue::TableCell, ParseRule::block(md::TABLE_CELL))
-        // Named so a consumer can see the fallback is deliberate for these.
         .with(
             &NodeValue::FootnoteDefinition(NodeFootnoteDefinition::default()),
-            ParseRule::Raw {
-                node_type: fixed(md::RAW_BLOCK),
-            },
+            ParseRule::block_with(md::FOOTNOTE_DEFINITION, attrs_fn(footnote_attrs)),
         )
+        // Named so a consumer can see the fallback is deliberate for these.
         .with(
             &NodeValue::FootnoteReference(Box::<NodeFootnoteReference>::default()),
             ParseRule::Raw {
@@ -227,6 +225,15 @@ pub(crate) fn callout_marker(target: ParseTarget<'_>) -> Option<crate::callout::
         return None;
     }
     crate::callout::read_callout(line.get(content - 1..)?)
+}
+
+fn footnote_attrs(target: ParseTarget<'_>) -> Attrs {
+    match &*target.value() {
+        NodeValue::FootnoteDefinition(definition) => {
+            attrs! {md::FOOTNOTE_LABEL_ATTR => definition.name.as_str()}
+        }
+        _ => Attrs::empty(),
+    }
 }
 
 fn heading_attrs(target: ParseTarget<'_>) -> Attrs {

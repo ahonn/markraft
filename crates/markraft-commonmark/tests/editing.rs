@@ -578,3 +578,29 @@ fn enter_after_a_header_row_makes_a_table_with_a_row_to_type_in() {
         assert!(entered(line).is_none(), "{line:?}");
     }
 }
+
+#[test]
+fn a_footnote_marker_makes_a_definition_its_references_then_resolve_to() {
+    let schema = commonmark_schema();
+    let doc = markraft_commonmark::from_markdown(&schema, "see[^n]\n").expect("a document");
+    let state = start_from(doc, &schema, 8);
+    assert_eq!(
+        schema.describe(state.doc()),
+        r#"doc(paragraph("see[^n]"))"#,
+        "no definition, no reference"
+    );
+    let state = run_command(&state, &markraft_core::commands::split_block())
+        .expect("Enter applies")
+        .expect("the transaction resolves")
+        .state()
+        .clone();
+    let state = type_all(&state, "[^n]: the note");
+    assert_eq!(
+        schema.describe(state.doc()),
+        r#"doc(paragraph("see", "[^"{footnote_reference,syntax}, "n"{footnote_reference}, "]"{footnote_reference,syntax}), footnote_definition[label=Str("n")](paragraph("the note")))"#
+    );
+    assert_eq!(
+        markraft_commonmark::to_markdown(&schema, state.doc()),
+        "see[^n]\n\n[^n]: the note"
+    );
+}

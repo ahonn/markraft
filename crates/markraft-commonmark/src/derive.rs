@@ -155,6 +155,11 @@ pub enum Style {
     Superscript,
     /// `~…~` or a paired `<sub>`…`</sub>`.
     Subscript,
+    /// `[^label]`, where the document defines `label`.
+    FootnoteReference {
+        /// The label, as written.
+        label: String,
+    },
     /// A formula: `$…$` and `` $`…`$ `` inline, `$$…$$` display. Like a code
     /// span, nothing inside it is read.
     Math {
@@ -176,6 +181,7 @@ impl Style {
             Style::Highlight => md::HIGHLIGHT,
             Style::Superscript => md::SUPERSCRIPT,
             Style::Subscript => md::SUBSCRIPT,
+            Style::FootnoteReference { .. } => md::FOOTNOTE_REFERENCE,
             Style::Math { .. } => md::MATH,
         }
     }
@@ -780,6 +786,8 @@ impl Reader<'_> {
                 NodeValue::Paragraph | NodeValue::Heading(_) | NodeValue::TableCell => {
                     self.inlines(child)
                 }
+                // The definitions the context adds are not the block's text.
+                NodeValue::FootnoteDefinition(_) => {}
                 // A code block, an HTML block or a thematic break holds no
                 // inline content; a table or a container holds blocks that may.
                 _ if value.block() => self.blocks(child),
@@ -833,6 +841,12 @@ impl Reader<'_> {
             NodeValue::Subscript if spans_whitespace(node) => self.inlines(node),
             NodeValue::Subscript => self.styled(node, whole, Style::Subscript),
             NodeValue::Math(math) => self.math(whole, &math),
+            // The `[^` and `]` are spelling; the label is what a reader sees.
+            NodeValue::FootnoteReference(reference) if whole.len() >= 3 => {
+                let label = reference.name.clone();
+                self.style(whole.clone(), Style::FootnoteReference { label });
+                self.delimiters(whole.clone(), whole.start + 2..whole.end - 1);
+            }
             NodeValue::Link(link) => {
                 let style = Style::Link {
                     href: link.url.clone(),

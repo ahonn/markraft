@@ -108,12 +108,10 @@ impl From<NodeError> for ParseError {
 /// link back as the bare URL. `relaxed_autolinks` stays off: it reads a URL
 /// inside brackets as a link too, which is not what GFM does.
 ///
-/// `footnotes` is deliberately **off**: comrak drops a footnote definition that
-/// nothing refers to, and losing text is worse than reading `[^1]: note` as the
-/// paragraph a plain CommonMark reader sees. A consumer that wants footnotes as
-/// nodes turns the extension on with
-/// [`MarkdownParser::with_options`] — the rule set already sends both footnote
-/// kinds to [`ParseRule::Raw`].
+/// `footnotes` is on, and every whole document is read through [`parse_ast`],
+/// which undoes the two things comrak does to footnote definitions that would
+/// lose or move text: it drops a definition nothing refers to, and it moves
+/// every definition to the end of the document.
 ///
 /// `wikilinks_title_after_pipe` is on for Obsidian's `[[target|alias]]` order,
 /// which is what the files this editor shares are written in. comrak only
@@ -154,10 +152,116 @@ pub fn commonmark_options() -> Options<'static> {
     options.extension.highlight = true;
     options.extension.superscript = true;
     options.extension.subscript = true;
+    options.extension.footnotes = true;
     options.extension.math_dollars = true;
     options.extension.math_code = true;
     options.extension.cjk_friendly_emphasis = true;
     options
+}
+
+/// Parse a whole document with comrak, its footnote definitions where the
+/// source has them.
+///
+/// comrak drops a footnote definition nothing refers to and moves the rest to
+/// the end of the document. So the source is read with a paragraph after it
+/// that refers to every label a definition could have, which keeps them all,
+/// and each definition is then put back into the container and at the place
+/// its lines are in. The extra paragraph starts after the last line of the
+/// source, so every position in the tree is the source's own; it is removed
+/// again, and the document's end is the source's. Where that paragraph would
+/// not stand on its own — the source ends in an open fence, say — the source
+/// is read without footnotes instead: a definition is then the paragraph a
+/// plain CommonMark reader sees, which loses nothing.
+pub(crate) fn parse_ast<'a>(
+    arena: &'a Arena<'a>,
+    source: &str,
+    options: &Options<'static>,
+) -> &'a AstNode<'a> {
+    let labels = footnote_labels(source);
+    if !options.extension.footnotes || labels.is_empty() {
+        return parse_document(arena, source, options);
+    }
+    let end = source_end(source);
+    let gap = if source.ends_with('\n') { "\n" } else { "\n\n" };
+    let references: String = labels.iter().map(|label| format!("[^{label}]")).collect();
+    let root = parse_document(arena, &format!("{source}{gap}{references}\n"), options);
+    let appended = root.children().find(|child| {
+        let data = child.data.borrow();
+        matches!(data.value, NodeValue::Paragraph) && data.sourcepos.start.line > end.line
+    });
+    let Some(appended) = appended else {
+        let mut plain = options.clone();
+        plain.extension.footnotes = false;
+        return parse_document(arena, source, &plain);
+    };
+    appended.detach();
+    root.data.borrow_mut().sourcepos.end = end;
+    let definitions: Vec<_> = root
+        .children()
+        .filter(|child| matches!(child.data.borrow().value, NodeValue::FootnoteDefinition(_)))
+        .collect();
+    for definition in definitions {
+        definition.detach();
+        place(root, definition);
+    }
+    root
+}
+
+/// Put a detached footnote definition back where its lines are: inside the
+/// deepest container whose lines hold them, before the first child after them.
+fn place<'a>(parent: &'a AstNode<'a>, definition: &'a AstNode<'a>) {
+    let line = definition.data.borrow().sourcepos.start.line;
+    for child in parent.children() {
+        let pos = child.data.borrow().sourcepos;
+        if pos.start.line > line {
+            child.insert_before(definition);
+            return;
+        }
+        let container = matches!(
+            child.data.borrow().value,
+            NodeValue::BlockQuote
+                | NodeValue::List(_)
+                | NodeValue::Item(_)
+                | NodeValue::TaskItem(_)
+                | NodeValue::FootnoteDefinition(_)
+                | NodeValue::Alert(_)
+        );
+        if container && pos.end.line >= line {
+            place(child, definition);
+            return;
+        }
+    }
+    parent.append(definition);
+}
+
+/// Every label a footnote definition in `source` could have: each `[^label]:`.
+fn footnote_labels(source: &str) -> Vec<&str> {
+    let mut labels: Vec<&str> = Vec::new();
+    let mut rest = source;
+    while let Some(at) = rest.find("[^") {
+        rest = &rest[at + 2..];
+        let Some(close) = rest.find("]:") else {
+            break;
+        };
+        let label = &rest[..close];
+        if !label.is_empty()
+            && !label.contains(|c: char| c.is_whitespace() || matches!(c, '[' | ']'))
+            && !labels.contains(&label)
+        {
+            labels.push(label);
+        }
+    }
+    labels
+}
+
+/// Where comrak says a document of `source` ends: its last line, and the
+/// byte length of that line.
+fn source_end(source: &str) -> comrak::nodes::LineColumn {
+    let lines: Vec<&str> = source.lines().collect();
+    comrak::nodes::LineColumn {
+        line: lines.len().max(1),
+        column: lines.last().map_or(0, |line| line.len()),
+    }
 }
 
 /// Reads Markdown into a [`Node`] tree.
@@ -227,7 +331,7 @@ impl MarkdownParser {
         let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
         let cx = ParseCx::new(&self.schema, &normalized);
         let arena = Arena::new();
-        let root = parse_document(&arena, &normalized, &self.options);
+        let root = parse_ast(&arena, &normalized, &self.options);
         let walk = Walk {
             schema: &self.schema,
             rules: &self.rules,

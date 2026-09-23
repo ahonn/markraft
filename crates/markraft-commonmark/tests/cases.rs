@@ -370,19 +370,51 @@ fn a_hard_break_in_a_cell_is_a_break_tag() {
 // -- constructs with no model of their own --------------------------------
 
 #[test]
-fn an_html_block_and_a_footnote_definition_are_kept_verbatim() {
+fn an_html_block_is_kept_verbatim() {
     assert_eq!(
         round("<div>\nraw <b>text</b>\n</div>"),
         "<div>\nraw <b>text</b>\n</div>"
     );
-    // Footnotes are off, so a definition is the paragraph a plain CommonMark
-    // reader sees — and no text is lost, which turning them on would risk.
+    assert_eq!(round("<!-- a comment -->"), "<!-- a comment -->");
+}
+
+// -- footnotes -------------------------------------------------------------
+
+/// comrak drops a definition nothing refers to and moves the rest to the end
+/// of the document; the codec keeps each one, where it was written.
+#[test]
+fn a_footnote_definition_is_kept_where_it_stands_referred_to_or_not() {
     assert_eq!(round("[^1]: a footnote"), "[^1]: a footnote");
     assert_eq!(
         shape("[^1]: a footnote"),
-        r#"doc(paragraph("[^1]: a footnote"))"#
+        r#"doc(footnote_definition[label=Str("1")](paragraph("a footnote")))"#
     );
-    assert_eq!(round("<!-- a comment -->"), "<!-- a comment -->");
+    assert_eq!(
+        shape("a[^n]\n\n[^n]: note\n\nafter"),
+        r#"doc(paragraph("a", "[^"{footnote_reference,syntax}, "n"{footnote_reference}, "]"{footnote_reference,syntax}), footnote_definition[label=Str("n")](paragraph("note")), paragraph("after"))"#
+    );
+    for source in [
+        "a[^n]\n\n[^n]: note\n\nafter",
+        "[^e]:",
+        "[^u]: https://example.com",
+        "[^long]: one\n    two\n\n    second paragraph\n\nz",
+        "> q\n>\n> [^q]: in a quote\n\nt[^q]",
+        "- item\n\n  [^i]: in an item",
+    ] {
+        assert_eq!(round(source), source);
+    }
+}
+
+/// Where the paragraph that keeps every definition cannot stand after the
+/// source, the source is read without footnotes and a definition is kept as
+/// the source it is: nothing is lost either way.
+#[test]
+fn a_source_ending_in_an_open_fence_keeps_its_definitions_as_source() {
+    assert_eq!(round("[^a]: x\n\n```\ncode"), "[^a]: x\n\n```\ncode\n```");
+    assert_eq!(
+        shape("[^a]: x\n\n```\ncode"),
+        r#"doc(raw_block("[^a]: x"), code_block[fence_char=Str("`"),fence_length=Int(3),language=Str("")]("code"))"#
+    );
 }
 
 #[test]
