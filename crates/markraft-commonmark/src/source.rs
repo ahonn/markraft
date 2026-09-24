@@ -137,6 +137,27 @@ impl SourceDocument {
                 }
                 partial[index] = new[index].clone();
                 let target = document.copy(Fragment::from_nodes(partial.clone()));
+                // A table whose rows were added, removed or edited, its columns
+                // as they were: each row it kept keeps its line, an edited row
+                // keeps its own spacing around the text that changed, and a new
+                // row is spelled the way the table's header is — an emptied cell
+                // keeping room between its pipes. Tried before the text patches,
+                // which would close a cell up to `||`. See `table_rows`.
+                if let Some(patched) = table_rows(
+                    schema,
+                    &old[index],
+                    &new[index],
+                    &result[self.blocks[index].clone()],
+                    self.newline,
+                )
+                .and_then(|rows| {
+                    let mut candidate = result.clone();
+                    candidate.replace_range(self.blocks[index].clone(), &rows);
+                    self.validate(schema, &target, candidate).ok()
+                }) {
+                    result = patched;
+                    continue;
+                }
                 // Prefer semantic text deltas: a longer table cell changes the
                 // canonical table's padding, but existing column whitespace is
                 // unrelated to the user's text edit and must remain untouched.
@@ -196,26 +217,6 @@ impl SourceDocument {
                 let before = block_markdown(schema, &self.document, &old[index..=index]);
                 let after = block_markdown(schema, document, &new[index..=index]);
                 let range = self.blocks[index].clone();
-                // A table whose rows were added, removed or edited, its columns
-                // as they were: each row it kept keeps its line, an edited row
-                // keeps its own spacing around the text that changed, and a new
-                // row is spelled the way the table's header is. See
-                // `table_rows`.
-                if let Some(patched) = table_rows(
-                    schema,
-                    &old[index],
-                    &new[index],
-                    &result[range.clone()],
-                    self.newline,
-                )
-                .and_then(|rows| {
-                    let mut candidate = result.clone();
-                    candidate.replace_range(range.clone(), &rows);
-                    self.validate(schema, &target, candidate).ok()
-                }) {
-                    result = patched;
-                    continue;
-                }
                 // A table's body row added goes in as a line of its own. A diff of
                 // the two tables' canonical spellings could place it anywhere their
                 // padding happens to agree, inside a hand-written row, and the

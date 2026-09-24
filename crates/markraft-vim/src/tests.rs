@@ -1269,9 +1269,11 @@ fn charwise_yanks_preserve_nested_inline_scopes_when_pasted_into_plain_text() {
             }
             keys.keys("G$p");
             let plain = markraft_commonmark::to_plain_text(&schema, keys.host.state.doc());
+            // `yw` takes the space after the word, as in vim.
+            let expected = if yank == "yw" { "xword " } else { "xword" };
             assert_eq!(
                 plain.lines().last().expect("a last line"),
-                "xword",
+                expected,
                 "{source} {yank}"
             );
         }
@@ -1610,40 +1612,64 @@ fn h_and_l_step_over_a_concealed_run_as_one_grapheme() {
 }
 
 #[test]
-fn word_motions_never_stop_inside_a_concealed_run() {
-    // Every `*` is a word of its own, so `w` from `x` would stop between the
-    // two of the opening run.
+fn word_motions_skip_markup_concealed_or_revealed() {
+    // `x **a** y` reads `x a y`: `w` goes from `x` to `a` and on to `y`, never
+    // resting on a delimiter, whether the cursor has revealed it or not.
     let mut keys = Keys::new("x **a** y").at(0, 0);
-    assert_eq!(keys.keys("2w").line_col(), (0, 4));
+    assert_eq!(keys.keys("w").line_col(), (0, 4));
+    assert_eq!(keys.keys("w").line_col(), (0, 8));
+    let mut keys = Keys::new("x **a** y").at(0, 0);
+    assert_eq!(keys.keys("2w").line_col(), (0, 8));
     let mut keys = Keys::new("x **a** y").at(0, 8);
-    assert_eq!(keys.keys("2b").line_col(), (0, 4));
-    // An escape's backslash is a run of its own.
-    let mut keys = Keys::new(r"a \*b").at(0, 0);
+    assert_eq!(keys.keys("b").line_col(), (0, 4));
+    assert_eq!(keys.keys("b").line_col(), (0, 0));
+    // `e` rests on a word's last letter, not past the markup that opens it.
+    let mut keys = Keys::new("x **bold** y").at(0, 0);
+    assert_eq!(keys.keys("e").line_col(), (0, 7));
+    let mut keys = Keys::new("**11** *22*").at(0, 0);
     assert_eq!(keys.keys("w").line_col(), (0, 2));
+    assert_eq!(keys.keys("w").line_col(), (0, 8));
+    assert_eq!(keys.keys("b").line_col(), (0, 2));
+    // An escape's backslash is markup; the character it escapes is text.
+    let mut keys = Keys::new(r"a \*b").at(0, 0);
+    assert_eq!(keys.keys("w").line_col(), (0, 3));
+}
+
+#[test]
+fn operators_keep_markup_whole() {
+    // A span whose text the range takes goes with its spelling; a span the
+    // range reaches into keeps it. Nothing is left as asterisks that no longer
+    // pair.
+    for (keys, expected) in [
+        ("wdw", "x y"),
+        ("wD", "x "),
+        ("wlD", "x **b**"),
+        ("wcw", "x  y"),
+        ("wvex", "x  y"),
+        ("$db", "x y"),
+        ("$bdb", "**bold** y"),
+    ] {
+        let mut at = Keys::new("x **bold** y").at(0, 0);
+        at.keys(keys);
+        assert_eq!(at.markdown(), expected, "{keys}");
+    }
 }
 
 #[test]
 fn a_run_of_punctuation_is_one_word() {
-    // As in vim, `**` is one word, not one per `*`.
-    let mut keys = Keys::new("**11** *22*").at(0, 0);
+    // As in vim, `--` is one word, not one per `-`.
+    let mut keys = Keys::new("a -- b ?? c").at(0, 0);
     assert_eq!(keys.keys("w").line_col(), (0, 2));
-    assert_eq!(keys.keys("w").line_col(), (0, 4));
+    assert_eq!(keys.keys("w").line_col(), (0, 5));
     assert_eq!(keys.keys("w").line_col(), (0, 7));
-    assert_eq!(keys.keys("w").line_col(), (0, 8));
     assert_eq!(keys.keys("w").line_col(), (0, 10));
-    let mut keys = Keys::new("**11** *22*").at(0, 0);
-    assert_eq!(keys.keys("e").line_col(), (0, 1));
+    let mut keys = Keys::new("a -- b ?? c").at(0, 0);
     assert_eq!(keys.keys("e").line_col(), (0, 3));
     assert_eq!(keys.keys("e").line_col(), (0, 5));
-    assert_eq!(keys.keys("e").line_col(), (0, 7));
-    assert_eq!(keys.keys("e").line_col(), (0, 9));
-    assert_eq!(keys.keys("e").line_col(), (0, 10));
-    let mut keys = Keys::new("**11** *22*").at(0, 10);
-    assert_eq!(keys.keys("b").line_col(), (0, 8));
+    let mut keys = Keys::new("a -- b ?? c").at(0, 10);
     assert_eq!(keys.keys("b").line_col(), (0, 7));
-    assert_eq!(keys.keys("b").line_col(), (0, 4));
+    assert_eq!(keys.keys("b").line_col(), (0, 5));
     assert_eq!(keys.keys("b").line_col(), (0, 2));
-    assert_eq!(keys.keys("b").line_col(), (0, 0));
 }
 
 #[test]

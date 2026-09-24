@@ -122,17 +122,22 @@ impl Hidden {
         line.iter().find(|run| matches(run)).cloned()
     }
 
+    /// The characters of line `index` that spell markup, concealed or not:
+    /// never part of a word, so no word motion stops on them.
+    fn spelled(&self, projection: &Projection, index: usize) -> Vec<Range<usize>> {
+        let Some(line) = projection.lines().get(index) else {
+            return Vec::new();
+        };
+        markraft_gpui::markup_spans(self.syntax, line)
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
     /// `pos`, or the start of the concealed run it stands inside: where a
     /// motion going back stops.
     fn snap_back(&self, projection: &Projection, pos: usize) -> usize {
         self.inside(projection, pos).map_or(pos, |run| run.start)
-    }
-
-    /// `pos`, or the end of the concealed run it stands inside: where a
-    /// motion going forward stops, since it may have set out from the run's
-    /// start.
-    fn snap_forward(&self, projection: &Projection, pos: usize) -> usize {
-        self.inside(projection, pos).map_or(pos, |run| run.end)
     }
 }
 
@@ -182,9 +187,10 @@ pub(crate) fn clamp(projection: &Projection, pos: usize) -> usize {
 }
 
 /// The words of one whole line, as document position ranges.
-fn line_words(projection: &Projection, line: usize) -> Vec<Range<usize>> {
-    let entry = &projection.lines()[line.min(last_line(projection))];
-    words(projection, entry.from(), entry.to())
+fn line_words(projection: &Projection, hidden: &Hidden, line: usize) -> Vec<Range<usize>> {
+    let line = line.min(last_line(projection));
+    let entry = &projection.lines()[line];
+    words(projection, hidden, entry.from(), entry.to())
 }
 
 /// The words between `from` and `to` as vim sees them: a run of keyword
@@ -193,10 +199,40 @@ fn line_words(projection: &Projection, line: usize) -> Vec<Range<usize>> {
 /// The editor's word segmentation makes each punctuation character a word of
 /// its own, which suits option-arrow but not `w`: `**` is one word to vim, so
 /// adjacent punctuation segments are joined here.
-fn words(projection: &Projection, from: usize, to: usize) -> Vec<Range<usize>> {
+///
+/// Markup is no word at all, concealed or revealed: `w` from `x` in
+/// `x **bold** y` lands on `b`, and `e` on `d`, where a reader's eye goes. A
+/// cursor resting on a delimiter would invite `x` or `dw` to take half of it
+/// and leave the rest reading as literal asterisks; `h` and `l` still step
+/// onto one for whoever means to edit the spelling itself.
+fn words(projection: &Projection, hidden: &Hidden, from: usize, to: usize) -> Vec<Range<usize>> {
+    let spelled = projection
+        .line_at(from)
+        .map(|index| hidden.spelled(projection, index))
+        .unwrap_or_default();
+    let segments = projection
+        .word_ranges(from, to)
+        .into_iter()
+        .flat_map(|word| {
+            // The parts of the segment outside every run of markup.
+            let mut parts = vec![word];
+            for run in &spelled {
+                parts = parts
+                    .into_iter()
+                    .flat_map(|part| {
+                        [
+                            part.start..run.start.clamp(part.start, part.end),
+                            run.end.clamp(part.start, part.end)..part.end,
+                        ]
+                    })
+                    .filter(|part| !part.is_empty())
+                    .collect();
+            }
+            parts
+        });
     let mut words: Vec<Range<usize>> = Vec::new();
     let mut last_punctuation = false;
-    for word in projection.word_ranges(from, to) {
+    for word in segments {
         let punctuation = projection
             .text_between(word.start, word.end)
             .is_some_and(is_punctuation);
@@ -271,11 +307,10 @@ fn step(projection: &Projection, hidden: &Hidden, from: usize, motion: Motion) -
     match motion {
         Motion::Left => previous_step(projection, hidden, from),
         Motion::Right => next_step(projection, hidden, from),
-        // A word boundary inside a concealed run is not one a reader sees; the
-        // run's edge in the direction of travel is.
-        Motion::WordForward => hidden.snap_forward(projection, next_word_start(projection, from)),
-        Motion::WordBackward => hidden.snap_back(projection, previous_word_start(projection, from)),
-        Motion::WordEnd => hidden.snap_forward(projection, next_word_end(projection, from)),
+        // Markup is never part of a word, so no word motion lands in it.
+        Motion::WordForward => next_word_start(projection, hidden, from),
+        Motion::WordBackward => previous_word_start(projection, hidden, from),
+        Motion::WordEnd => next_word_end(projection, hidden, from),
         _ => from,
     }
 }
@@ -333,10 +368,10 @@ pub(crate) fn next_in_line(projection: &Projection, pos: usize) -> usize {
     projection.next_grapheme_in_line(pos).unwrap_or(pos)
 }
 
-fn next_word_start(projection: &Projection, from: usize) -> usize {
+fn next_word_start(projection: &Projection, hidden: &Hidden, from: usize) -> usize {
     let index = line_of(projection, from);
     let from = clamp(projection, from);
-    if let Some(word) = line_words(projection, index)
+    if let Some(word) = line_words(projection, hidden, index)
         .into_iter()
         .find(|word| word.start > from)
     {
@@ -347,32 +382,32 @@ fn next_word_start(projection: &Projection, from: usize) -> usize {
     }
     // A blank line counts as a word, so `w` stops on it rather than skipping past.
     let next = line_start(projection, index + 1);
-    line_words(projection, index + 1)
+    line_words(projection, hidden, index + 1)
         .first()
         .map_or(next, |word| word.start)
 }
 
-fn previous_word_start(projection: &Projection, from: usize) -> usize {
+fn previous_word_start(projection: &Projection, hidden: &Hidden, from: usize) -> usize {
     let index = line_of(projection, from);
     let from = clamp(projection, from);
     // Only the text before the cursor is segmented, so a cursor inside a word finds
     // that word's own start rather than skipping to the one before it.
-    if let Some(word) = words(projection, projection.lines()[index].from(), from).last() {
+    if let Some(word) = words(projection, hidden, projection.lines()[index].from(), from).last() {
         return word.start;
     }
     if index == 0 {
         return line_start(projection, 0);
     }
     let previous = line_start(projection, index - 1);
-    line_words(projection, index - 1)
+    line_words(projection, hidden, index - 1)
         .last()
         .map_or(previous, |word| word.start)
 }
 
-fn next_word_end(projection: &Projection, from: usize) -> usize {
+fn next_word_end(projection: &Projection, hidden: &Hidden, from: usize) -> usize {
     let index = line_of(projection, from);
     let from = clamp(projection, from);
-    if let Some(end) = line_words(projection, index)
+    if let Some(end) = line_words(projection, hidden, index)
         .iter()
         .map(|word| word_end(projection, word))
         .find(|end| *end > from)
@@ -383,7 +418,7 @@ fn next_word_end(projection: &Projection, from: usize) -> usize {
         return last_grapheme_of(projection, index);
     }
     let next = line_start(projection, index + 1);
-    line_words(projection, index + 1)
+    line_words(projection, hidden, index + 1)
         .first()
         .map_or(next, |word| word_end(projection, word))
 }

@@ -1073,6 +1073,14 @@ fn a_hand_written_tables_rows_keep_their_spelling_through_several_edits() {
             "| a | b |\n|---|---|\n|  1x |2|\n| z |  |\n",
         ),
         ("a | b\n--|--\n1 | 2\n", "a | b\n--|--\n1 | 2\nz | \n"),
+        // A cell emptied keeps room between its pipes.
+        ("|a|b|\n|-|-|\n|1|2|\n", "|a|b|\n|-|-|\n|1| |\n"),
+        (
+            "| a | b |\n| - | - |\n| 1 | 2 |\n",
+            "| a | b |\n| - | - |\n| 1 |  |\n",
+        ),
+        // The paragraph after the table joined into its last cell.
+        ("|a|b|\n|-|-|\n|1|2|\n\nb\n", "|a|b|\n|-|-|\n|1|2b|\n"),
     ] {
         assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
     }

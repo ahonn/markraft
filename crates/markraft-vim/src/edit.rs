@@ -9,7 +9,7 @@ use crate::motion::{self, Span};
 use markraft_core::commands::delete_range_changes;
 use markraft_core::projection::{Line, Projection};
 use markraft_core::{
-    Change, ChangeSet, EditorState, Fit, Fragment, Node, Selection, Slice, TrackMode,
+    Change, ChangeSet, EditorState, Fit, Fragment, MarkTypeId, Node, Selection, Slice, TrackMode,
     TransactionSpec,
 };
 use std::ops::Range;
@@ -205,6 +205,105 @@ pub(crate) fn delete_charwise(state: &EditorState, range: Range<usize>) -> Optio
         .unwrap_or(range.start)
         .min(doc.content_size());
     Some(spec(set, Selection::near(state.schema(), &doc, caret, 1)))
+}
+
+/// Delete the charwise range an operator covers, keeping markup whole.
+///
+/// A span whose text the range takes entirely goes with its spelling, and a span
+/// the range only reaches into keeps every run of its spelling: `dw` on `bold` in
+/// `x **bold** y` leaves `x y`, and `D` from its `o` leaves `x **b**`, where a
+/// plain deletion would leave `x ** y` and `x **b` — asterisks that no longer
+/// pair, read back as text. `x` is the one command that takes source as it
+/// comes, for editing the spelling itself.
+pub(crate) fn delete_charwise_keeping_markup(
+    state: &EditorState,
+    projection: &Projection,
+    syntax: Option<MarkTypeId>,
+    range: Range<usize>,
+) -> Option<TransactionSpec> {
+    let ranges = markup_safe(projection, syntax, range.clone());
+    if ranges.is_empty() {
+        return None;
+    }
+    let changes = ranges
+        .iter()
+        .flat_map(|part| delete_range_changes(state.schema(), state.doc(), part.start, part.end))
+        .collect();
+    let (set, doc) = resolve(state, changes)?;
+    let start = ranges[0].start.min(range.start);
+    let caret = set
+        .map_pos(start, -1, TrackMode::Simple)
+        .unwrap_or(start)
+        .min(doc.content_size());
+    Some(spec(set, Selection::near(state.schema(), &doc, caret, 1)))
+}
+
+/// `range` with the markup it must not split taken out and the markup it
+/// empties put in, as ordered, disjoint ranges.
+pub(crate) fn markup_safe(
+    projection: &Projection,
+    syntax: Option<MarkTypeId>,
+    range: Range<usize>,
+) -> Vec<Range<usize>> {
+    let mut take = vec![range.clone()];
+    let mut keep = Vec::new();
+    let lines = projection
+        .lines()
+        .iter()
+        .filter(|line| line.from() <= range.end && range.start <= line.to());
+    for line in lines {
+        for runs in markraft_gpui::markup_spans(syntax, line) {
+            let (Some(first), Some(last)) = (runs.first(), runs.last()) else {
+                continue;
+            };
+            // What the span holds: the text between its first run and its last,
+            // or — spelled by one run, an entity — the run itself.
+            let content = if runs.len() > 1 {
+                first.end..last.start
+            } else {
+                first.clone()
+            };
+            let emptied =
+                !content.is_empty() && range.start <= content.start && content.end <= range.end;
+            if emptied {
+                take.push(first.start..last.end);
+            } else {
+                keep.extend(runs);
+            }
+        }
+    }
+    subtract(union(take), &keep)
+}
+
+/// `ranges` merged where they touch or overlap, in order.
+fn union(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    ranges.sort_by_key(|range| range.start);
+    let mut out: Vec<Range<usize>> = Vec::new();
+    for range in ranges {
+        match out.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => out.push(range),
+        }
+    }
+    out
+}
+
+/// `ranges` without any position `holes` cover, dropping what empties.
+fn subtract(ranges: Vec<Range<usize>>, holes: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut out = ranges;
+    for hole in holes {
+        out = out
+            .into_iter()
+            .flat_map(|range| {
+                [
+                    range.start..hole.start.clamp(range.start, range.end),
+                    hole.end.clamp(range.start, range.end)..range.end,
+                ]
+            })
+            .filter(|range| !range.is_empty())
+            .collect();
+    }
+    out
 }
 
 /// Delete whole lines. The schema keeps the document valid, so deleting everything

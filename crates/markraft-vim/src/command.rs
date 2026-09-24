@@ -9,8 +9,8 @@ use crate::{
     state::{Mode, Operator, State},
     table,
 };
-use markraft_core::Selection;
 use markraft_core::projection::{LineKind, Projection};
+use markraft_core::{Selection, TransactionSpec};
 use markraft_gpui::DocTypes;
 use std::ops::Range;
 
@@ -148,7 +148,7 @@ pub(crate) fn motion(state: &mut State, cx: &mut impl Host, motion: Motion) {
         }
         span => {
             let range = motion::charwise_range(&projection, &hidden, from, target, span);
-            charwise(state, cx, operator, range);
+            charwise(state, cx, operator, range, false);
         }
     }
 }
@@ -212,7 +212,16 @@ fn yank(state: &mut State, cx: &mut impl Host, register: Register) {
     state.register = Some(register);
 }
 
-fn charwise(state: &mut State, cx: &mut impl Host, operator: Operator, range: Range<usize>) {
+/// Yank, delete or change a charwise range. An operator keeps markup whole —
+/// see [`edit::delete_charwise_keeping_markup`] — unless `source` says the range
+/// is the source under the cursor as it comes, which is what `x` takes.
+fn charwise(
+    state: &mut State,
+    cx: &mut impl Host,
+    operator: Operator,
+    range: Range<usize>,
+    source: bool,
+) {
     // A range reaching from one cell into another cannot be replaced: doing so would
     // merge the two and leave their rows short. Core's `guard_cell_range` stops the
     // editor's own keys there; here the whole operator is refused, selection and all,
@@ -221,8 +230,18 @@ fn charwise(state: &mut State, cx: &mut impl Host, operator: Operator, range: Ra
     if operator != Operator::Yank && table::crosses_cells(cx.types(), &cx.projection(), &range) {
         return;
     }
-    let register =
-        edit::charwise_register(cx.state(), range.clone(), &|slice| cx.plain_text(slice));
+    // What is yanked keeps markup whole as a deletion does: a span the range
+    // empties comes with its spelling, so it pastes styled.
+    let yanked = if source {
+        range.clone()
+    } else {
+        let parts = edit::markup_safe(&cx.projection(), cx.types().syntax, range.clone());
+        match (parts.first(), parts.last()) {
+            (Some(first), Some(last)) => first.start..last.end,
+            _ => range.clone(),
+        }
+    };
+    let register = edit::charwise_register(cx.state(), yanked, &|slice| cx.plain_text(slice));
     yank(state, cx, register);
     match operator {
         Operator::Yank => {
@@ -233,17 +252,26 @@ fn charwise(state: &mut State, cx: &mut impl Host, operator: Operator, range: Ra
             state.mode = Mode::Normal;
         }
         Operator::Delete => {
-            if let Some(spec) = edit::delete_charwise(cx.state(), range) {
+            if let Some(spec) = delete(cx, range, source) {
                 cx.dispatch(vec![spec]);
             }
             state.mode = Mode::Normal;
         }
         Operator::Change => {
             enter_insert(state, cx);
-            if let Some(spec) = edit::delete_charwise(cx.state(), range) {
+            if let Some(spec) = delete(cx, range, source) {
                 cx.dispatch(vec![spec]);
             }
         }
+    }
+}
+
+fn delete(cx: &mut impl Host, range: Range<usize>, source: bool) -> Option<TransactionSpec> {
+    if source {
+        edit::delete_charwise(cx.state(), range)
+    } else {
+        let projection = cx.projection();
+        edit::delete_charwise_keeping_markup(cx.state(), &projection, cx.types().syntax, range)
     }
 }
 
@@ -264,7 +292,7 @@ fn linewise(state: &mut State, cx: &mut impl Host, operator: Operator, lines: Ra
         // every cell of one is a great deal to ask of a keystroke that in vim never
         // leaves the text it is on, and `dd` is still there for the row itself.
         let line = &projection.lines()[cell.line];
-        charwise(state, cx, operator, line.from()..line.to());
+        charwise(state, cx, operator, line.from()..line.to(), false);
         return;
     }
     if let Some(register) =
@@ -355,7 +383,7 @@ pub(crate) fn selection_operator(state: &mut State, cx: &mut impl Host, operator
         linewise(state, cx, operator, lines);
     } else {
         let range = edit::visual_range(&projection, anchor, from);
-        charwise(state, cx, operator, range);
+        charwise(state, cx, operator, range, false);
     }
 }
 
@@ -373,7 +401,7 @@ pub(crate) fn delete_chars(state: &mut State, cx: &mut impl Host) {
     if range.start == range.end {
         return;
     }
-    charwise(state, cx, Operator::Delete, range);
+    charwise(state, cx, Operator::Delete, range, true);
 }
 
 /// `D` and `C`. The count is consumed but not applied: they always take the rest of the
@@ -383,7 +411,7 @@ pub(crate) fn to_line_end(state: &mut State, cx: &mut impl Host, operator: Opera
     let projection = cx.projection();
     let from = cursor(state, cx);
     let range = edit::to_line_end(&projection, from);
-    charwise(state, cx, operator, range);
+    charwise(state, cx, operator, range, false);
 }
 
 /// The content `p` and `P` insert. The clipboard wins, so ⌘C in another application

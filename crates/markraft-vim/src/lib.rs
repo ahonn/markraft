@@ -75,10 +75,19 @@
 //!
 //! A kind that keeps its markup in the text — Markdown's `**`, a backslash
 //! escape — conceals it until the cursor reaches its span. Motions move over
-//! what a reader sees: a run the cursor leaves concealed is one step for `h`,
-//! `l` and `x`, and no motion stops inside one. Landing on its start reveals
-//! it, and from there the cursor walks its characters like any others. A yank
-//! takes the characters themselves, so a paste writes the same source again.
+//! what a reader sees:
+//!
+//! - `w`, `b` and `e` go from word to word of the text and never rest on
+//!   markup, concealed or revealed: `w` from `x` in `x **bold** y` lands on
+//!   `b`, `e` on `d`.
+//! - `h`, `l` and `x` take a run the cursor leaves concealed as one step, and
+//!   no motion stops inside one. Landing on its start reveals it, and from
+//!   there the cursor walks its characters like any others — the way to edit
+//!   the spelling itself, which `x` takes as it comes.
+//! - An operator over a range keeps markup whole: a span whose text the range
+//!   takes goes with its spelling, and one it only reaches into keeps every
+//!   run of it, so `dw` on `bold` leaves `x y` and `D` from its `o` leaves
+//!   `x **b**`. A yank takes the same, so a word yanked whole pastes styled.
 //!
 //! # Registers
 //!

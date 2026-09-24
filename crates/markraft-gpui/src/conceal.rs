@@ -239,6 +239,34 @@ pub(crate) fn word_boundary(
     }
 }
 
+/// The markup of `line`, one entry per span it spells — a bold's two `**`,
+/// a link's `[` and `](url)`, an escape's `\` — each the span's runs in
+/// order, as document ranges, concealed or not.
+///
+/// What a reader edits is the text between a span's first run and its last;
+/// the runs themselves are the span's spelling, and an edit that takes one of
+/// them without the rest leaves markup that reads as something else.
+pub fn markup_spans(syntax: Option<MarkTypeId>, line: &Line) -> Vec<Vec<Range<usize>>> {
+    let mut spans: Vec<(i64, Vec<Range<usize>>)> = Vec::new();
+    for run in line.runs() {
+        let RunContent::Text(_) = run.content else {
+            continue;
+        };
+        let Some(concealed) = concealed(syntax, &run.marks) else {
+            continue;
+        };
+        let range = line.abs(run.start)..line.abs(run.end);
+        match spans.iter_mut().find(|(span, _)| *span == concealed.span) {
+            Some((_, runs)) => match runs.last_mut() {
+                Some(last) if last.end == range.start => last.end = range.end,
+                _ => runs.push(range),
+            },
+            None => spans.push((concealed.span, vec![range])),
+        }
+    }
+    spans.into_iter().map(|(_, runs)| runs).collect()
+}
+
 /// The runs of `line` that spell markup, concealed or not, with neighbours
 /// merged, as document ranges.
 fn spelling(syntax: Option<MarkTypeId>, line: &Line) -> Vec<Range<usize>> {
