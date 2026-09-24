@@ -225,4 +225,40 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn refuses_a_feed_that_would_not_update_safely() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let archive = dir.path().join("app.zip");
+        fs::write(&archive, b"archive")?;
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let public = STANDARD.encode(key.verifying_key().as_bytes());
+        let signed = STANDARD.encode(key.sign(b"archive").to_bytes());
+        let forged = STANDARD.encode(key.sign(b"another archive").to_bytes());
+        let enclosure = |signature: Option<&str>| match signature {
+            Some(signature) => {
+                format!(r#"<enclosure length="7" sparkle:edSignature="{signature}"/>"#)
+            }
+            None => r#"<enclosure length="7"/>"#.to_owned(),
+        };
+        let feed = dir.path().join("appcast.xml");
+        for (items, reason) in [
+            (enclosure(Some(&forged)), "signature"),
+            (enclosure(None), "Ed25519 archive signature"),
+            (String::new(), "one full update"),
+            (enclosure(Some(&signed)).repeat(2), "one full update"),
+        ] {
+            fs::write(
+                &feed,
+                format!(
+                    r#"<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><item>{items}</item></channel></rss>"#
+                ),
+            )?;
+            let error = verify_feed(&feed, &archive, &public)
+                .expect_err("the feed must be refused")
+                .to_string();
+            assert!(error.contains(reason), "{reason:?} not in {error:?}");
+        }
+        Ok(())
+    }
 }
