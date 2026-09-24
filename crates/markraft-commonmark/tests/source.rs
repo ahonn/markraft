@@ -1228,3 +1228,20 @@ fn a_line_a_patch_empties_keeps_no_trailing_spaces() {
         );
     }
 }
+
+/// A line added inside a hand-written block takes the prefix of the lines
+/// around it: a paragraph in a quote its `>`, a bullet item the marker of the
+/// item before it, spaced as that was. A heading's level changes in its own
+/// `#`s. An ordered item added would carry the number of the one before it,
+/// so the writer numbers the list afresh.
+#[test]
+fn lines_added_inside_a_block_take_the_prefixes_around_them() {
+    for (original, edited) in [
+        ("> one\n>\n> two\n", "> one\n>\n> new\n>\n> two\n"),
+        ("-  a\n-  b\n", "-  a\n-  new\n-  b\n"),
+        ("##  Title  ##\n\ntext\n", "###  Title  ##\n\ntext\n"),
+        ("1.  a\n2.  b\n", "1. a\n2. new\n3. b\n"),
+    ] {
+        assert_eq!(edit(original, edited).unwrap(), edited, "{original:?}");
+    }
+}

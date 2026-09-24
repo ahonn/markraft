@@ -266,7 +266,7 @@ impl SerializerState<'_> {
 
 /// `items` without the whitespace that starts each line and the line breaks
 /// at either end of the block.
-fn canonical_lines(items: Items) -> Items {
+pub(crate) fn canonical_lines(items: Items) -> Items {
     let mut out: Vec<Item> = Vec::with_capacity(items.len());
     let mut line_start = true;
     for item in items.0 {

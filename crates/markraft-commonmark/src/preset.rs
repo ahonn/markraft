@@ -319,7 +319,7 @@ fn blockquote(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _:
         // line, which is how the compact form is written and read back.
         let compact = node.maybe_child(0).is_some_and(|first| {
             state.schema().node_id(md::PARAGRAPH) == Some(first.type_id())
-                || interrupts_paragraph(state, first)
+                || interrupts_paragraph(state.schema(), first)
         });
         state.close_block(node);
         state.flush_close(if compact { 1 } else { 2 });
@@ -526,7 +526,7 @@ fn bullet_list(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _
     let bullet = list_marker_char(node, "bullet_char", "-");
     let marker = format!("{bullet} ");
     let delim = " ".repeat(marker.chars().count());
-    let tight = tight_attr(node) && writable_tight(state, node);
+    let tight = written_tight(state.schema(), node);
     state.render_list(node, &delim, tight, &|index| {
         item_marker(node, index, &marker)
     });
@@ -541,7 +541,7 @@ fn ordered_list(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, 
     let last = start + node.child_count().max(1) as i64 - 1;
     let width = last.to_string().len();
     let delim = " ".repeat(width + delimiter.chars().count() + 1);
-    let tight = tight_attr(node) && writable_tight(state, node);
+    let tight = written_tight(state.schema(), node);
     state.render_list(node, &delim, tight, &|index| {
         let ordinal = (start + index as i64).to_string();
         let marker = format!(
@@ -550,6 +550,12 @@ fn ordered_list(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, 
         );
         item_marker(node, index, &marker)
     });
+}
+
+/// Whether `list` is written tight: what its `tight` attribute asks for, as
+/// far as its content lets the writer honour it. See [`writable_tight`].
+pub(crate) fn written_tight(schema: &Schema, list: &Node) -> bool {
+    tight_attr(list) && writable_tight(schema, list)
 }
 
 fn tight_attr(node: &Node) -> bool {
@@ -577,8 +583,8 @@ fn tight_attr(node: &Node) -> bool {
 /// An empty paragraph writes as nothing, so it has no say: Backspace in an
 /// empty item leaves one in the item before, and the list stays as it was
 /// written until something is typed there.
-fn writable_tight(state: &SerializerState<'_>, list: &Node) -> bool {
-    let paragraph = state.schema().node_id(md::PARAGRAPH);
+fn writable_tight(schema: &Schema, list: &Node) -> bool {
+    let paragraph = schema.node_id(md::PARAGRAPH);
     list.children().all(|item| {
         let last = item.child_count().saturating_sub(1);
         let mut previous: Option<&Node> = None;
@@ -586,9 +592,9 @@ fn writable_tight(state: &SerializerState<'_>, list: &Node) -> bool {
             if Some(block.type_id()) == paragraph && block.content_size() == 0 {
                 return true;
             }
-            let ok = (index == last || !runs_until_a_blank_line(state, block))
+            let ok = (index == last || !runs_until_a_blank_line(schema, block))
                 && previous.is_none_or(|before| {
-                    !is_open_paragraph(state, before) || interrupts_paragraph(state, block)
+                    !is_open_paragraph(schema, before) || interrupts_paragraph(schema, block)
                 });
             previous = Some(block);
             ok
@@ -597,18 +603,18 @@ fn writable_tight(state: &SerializerState<'_>, list: &Node) -> bool {
 }
 
 /// Whether the block swallows the line after it unless that line is blank.
-fn runs_until_a_blank_line(state: &SerializerState<'_>, node: &Node) -> bool {
-    let named = |name: &str| state.schema().node_id(name) == Some(node.type_id());
+fn runs_until_a_blank_line(schema: &Schema, node: &Node) -> bool {
+    let named = |name: &str| schema.node_id(name) == Some(node.type_id());
     named(md::TABLE) || named(md::RAW_BLOCK)
 }
 
-fn is_open_paragraph(state: &SerializerState<'_>, node: &Node) -> bool {
-    state.schema().node_id(md::PARAGRAPH) == Some(node.type_id()) && node.content_size() > 0
+fn is_open_paragraph(schema: &Schema, node: &Node) -> bool {
+    schema.node_id(md::PARAGRAPH) == Some(node.type_id()) && node.content_size() > 0
 }
 
 /// Whether the block's own first line can interrupt the paragraph above it.
-fn interrupts_paragraph(state: &SerializerState<'_>, node: &Node) -> bool {
-    let named = |name: &str| state.schema().node_id(name) == Some(node.type_id());
+fn interrupts_paragraph(schema: &Schema, node: &Node) -> bool {
+    let named = |name: &str| schema.node_id(name) == Some(node.type_id());
     if named(md::HEADING) || named(md::CODE_BLOCK) || named(md::BLOCKQUOTE) {
         return true;
     }

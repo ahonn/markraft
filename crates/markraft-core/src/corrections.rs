@@ -64,7 +64,7 @@ use crate::node::Node;
 use crate::schema::NodeTypeId;
 use crate::selection::Selection;
 use crate::slice::Slice;
-use crate::state::protocol::{add_to_history, corrections_diverged, fold_into_previous, remote};
+use crate::state::protocol::{corrections_diverged, fold_into_previous, remote};
 use crate::state::{
     EditorState, Extension, Facet, Transaction, TransactionExtenderFn, TransactionSpec,
     transaction_extender,
@@ -325,8 +325,7 @@ fn run_corrections(tr: &Transaction) -> Option<TransactionSpec> {
 /// in it would make undoing one thing do another.
 fn selection_left(corrections: &[Correction], tr: &Transaction) -> Vec<usize> {
     if tr.selection().is_none()
-        || tr.annotation(remote()) == Some(&true)
-        || tr.annotation(add_to_history()) == Some(&false)
+        || !tr.recorded_in_history()
         || !corrections.iter().any(|c| c.on_selection_leave)
     {
         return Vec::new();

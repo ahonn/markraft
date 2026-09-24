@@ -173,17 +173,18 @@ fn merge_adjacent_lists(cx: &markraft_core::corrections::CorrectionContext<'_>) 
     Vec::new()
 }
 
-/// Keep the numbers of an ordered list's items when typing or deleting over a
-/// range takes the items before them, as Typora does: selecting a paragraph
-/// and the first item of `1. a` / `2. b` and deleting leaves `2. b`. Lifting
-/// the first item out, which is not a deletion, numbers the rest from the
-/// list's start as before.
+/// Keep the numbers of an ordered list's items when an edit takes the items
+/// before them, text and all, as Typora does: selecting a paragraph and the
+/// first item of `1. a` / `2. b` and deleting leaves `2. b`. Lifting the
+/// first item out takes the item but keeps its text, so the rest are
+/// numbered from the list's start as before.
 ///
 /// The list's first item is matched to the item of a list the transaction
 /// started with that it was, and the list starts at that item's number when
-/// every item before it went.
+/// every item before it went with what it held. An undo or a remote change
+/// puts a document back rather than editing one, and is left as it is.
 fn keep_numbers(cx: &CorrectionContext<'_>) -> Vec<Change> {
-    if !(cx.tr.is_user_event("input") || cx.tr.is_user_event("delete")) {
+    if !cx.tr.recorded_in_history() {
         return Vec::new();
     }
     let Some(before) = cx.before else {
@@ -207,7 +208,10 @@ fn keep_numbers(cx: &CorrectionContext<'_>) -> Vec<Change> {
         }
         let mut item = pos + 1;
         for (index, child) in old.children().enumerate() {
-            let gone = changes.map_pos(item, 1, TrackMode::After).is_none();
+            // The item's open token and the first of what it held both
+            // deleted: an item lifted out loses the one and keeps the other.
+            let gone = changes.map_pos(item, 1, TrackMode::After).is_none()
+                && changes.map_pos(item + 2, 1, TrackMode::After).is_none();
             if !gone {
                 if changes.map_pos(item, 1, TrackMode::Simple) == Some(before + 1) {
                     number = Some(start(old) + index as i64);

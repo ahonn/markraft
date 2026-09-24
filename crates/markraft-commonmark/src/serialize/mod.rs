@@ -38,6 +38,7 @@ use std::sync::Arc;
 use markraft_core::{Mark, MarkTypeId, Node, NodeTypeId, Schema, Slice};
 
 mod inline;
+pub(crate) use inline::canonical_lines;
 
 use crate::escape::{escape_text, escape_unlinked_text, protect_indent};
 

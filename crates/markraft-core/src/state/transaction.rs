@@ -374,6 +374,27 @@ impl Transaction {
             .is_some_and(|event| matches_user_event(event, prefix))
     }
 
+    /// Whether the history records this transaction as an edit of the
+    /// document: not one that puts back what it recorded already — an undo or
+    /// a redo — nor a remote change, nor one asked to stay out of it with
+    /// [`add_to_history`](super::protocol::add_to_history).
+    ///
+    /// What settles or responds to an edit — a correction, an auto-pair, a
+    /// fold — leaves such a transaction alone: adding to it would put a change
+    /// in the document the history never recorded, so the next undo, written
+    /// against the document as it was, would no longer apply.
+    pub fn recorded_in_history(&self) -> bool {
+        self.annotation(protocol::remote()) != Some(&true)
+            && self.annotation(protocol::add_to_history()) != Some(&false)
+    }
+
+    /// Whether this transaction is an undo or a redo: one that puts back a
+    /// document the history holds, and the selection that went with it, rather
+    /// than editing the one it starts from.
+    pub fn replays_history(&self) -> bool {
+        crate::history::replays_history(self)
+    }
+
     /// Whether the view should scroll the selection into view.
     pub fn scroll_into_view(&self) -> bool {
         self.0.scroll_into_view

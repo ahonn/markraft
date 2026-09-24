@@ -4,16 +4,33 @@
 //! every inline spelling as it was read. What it does not keep is the block
 //! level: container prefixes and indentation, setext underlines, table
 //! padding, blank-line runs, line endings, front matter. This codec retains the
-//! original source, maps each top-level block to the lines it came from, and
-//! patches only the blocks an edit changed — accepting a patch only when
-//! reparsing the result produces the requested document. Unmapped source is
-//! never silently replaced by canonical Markdown.
+//! original source and patches only what an edit changed, by one rule:
+//!
+//! > A source line is a prefix the containers own, the text of one line of a
+//! > leaf block, and a suffix the block's own syntax owns. The document owns
+//! > the text; the file owns the prefix and the suffix.
+//!
+//! That is the rule the parser reads with — a paragraph's continuation line is
+//! whatever follows its `>` markers and indentation — so an edit to a leaf's
+//! text replaces the text of the lines it changed and leaves their prefixes,
+//! and every other line, as they were. A line added takes the continuation
+//! form of the prefix before it; a line removed goes whole. What lives in a
+//! prefix and is owned by the document — a task box, a heading's `#`s, a
+//! callout's marker line — is patched in the prefix the same way.
+//!
+//! Top-level blocks are paired by shape across the edit. A block whose shape
+//! changed — a paragraph split in two, a list converted — is respelled the way
+//! the writer spells it, as Typora does, and only that block. Every candidate
+//! has to read back as the block it stands for, and the whole file as the
+//! edited document; unmapped source is never silently replaced.
 
 use std::ops::Range;
 
 use comrak::Arena;
+use markraft_core::kind::{HEADING_LEVEL_ATTR, TASK_CHECKED_ATTR};
 use markraft_core::{Fragment, Node, Schema};
 
+use crate::derive::BlockKind;
 use crate::textblock::{Item, Items, block_kind};
 use crate::{ParseError, commonmark_options, from_markdown, to_markdown};
 
@@ -128,20 +145,6 @@ impl SourceDocument {
         }
         let old: Vec<_> = self.document.children().cloned().collect();
         let new: Vec<_> = document.children().cloned().collect();
-        if old.len() == new.len() {
-            let patched = self
-                .patch_blocks(schema, document, &old, &new)
-                .and_then(|result| self.validate(schema, document, result));
-            if patched.is_ok() {
-                return patched;
-            }
-            // Blocks at the same index need not be the same block: a paragraph
-            // split in two while a block further on joined the list before it
-            // keeps the count, but the blocks between have moved. Taken one by
-            // one, each step leaves a note no file holds, so the blocks the
-            // edit touched are saved as one span, as when the count changed.
-        }
-        let mut result = self.source.clone();
         let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
         let suffix = old[prefix..]
             .iter()
@@ -149,221 +152,104 @@ impl SourceDocument {
             .zip(new[prefix..].iter().rev())
             .take_while(|(a, b)| a == b)
             .count();
-        let end = old.len() - suffix;
-        let before = block_markdown(schema, &self.document, &old[prefix..end]);
-        let after = block_markdown(schema, document, &new[prefix..new.len() - suffix]);
+        let (end, new_end) = (old.len() - suffix, new.len() - suffix);
+        let after = block_markdown(schema, document, &new[prefix..new_end]);
         if prefix == end {
-            return self.insert_blocks(schema, document, result, prefix, suffix, &after);
-        } else {
-            // Whole blocks went and nothing took their place — a divider
-            // deleted: their lines go with the gap before them. Patching
-            // them out would leave both gaps, a blank line too many, where
-            // they stood.
-            if prefix + suffix == new.len() {
-                let mut candidate = result.clone();
-                candidate.replace_range(self.dropped_range(prefix, end, suffix), "");
-                if let Ok(done) = self.validate(schema, document, candidate) {
-                    return Ok(done);
-                }
-            }
-            // A table that took in the text of the blocks after it —
-            // Backspace after a table joins its last cell — keeps its
-            // rows' spelling, and the blocks go with the gap before them.
-            if new.len() - suffix == prefix + 1
-                && let Some(rows) = table_rows(
-                    schema,
-                    &old[prefix],
-                    &new[prefix],
-                    &result[self.blocks[prefix].clone()],
-                    self.newline,
-                )
-            {
-                let mut candidate = result.clone();
-                candidate.replace_range(self.blocks[prefix].end..self.blocks[end - 1].end, "");
-                candidate.replace_range(self.blocks[prefix].clone(), &rows);
-                if let Ok(done) = self.validate(schema, document, candidate) {
-                    return Ok(done);
-                }
-            }
-            let range = self.blocks[prefix].start..self.blocks[end - 1].end;
-            result = match self.patch(schema, document, result.clone(), range, &before, &after) {
-                Ok(patched) => patched,
-                // Whole blocks went and nothing took their place, but their
-                // source is not spelled the way the writer would spell them —
-                // a table padded otherwise. Their spelling does not matter to
-                // a deletion: drop their lines and the gap before them.
-                Err(_) if prefix + suffix == new.len() => {
-                    result.replace_range(self.dropped_range(prefix, end, suffix), "");
-                    result
-                }
-                // Blocks were joined, split, wrapped or lifted out: the
-                // structure changed, so the blocks it touched are
-                // respelled whole.
-                Err(_) => {
-                    let range = self.blocks[prefix].start..self.blocks[end - 1].end;
-                    return self.respell(schema, document, result, range, &after);
-                }
-            };
+            return self.insert_blocks(
+                schema,
+                document,
+                self.source.clone(),
+                prefix,
+                suffix,
+                &after,
+            );
         }
+        if prefix == new_end {
+            // Whole blocks went and nothing took their place: their lines go
+            // with the gap before them. Patching them out would leave both
+            // gaps, a blank line too many, where they stood.
+            let mut result = self.source.clone();
+            result.replace_range(self.dropped_range(prefix, end, suffix), "");
+            return self.validate(schema, document, result);
+        }
+        let region = self.blocks[prefix].start..self.blocks[end - 1].end;
+        let pieces = self.pieces(
+            schema,
+            document,
+            &old[prefix..end],
+            &new[prefix..new_end],
+            prefix,
+        );
+        let mut result = self.source.clone();
+        result.replace_range(region.clone(), &pieces);
+        if let Ok(done) = self.validate(schema, document, result) {
+            return Ok(done);
+        }
+        // The blocks the edit touched, written together the way the writer
+        // writes them: what the file reads back as when their own spellings
+        // cannot hold the edit — two lists that would run together, say.
+        let mut result = self.source.clone();
+        result.replace_range(region, &self.with_newlines(&after));
         self.validate(schema, document, result)
     }
 
-    /// Patch each top-level block that differs from the one at its index in
-    /// the source, last first, so each earlier block's source range still
-    /// holds. Each step must read back as the note with the blocks so far
-    /// changed.
-    fn patch_blocks(
+    /// The source of the changed top-level blocks `new` in place of `old`,
+    /// which begin at index `first` of the baseline.
+    ///
+    /// Each new block is paired with the old block of the same shape where
+    /// there is one, and patched in that block's source — or, where its
+    /// spelling cannot take the edit, respelled by the writer. A block paired
+    /// with nothing is new and spelled by the writer; an old block nothing
+    /// pairs with goes. Two blocks that both stand for old ones are parted by
+    /// the gap the source has after the first; any other pair by the writer's
+    /// blank line.
+    fn pieces(
         &self,
         schema: &Schema,
         document: &Node,
         old: &[Node],
         new: &[Node],
-    ) -> Result<String, SourceError> {
-        let mut result = self.source.clone();
-        let mut partial = old.to_vec();
-        for index in (0..old.len()).rev() {
-            if old[index] == new[index] {
-                continue;
+        first: usize,
+    ) -> String {
+        let pairs = pair_in_order(old.len(), new.len(), |i, j| {
+            if old[i] == new[j] {
+                2
+            } else {
+                usize::from(same_shape(schema, &old[i], &new[j]))
             }
-            partial[index] = new[index].clone();
-            let target = document.copy(Fragment::from_nodes(partial.clone()));
-            // A table whose rows were added, removed or edited, its columns
-            // as they were: each row it kept keeps its line, an edited row
-            // keeps its own spacing around the text that changed, and a new
-            // row is spelled the way the table's header is — an emptied cell
-            // keeping room between its pipes. Tried before the text patches,
-            // which would close a cell up to `||`. See `table_rows`.
-            if let Some(patched) = table_rows(
-                schema,
-                &old[index],
-                &new[index],
-                &result[self.blocks[index].clone()],
-                self.newline,
-            )
-            .and_then(|rows| {
-                let mut candidate = result.clone();
-                candidate.replace_range(self.blocks[index].clone(), &rows);
-                self.validate(schema, &target, candidate).ok()
-            }) {
-                result = patched;
-                continue;
-            }
-            // Prefer semantic text deltas: a longer table cell changes the
-            // canonical table's padding, but existing column whitespace is
-            // unrelated to the user's text edit and must remain untouched.
-            let mut text = Vec::new();
-            if text_changes(&old[index], &new[index], &mut text)
-                && let [(before, after)] = text.as_slice()
-                && let Ok(patched) = self.patch(
-                    schema,
-                    &target,
-                    result.clone(),
-                    self.blocks[index].clone(),
-                    before,
-                    after,
-                )
-            {
-                result = patched;
-                continue;
-            }
-            // The same, spelled as the writer spells the one textblock that
-            // changed: a character its guard escapes — a `|` in a table
-            // cell — goes in with its backslash.
-            if let Some((before, after)) = changed_textblock(schema, &old[index], &new[index])
-                .and_then(|(before, after)| {
-                    Some((
-                        guarded_source(schema, before)?,
-                        guarded_source(schema, after)?,
-                    ))
+        });
+        let partner = |j: usize| pairs.iter().find(|(_, b)| *b == j).map(|(a, _)| *a);
+        let separator = self.newline.repeat(2);
+        let mut out = String::new();
+        let mut previous: Option<Option<usize>> = None;
+        for (j, block) in new.iter().enumerate() {
+            let paired = partner(j);
+            let canonical = block_markdown(schema, document, std::slice::from_ref(block));
+            let piece = paired
+                .and_then(|i| {
+                    let raw = &self.source[self.blocks[first + i].clone()];
+                    let patched = patch_block(schema, &old[i], block, raw, self.newline)?;
+                    reads_same(schema, &patched, &self.with_newlines(&canonical)).then_some(patched)
                 })
-                && let Ok(patched) = self.patch(
-                    schema,
-                    &target,
-                    result.clone(),
-                    self.blocks[index].clone(),
-                    &before,
-                    &after,
-                )
-            {
-                result = patched;
+                .unwrap_or_else(|| self.with_newlines(&canonical));
+            // A block that spells nothing — an empty paragraph, typing in
+            // progress — adds nothing, not even a gap.
+            if piece.is_empty() {
                 continue;
             }
-            // A task box ticked or unticked: its one character changes,
-            // however the rest of the item is spelled — `[X]`, a `+`
-            // marker, extra spaces — none of which the writer keeps.
-            if let Some((nth, checked)) = toggled_box(schema, &old[index], &new[index])
-                && let Ok(patched) = self.flip_box(
-                    schema,
-                    &target,
-                    result.clone(),
-                    self.blocks[index].clone(),
-                    nth,
-                    checked,
-                )
-            {
-                result = patched;
-                continue;
-            }
-            let before = block_markdown(schema, &self.document, &old[index..=index]);
-            let after = block_markdown(schema, document, &new[index..=index]);
-            let range = self.blocks[index].clone();
-            // A table's body row added goes in as a line of its own. A diff of
-            // the two tables' canonical spellings could place it anywhere their
-            // padding happens to agree, inside a hand-written row, and the
-            // table would still read the same.
-            if let Some(patched) = added_row(schema, &old[index], &new[index]).and_then(|row| {
-                let line = after.split('\n').nth(row + 1)?;
-                let raw = &result[range.clone()];
-                let at = match row_line(raw, self.newline, row + 1) {
-                    Some(existing) => existing.start + self.newline.len(),
-                    None => raw.len(),
-                };
-                let text = if at == raw.len() {
-                    format!("{}{line}", self.newline)
-                } else {
-                    format!("{line}{}", self.newline)
-                };
-                let mut candidate = result.clone();
-                candidate.insert_str(range.start + at, &text);
-                self.validate(schema, &target, candidate).ok()
-            }) {
-                result = patched;
-                continue;
-            }
-            result = match self.patch(
-                schema,
-                &target,
-                result.clone(),
-                range.clone(),
-                &before,
-                &after,
-            ) {
-                Ok(patched) => patched,
-                // The block's hand-written spelling cannot take the
-                // change in place — a heading's level, a list's type, a
-                // table's columns, or text its spelling cannot hold — so
-                // it is respelled; see `respell`. A table's body row
-                // deleted takes just its line with it rather than the
-                // whole table.
-                Err(_) => {
-                    let dropped = removed_row(schema, &old[index], &new[index])
-                        .and_then(|row| row_line(&result[range.clone()], self.newline, row + 1))
-                        .and_then(|line| {
-                            let mut candidate = result.clone();
-                            candidate.replace_range(
-                                range.start + line.start..range.start + line.end,
-                                "",
-                            );
-                            self.validate(schema, &target, candidate).ok()
-                        });
-                    match dropped {
-                        Some(patched) => patched,
-                        None => self.respell(schema, &target, result, range, &after)?,
+            if let Some(before) = previous {
+                match (before, paired) {
+                    (Some(i), Some(_)) if first + i + 1 < self.blocks.len() => {
+                        let gap = self.blocks[first + i].end..self.blocks[first + i + 1].start;
+                        out.push_str(&self.source[gap]);
                     }
+                    _ => out.push_str(&separator),
                 }
-            };
+            }
+            out.push_str(&piece);
+            previous = Some(paired);
         }
-        Ok(result)
+        out
     }
 
     /// The source top-level blocks `prefix..end` take, with the gap that parts
@@ -377,32 +263,6 @@ impl SourceDocument {
         } else {
             self.blocks[prefix].start..self.blocks[end - 1].end
         }
-    }
-
-    /// Replace `range` — whole top-level blocks — with `after`, their Markdown
-    /// as the writer spells it.
-    ///
-    /// This is the last resort, once no patch keeps the blocks' spelling: an
-    /// edit to a block's structure — a heading made a paragraph, a list
-    /// converted or lifted, blocks joined, a table's columns changed — or text
-    /// the spelling cannot hold, such as a setext heading whose text now opens
-    /// with `~~~`, which would read as a code fence. The blocks the edit
-    /// touched are written the way the writer writes them, as Typora does,
-    /// rather than the edit being refused: a setext heading becomes an ATX
-    /// one, a list's markers are re-spaced. Every other block keeps its bytes,
-    /// and the whole document still has to read back as `target`. Typing in a
-    /// block never gets this far while a patch can place it, so a hand-written
-    /// block keeps its spelling for as long as it can.
-    fn respell(
-        &self,
-        schema: &Schema,
-        target: &Node,
-        mut source: String,
-        range: Range<usize>,
-        after: &str,
-    ) -> Result<String, SourceError> {
-        source.replace_range(range, &self.with_newlines(after));
-        self.validate(schema, target, source)
     }
 
     /// Insert the Markdown of new top-level blocks between the untouched ones
@@ -499,284 +359,842 @@ impl SourceDocument {
             Err(SourceError::UnsupportedEdit)
         }
     }
+}
 
-    fn patch(
-        &self,
-        schema: &Schema,
-        target: &Node,
-        source: String,
-        range: Range<usize>,
-        before: &str,
-        after: &str,
-    ) -> Result<String, SourceError> {
-        let (removed, inserted, prefix, suffix) = difference(before, after);
-        let raw = &source[range.clone()];
-        let removed = self.with_newlines(removed);
-        let inserted = self.with_newlines(inserted);
-        let prefix = self.with_newlines(prefix);
-        let suffix = self.with_newlines(suffix);
-        // Source and canonical Markdown can differ around the edit — a setext
-        // underline, a continuation line's prefix, a table's padding. Prefer
-        // matching local context, then prove the chosen location by parsing
-        // the entire resulting document.
-        for offset in candidate_offsets(raw, &removed, &prefix, &suffix) {
-            let changed = range.start + offset..range.start + offset + removed.len();
-            let trimmed = emptied_line_end(&source, &changed, &inserted);
-            let ends =
-                std::iter::once(trimmed).chain((trimmed != changed.end).then_some(changed.end));
-            for end in ends {
-                let mut candidate = source.clone();
-                candidate.replace_range(changed.start..end, &inserted);
-                if let Ok(valid) = self.validate(schema, target, candidate) {
-                    return Ok(valid);
-                }
-            }
-        }
-        // A save can cover several keystrokes separated by an untouched link
-        // or opaque token. Diff those independently rather than serializing
-        // everything between the first and last change.
-        if let Some(hunks) = token_hunks(before, after)
-            && hunks.len() > 1
-        {
-            let mut patches = Vec::new();
-            for (old, new) in hunks {
-                let (removed, inserted, left, right) =
-                    difference(&before[old.clone()], &after[new]);
-                let removed = self.with_newlines(removed);
-                let prefix = self.with_newlines(&format!("{}{left}", &before[..old.start]));
-                let suffix = self.with_newlines(&format!("{right}{}", &before[old.end..]));
-                let found = candidate_offsets(raw, &removed, &prefix, &suffix)
-                    .into_iter()
-                    .next()
-                    .map(|offset| offset..offset + removed.len());
-                let Some(changed) = found else {
-                    patches.clear();
-                    break;
-                };
-                patches.push((changed, self.with_newlines(inserted)));
-            }
-            patches.sort_by_key(|(span, _)| span.start);
-            if !patches.is_empty()
-                && patches.windows(2).all(|pair| {
-                    pair[0].0.end <= pair[1].0.start && pair[0].0.start != pair[1].0.start
-                })
-            {
-                let spans: Vec<_> = patches
-                    .iter()
-                    .map(|(changed, _)| range.start + changed.start..range.start + changed.end)
-                    .collect();
-                let trimmed: Vec<_> = spans
-                    .iter()
-                    .zip(&patches)
-                    .map(|(span, (_, inserted))| {
-                        span.start..emptied_line_end(&source, span, inserted)
-                    })
-                    .collect();
-                let variants =
-                    std::iter::once(&trimmed).chain((trimmed != spans).then_some(&spans));
-                for spans in variants {
-                    let mut candidate = source.clone();
-                    for (span, (_, inserted)) in spans.iter().zip(&patches).rev() {
-                        candidate.replace_range(span.clone(), inserted);
-                    }
-                    if let Ok(valid) = self.validate(schema, target, candidate) {
-                        return Ok(valid);
-                    }
-                }
-            }
-        }
-        // A structural operation may require replacing its containing block.
-        // Only canonical original source is eligible: block-level trivia the
-        // writer would respell makes this fallback unsafe rather than
-        // expendable. Inline source needs no such care — a textblock's text is
-        // its source, so the writer puts every inline spelling back as it was —
-        // and a callout's marker line lives in its quote's attributes, which
-        // the writer spells again exactly.
-        if raw == self.with_newlines(before) {
-            let mut candidate = source;
-            candidate.replace_range(range, &self.with_newlines(after));
-            return self.validate(schema, target, candidate);
-        }
-        Err(SourceError::UnsupportedEdit)
-    }
-
-    /// Tick (`checked`) or untick the `nth` task box of the block in `range`,
-    /// changing only the character inside it.
-    ///
-    /// A box is a `[ ]`, `[x]` or `[X]` that follows nothing but list markers
-    /// and quote prefixes on its line. The `nth` of those is tried first — the
-    /// source order of the boxes is the order of the task items — and the
-    /// others after it, for a line that only looks like an item, such as one
-    /// inside an indented code block. Whichever is taken, the whole document
-    /// has to parse back to `target`.
-    fn flip_box(
-        &self,
-        schema: &Schema,
-        target: &Node,
-        source: String,
-        range: Range<usize>,
-        nth: usize,
-        checked: bool,
-    ) -> Result<String, SourceError> {
-        let raw = &source[range.clone()];
-        let mut boxes: Vec<usize> = raw
-            .match_indices('[')
-            .map(|(offset, _)| offset + 1)
-            .filter(|&inner| {
-                matches!(raw.as_bytes().get(inner), Some(b' ' | b'x' | b'X'))
-                    && raw.as_bytes().get(inner + 1) == Some(&b']')
-                    && after_item_markers(
-                        &raw[raw[..inner - 1].rfind('\n').map_or(0, |at| at + 1)..inner - 1],
-                    )
-            })
-            .collect();
-        if nth < boxes.len() {
-            let first = boxes.remove(nth);
-            boxes.insert(0, first);
-        }
-        boxes.truncate(64);
-        let mark = if checked { "x" } else { " " };
-        for inner in boxes {
-            if (raw.as_bytes()[inner] != b' ') == checked {
-                continue;
-            }
-            let at = range.start + inner;
-            let mut candidate = source.clone();
-            candidate.replace_range(at..at + 1, mark);
-            if let Ok(valid) = self.validate(schema, target, candidate) {
-                return Ok(valid);
-            }
-        }
-        Err(SourceError::UnsupportedEdit)
+/// Whether two spellings of a block read as the same block, each read on its
+/// own — without the definitions the rest of the note holds, which neither
+/// has, so a reference link reads the same way in both.
+fn reads_same(schema: &Schema, a: &str, b: &str) -> bool {
+    match (from_markdown(schema, a), from_markdown(schema, b)) {
+        (Ok(a), Ok(b)) => a == b || to_markdown(schema, &a) == to_markdown(schema, &b),
+        _ => false,
     }
 }
 
-/// Where replacing `changed` in `source` with `inserted` should stop so that
-/// it leaves no line of nothing but spaces: past the spaces and tabs that end
-/// the line when the replacement leaves nothing else on it. A reader takes
-/// such a line for a blank one, so it only survives as trailing spaces in
-/// the file. Where anything is left before them on the line, they may be a
-/// hard break and stay; `changed.end` is returned then.
-fn emptied_line_end(source: &str, changed: &Range<usize>, inserted: &str) -> usize {
-    let rest = &source[changed.end..];
-    let spaces = rest.len() - rest.trim_start_matches([' ', '\t']).len();
-    let ends_line = matches!(rest[spaces..].chars().next(), None | Some('\n' | '\r'));
-    let starts_line = if inserted.is_empty() {
-        source[..changed.start].is_empty() || source[..changed.start].ends_with('\n')
-    } else {
-        inserted.ends_with('\n')
-    };
-    if ends_line && starts_line {
-        changed.end + spaces
-    } else {
-        changed.end
+/// Whether `old` and `new` are the same block but for what the line model
+/// patches in place: the text of each leaf, a paragraph or heading added or
+/// dropped, a task box, a heading's level, a callout's marker. A table is one
+/// shape whatever its rows: its rows are lines of their own, patched by
+/// [`table_rows`].
+fn same_shape(schema: &Schema, old: &Node, new: &Node) -> bool {
+    if old.type_id() != new.type_id() || old.marks() != new.marks() {
+        return false;
     }
-}
-
-/// Whether `prefix`, the start of a line up to a `[`, is nothing but quote
-/// prefixes and list markers, each marker followed by the space or tab that
-/// makes it one — at least one marker, as a task box needs an item.
-fn after_item_markers(prefix: &str) -> bool {
-    let mut rest = prefix;
-    let mut marker = false;
-    loop {
-        rest = rest.trim_start_matches([' ', '\t']);
-        if rest.is_empty() {
-            return marker && prefix.ends_with([' ', '\t']);
-        }
-        if let Some(after) = rest.strip_prefix('>') {
-            rest = after;
-            marker = false;
-            continue;
-        }
-        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        let length = match rest.as_bytes()[0] {
-            b'-' | b'+' | b'*' => 1,
-            _ if (1..=9).contains(&digits)
-                && matches!(rest.as_bytes().get(digits), Some(b'.' | b')')) =>
-            {
-                digits + 1
-            }
-            _ => return false,
-        };
-        if !rest[length..].starts_with([' ', '\t']) {
+    if old.attrs() != new.attrs() {
+        let carried = prefix_attrs(schema, old)
+            .iter()
+            .fold(old.attrs().clone(), |attrs, name| {
+                match new.attrs().get(name) {
+                    Some(value) => attrs.with(*name, value.clone()),
+                    None => attrs,
+                }
+            });
+        if carried != *new.attrs() {
             return false;
         }
-        rest = &rest[length..];
-        marker = true;
     }
-}
-
-/// The source-order index among `old`'s task items of the one whose box `new`
-/// ticks or unticks, and whether it ends up ticked, when the two differ in
-/// nothing else.
-fn toggled_box(schema: &Schema, old: &Node, new: &Node) -> Option<(usize, bool)> {
-    fn walk(
-        task: markraft_core::NodeTypeId,
-        old: &Node,
-        new: &Node,
-        seen: &mut usize,
-        found: &mut Option<(usize, bool)>,
-    ) -> bool {
-        if old.type_id() != new.type_id()
-            || old.marks() != new.marks()
-            || old.text() != new.text()
-            || old.child_count() != new.child_count()
-        {
-            return false;
-        }
-        if old.type_id() == task {
-            if old.attrs() != new.attrs() {
-                let Some(checked) = new
-                    .attrs()
-                    .get(markraft_core::kind::TASK_CHECKED_ATTR)
-                    .and_then(|value| value.as_bool())
-                else {
-                    return false;
-                };
-                let only_the_box = old
-                    .attrs()
-                    .with(markraft_core::kind::TASK_CHECKED_ATTR, checked)
-                    == *new.attrs();
-                if !only_the_box || found.replace((*seen, checked)).is_some() {
-                    return false;
-                }
-            }
-            *seen += 1;
-        } else if old.attrs() != new.attrs() {
-            return false;
-        }
-        old.children()
-            .zip(new.children())
-            .all(|(a, b)| walk(task, a, b, seen, found))
-    }
-    let task = schema.node_id(crate::schema::TASK_ITEM)?;
-    let mut found = None;
-    walk(task, old, new, &mut 0, &mut found).then_some(found)?
-}
-
-/// The index of the one body row the table `new` lacks, when it is the table
-/// `old` without it.
-fn removed_row(schema: &Schema, old: &Node, new: &Node) -> Option<usize> {
-    if schema.node_id(crate::schema::TABLE) != Some(old.type_id())
-        || !old.same_markup(new)
-        || old.child_count() != new.child_count() + 1
+    // A leaf is its text; a table is its rows; a list is its items — all
+    // lines the line model patches, adds and drops on its own.
+    let ty = old.type_id();
+    if block_kind(schema, ty).is_some()
+        || is_verbatim(schema, old)
+        || schema.node_type(ty).is_leaf()
+        || [
+            crate::schema::TABLE,
+            crate::schema::BULLET_LIST,
+            crate::schema::ORDERED_LIST,
+        ]
+        .iter()
+        .any(|name| schema.node_id(name) == Some(ty))
     {
+        return true;
+    }
+    // Paragraphs and headings are lines the line model adds and drops; the
+    // rest of the children are the shape.
+    fn structure<'a>(schema: &Schema, node: &'a Node) -> Vec<&'a Node> {
+        node.children()
+            .filter(|child| block_kind(schema, child.type_id()).is_none())
+            .collect()
+    }
+    let (before, after) = (structure(schema, old), structure(schema, new));
+    before.len() == after.len()
+        && before
+            .into_iter()
+            .zip(after)
+            .all(|(a, b)| same_shape(schema, a, b))
+}
+
+/// The attributes of `node`'s type that are spelled in a line's prefix, on a
+/// marker line of its own, or in the blank lines between items, and so can
+/// change without the block's shape changing.
+fn prefix_attrs(schema: &Schema, node: &Node) -> &'static [&'static str] {
+    let ty = Some(node.type_id());
+    if schema.node_id(crate::schema::TASK_ITEM) == ty {
+        &[TASK_CHECKED_ATTR]
+    } else if schema.node_id(crate::schema::HEADING) == ty {
+        &[HEADING_LEVEL_ATTR]
+    } else if schema.node_id(crate::schema::BLOCKQUOTE) == ty {
+        &["callout", "fold", "title"]
+    } else if [crate::schema::BULLET_LIST, crate::schema::ORDERED_LIST]
+        .iter()
+        .any(|name| schema.node_id(name) == ty)
+    {
+        &["tight"]
+    } else {
+        &[]
+    }
+}
+
+/// Whether `node` is a block whose text is written line for line as it
+/// stands — a code block, an HTML block, a raw block — rather than inline
+/// source with atoms and marks.
+fn is_verbatim(schema: &Schema, node: &Node) -> bool {
+    block_kind(schema, node.type_id()).is_none()
+        && schema.node_type(node.type_id()).has_inline_content()
+        && node.children().all(Node::is_text)
+}
+
+/// What a leaf's lines hold.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeafKind {
+    /// Inline source: a paragraph's, a heading's.
+    Text(BlockKind),
+    /// A callout's marker, the first line of its quote.
+    Marker,
+    /// A code block's lines, between fences or indented.
+    Code,
+    /// An HTML or raw block's lines.
+    Verbatim,
+}
+
+/// One run of lines a block owns the text of, in document order.
+struct Leaf<'a> {
+    kind: LeafKind,
+    /// The node the lines belong to: the textblock, the code block, or for a
+    /// marker the quote.
+    node: &'a Node,
+    /// The text of each line, as the file holds it.
+    lines: Vec<String>,
+    /// The task items whose box stands in the prefix of the first line —
+    /// each item this leaf opens, outermost first.
+    boxes: Vec<&'a Node>,
+    /// Whether this leaf is the first block of a list item, and if so whether
+    /// that list is loose. One with no text still takes the item's marker
+    /// line, which holds the item open.
+    opens_item: Option<bool>,
+}
+
+/// The leaves of `block` in document order, their text as the file holds it
+/// (`as_written`) or as the writer would write it now. `None` where the block
+/// holds something the line model does not cover: a table inside it, or an
+/// atom the writer has no spelling for.
+fn leaves<'a>(schema: &Schema, block: &'a Node, as_written: bool) -> Option<Vec<Leaf<'a>>> {
+    fn walk<'a>(
+        schema: &Schema,
+        node: &'a Node,
+        as_written: bool,
+        parent: Option<&'a Node>,
+        boxes: &mut Vec<&'a Node>,
+        opens_item: &mut Option<bool>,
+        out: &mut Vec<Leaf<'a>>,
+    ) -> Option<()> {
+        let ty = node.type_id();
+        if schema.node_id(crate::schema::TABLE) == Some(ty) {
+            return None;
+        }
+        if let Some(kind) = block_kind(schema, ty) {
+            let text = if as_written {
+                written_text(schema, node)
+            } else {
+                guarded_text(schema, node, kind)?
+            };
+            out.push(Leaf {
+                kind: LeafKind::Text(kind),
+                node,
+                lines: text_lines(&text),
+                boxes: std::mem::take(boxes),
+                opens_item: std::mem::take(opens_item),
+            });
+            return Some(());
+        }
+        if is_verbatim(schema, node) {
+            let text: String = node.children().filter_map(Node::text).collect();
+            let kind = if schema.node_id(crate::schema::CODE_BLOCK) == Some(ty) {
+                LeafKind::Code
+            } else {
+                LeafKind::Verbatim
+            };
+            out.push(Leaf {
+                kind,
+                node,
+                lines: text_lines(&text),
+                boxes: std::mem::take(boxes),
+                opens_item: std::mem::take(opens_item),
+            });
+            return Some(());
+        }
+        if let Some(marker) = callout_marker(schema, node) {
+            out.push(Leaf {
+                kind: LeafKind::Marker,
+                node,
+                lines: vec![marker],
+                boxes: std::mem::take(boxes),
+                opens_item: std::mem::take(opens_item),
+            });
+        }
+        if schema.node_id(crate::schema::TASK_ITEM) == Some(ty) {
+            boxes.push(node);
+        }
+        if [crate::schema::LIST_ITEM, crate::schema::TASK_ITEM]
+            .iter()
+            .any(|name| schema.node_id(name) == Some(ty))
+        {
+            let loose = parent.is_some_and(|list| !crate::preset::written_tight(schema, list));
+            *opens_item = Some(loose);
+        }
+        for child in node.children() {
+            walk(
+                schema,
+                child,
+                as_written,
+                Some(node),
+                boxes,
+                opens_item,
+                out,
+            )?;
+        }
+        Some(())
+    }
+    let mut out = Vec::new();
+    walk(
+        schema,
+        block,
+        as_written,
+        None,
+        &mut Vec::new(),
+        &mut None,
+        &mut out,
+    )?;
+    Some(out)
+}
+
+/// The lines of a leaf's text: none for no text at all.
+fn text_lines(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split('\n').map(str::to_owned).collect()
+    }
+}
+
+/// The marker line a callout quote opens with, if `node` is one.
+fn callout_marker(schema: &Schema, node: &Node) -> Option<String> {
+    if schema.node_id(crate::schema::BLOCKQUOTE) != Some(node.type_id()) {
         return None;
     }
-    let row = old
-        .children()
-        .zip(new.children())
-        .position(|(a, b)| a != b)
-        .unwrap_or(new.child_count());
-    let rest_equal = old.children().skip(row + 1).eq(new.children().skip(row));
-    (row > 0 && rest_equal).then_some(row)
+    let attr = |name: &str| node.attrs().get(name).and_then(|value| value.as_str());
+    let kind = attr("callout").filter(|kind| !kind.is_empty())?;
+    let callout = crate::callout::Callout {
+        kind: kind.to_owned(),
+        fold: attr("fold").unwrap_or_default().to_owned(),
+        title: attr("title").unwrap_or_default().to_owned(),
+    };
+    Some(callout.marker())
 }
 
-/// The index of the one body row the table `new` has that `old` lacks, when it
-/// is the table `old` with it.
-fn added_row(schema: &Schema, old: &Node, new: &Node) -> Option<usize> {
-    removed_row(schema, new, old)
+/// A textblock's text as the file holds it: its inline source, with each
+/// atom's own spelling and `\n` for a line break.
+fn written_text(schema: &Schema, block: &Node) -> String {
+    let mut out = String::new();
+    for item in &Items::from_nodes(schema, block.children()).0 {
+        match item {
+            Item::Char(c) => out.push(*c),
+            Item::Break => out.push('\n'),
+            Item::Atom(atom) => out.push_str(&crate::textblock::atom_spelling(schema, atom)),
+        }
+    }
+    out
+}
+
+/// A textblock's text as the writer puts it in the file: its lines settled,
+/// with its guard's backslashes and each atom's own spelling — or `None` when
+/// it holds an atom the writer has no spelling for.
+fn guarded_text(schema: &Schema, block: &Node, kind: BlockKind) -> Option<String> {
+    let items = crate::serialize::canonical_lines(Items::from_nodes(schema, block.children()));
+    let insertions = items.guard_insertions(schema, kind, None);
+    let mut out = String::new();
+    let mut next = insertions.iter().peekable();
+    for (index, item) in items.0.iter().enumerate() {
+        while next.next_if(|at| **at == index).is_some() {
+            out.push('\\');
+        }
+        match item {
+            Item::Char(c) => out.push(*c),
+            Item::Break => out.push('\n'),
+            Item::Atom(atom) => {
+                let spelling = crate::textblock::atom_spelling(schema, atom);
+                if spelling == markraft_core::projection::OBJECT_REPLACEMENT.to_string() {
+                    return None;
+                }
+                out.push_str(&spelling);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// A block's source cut into lines, each with the line ending that closes it
+/// — none for a last line the source ends without one.
+fn source_lines(raw: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let bytes = raw.as_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if matches!(bytes[offset], b'\r' | b'\n') {
+            let mut end = offset + 1;
+            if bytes[offset] == b'\r' && bytes.get(offset + 1) == Some(&b'\n') {
+                end += 1;
+            }
+            out.push((raw[start..offset].to_owned(), raw[offset..end].to_owned()));
+            start = end;
+            offset = end;
+        } else {
+            offset += 1;
+        }
+    }
+    if start < raw.len() || out.is_empty() {
+        out.push((raw[start..].to_owned(), String::new()));
+    }
+    out
+}
+
+/// Where a leaf's lines stand in a block's source.
+struct Located {
+    /// The index of its first line, and how many lines it has.
+    first: usize,
+    count: usize,
+    /// What each line holds before the leaf's text.
+    prefixes: Vec<String>,
+    /// The line ending that closes each line.
+    ends: Vec<String>,
+    /// What the last line holds after it: whitespace the reader drops, an ATX
+    /// heading's closing sequence.
+    suffix: String,
+    /// The prefix a line added to a leaf with no lines takes.
+    base: String,
+    /// The line that closes a fenced code block, after its lines.
+    close: Option<(String, String)>,
+}
+
+/// The characters a continuation line's prefix is made of: what the parser
+/// strips from one.
+fn is_prefix_char(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '>')
+}
+
+/// Whether `line` ends with `text` after a prefix of nothing but `>` markers
+/// and whitespace: what a continuation line is to the parser.
+fn continues(line: &str, text: &str) -> bool {
+    line.ends_with(text) && line[..line.len() - text.len()].chars().all(is_prefix_char)
+}
+
+/// Whether `line` is a fence line: its content, after any container prefix,
+/// opens with a run of at least three backticks or tildes. Answers the run.
+fn fence_of(line: &str) -> Option<&str> {
+    let content = line.trim_start_matches(is_prefix_char);
+    let run = content.len() - content.trim_start_matches(['`', '~']).len();
+    let first = content.chars().next()?;
+    (run >= 3 && content[..run].chars().all(|c| c == first)).then(|| &content[..run])
+}
+
+/// Find where `leaf`'s lines stand in `lines` from `cursor` on, moving the
+/// cursor past them. `Some(None)` is a leaf with no lines of its own — an
+/// empty paragraph, an empty code block — and `None` a leaf whose lines could
+/// not be found, so the block cannot be patched.
+fn locate(
+    leaf: &Leaf<'_>,
+    lines: &[(String, String)],
+    cursor: &mut usize,
+) -> Option<Option<Located>> {
+    let texts = &leaf.lines;
+    let n = texts.len();
+    match leaf.kind {
+        LeafKind::Text(_) | LeafKind::Marker => {
+            let kind = match leaf.kind {
+                LeafKind::Text(kind) => Some(kind),
+                _ => None,
+            };
+            if n == 0 {
+                return Some(None);
+            }
+            for first in *cursor..lines.len() {
+                let Some(located) = locate_text(texts, kind, lines, first) else {
+                    continue;
+                };
+                *cursor = first + n;
+                return Some(Some(located));
+            }
+            None
+        }
+        LeafKind::Code | LeafKind::Verbatim => {
+            let start = (*cursor..lines.len())
+                .find(|&index| !lines[index].0.chars().all(is_prefix_char))?;
+            let fence = (leaf.kind == LeafKind::Code)
+                .then(|| fence_of(&lines[start].0))
+                .flatten();
+            let first = if fence.is_some() { start + 1 } else { start };
+            if first + n > lines.len() {
+                return None;
+            }
+            let prefixes: Vec<String> = (0..n)
+                .map(|j| {
+                    let line = &lines[first + j].0;
+                    continues(line, &texts[j])
+                        .then(|| line[..line.len() - texts[j].len()].to_owned())
+                })
+                .collect::<Option<_>>()?;
+            let base = match fence {
+                Some(_) => {
+                    let line = &lines[start].0;
+                    line[..line.len() - line.trim_start_matches(is_prefix_char).len()].to_owned()
+                }
+                None => prefixes.first().cloned().unwrap_or_default(),
+            };
+            *cursor = first + n;
+            let close = fence.and_then(|run| {
+                lines
+                    .get(first + n)
+                    .filter(|(line, _)| fence_of(line).is_some_and(|close| close.starts_with(run)))
+                    .cloned()
+            });
+            if close.is_some() {
+                *cursor += 1;
+            }
+            Some(Some(Located {
+                first,
+                count: n,
+                prefixes,
+                ends: lines[first..first + n]
+                    .iter()
+                    .map(|(_, end)| end.clone())
+                    .collect(),
+                suffix: String::new(),
+                base,
+                close,
+            }))
+        }
+    }
+}
+
+/// The lines of a textblock's text laid over `lines` from `first`: the first
+/// line ends with the first text after whatever prefix, the rest are
+/// continuation lines, and the last drops the whitespace — and, for a heading,
+/// the closing `#`s — the reader drops.
+fn locate_text(
+    texts: &[String],
+    kind: Option<BlockKind>,
+    lines: &[(String, String)],
+    first: usize,
+) -> Option<Located> {
+    let n = texts.len();
+    if first + n > lines.len() {
+        return None;
+    }
+    let mut prefixes = Vec::with_capacity(n);
+    let mut suffix = String::new();
+    for j in 0..n {
+        let line = &lines[first + j].0;
+        let text = &texts[j];
+        let bodies: Vec<&str> = if j + 1 == n {
+            let trimmed = line.trim_end_matches([' ', '\t']);
+            let mut bodies = vec![trimmed];
+            if kind == Some(BlockKind::Heading) {
+                let hashes = trimmed.trim_end_matches('#');
+                if hashes.len() < trimmed.len() && hashes.ends_with([' ', '\t']) {
+                    bodies.insert(0, hashes.trim_end_matches([' ', '\t']));
+                }
+            }
+            bodies
+        } else {
+            vec![line.as_str()]
+        };
+        let body = bodies.into_iter().find(|body| {
+            body.ends_with(text.as_str())
+                && (j == 0 || body[..body.len() - text.len()].chars().all(is_prefix_char))
+        })?;
+        prefixes.push(body[..body.len() - text.len()].to_owned());
+        if j + 1 == n {
+            suffix = line[body.len()..].to_owned();
+        }
+    }
+    let base = prefixes[0].clone();
+    Some(Located {
+        first,
+        count: n,
+        prefixes,
+        ends: lines[first..first + n]
+            .iter()
+            .map(|(_, end)| end.clone())
+            .collect(),
+        suffix,
+        base,
+        close: None,
+    })
+}
+
+/// The prefix a line continuing the one with `prefix` takes: its markers and
+/// boxes as the spaces they stand over, its `>` markers and whitespace as they
+/// are.
+fn continuation(prefix: &str) -> String {
+    prefix
+        .chars()
+        .map(|c| if is_prefix_char(c) { c } else { ' ' })
+        .collect()
+}
+
+/// The lines of a block written out so far.
+struct Emitted {
+    out: Vec<(String, String)>,
+    /// How many of them are lines of a leaf.
+    leaf_lines: usize,
+    /// The prefix of the last leaf line, which a new line continues, and of
+    /// the last one that opens a list item, which a new item's takes.
+    last_prefix: Option<String>,
+    last_opener: Option<String>,
+}
+
+/// The patch of `old`'s source `raw` that holds `new`, or `None` where its
+/// spelling cannot take the edit and the writer spells the block instead.
+///
+/// The block is patched as its lines: each leaf of `new` is paired with the
+/// leaf of `old` it is an edit of, a paired leaf keeps every line whose text
+/// it keeps and gets the text of the lines that changed, and the lines
+/// between leaves — blank lines, fences, a setext underline — stay with the
+/// leaf before them. A leaf with no partner is a paragraph or heading added
+/// or removed whole: any other kind brings syntax of its own that only the
+/// writer spells.
+fn patch_block(
+    schema: &Schema,
+    old: &Node,
+    new: &Node,
+    raw: &str,
+    newline: &str,
+) -> Option<String> {
+    if old == new {
+        return Some(raw.to_owned());
+    }
+    if schema.node_id(crate::schema::TABLE) == Some(old.type_id()) {
+        return table_rows(schema, old, new, raw, newline);
+    }
+    if !same_shape(schema, old, new) {
+        return None;
+    }
+    let before = leaves(schema, old, true)?;
+    let after = leaves(schema, new, false)?;
+    let lines = source_lines(raw);
+    let mut cursor = 0;
+    let located: Vec<Option<Located>> = before
+        .iter()
+        .map(|leaf| locate(leaf, &lines, &mut cursor))
+        .collect::<Option<_>>()?;
+    let starts: Vec<usize> = located.iter().flatten().map(|place| place.first).collect();
+    let opener_index = located.iter().position(Option::is_some)?;
+    let opener = located[opener_index].as_ref()?;
+    let opener_line = opener.first;
+    let opener_prefix = opener
+        .prefixes
+        .first()
+        .cloned()
+        .unwrap_or_else(|| opener.base.clone());
+    // The lines after a leaf's own up to the next leaf's: what parts them.
+    let trivia_after = |place: &Located| -> &[(String, String)] {
+        let end = place.first + place.count + usize::from(place.close.is_some());
+        let next = starts
+            .iter()
+            .copied()
+            .find(|&start| start >= end)
+            .unwrap_or(lines.len());
+        &lines[end..next]
+    };
+    let pairs = pair_in_order(before.len(), after.len(), |i, j| {
+        let (a, b) = (&before[i], &after[j]);
+        if a.kind != b.kind || a.node.type_id() != b.node.type_id() {
+            0
+        } else {
+            1 + usize::from(a.lines == b.lines)
+        }
+    });
+    let partner = |j: usize| pairs.iter().find(|(_, b)| *b == j).map(|(a, _)| *a);
+    let mut cur = Emitted {
+        out: lines[..opener_line].to_vec(),
+        leaf_lines: 0,
+        last_prefix: None,
+        last_opener: None,
+    };
+    // One line of a leaf, the `k`th of its lines, kept from old line
+    // `from_old` of the leaf `was` at `place` where it is one the leaf had.
+    //
+    // The block's first line keeps the prefix the block opens with. A line
+    // kept from an old one keeps that line's prefix — but for the old first
+    // line, which takes the continuation form once another line stands
+    // before it, unless it still opens an item and so keeps its marker. A
+    // line that opens a new item takes the prefix of the last line that
+    // opened one; any other new line continues the last leaf line. The boxes
+    // in a prefix that opens items are patched where the prefix is kept.
+    let push = |cur: &mut Emitted,
+                text: &str,
+                k: usize,
+                from_old: Option<usize>,
+                leaf: &Leaf<'_>,
+                was: Option<&Leaf<'_>>,
+                place: Option<&Located>|
+     -> Option<()> {
+        let mut boxes: Option<(&[&Node], &[&Node])> = None;
+        let mut prefix = if cur.leaf_lines == 0 {
+            boxes = Some((&before[opener_index].boxes, &leaf.boxes));
+            opener_prefix.clone()
+        } else {
+            match (from_old, place) {
+                (Some(0), Some(place))
+                    if place.first == opener_line && leaf.opens_item.is_none() =>
+                {
+                    continuation(&opener_prefix)
+                }
+                (Some(index), Some(place)) => {
+                    if index == 0 {
+                        boxes = Some((&was?.boxes, &leaf.boxes));
+                    }
+                    place.prefixes[index].clone()
+                }
+                _ if k == 0 && leaf.opens_item.is_some() => {
+                    // An ordered item would carry the number of the one
+                    // before it; the writer numbers the list afresh.
+                    let opener = cur.last_opener.clone()?;
+                    if !leaf.boxes.is_empty() || opener.chars().any(|c| c.is_ascii_digit()) {
+                        return None;
+                    }
+                    opener
+                }
+                _ => continuation(cur.last_prefix.as_deref()?),
+            }
+        };
+        if let Some((opened, opens)) = boxes {
+            prefix = patch_boxes(prefix, opened, opens)?;
+        }
+        if k == 0
+            && let (LeafKind::Text(BlockKind::Heading), Some(was)) = (leaf.kind, was)
+        {
+            prefix = patch_level(prefix, was.node, leaf.node)?;
+        }
+        if k == 0 && leaf.opens_item.is_some() {
+            cur.last_opener = Some(prefix.clone());
+        }
+        cur.last_prefix = Some(prefix.clone());
+        let end = match from_old {
+            Some(index) => place?.ends[index].clone(),
+            None => newline.to_owned(),
+        };
+        cur.out.push((format!("{prefix}{text}"), end));
+        cur.leaf_lines += 1;
+        Some(())
+    };
+    // The lines that parted the last leaf emitted from the next one in the
+    // source, not yet written out; and whether that leaf was a marker line
+    // alone, which nothing parts from the item's next block.
+    let mut pending: &[(String, String)] = &[];
+    let mut after_marker = false;
+    let mut after_paired = false;
+    let mut first = true;
+    for (j, leaf) in after.iter().enumerate() {
+        let paired = partner(j).map(|i| (&before[i], located[i].as_ref()));
+        let marker_only = leaf.lines.is_empty() && leaf.opens_item.is_some();
+        if leaf.lines.is_empty() && !marker_only {
+            continue;
+        }
+        // What parts this leaf from the one before it. Two leaves that both
+        // stand for old ones, in a list as loose or as tight as it was, keep
+        // the lines the source had between them. Otherwise the source's own
+        // lines that are not blank — a setext underline — stay, and a blank
+        // line parts the leaves where the writer would put one: before an
+        // item of a loose list, and before any other block but the one a
+        // marker line alone opens.
+        if !first {
+            let kept =
+                after_paired && paired.is_some_and(|(was, _)| was.opens_item == leaf.opens_item);
+            if kept {
+                cur.out.extend_from_slice(pending);
+            } else {
+                cur.out.extend(
+                    pending
+                        .iter()
+                        .filter(|(line, _)| !line.chars().all(is_prefix_char))
+                        .cloned(),
+                );
+                let blank = match leaf.opens_item {
+                    Some(loose) => loose,
+                    None => !after_marker,
+                };
+                if blank {
+                    let markers: String = cur
+                        .last_prefix
+                        .as_deref()
+                        .unwrap_or_default()
+                        .chars()
+                        .filter(|c| *c == '>')
+                        .collect();
+                    cur.out.push((markers, newline.to_owned()));
+                }
+            }
+        }
+        first = false;
+        pending = &[];
+        match paired {
+            Some((was, Some(place))) => {
+                let (old_lines, new_lines) = (&was.lines, &leaf.lines);
+                let head = old_lines
+                    .iter()
+                    .zip(new_lines)
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                let tail = old_lines[head..]
+                    .iter()
+                    .rev()
+                    .zip(new_lines[head..].iter().rev())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                let texts: &[String] = if marker_only {
+                    &[String::new()]
+                } else {
+                    new_lines
+                };
+                for (k, text) in texts.iter().enumerate() {
+                    let from_old = if marker_only {
+                        None
+                    } else if k < head {
+                        Some(k)
+                    } else if k >= new_lines.len() - tail {
+                        Some(k + old_lines.len() - new_lines.len())
+                    } else if k < old_lines.len() - tail {
+                        Some(k)
+                    } else {
+                        None
+                    };
+                    push(&mut cur, text, k, from_old, leaf, Some(was), Some(place))?;
+                }
+                if !new_lines.is_empty()
+                    && let Some((line, _)) = cur.out.last_mut()
+                {
+                    line.push_str(&place.suffix);
+                }
+                if let Some(close) = &place.close {
+                    cur.out.push(close.clone());
+                }
+                pending = trivia_after(place);
+            }
+            _ => {
+                // A paragraph or heading added whole; any other kind brings
+                // syntax of its own that only the writer spells.
+                if !matches!(leaf.kind, LeafKind::Text(_)) {
+                    return None;
+                }
+                let texts: &[String] = if marker_only {
+                    &[String::new()]
+                } else {
+                    &leaf.lines
+                };
+                for (k, text) in texts.iter().enumerate() {
+                    push(&mut cur, text, k, None, leaf, None, None)?;
+                }
+            }
+        }
+        after_marker = marker_only;
+        after_paired = matches!(paired, Some((_, Some(_))));
+    }
+    // What followed the last leaf stays but for its blank lines: a setext
+    // underline, not the gap a dropped leaf left.
+    cur.out.extend(
+        pending
+            .iter()
+            .filter(|(line, _)| !line.chars().all(is_prefix_char))
+            .cloned(),
+    );
+    // A leaf of any other kind dropped would leave its fences behind.
+    if before.iter().enumerate().any(|(index, leaf)| {
+        !matches!(leaf.kind, LeafKind::Text(_)) && !pairs.iter().any(|(i, _)| *i == index)
+    }) {
+        return None;
+    }
+    let last_end = lines.last().map(|(_, end)| end.clone()).unwrap_or_default();
+    let count = cur.out.len();
+    Some(
+        cur.out
+            .into_iter()
+            .enumerate()
+            .map(|(index, (line, end))| {
+                let end = if index + 1 == count {
+                    last_end.clone()
+                } else if end.is_empty() {
+                    newline.to_owned()
+                } else {
+                    end
+                };
+                line + &end
+            })
+            .collect(),
+    )
+}
+
+/// `prefix`, the block's first line's, with the box of each task item the
+/// block opens with ticked or unticked as `now` has it.
+fn patch_boxes(mut prefix: String, was: &[&Node], now: &[&Node]) -> Option<String> {
+    let checked = |item: &Node| {
+        item.attrs()
+            .get(TASK_CHECKED_ATTR)
+            .and_then(|value| value.as_bool())
+    };
+    if was.len() != now.len() {
+        return None;
+    }
+    let boxes: Vec<usize> = prefix
+        .match_indices('[')
+        .filter(|(at, _)| matches!(prefix.get(at + 1..at + 3), Some(" ]" | "x]" | "X]")))
+        .map(|(at, _)| at)
+        .collect();
+    if boxes.len() < was.len() {
+        return None;
+    }
+    for (nth, (a, b)) in was.iter().zip(now).enumerate() {
+        if checked(a) != checked(b) {
+            let at = boxes[nth] + 1;
+            prefix.replace_range(at..at + 1, if checked(b) == Some(true) { "x" } else { " " });
+        }
+    }
+    Some(prefix)
+}
+
+/// `prefix`, a heading's first line's, with its `#`s as many as `now`'s
+/// level — or `None` for a setext heading, which has none to change.
+fn patch_level(prefix: String, was: &Node, now: &Node) -> Option<String> {
+    let level = |node: &Node| {
+        node.attrs()
+            .get(HEADING_LEVEL_ATTR)
+            .and_then(|value| value.as_int())
+    };
+    if level(was) == level(now) {
+        return Some(prefix);
+    }
+    let trimmed = prefix.trim_end_matches([' ', '\t']);
+    let hashes = trimmed.trim_end_matches('#');
+    if hashes.len() == trimmed.len() {
+        return None;
+    }
+    let level = usize::try_from(level(now)?).ok()?;
+    Some(format!(
+        "{hashes}{}{}",
+        "#".repeat(level),
+        &prefix[trimmed.len()..]
+    ))
 }
 
 /// A top-level table's source, `raw`, rewritten row by row from `old` to
@@ -834,8 +1252,18 @@ fn table_rows(schema: &Schema, old: &Node, new: &Node, raw: &str, newline: &str)
             }
         })
         .collect();
-    for (old_index, new_index) in pair_rows(old, new, head..o - tail, head..n - tail) {
-        source_of[new_index] = Some(old_index);
+    // Two rows paired count for one more than their equal cells, so an edited
+    // row pairs rather than reading as one row dropped and another added.
+    let pairs = pair_in_order(o - tail - head, n - tail - head, |i, j| {
+        1 + old
+            .child(head + i)
+            .children()
+            .zip(new.child(head + j).children())
+            .filter(|(p, q)| p == q)
+            .count()
+    });
+    for (old_index, new_index) in pairs {
+        source_of[head + new_index] = Some(head + old_index);
     }
     let mut out: Vec<String> = Vec::with_capacity(n + 1);
     for (index, source) in source_of.into_iter().enumerate() {
@@ -850,7 +1278,7 @@ fn table_rows(schema: &Schema, old: &Node, new: &Node, raw: &str, newline: &str)
                 let was = old.child(from);
                 for column in 0..columns {
                     if was.child(column) != row.child(column) {
-                        line.set(column, guarded_source(schema, row.child(column))?, &header);
+                        line.set(column, cell_text(schema, row.child(column))?, &header);
                     }
                 }
                 line.to_string()
@@ -858,7 +1286,7 @@ fn table_rows(schema: &Schema, old: &Node, new: &Node, raw: &str, newline: &str)
             None => {
                 let mut line = header.emptied();
                 for column in 0..columns {
-                    line.set(column, guarded_source(schema, row.child(column))?, &header);
+                    line.set(column, cell_text(schema, row.child(column))?, &header);
                 }
                 line.to_string()
             }
@@ -874,27 +1302,16 @@ fn table_rows(schema: &Schema, old: &Node, new: &Node, raw: &str, newline: &str)
     Some(out.join(newline))
 }
 
-/// Which rows of `old` in `olds` the rows of `new` in `news` are edits of, as
-/// pairs in order: the pairing that keeps the most cells as they were, a row
-/// with no partner being one added or removed. Two rows paired count for one
-/// more than their equal cells, so an edited row pairs rather than reading as
-/// one row dropped and another added.
-fn pair_rows(
-    old: &Node,
-    new: &Node,
-    olds: Range<usize>,
-    news: Range<usize>,
-) -> Vec<(usize, usize)> {
-    let (a, b) = (olds.len(), news.len());
-    let score = |i: usize, j: usize| {
-        let (x, y) = (old.child(olds.start + i), new.child(news.start + j));
-        1 + x
-            .children()
-            .zip(y.children())
-            .filter(|(p, q)| p == q)
-            .count()
-    };
-    // best[i][j]: the most a pairing of old rows i.. with new rows j.. keeps.
+/// A cell's text as the writer puts it in its row.
+fn cell_text(schema: &Schema, cell: &Node) -> Option<String> {
+    guarded_text(schema, cell, block_kind(schema, cell.type_id())?)
+}
+
+/// Which of `a` items the `b` items are edits of, as index pairs in order: the
+/// pairing whose scores add up to the most, an item with no partner being one
+/// added or removed. A pair scoring nothing is no pair.
+fn pair_in_order(a: usize, b: usize, score: impl Fn(usize, usize) -> usize) -> Vec<(usize, usize)> {
+    // best[i][j]: the most a pairing of items i.. with items j.. scores.
     let mut best = vec![vec![0usize; b + 1]; a + 1];
     for i in (0..a).rev() {
         for j in (0..b).rev() {
@@ -905,8 +1322,9 @@ fn pair_rows(
     }
     let (mut i, mut j, mut pairs) = (0, 0, Vec::new());
     while i < a && j < b {
-        if best[i][j] == score(i, j) + best[i + 1][j + 1] {
-            pairs.push((olds.start + i, news.start + j));
+        let here = score(i, j);
+        if here > 0 && best[i][j] == here + best[i + 1][j + 1] {
+            pairs.push((i, j));
             i += 1;
             j += 1;
         } else if best[i][j] == best[i + 1][j] {
@@ -1013,19 +1431,6 @@ impl std::fmt::Display for RowLine {
         }
         f.write_str(&self.trail)
     }
-}
-
-/// The byte range of `raw`'s line `index` with the line break before it — a
-/// table's rows after the header are its lines from the third on.
-fn row_line(raw: &str, newline: &str, index: usize) -> Option<Range<usize>> {
-    let starts: Vec<usize> = std::iter::once(0)
-        .chain(raw.match_indices(newline).map(|(at, _)| at + newline.len()))
-        .collect();
-    let start = *starts.get(index)?;
-    let end = starts
-        .get(index + 1)
-        .map_or(raw.len(), |next| next - newline.len());
-    Some(start.checked_sub(newline.len())?..end)
 }
 
 /// The one-based first and last line of each of the document's top-level
@@ -1156,78 +1561,6 @@ pub fn without_empty_paragraphs(schema: &Schema, node: &Node) -> Node {
     node.copy(Fragment::from_nodes(children))
 }
 
-fn text_changes<'a>(old: &'a Node, new: &'a Node, changes: &mut Vec<(&'a str, &'a str)>) -> bool {
-    if !old.same_markup(new) || old.child_count() != new.child_count() {
-        return false;
-    }
-    match (old.text(), new.text()) {
-        (Some(before), Some(after)) => {
-            if before != after {
-                changes.push((before, after));
-            }
-            true
-        }
-        (None, None) => old
-            .children()
-            .zip(new.children())
-            .all(|(a, b)| text_changes(a, b, changes)),
-        _ => false,
-    }
-}
-
-/// The one textblock `old` and `new` differ in, when they differ in nothing
-/// else.
-fn changed_textblock<'a>(
-    schema: &Schema,
-    old: &'a Node,
-    new: &'a Node,
-) -> Option<(&'a Node, &'a Node)> {
-    if old == new || !old.same_markup(new) {
-        return None;
-    }
-    if block_kind(schema, old.type_id()).is_some() {
-        return Some((old, new));
-    }
-    if old.child_count() != new.child_count() {
-        return None;
-    }
-    let mut changed = old.children().zip(new.children()).filter(|(a, b)| a != b);
-    let (a, b) = changed.next()?;
-    if changed.next().is_some() {
-        return None;
-    }
-    changed_textblock(schema, a, b)
-}
-
-/// A textblock's text as the writer puts it in the file, with its guard's
-/// backslashes and each atom's own spelling — `<br/>` for the raw HTML a
-/// paste puts in a table cell — or `None` when it holds an atom the writer
-/// has no spelling for.
-fn guarded_source(schema: &Schema, block: &Node) -> Option<String> {
-    let kind = block_kind(schema, block.type_id())?;
-    let items = Items::from_nodes(schema, block.children());
-    let insertions = items.guard_insertions(schema, kind, None);
-    let mut out = String::new();
-    let mut next = insertions.iter().peekable();
-    for (index, item) in items.0.iter().enumerate() {
-        while next.next_if(|at| **at == index).is_some() {
-            out.push('\\');
-        }
-        match item {
-            Item::Char(c) => out.push(*c),
-            Item::Break => out.push('\n'),
-            Item::Atom(atom) => {
-                let spelling = crate::textblock::atom_spelling(schema, atom);
-                if spelling == markraft_core::projection::OBJECT_REPLACEMENT.to_string() {
-                    return None;
-                }
-                out.push_str(&spelling);
-            }
-        }
-    }
-    Some(out)
-}
-
 fn block_markdown(schema: &Schema, document: &Node, nodes: &[Node]) -> String {
     if nodes.is_empty() {
         String::new()
@@ -1237,130 +1570,6 @@ fn block_markdown(schema: &Schema, document: &Node, nodes: &[Node]) -> String {
             &document.copy(Fragment::from_nodes(nodes.iter().cloned())),
         )
     }
-}
-
-fn difference<'a>(before: &'a str, after: &'a str) -> (&'a str, &'a str, &'a str, &'a str) {
-    let prefix = before
-        .chars()
-        .zip(after.chars())
-        .take_while(|(a, b)| a == b)
-        .map(|(c, _)| c.len_utf8())
-        .sum::<usize>();
-    let suffix = before[prefix..]
-        .chars()
-        .rev()
-        .zip(after[prefix..].chars().rev())
-        .take_while(|(a, b)| a == b)
-        .map(|(c, _)| c.len_utf8())
-        .sum::<usize>();
-    (
-        &before[prefix..before.len() - suffix],
-        &after[prefix..after.len() - suffix],
-        &before[..prefix],
-        &before[before.len() - suffix..],
-    )
-}
-
-fn candidate_offsets(raw: &str, removed: &str, prefix: &str, suffix: &str) -> Vec<usize> {
-    let mut offsets: Vec<_> = if removed.is_empty() {
-        raw.char_indices()
-            .map(|(offset, _)| offset)
-            .chain([raw.len()])
-            .collect()
-    } else {
-        raw.match_indices(removed)
-            .map(|(offset, _)| offset)
-            .collect()
-    };
-    offsets.sort_by_key(|&offset| {
-        std::cmp::Reverse(context_score(
-            &raw[..offset],
-            prefix,
-            &raw[offset + removed.len()..],
-            suffix,
-        ))
-    });
-    offsets.truncate(64);
-    offsets
-}
-
-/// Bounded word/punctuation diff, used only when a single contiguous patch fails.
-/// Large divergent blocks are rejected instead of allocating quadratic memory.
-fn token_hunks(before: &str, after: &str) -> Option<Vec<(Range<usize>, Range<usize>)>> {
-    fn tokens(source: &str) -> Vec<Range<usize>> {
-        let mut result = Vec::new();
-        let mut start = 0;
-        let mut previous_word = false;
-        for (offset, ch) in source.char_indices() {
-            let word = ch.is_alphanumeric();
-            if offset > start && !(word && previous_word) {
-                result.push(start..offset);
-                start = offset;
-            }
-            previous_word = word;
-        }
-        if start < source.len() {
-            result.push(start..source.len());
-        }
-        result
-    }
-    let old = tokens(before);
-    let new = tokens(after);
-    let width = new.len() + 1;
-    let cells = (old.len() + 1).checked_mul(width)?;
-    if cells > 250_000 {
-        return None;
-    }
-    let mut lengths = vec![0_u32; cells];
-    for i in (0..old.len()).rev() {
-        for j in (0..new.len()).rev() {
-            lengths[i * width + j] = if before[old[i].clone()] == after[new[j].clone()] {
-                lengths[(i + 1) * width + j + 1] + 1
-            } else {
-                lengths[(i + 1) * width + j].max(lengths[i * width + j + 1])
-            };
-        }
-    }
-    let (mut i, mut j) = (0, 0);
-    let (mut old_start, mut new_start) = (0, 0);
-    let mut hunks = Vec::new();
-    while i < old.len() && j < new.len() {
-        if before[old[i].clone()] == after[new[j].clone()] {
-            if old_start < old[i].start || new_start < new[j].start {
-                hunks.push((old_start..old[i].start, new_start..new[j].start));
-            }
-            old_start = old[i].end;
-            new_start = new[j].end;
-            i += 1;
-            j += 1;
-        } else if lengths[(i + 1) * width + j] >= lengths[i * width + j + 1] {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
-    if old_start < before.len() || new_start < after.len() {
-        hunks.push((old_start..before.len(), new_start..after.len()));
-    }
-    Some(hunks)
-}
-
-fn context_score(left: &str, prefix: &str, right: &str, suffix: &str) -> usize {
-    usize::from(left == prefix) * 256
-        + usize::from(right == suffix) * 256
-        + left
-            .chars()
-            .rev()
-            .zip(prefix.chars().rev())
-            .take(64)
-            .take_while(|(a, b)| a == b)
-            .count()
-        + right
-            .chars()
-            .zip(suffix.chars())
-            .take(64)
-            .take_while(|(a, b)| a == b)
-            .count()
 }
 
 fn body_start(source: &str) -> usize {

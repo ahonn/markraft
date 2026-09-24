@@ -380,11 +380,7 @@ fn join_text_after_wrapper(types: &DocTypes) -> Command {
         if !at_textblock_start(state) || types.in_verbatim_block_at(state) {
             return None;
         }
-        let doc = state.doc();
-        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
-        let depth = (1..=resolved.depth())
-            .rev()
-            .find(|&d| resolved.node(d).is_textblock(state.schema()))?;
+        let (resolved, depth) = caret_textblock(state)?;
         let index = resolved.index(depth - 1);
         let before = resolved
             .node(depth - 1)
@@ -403,11 +399,7 @@ fn join_text_after_wrapper(types: &DocTypes) -> Command {
 fn stop_before_kept_text(types: &DocTypes, command: Command) -> Command {
     let types = types.clone();
     markraft_core::commands::command(move |state| {
-        let doc = state.doc();
-        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
-        let depth = (1..=resolved.depth())
-            .rev()
-            .find(|&d| resolved.node(d).is_textblock(state.schema()))?;
+        let (resolved, depth) = caret_textblock(state)?;
         let at_end = state.selection().is_cursor() && resolved.pos() == resolved.end(depth);
         if at_end && !prose_textblock_near(&types, state, resolved.after(depth), 1) {
             return None;
@@ -427,11 +419,7 @@ fn join_text_forward(types: &DocTypes) -> Command {
         if types.in_verbatim_block_at(state) {
             return None;
         }
-        let doc = state.doc();
-        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
-        let depth = (1..=resolved.depth())
-            .rev()
-            .find(|&d| resolved.node(d).is_textblock(state.schema()))?;
+        let (resolved, depth) = caret_textblock(state)?;
         if !prose_textblock_near(&types, state, resolved.after(depth), 1) {
             return None;
         }
@@ -449,12 +437,8 @@ fn take_leaf_block(types: &DocTypes, dir: Direction) -> Command {
         if !state.selection().is_cursor() || types.in_verbatim_block_at(state) {
             return None;
         }
-        let doc = state.doc();
         let schema = state.schema();
-        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
-        let depth = (1..=resolved.depth())
-            .rev()
-            .find(|&d| resolved.node(d).is_textblock(schema))?;
+        let (resolved, depth) = caret_textblock(state)?;
         let index = resolved.index(depth - 1);
         let (at_edge, index) = match dir {
             Direction::Backward => (at_textblock_start(state), index.checked_sub(1)?),
@@ -487,12 +471,8 @@ fn join_into_table_after(types: &DocTypes) -> Command {
         if !at_textblock_start(state) || types.in_verbatim_block_at(state) {
             return None;
         }
-        let doc = state.doc();
         let schema = state.schema();
-        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
-        let depth = (1..=resolved.depth())
-            .rev()
-            .find(|&d| resolved.node(d).is_textblock(schema))?;
+        let (resolved, depth) = caret_textblock(state)?;
         let paragraph = resolved.node(depth);
         let before = resolved
             .node(depth - 1)
@@ -544,13 +524,16 @@ pub(crate) fn backspace(types: &DocTypes) -> Command {
         // as Typora does, rather than giving the characters back.
         Some(when(|state| !at_textblock_start(state), undo_input_rule())),
         Some(delete_selection()),
-        Some(clear_heading_at_start(types)),
+        // At a block's start, the container it opens goes before the block's
+        // own format: a quote is lifted, an item joined or outdented, and
+        // only a heading opening nothing becomes a paragraph.
         Some(lift_quote_at_start(types)),
         Some(delete_by_grapheme(Direction::Backward)),
         types.table_types().map(delete_empty_table),
         types.table_types().map(guard_cell_boundary),
         Some(join_item_backward(types)),
         Some(outdent),
+        Some(clear_heading_at_start(types)),
         Some(clear_empty_verbatim(types)),
         Some(join_text_after_wrapper(types)),
         Some(take_leaf_block(types, Direction::Backward)),
@@ -560,20 +543,23 @@ pub(crate) fn backspace(types: &DocTypes) -> Command {
     ])
 }
 
-/// Whether the cursor sits at the start of its textblock.
-fn at_textblock_start(state: &EditorState) -> bool {
+/// The caret's position resolved, and the depth of the textblock it is in:
+/// the innermost, so a caret inside an inline node still names its block.
+fn caret_textblock(state: &EditorState) -> Option<(markraft_core::ResolvedPos, usize)> {
     let doc = state.doc();
-    let selection = state.selection();
-    if !selection.is_cursor() {
-        return false;
-    }
-    let Ok(resolved) = doc.resolve(selection.head(doc)) else {
-        return false;
-    };
+    let resolved = doc.resolve(state.selection().head(doc)).ok()?;
     let depth = (1..=resolved.depth())
         .rev()
-        .find(|&d| resolved.node(d).is_textblock(state.schema()));
-    let Some(depth) = depth else {
+        .find(|&d| resolved.node(d).is_textblock(state.schema()))?;
+    Some((resolved, depth))
+}
+
+/// Whether the cursor sits at the start of its textblock.
+fn at_textblock_start(state: &EditorState) -> bool {
+    if !state.selection().is_cursor() {
+        return false;
+    }
+    let Some((resolved, depth)) = caret_textblock(state) else {
         return false;
     };
     let start = resolved.start(depth);
@@ -584,9 +570,9 @@ fn at_textblock_start(state: &EditorState) -> bool {
 /// At the start of a heading, Backspace turns it into a paragraph, whatever
 /// its level, as Typora does. Typing `#` there raises the level again.
 ///
-/// A heading that opens a list item or a quote is left to the commands after
-/// this, as a paragraph there would be: Typora takes the item or the quote
-/// away and keeps the heading.
+/// This runs after the steps that take a container the block opens — a quote
+/// lifted, an item joined or outdented — so a heading that opens one keeps
+/// its level and loses the container, as a paragraph there would.
 fn clear_heading_at_start(types: &DocTypes) -> Command {
     let types = types.clone();
     command(move |state| {
@@ -597,15 +583,6 @@ fn clear_heading_at_start(types: &DocTypes) -> Command {
         let paragraph = types.paragraph?;
         let (ty, _) = types.block_at_cursor(state)?;
         if ty != heading {
-            return None;
-        }
-        let doc = state.doc();
-        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
-        let depth = resolved.depth();
-        let container = resolved.node(depth - 1).type_id();
-        let opens_container = resolved.index(depth - 1) == 0
-            && (types.is_item(container) || Some(container) == types.blockquote);
-        if opens_container {
             return None;
         }
         set_block_type(paragraph, Attrs::empty())(state)
@@ -622,17 +599,12 @@ fn lift_quote_at_start(types: &DocTypes) -> Command {
             return None;
         }
         let blockquote = types.blockquote?;
-        let doc = state.doc();
-        let head = state.selection().head(doc);
-        let resolved = doc.resolve(head).ok()?;
+        let (resolved, textblock) = caret_textblock(state)?;
         let in_quote =
             (1..=resolved.depth()).any(|depth| resolved.node(depth).type_id() == blockquote);
         if !in_quote {
             return None;
         }
-        let textblock = (1..=resolved.depth())
-            .rev()
-            .find(|&d| resolved.node(d).is_textblock(state.schema()))?;
         if resolved.node(textblock - 1).type_id() == blockquote && resolved.index(textblock - 1) > 0
         {
             return None;

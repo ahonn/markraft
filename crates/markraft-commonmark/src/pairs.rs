@@ -58,7 +58,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
-use markraft_core::protocol::{COMPOSE_USER_EVENT, add_to_history, remote};
+use markraft_core::protocol::COMPOSE_USER_EVENT;
 use markraft_core::{
     AnnotationType, Change, ChangeRange, Extension, Fragment, Node, Schema, Selection, Slice,
     StateField, StateFieldConfig, TrackMode, Transaction, TransactionFilterFn, TransactionSpec,
@@ -176,10 +176,7 @@ fn update(value: &Vec<Tracked>, tr: &Transaction) -> Vec<Tracked> {
 fn auto_pair(tr: &Transaction) -> Option<Vec<TransactionSpec>> {
     let state = tr.start_state();
     if !tr.doc_changed()
-        || tr.annotation(remote()) == Some(&true)
-        || tr.annotation(add_to_history()) == Some(&false)
-        || tr.is_user_event("undo")
-        || tr.is_user_event("redo")
+        || !tr.recorded_in_history()
         || tr.is_user_event(COMPOSE_USER_EVENT)
         || markraft_core::composition::is_composing(state)
     {

@@ -177,70 +177,61 @@ pub fn commonmark_options() -> Options<'static> {
 /// A task's check box before a heading or a quote, `- [ ] # title` or
 /// `- [ ] > quote`, is read as Typora reads it: the box, and the block after
 /// it on its line. comrak only knows a box before a paragraph and reads the
-/// rest of that line as the paragraph's text, so each such line is read again
-/// with its box taken out — the item's content column does not count the box,
-/// so the item holds the same lines — and the positions after it on the line
-/// are moved back to where the source has them.
+/// rest of that line as the paragraph's text, so the source is read again
+/// once with every such box taken out — the item's content column does not
+/// count the box, so the item holds the same lines — and the positions after
+/// them on their lines are moved back to where the source has them. A quote
+/// such a box opens may hold, on the same line, an item whose own box opens
+/// a block; those are found along the line from the first box, so one
+/// reading finds them all.
 pub(crate) fn parse_ast<'a>(
     arena: &'a Arena<'a>,
     source: &str,
     options: &Options<'static>,
 ) -> &'a AstNode<'a> {
-    let mut root = parse_with_footnotes(arena, source, options);
-    let mut boxes: Vec<BoxBeforeBlock> = Vec::new();
-    // A quote read out of one box may hold a list whose own box opens a
-    // block, so the source is read again until no new such box turns up.
-    loop {
-        let found: Vec<_> = boxes_before_blocks(root, source)
-            .into_iter()
-            .filter(|found| {
-                !boxes
-                    .iter()
-                    .any(|seen| (seen.line, seen.column) == (found.line, found.column))
-            })
-            .collect();
-        if found.is_empty() {
-            return root;
-        }
-        boxes.extend(found);
-        boxes.sort_by_key(|found| (found.line, found.column));
-        let mut lines: Vec<String> = source.split('\n').map(str::to_owned).collect();
-        for found in boxes.iter().rev() {
-            let line = &mut lines[found.line - 1];
-            line.replace_range(found.column - 1..found.column - 1 + found.len, "");
-        }
-        root = parse_with_footnotes(arena, &lines.join("\n"), options);
-        let restore = |point: &mut LineColumn| {
-            let mut shift = 0;
-            for found in boxes.iter().filter(|found| found.line == point.line) {
-                if point.column + shift >= found.column {
-                    shift += found.len;
-                }
-            }
-            point.column += shift;
-        };
-        for node in root.descendants() {
-            let mut data = node.data.borrow_mut();
-            restore(&mut data.sourcepos.start);
-            restore(&mut data.sourcepos.end);
-            if let NodeValue::TaskItem(task) = &mut data.value {
-                restore(&mut task.symbol_sourcepos.start);
-                restore(&mut task.symbol_sourcepos.end);
+    let root = parse_with_footnotes(arena, source, options);
+    let mut boxes = boxes_before_blocks(root, source);
+    if boxes.is_empty() {
+        return root;
+    }
+    boxes.sort_by_key(|found| (found.line, found.column));
+    let mut lines: Vec<String> = source.split('\n').map(str::to_owned).collect();
+    for found in boxes.iter().rev() {
+        let line = &mut lines[found.line - 1];
+        line.replace_range(found.column - 1..found.column - 1 + found.len, "");
+    }
+    let root = parse_with_footnotes(arena, &lines.join("\n"), options);
+    let restore = |point: &mut LineColumn| {
+        let mut shift = 0;
+        for found in boxes.iter().filter(|found| found.line == point.line) {
+            if point.column + shift >= found.column {
+                shift += found.len;
             }
         }
-        for found in &boxes {
-            let item = root.descendants().find(|node| {
-                matches!(node.data.borrow().value, NodeValue::Item(_))
-                    && node.first_child().is_some_and(|block| {
-                        let start = block.data.borrow().sourcepos.start;
-                        start.line == found.line && start.column == found.column + found.len
-                    })
-            });
-            if let Some(item) = item {
-                item.data.borrow_mut().value = NodeValue::TaskItem(found.task);
-            }
+        point.column += shift;
+    };
+    for node in root.descendants() {
+        let mut data = node.data.borrow_mut();
+        restore(&mut data.sourcepos.start);
+        restore(&mut data.sourcepos.end);
+        if let NodeValue::TaskItem(task) = &mut data.value {
+            restore(&mut task.symbol_sourcepos.start);
+            restore(&mut task.symbol_sourcepos.end);
         }
     }
+    for found in &boxes {
+        let item = root.descendants().find(|node| {
+            matches!(node.data.borrow().value, NodeValue::Item(_))
+                && node.first_child().is_some_and(|block| {
+                    let start = block.data.borrow().sourcepos.start;
+                    start.line == found.line && start.column == found.column + found.len
+                })
+        });
+        if let Some(item) = item {
+            item.data.borrow_mut().value = NodeValue::TaskItem(found.task);
+        }
+    }
+    root
 }
 
 /// A task's check box that a heading or a quote follows on its line: where
@@ -254,7 +245,8 @@ struct BoxBeforeBlock {
 }
 
 /// The check boxes in `root` whose item's paragraph opens with what would be
-/// a heading or a quote without them.
+/// a heading or a quote without them, and the boxes after each of those on
+/// its line that open a block the same way, inside the quote it opens.
 fn boxes_before_blocks<'a>(root: &'a AstNode<'a>, source: &str) -> Vec<BoxBeforeBlock> {
     let lines: Vec<&str> = source.split('\n').collect();
     let mut out = Vec::new();
@@ -268,27 +260,98 @@ fn boxes_before_blocks<'a>(root: &'a AstNode<'a>, source: &str) -> Vec<BoxBefore
         };
         // The box is `[`, the symbol and `]`, the symbol one byte wide.
         let open = symbol.column.saturating_sub(1);
-        let close = open + 2;
         if line.as_bytes().get(open.wrapping_sub(1)) != Some(&b'[') {
             continue;
         }
-        let after = line.get(close..).unwrap_or_default();
-        let text = after.trim_start_matches([' ', '\t']);
-        let hashes = text.len() - text.trim_start_matches('#').len();
-        let opens_block = text.starts_with('>')
-            || ((1..=6).contains(&hashes)
-                && matches!(text.as_bytes().get(hashes), None | Some(b' ' | b'\t')));
-        // comrak only makes a box that whitespace follows.
-        if opens_block {
+        let mut close = open + 1;
+        let mut box_task = *task;
+        while let Some((len, quote)) = box_before_opener(line, close) {
             out.push(BoxBeforeBlock {
                 line: symbol.line,
-                column: open,
-                len: close - open + 1 + after.len() - text.len(),
-                task: *task,
+                column: close - 1,
+                len,
+                task: box_task,
             });
+            // Along the quote's line, past the container prefix inside it,
+            // to the next box, if the line opens an item with one there.
+            let Some((next, checked)) = quote.and_then(|content| box_in_prefix(line, content))
+            else {
+                break;
+            };
+            close = next;
+            // comrak's symbol is the character of a ticked box, none for an
+            // unticked one.
+            box_task = NodeTaskItem {
+                symbol: checked.then_some('x'),
+                ..*task
+            };
         }
     }
     out
+}
+
+/// Whether the box whose `]` sits at byte `close` of `line` opens a block:
+/// the bytes the box and the whitespace after it take, and — when what
+/// follows is a quote marker rather than a heading — the byte the quote's
+/// content starts at.
+fn box_before_opener(line: &str, close: usize) -> Option<(usize, Option<usize>)> {
+    let after = line.get(close + 1..)?;
+    let text = after.trim_start_matches([' ', '\t']);
+    // comrak only makes a box that whitespace follows.
+    if text.len() == after.len() && !text.is_empty() {
+        return None;
+    }
+    let len = 3 + after.len() - text.len();
+    if text.starts_with('>') {
+        return Some((len, Some(line.len() - text.len() + 1)));
+    }
+    let hashes = text.len() - text.trim_start_matches('#').len();
+    let heading = (1..=6).contains(&hashes)
+        && matches!(text.as_bytes().get(hashes), None | Some(b' ' | b'\t'));
+    heading.then_some((len, None))
+}
+
+/// A box that opens a list item in the container prefix of `line` from byte
+/// `from`: past any further quote markers, a list marker and the whitespace
+/// after it, a `[ ]`, `[x]` or `[X]`. Answers the byte of its `]` and whether
+/// it is ticked.
+fn box_in_prefix(line: &str, from: usize) -> Option<(usize, bool)> {
+    let rest = |at: usize| line.get(at..).unwrap_or_default();
+    let mut at = from;
+    loop {
+        at += rest(at).len() - rest(at).trim_start_matches([' ', '\t']).len();
+        if rest(at).starts_with('>') {
+            at += 1;
+        } else {
+            break;
+        }
+    }
+    let marker = rest(at);
+    let digits = marker.len()
+        - marker
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .len();
+    let width = match marker.as_bytes().first()? {
+        b'-' | b'+' | b'*' => 1,
+        _ if (1..=9).contains(&digits)
+            && matches!(marker.as_bytes().get(digits), Some(b'.' | b')')) =>
+        {
+            digits + 1
+        }
+        _ => return None,
+    };
+    at += width;
+    let spaces = rest(at).len() - rest(at).trim_start_matches([' ', '\t']).len();
+    if !(1..=4).contains(&spaces) {
+        return None;
+    }
+    at += spaces;
+    let checked = match rest(at).as_bytes() {
+        [b'[', b' ', b']', ..] => false,
+        [b'[', b'x' | b'X', b']', ..] => true,
+        _ => return None,
+    };
+    Some((at + 2, checked))
 }
 
 fn parse_with_footnotes<'a>(

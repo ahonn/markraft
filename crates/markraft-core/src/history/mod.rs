@@ -137,6 +137,11 @@ static HISTORY_CONFIG: LazyLock<Facet<HistoryConfig, HistoryConfig>> = LazyLock:
 });
 static INVERTED_EFFECTS: LazyLock<Facet<InvertedEffectsFn>> = LazyLock::new(Facet::list);
 static FROM_HISTORY: LazyLock<AnnotationType<FromHistory>> = LazyLock::new(AnnotationType::define);
+
+/// Whether `tr` is an undo or a redo the history made.
+pub(crate) fn replays_history(tr: &Transaction) -> bool {
+    tr.annotation(&FROM_HISTORY).is_some()
+}
 static BEGIN_GROUP: LazyLock<StateEffectType<()>> = LazyLock::new(StateEffectType::define);
 static END_GROUP: LazyLock<StateEffectType<()>> = LazyLock::new(StateEffectType::define);
 static HISTORY_FIELD: LazyLock<StateField<HistoryState>> = LazyLock::new(|| {

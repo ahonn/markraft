@@ -1088,6 +1088,7 @@ fn a_task_item_may_start_with_a_heading_or_a_quote() {
         "> - [x] # quoted task",
         "- [ ] a\n- [ ] ## b",
         "- [ ] > - [x] # nested",
+        "- [ ] > - [x] > 1. [ ] # deep",
     ] {
         assert_eq!(round(source), source);
     }
@@ -1097,10 +1098,18 @@ fn a_task_item_may_start_with_a_heading_or_a_quote() {
     );
     assert!(shape("- [ ] > a").contains("task_item[checked=Bool(false)](blockquote["));
     assert!(shape("- [ ]\t# tab").contains(r#"(heading[level=Int(1)]("tab"))"#));
-    // A box inside the quote a box opens is read the same way.
+    // A box inside the quote a box opens is read the same way, however deep
+    // the quotes go on the line; one before text inside it is GFM's own.
     assert!(
         shape("- [ ] > - [x] # nested")
             .contains(r#"task_item[checked=Bool(true)](heading[level=Int(1)]("nested"))"#)
+    );
+    assert!(
+        shape("- [ ] > - [x] > 1. [ ] # deep")
+            .contains(r#"task_item[checked=Bool(false)](heading[level=Int(1)]("deep"))"#)
+    );
+    assert!(
+        shape("- [ ] > - [x] text").contains(r#"task_item[checked=Bool(true)](paragraph("text"))"#)
     );
     // What opens neither stays the paragraph's text.
     assert!(shape("- [ ] #a").contains("paragraph(\"#a\")"));

@@ -33,7 +33,7 @@
 
 use std::sync::{Arc, LazyLock};
 
-use markraft_core::protocol::{add_to_history, fold_into_previous, remote};
+use markraft_core::protocol::fold_into_previous;
 use markraft_core::{
     AnnotationType, Change, Extension, Fragment, Node, Schema, Selection, Slice, Transaction,
     TransactionFilterFn, TransactionSpec, transaction_filter,
@@ -67,8 +67,7 @@ pub(crate) fn keeps_spelling_at_caret(tr: &Transaction) -> bool {
     tr.annotation(&UNFOLDS) == Some(&true)
         || !tr.doc_changed()
         || tr.is_user_event("input.type")
-        || tr.is_user_event("undo")
-        || tr.is_user_event("redo")
+        || tr.replays_history()
 }
 
 /// Whether `node` is an atom a reader wrote as text: one the caret should find
@@ -83,10 +82,7 @@ pub(crate) fn is_spelled_atom(schema: &Schema, node: &Node) -> bool {
 /// Replace every atom an end of the selection stands against with its
 /// spelling. See the module documentation.
 fn unfold(tr: &Transaction) -> Option<Vec<TransactionSpec>> {
-    if tr.doc_changed()
-        || tr.annotation(remote()) == Some(&true)
-        || tr.annotation(add_to_history()) == Some(&false)
-    {
+    if tr.doc_changed() || !tr.recorded_in_history() {
         return None;
     }
     let schema = tr.start_state().schema();

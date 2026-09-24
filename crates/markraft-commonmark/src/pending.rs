@@ -61,7 +61,7 @@
 use std::ops::Range;
 use std::sync::{Arc, LazyLock};
 
-use markraft_core::protocol::{add_to_history, fold_into_previous, remote};
+use markraft_core::protocol::fold_into_previous;
 use markraft_core::{
     Annotation, AnnotationType, Change, ChangeRange, ChangeSet, EditorState, Extension, Fragment,
     Node, Schema, Slice, StateField, StateFieldConfig, TrackMode, Transaction, TransactionFilterFn,
@@ -326,10 +326,10 @@ fn update(value: &Pair, tr: &Transaction) -> Pair {
                 Pair::Pending(pending)
             }
             Some(span) => Pair::Left(span),
-            // An undo that takes an empty pair out — the toggle's own undo —
-            // remembers it as a deleted one, so the redo that writes it back
-            // makes it pending again.
-            None if pending.is_empty() && tr.is_user_event("undo") => {
+            // An undo or a redo that takes an empty pair out — the toggle's
+            // own undo — remembers it as a deleted one, so the replay that
+            // writes it back makes it pending again.
+            None if pending.is_empty() && tr.replays_history() => {
                 Settled::after(pending, tr.changes()).map_or(Pair::None, Pair::Settled)
             }
             None => Pair::None,
@@ -337,7 +337,7 @@ fn update(value: &Pair, tr: &Transaction) -> Pair {
         Pair::Left(span) => {
             // Undoing what was typed in it gives the empty pair back with the
             // caret between its runs, as it was before the typing.
-            let undoing = tr.is_user_event("undo") || tr.is_user_event("redo");
+            let undoing = tr.replays_history();
             match follow(schema, span, tr) {
                 Some(pair) if undoing && pair.is_empty() && caret_inside(&pair, tr) => {
                     Pair::Pending(pair)
@@ -348,7 +348,7 @@ fn update(value: &Pair, tr: &Transaction) -> Pair {
             }
         }
         Pair::Settled(settled) => {
-            if (tr.is_user_event("undo") || tr.is_user_event("redo"))
+            if tr.replays_history()
                 && let Some(restored) = settled.restored(tr)
             {
                 return Pair::Pending(restored);
@@ -397,10 +397,7 @@ fn caret_inside(pair: &Pending, tr: &Transaction) -> bool {
 /// Delete the empty pending pair a transaction leaves behind. See the module
 /// documentation.
 fn settle(tr: &Transaction) -> Option<Vec<TransactionSpec>> {
-    if tr.annotation(&MARK).is_some()
-        || tr.annotation(remote()) == Some(&true)
-        || tr.annotation(add_to_history()) == Some(&false)
-    {
+    if tr.annotation(&MARK).is_some() || !tr.recorded_in_history() {
         return None;
     }
     let state = tr.start_state();
