@@ -194,7 +194,7 @@ fn every_alignment_survives_in_both_directions() {
         codec.write(&doc),
         "| l   | c   | r   | n   |\n| :-- | :-: | --: | --- |\n| 1   | 2   | 3   | 4   |"
     );
-    assert!(judge(&codec, source).is_ok());
+    judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
 }
 
 #[test]
@@ -217,7 +217,7 @@ fn a_pipe_in_a_cell_is_escaped_even_inside_a_code_span() {
         "| a\\|b | `c\\|d` |\n| ---- | ------ |\n| x    | y      |"
     );
     let codec = Codec::new();
-    assert!(judge(&codec, source).is_ok());
+    judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
 }
 
 #[test]
@@ -251,7 +251,7 @@ fn a_ragged_table_is_squared_off_the_way_a_reader_squares_it() {
         )
     );
     let codec = Codec::new();
-    assert!(judge(&codec, source).is_ok());
+    judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
 }
 
 #[test]
@@ -302,7 +302,7 @@ fn a_list_holding_a_table_is_written_loose() {
         )
     );
     let codec = Codec::new();
-    assert!(judge(&codec, source).is_ok());
+    judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
     let once = round(source);
     assert_eq!(once, round(&once));
     assert!(once.contains("  | a   |"), "{once}");
@@ -320,7 +320,7 @@ fn a_list_item_that_is_only_a_table_stays_tight() {
     ] {
         let once = round(source);
         assert_eq!(once, round(&once), "{source:?} does not settle");
-        assert!(judge(&codec, source).is_ok(), "{source:?}");
+        judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
         assert!(
             !once.contains("\n\n"),
             "{source:?} was written loose: {once}"
@@ -450,7 +450,7 @@ fn a_raw_block_carries_the_prefix_of_every_container_it_sits_in() {
         "> - <div>\n>   x\n>   </div>",
     ] {
         assert_eq!(round(source), source, "{source:?} was not written back");
-        assert!(judge(&codec, source).is_ok(), "{source:?}");
+        judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
     }
 }
 
@@ -569,7 +569,7 @@ fn every_raw_block_shape_is_a_fixed_point_of_parse_and_write() {
         let written = codec.write(&doc);
         assert_eq!(codec.parse(&written), doc, "{source:?} does not settle");
         assert_eq!(codec.normalize(&written), written, "{source:?}");
-        assert!(judge(&codec, source).is_ok(), "{source:?}");
+        judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
     }
 }
 
@@ -1476,9 +1476,9 @@ fn text_that_only_looks_like_a_url_is_kept_from_becoming_one() {
     ] {
         assert_eq!(round(source), source, "{source}");
         assert!(!shape(source).contains("{link}"), "{source}");
-        assert!(judge(&codec, source).is_ok(), "{source}");
+        judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
     }
-    assert!(judge(&codec, "<foo\\+@bar.example.com>").is_ok());
+    judge(&codec, "<foo\\+@bar.example.com>").unwrap_or_else(|message| panic!("{message}"));
 }
 
 #[test]
@@ -1502,7 +1502,7 @@ fn every_autolink_shape_renders_the_same_and_settles() {
         "> https://example.com",
         "- https://example.com",
     ] {
-        assert!(judge(&codec, source).is_ok(), "{source}");
+        judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
         let once = round(source);
         assert_eq!(once, round(&once), "{source} does not settle");
     }
@@ -1576,6 +1576,6 @@ fn a_thematic_break_keeps_its_character_unless_that_would_read_as_something_else
             codec.normalize(source),
             codec.normalize(&codec.normalize(source))
         );
-        assert!(judge(&codec, source).is_ok(), "{source}");
+        judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
     }
 }

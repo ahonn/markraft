@@ -186,6 +186,12 @@ impl Harness<'_> {
         self.cx.run_until_parked();
     }
 
+    /// The active note's selection.
+    pub(crate) fn selection(&mut self) -> markraft_core::Selection {
+        let editor = self.app.update(self.cx, |app, _| app.test_editor());
+        editor.update(self.cx, |editor, _| editor.state().selection().clone())
+    }
+
     /// Run `edit` on the active note's editor, as a toolbar button does.
     pub(crate) fn edit(
         &mut self,
@@ -273,8 +279,7 @@ mod tests {
             h.save();
             assert_eq!(h.error(), None, "after {step:?}: {:?}", h.markdown());
         }
-        let markdown = h.markdown();
-        assert!(markdown.contains("code"), "{markdown:?}");
+        assert_eq!(h.markdown(), "tt\n\n- [ ] t1\n- [ ] \n  ```\n  code\n  ```");
     }
 
     // M1: Return at the end of an item's first paragraph that more blocks of the
@@ -341,8 +346,7 @@ mod tests {
         let mut h = open_with(cx, &[("code.md", "```\nfn a() {\n    x\n```\n")], |_| {});
         h.keys("cmd-up down down end enter");
         h.type_text("y");
-        let markdown = h.markdown();
-        assert!(markdown.contains("    x\n    y"), "{markdown:?}");
+        assert_eq!(h.markdown(), "```\nfn a() {\n    x\n    y\n```");
     }
 
     // The `/` menu searches past a space: `/code bl` still finds Code Block.
@@ -351,8 +355,8 @@ mod tests {
         let mut h = open(cx, |_| {});
         h.type_text("/code bl");
         h.keys("enter");
-        let markdown = h.markdown();
-        assert!(markdown.starts_with("```"), "{markdown:?}");
+        // The query is taken away with the menu: nothing of `/code bl` is left.
+        assert_eq!(h.markdown(), "```\n```");
     }
 
     // A pasted image is written beside the note and referenced with nothing after it;
@@ -709,21 +713,24 @@ mod tests {
     // G5: every block format applied to a task item's text.
     #[gpui::test]
     fn block_formats_inside_a_task_item(cx: &mut TestAppContext) {
-        let keys = [
-            "cmd-1",
-            "cmd-2",
-            "cmd-6",
-            "cmd-0",
-            "cmd-shift-b",
-            "alt-cmd-c",
-            "cmd-&",
-            "cmd-*",
-            "cmd-(",
+        // A task's box is spelled at the start of its first paragraph, so a heading or
+        // a quote there is refused: `- [ ] # t` reads back as a paragraph.
+        let cases = [
+            ("cmd-1", "- [ ] t"),
+            ("cmd-2", "- [ ] t"),
+            ("cmd-6", "- [ ] t"),
+            ("cmd-0", "- [ ] t"),
+            ("cmd-shift-b", "- [ ] t"),
+            ("alt-cmd-c", "- [ ] t\n  ```\n  ```"),
+            ("cmd-&", "1. t"),
+            ("cmd-*", "- t"),
+            ("cmd-(", "t"),
         ];
-        for key in keys {
+        for (key, expected) in cases {
             let mut h = open_with(cx, &[("t.md", "- [ ] t\n")], |_| {});
             h.keys("cmd-down");
             h.keys(key);
+            assert_eq!(h.markdown(), expected, "{key}");
             h.assert_round_trip(key);
         }
     }
@@ -820,14 +827,10 @@ mod tests {
         h.keys("cmd-n");
         h.type_text("see [[Targ");
         h.keys("enter");
-        assert!(
-            h.markdown().contains("[[Target note]]"),
-            "{:?}",
-            h.markdown()
-        );
+        assert_eq!(h.markdown(), "see [[Target note]]");
         h.type_text(" :smil");
         h.keys("enter");
-        assert!(h.markdown().ends_with(":smile:"), "{:?}", h.markdown());
+        assert_eq!(h.markdown(), "see [[Target note]] :smile:");
         h.assert_round_trip("a link and an emoji from the menus");
     }
 
@@ -1052,6 +1055,7 @@ mod tests {
     fn every_edit_in_the_corpus_leaves_a_note_a_file_can_hold(cx: &mut TestAppContext) {
         let mut failures = Vec::new();
         let mut refused = Vec::new();
+        let mut applied = 0;
         for (index, document) in CORPUS.iter().enumerate() {
             for on_disk in [true, false] {
                 let name = format!("c{index}.md");
@@ -1109,6 +1113,7 @@ mod tests {
                         });
                         h.cx.write_to_clipboard(gpui::ClipboardItem::new_string(CLIPBOARD.into()));
                         let before = h.app.update(h.cx, |app, cx| app.active_document(cx));
+                        let selected = h.selection();
                         match edit.strip_prefix("type:") {
                             Some(text) => h.type_text(text),
                             None => h.keys(edit),
@@ -1119,6 +1124,7 @@ mod tests {
                             refused.push(at);
                             continue;
                         }
+                        applied += 1;
                         // An empty paragraph writes as nothing, so the file is held
                         // to the note without the ones a reader would not give back.
                         let bare = |node: &markraft_core::Node| {
@@ -1138,6 +1144,8 @@ mod tests {
                             Ok(text) => {
                                 let read = bare(&crate::doc::from_markdown(&text));
                                 let back = crate::doc::to_markdown(&read);
+                                // A document that differs only by whitespace ending a
+                                // line still says the same thing once written.
                                 if read != bare(&after) && trimmed(&back) != trimmed(&markdown) {
                                     failures.push(format!(
                                         "{at}: file reads back as {back:?}, editor has {markdown:?}"
@@ -1159,6 +1167,12 @@ mod tests {
                             // Sweeping on from a document undo got wrong would only
                             // report the same thing again.
                             break 'places;
+                        }
+                        if h.selection() != selected {
+                            failures.push(format!(
+                                "{at}: undo left the selection at {:?}, was {selected:?}",
+                                h.selection()
+                            ));
                         }
                         h.keys("cmd-shift-z");
                         let redone = h.app.update(h.cx, |app, cx| app.active_document(cx));
@@ -1182,7 +1196,14 @@ mod tests {
                 }
             }
         }
-        eprintln!("refused ({}):\n{}", refused.len(), refused.join("\n"));
+        eprintln!(
+            "applied {applied}, refused ({}):\n{}",
+            refused.len(),
+            refused.join("\n")
+        );
+        // Refusals are listed, not failed, so a sweep whose keys stopped reaching
+        // the note would pass on refusals alone; 5428 edits applied when this was set.
+        assert!(applied >= 5000, "only {applied} edits applied");
         assert!(
             failures.is_empty(),
             "{} failures:\n{}",

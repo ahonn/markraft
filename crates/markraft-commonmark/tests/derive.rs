@@ -651,6 +651,8 @@ fn guard_and_derive_are_idempotent() {
             assert_eq!(
                 derived,
                 derive(block.kind, &text, &ctx),
+                // Its hash maps iterate in a different order each run, so this
+                // holds only while nothing it says depends on that order.
                 "derive is a function of its input"
             );
             let tree = derive(block.kind, &guarded.text, &ctx);

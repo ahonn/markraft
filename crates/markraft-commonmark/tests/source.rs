@@ -584,25 +584,23 @@ fn real_enter_commands_leave_an_existing_list_and_type_a_plain_paragraph() {
 
 #[test]
 fn real_enter_and_typing_commands_still_save() {
-    // Empty paragraphs have no CommonMark spelling, so intermediate Returns may
-    // not patch source in place. After typing, a save (source patch or full
-    // rewrite) must still produce the typed text without a `<br>` marker.
+    // Empty paragraphs have no CommonMark spelling: the one the second Return
+    // leaves writes as a blank line, and never as a `<br>` marker. A save that
+    // could not keep the source is a failed save, so nothing falls back here.
     let schema = commonmark_schema();
-    for original in ["", "hello\n", "# Heading\n"] {
+    for (original, expected) in [
+        ("", "\ntyped"),
+        ("hello\n", "hello\n\n\ntyped\n"),
+        ("# Heading\n", "# Heading\n\n\ntyped\n"),
+    ] {
         let source = SourceDocument::parse(&schema, original).unwrap();
         let mut state = editor_at_end(&source);
         for _ in 0..2 {
             state = applied(&state, enter_command(&state));
         }
         state = applied(&state, markraft_core::commands::insert_text("typed"));
-        let rendered = source
-            .render(&schema, state.doc())
-            .unwrap_or_else(|_| markraft_commonmark::to_markdown(&schema, state.doc()));
-        assert!(rendered.contains("typed"), "{original:?} -> {rendered:?}");
-        assert!(
-            !rendered.contains("<br>"),
-            "empty paragraphs must not write <br>: {rendered:?}"
-        );
+        let rendered = source.render(&schema, state.doc()).unwrap();
+        assert_eq!(rendered, expected, "{original:?}");
     }
 }
 
@@ -632,25 +630,36 @@ fn typing_and_backspace_work_after_an_empty_paragraph_has_been_saved() {
 #[test]
 fn typing_into_a_saved_break_tag_paragraph_writes_the_text() {
     // Older files may still contain a lone `<br>` empty-paragraph marker. Typing
-    // into that paragraph must replace it with the text (via a source patch or a
-    // full rewrite), never leave the tag beside the new words.
+    // into that paragraph must replace it with the text, never leave the tag
+    // beside the new words.
     let schema = commonmark_schema();
-    for original in ["<br>\n", "---\ntitle: mine\n---\n<br>\n"] {
+    for (original, expected) in [
+        ("<br>\n", "hello\n"),
+        (
+            "---\ntitle: mine\n---\n<br>\n",
+            "---\ntitle: mine\n---\nhello\n",
+        ),
+    ] {
         let source = SourceDocument::parse(&schema, original).unwrap();
         let state = editor_at_end(&source);
         let typed = applied(&state, markraft_core::commands::insert_text("hello"));
-        let rendered = source
-            .render(&schema, typed.doc())
-            .unwrap_or_else(|_| markraft_commonmark::to_markdown(&schema, typed.doc()));
-        assert!(rendered.contains("hello"), "{original:?} -> {rendered:?}");
-        assert!(!rendered.contains("<br>"), "{original:?} -> {rendered:?}");
+        let rendered = source.render(&schema, typed.doc()).unwrap();
+        assert_eq!(rendered, expected, "{original:?}");
     }
 }
 
 #[test]
 fn real_enter_commands_preserve_existing_list_markers_and_code_source() {
     let schema = commonmark_schema();
-    for original in ["+ one\n", "3. one\n", "```rust\nlet a = 1;\n```\n"] {
+    // Two Returns leave a list, and stay inside a code block.
+    for (original, expected) in [
+        ("+ one\n", "+ one\n\ntyped\n"),
+        ("3. one\n", "3. one\n\ntyped\n"),
+        (
+            "```rust\nlet a = 1;\n```\n",
+            "```rust\nlet a = 1;\n\ntyped\n```\n",
+        ),
+    ] {
         let source = SourceDocument::parse(&schema, original).unwrap();
         let mut state = editor_at_end(&source);
         for _ in 0..2 {
@@ -662,7 +671,11 @@ fn real_enter_commands_preserve_existing_list_markers_and_code_source() {
             );
         }
         state = applied(&state, markraft_core::commands::insert_text("typed"));
-        assert!(source.render(&schema, state.doc()).is_ok());
+        assert_eq!(
+            source.render(&schema, state.doc()).unwrap(),
+            expected,
+            "{original:?}"
+        );
     }
 }
 
@@ -693,7 +706,12 @@ fn typing_each_character_after_leaving_a_list_keeps_every_space() {
 #[test]
 fn typing_consecutive_and_trailing_spaces_survives_each_guard_check() {
     let schema = commonmark_schema();
-    for original in ["hello\n", "- item\n", "# Heading\n", "```text\ncode\n```\n"] {
+    for (original, after_return) in [
+        ("hello\n", "hello one  two  \n"),
+        ("- item\n", "- item one  two  \n- \n"),
+        ("# Heading\n", "# Heading one  two  \n"),
+        ("```text\ncode\n```\n", "```text\ncode one  two  \n\n```\n"),
+    ] {
         let source = SourceDocument::parse(&schema, original).unwrap();
         let mut state = editor_at_end(&source);
         let mut typed = String::new();
@@ -709,8 +727,9 @@ fn typing_consecutive_and_trailing_spaces_survives_each_guard_check() {
             assert!(rendered.contains(&typed), "{rendered:?} lost {typed:?}");
         }
         state = applied(&state, enter_command(&state));
-        assert!(
-            source.render(&schema, state.doc()).is_ok(),
+        assert_eq!(
+            source.render(&schema, state.doc()).unwrap(),
+            after_return,
             "Return after trailing spaces in {original:?}"
         );
     }
