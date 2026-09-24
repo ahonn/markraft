@@ -249,9 +249,7 @@ pub(crate) fn spell_run(
 pub fn spell_document(serializer: &MarkdownSerializer, doc: &Node) -> Node {
     let schema = serializer.schema();
     if let Some(kind) = crate::textblock::block_kind(schema, doc.type_id()) {
-        let source = spell(serializer, doc);
-        let content = crate::textblock::build(schema, kind, &source);
-        return doc.copy(markraft_core::Fragment::from_nodes(content));
+        return spell_textblock(serializer, kind, doc);
     }
     if !doc.is_container() || doc.is_textblock(schema) {
         return doc.clone();
@@ -261,6 +259,232 @@ pub fn spell_document(serializer: &MarkdownSerializer, doc: &Node) -> Node {
         .map(|child| spell_document(serializer, child))
         .collect();
     doc.copy(markraft_core::Fragment::from_nodes(children))
+}
+
+/// Styles in the order they are given up when their spelling does not read
+/// back: the ones Markdown has least room for first.
+const GIVEN_UP: &[&str] = &[
+    crate::schema::HIGHLIGHT,
+    crate::schema::SUPERSCRIPT,
+    crate::schema::SUBSCRIPT,
+    crate::schema::UNDERLINE,
+    crate::schema::STRIKETHROUGH,
+    crate::schema::EM,
+    crate::schema::STRONG,
+    crate::schema::CODE,
+    crate::schema::MATH,
+    crate::schema::LINK,
+    crate::schema::FOOTNOTE_REFERENCE,
+];
+
+/// `block` spelled and rebuilt with its marks derived.
+///
+/// A style whose spelling does not read back — a subscript holding a space, a
+/// highlight around a bare link — is given up, one run at a time in
+/// [`GIVEN_UP`] order, and the block spelled again. What is left is the text
+/// with the styles Markdown can say, as Typora pastes it, rather than
+/// delimiters that read as text or a link that swallows them. When the text
+/// still reads wrong and no single run helps — several styles on one character
+/// that each break its reading — the run nearest the first wrong character is
+/// given up anyway; styles lost from text that reads right are kept when
+/// nothing more can be won.
+pub(crate) fn spell_textblock(
+    serializer: &MarkdownSerializer,
+    kind: crate::derive::BlockKind,
+    block: &Node,
+) -> Node {
+    let schema = serializer.schema();
+    let build = |wanted: &Node| {
+        let source = spell(serializer, wanted);
+        let content = crate::textblock::build(schema, kind, &source);
+        block.copy(markraft_core::Fragment::from_nodes(content))
+    };
+    let mut wanted = block.clone();
+    let mut built = build(&wanted);
+    let mut miss = mismatch(schema, &wanted, &built);
+    'improve: while miss > 0 {
+        for run in style_runs(schema, &wanted) {
+            let trial = without_style(schema, &wanted, &run);
+            let trial_built = build(&trial);
+            // Measured against what the trial still asks for: a style given
+            // up is not a style lost.
+            let trial_miss = mismatch(schema, &trial, &trial_built);
+            if trial_miss < miss {
+                (wanted, built, miss) = (trial, trial_built, trial_miss);
+                continue 'improve;
+            }
+        }
+        if miss < TEXT_DIFFERS {
+            break;
+        }
+        let Some(run) = run_nearest_divergence(schema, &wanted, &built) else {
+            break;
+        };
+        wanted = without_style(schema, &wanted, &run);
+        built = build(&wanted);
+        miss = mismatch(schema, &wanted, &built);
+    }
+    built
+}
+
+/// What [`mismatch`] counts from when the text itself reads wrong.
+const TEXT_DIFFERS: usize = 1_000_000;
+
+/// The run in `wanted` that covers, or else lies nearest, the first unit that
+/// `built` reads differently.
+fn run_nearest_divergence(
+    schema: &Schema,
+    wanted: &Node,
+    built: &Node,
+) -> Option<(Mark, Vec<usize>)> {
+    let want = units(schema, wanted);
+    let got = units(schema, built);
+    let at = want
+        .iter()
+        .zip(&got)
+        .position(|(a, b)| a.ch != b.ch)
+        .unwrap_or(want.len().min(got.len()));
+    style_runs(schema, wanted)
+        .into_iter()
+        .min_by_key(|(_, covered)| {
+            covered
+                .iter()
+                .map(|&index| index.abs_diff(at))
+                .min()
+                .unwrap_or(usize::MAX)
+        })
+}
+
+/// One character of a textblock, or one atom, with the marks on it.
+struct Unit {
+    /// The character, or `None` for an atom.
+    ch: Option<char>,
+    marks: Vec<Mark>,
+}
+
+/// What `block` reads as, a unit per character or atom: spelling marked
+/// `syntax` reads as nothing, except a numeric character reference, which
+/// reads as the character it names.
+fn units(schema: &Schema, block: &Node) -> Vec<Unit> {
+    let syntax = schema.mark_id(crate::schema::SYNTAX);
+    let mut out = Vec::new();
+    for child in block.children() {
+        let marks: Vec<Mark> = child
+            .marks()
+            .iter()
+            .filter(|mark| Some(mark.ty) != syntax)
+            .cloned()
+            .collect();
+        let spelling = syntax.is_some_and(|syntax| child.marks().contains_type(syntax));
+        match child.text() {
+            Some(text) if spelling => {
+                if let Some(ch) = character_reference(text) {
+                    out.push(Unit {
+                        ch: Some(ch),
+                        marks,
+                    });
+                }
+            }
+            Some(text) => out.extend(text.chars().map(|ch| Unit {
+                ch: Some(ch),
+                marks: marks.clone(),
+            })),
+            None if spelling => {}
+            None => out.push(Unit { ch: None, marks }),
+        }
+    }
+    out
+}
+
+/// The character a numeric reference such as `&#10;` or `&#x2a;` names.
+fn character_reference(text: &str) -> Option<char> {
+    let number = text.strip_prefix("&#")?.strip_suffix(';')?;
+    let code = match number.strip_prefix(['x', 'X']) {
+        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+        None => number.parse().ok()?,
+    };
+    char::from_u32(code)
+}
+
+/// How far `built` is from reading as `wanted`: zero when it does. Text that
+/// differs — a delimiter left as text, a link that swallowed its neighbour —
+/// outweighs any number of styles lost from text that reads right. A style on
+/// whitespace is not counted: nothing shows it, and spelling moves the
+/// whitespace at a run's edges out of the run.
+fn mismatch(schema: &Schema, wanted: &Node, built: &Node) -> usize {
+    let want = units(schema, wanted);
+    let got = units(schema, built);
+    if want.len() != got.len() || want.iter().zip(&got).any(|(a, b)| a.ch != b.ch) {
+        return TEXT_DIFFERS + want.len().abs_diff(got.len());
+    }
+    want.iter()
+        .zip(&got)
+        .filter(|(a, _)| !a.ch.is_some_and(char::is_whitespace))
+        .map(|(a, b)| {
+            a.marks
+                .iter()
+                .filter(|mark| !b.marks.contains(mark))
+                .count()
+        })
+        .sum()
+}
+
+/// Every run of one style in `block`, as the unit indices it covers: the
+/// maximal stretches carrying the same mark, styles in [`GIVEN_UP`] order.
+fn style_runs(schema: &Schema, block: &Node) -> Vec<(Mark, Vec<usize>)> {
+    let units = units(schema, block);
+    let mut out = Vec::new();
+    for ty in GIVEN_UP.iter().filter_map(|name| schema.mark_id(name)) {
+        let mut current: Option<(Mark, Vec<usize>)> = None;
+        for (index, unit) in units.iter().enumerate() {
+            let mark = unit.marks.iter().find(|mark| mark.ty == ty);
+            match (mark, current.as_mut()) {
+                (Some(mark), Some((open, indices))) if open == mark => indices.push(index),
+                (Some(mark), _) => {
+                    out.extend(current.take());
+                    current = Some((mark.clone(), vec![index]));
+                }
+                (None, _) => out.extend(current.take()),
+            }
+        }
+        out.extend(current);
+    }
+    out
+}
+
+/// `block` with `run`'s mark taken off the units it covers, counted the way
+/// [`units`] counts them: spelling that reads as nothing is no unit and keeps
+/// its marks.
+fn without_style(schema: &Schema, block: &Node, run: &(Mark, Vec<usize>)) -> Node {
+    let (mark, covered) = run;
+    let syntax = schema.mark_id(crate::schema::SYNTAX);
+    let mut index = 0;
+    let mut nodes = Vec::new();
+    let take = |node: &Node, units: usize, index: &mut usize| {
+        let hit = (*index..*index + units).any(|unit| covered.contains(&unit));
+        *index += units;
+        if hit {
+            node.mark(node.marks().remove(mark))
+        } else {
+            node.clone()
+        }
+    };
+    for child in block.children() {
+        let spelling = syntax.is_some_and(|syntax| child.marks().contains_type(syntax));
+        match child.text() {
+            Some(text) if spelling => {
+                let units = usize::from(character_reference(text).is_some());
+                nodes.push(take(child, units, &mut index));
+            }
+            Some(text) => {
+                for ch in text.chars() {
+                    nodes.push(take(&child.with_text(&ch.to_string()), 1, &mut index));
+                }
+            }
+            None => nodes.push(take(child, usize::from(!spelling), &mut index)),
+        }
+    }
+    block.copy(markraft_core::Fragment::from_nodes(nodes))
 }
 
 /// The output being built, and everything a rule needs to add to it.

@@ -203,9 +203,11 @@ impl<'s> Build<'s> {
         let Some(kind) = crate::textblock::block_kind(self.schema, ty) else {
             return Ok(block);
         };
-        let source = crate::serialize::spell(self.serializer, &block);
-        let content = crate::textblock::build(self.schema, kind, &source);
-        Ok(block.copy(Fragment::from_nodes(content)))
+        Ok(crate::serialize::spell_textblock(
+            self.serializer,
+            kind,
+            &block,
+        ))
     }
 
     /// Add text that is Markdown source already, which spelling leaves as it

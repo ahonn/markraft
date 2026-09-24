@@ -737,3 +737,35 @@ fn a_pasted_line_break_is_spelled_in_the_house_style() {
     });
     assert_eq!(markdown("<p>a<br>b</p>"), "a\\\nb");
 }
+
+/// A style Markdown cannot say where it was pasted is given up and its text
+/// kept, as Typora pastes it, rather than written as delimiters that read as
+/// text or a link that swallows them. Styles that can be said stay.
+#[test]
+fn a_style_markdown_cannot_say_is_given_up_and_its_text_kept() {
+    for (html, expected) in [
+        // A subscript cannot hold a space.
+        ("<p>A <sub>a b</sub> Z</p>", "A a b Z"),
+        // `~~~` is neither strikethrough nor subscript; the strikethrough stays.
+        ("<p>B <del><sub>ab</sub></del> Z</p>", "B ~~ab~~ Z"),
+        // A link's text does not read superscript; the link stays.
+        (
+            "<p>C <a href=\"https://e.com\"><sup>ab</sup></a> Z</p>",
+            "C [ab](https://e.com) Z",
+        ),
+        // A bare link would swallow the closing `==`, and point elsewhere.
+        (
+            "<p>D <mark><del><a href=\"https://example.com\">https://example.com</a></del></mark> Z</p>",
+            "D ~~https://example.com~~ Z",
+        ),
+        // Emphasis closing between punctuation and a letter does not close.
+        ("<p>E <strong>x {z}</strong>a Z</p>", "E x {z}a Z"),
+        ("<p>F <em>C#</em>gamma Z</p>", "F C#gamma Z"),
+        (
+            "<p>G <sub>ab</sub> <sup>cd</sup> <mark>ef</mark> Z</p>",
+            "G ~ab~ ^cd^ ==ef== Z",
+        ),
+    ] {
+        assert_eq!(markdown(html), expected, "{html}");
+    }
+}

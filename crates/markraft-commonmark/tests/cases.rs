@@ -951,9 +951,10 @@ fn mark_combinations_on_a_code_span_are_spelled_with_delimiters() {
 }
 
 #[test]
-fn a_mark_whose_delimiter_cannot_flank_is_still_spelled_as_delimiters() {
-    // Portable Markdown has no HTML fallback. `a*!*` will not re-read as
-    // emphasis — that loss is preferred over `<em>` tags other editors keep.
+fn a_mark_whose_delimiter_cannot_flank_is_given_up() {
+    // Portable Markdown has no HTML fallback, and `a*!*` would not re-read as
+    // emphasis. The emphasis is given up and the text kept, as Typora pastes
+    // it — rather than `<em>` tags, or delimiters left to read as text.
     let codec = Codec::new();
     let schema = &codec.schema;
     let em = schema.mark(md::EM, Attrs::empty()).expect("em");
@@ -968,10 +969,7 @@ fn a_mark_whose_delimiter_cannot_flank_is_still_spelled_as_delimiters() {
             )
             .expect("a paragraph")])
         .expect("a document");
-    assert_eq!(
-        codec.write(&spell_document(&codec.serializer, &doc)),
-        "a*!*"
-    );
+    assert_eq!(codec.write(&spell_document(&codec.serializer, &doc)), "a!");
 }
 
 // -- lists ----------------------------------------------------------------
