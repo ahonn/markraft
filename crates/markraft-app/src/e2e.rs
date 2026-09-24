@@ -443,7 +443,8 @@ mod tests {
     }
 
     // G4: the table toolbar on a table written by hand, not as the writer would.
-    // A row added or deleted leaves the other rows as they were spelled; a
+    // A row added — spaced as the header is — or deleted leaves the other rows
+    // as they were spelled; a
     // column changed respells the table, since every row changes with it.
     #[gpui::test]
     fn table_edits_on_a_hand_written_table(cx: &mut TestAppContext) {
@@ -456,12 +457,12 @@ mod tests {
             (
                 "row after",
                 |e, cx| e.table_add_row_after(cx),
-                "|a|b|\n|-|-|\n|1|2|\n|     |     |\n",
+                "|a|b|\n|-|-|\n|1|2|\n| | |\n",
             ),
             (
                 "row before",
                 |e, cx| e.table_add_row_before(cx),
-                "|a|b|\n|-|-|\n|     |     |\n|1|2|\n",
+                "|a|b|\n|-|-|\n| | |\n|1|2|\n",
             ),
             (
                 "column after",
@@ -570,6 +571,58 @@ mod tests {
             h.type_text("X");
             assert_eq!(h.markdown(), expected, "{source:?}");
             h.assert_round_trip("bold at a caret");
+        }
+    }
+
+    // Around a divider, Backspace and Delete take it with one press, as Typora
+    // does, and no empty line is left where it was.
+    #[gpui::test]
+    fn backspace_and_delete_take_a_divider_with_one_press(cx: &mut TestAppContext) {
+        for (keys, expected) in [
+            ("cmd-down cmd-left backspace", "a\n\nb\n"),
+            ("cmd-up cmd-right delete", "ab\n"),
+        ] {
+            let mut h = open_with(cx, &[("d.md", "a\n\n---\n\nb\n")], |_| {});
+            h.keys(keys);
+            h.save();
+            let text = h.wait_for_file("d.md", |text| text == expected);
+            assert_eq!(text, expected, "{keys}");
+        }
+    }
+
+    // ⌘Enter in a table opens a row below the caret's and moves into its first
+    // cell, as Typora does. The rows written by hand keep their bytes, the
+    // edit typed into the new row included.
+    #[gpui::test]
+    fn command_return_in_a_table_opens_a_row_to_type_in(cx: &mut TestAppContext) {
+        let source = "|a|b|\n|-|-|\n|1|2|\n|3|4|\n";
+        let mut h = open_with(cx, &[("t.md", source)], |_| {});
+        h.keys("cmd-up down cmd-right cmd-enter");
+        h.type_text("z");
+        h.keys("down");
+        h.type_text("y");
+        h.save();
+        let expected = "|a|b|\n|-|-|\n|1|2|\n|z| |\n|3y|4|\n";
+        let text = h.wait_for_file("t.md", |text| text == expected);
+        assert_eq!(text, expected);
+    }
+
+    // The Emacs keys every macOS text view takes: ⌃A and ⌃E go to the ends of
+    // the paragraph, ⌃K deletes to its end, ⌃D and ⌃H delete a character.
+    #[gpui::test]
+    fn the_emacs_keys_move_and_delete(cx: &mut TestAppContext) {
+        let cases: &[(&str, &str, &str)] = &[
+            ("hello **world**\n", "cmd-up ctrl-e", "hello **world**X"),
+            ("hello world\n", "cmd-up cmd-right ctrl-a", "Xhello world"),
+            ("hello world\n", "cmd-up ctrl-f ctrl-f ctrl-k", "heX"),
+            ("hello\n", "cmd-up ctrl-d", "Xello"),
+            ("hello\n", "cmd-up ctrl-f ctrl-h", "Xello"),
+        ];
+        for (source, keys, expected) in cases {
+            let mut h = open_with(cx, &[("e.md", source)], |_| {});
+            h.keys(keys);
+            h.type_text("X");
+            assert_eq!(h.markdown(), *expected, "{source:?} {keys}");
         }
     }
 
@@ -788,6 +841,24 @@ mod tests {
             h.assert_round_trip("blocks pasted into a cell");
             let text = h.wait_for_file("t.md", |text| text == expected);
             assert_eq!(text, expected, "{pasted:?}");
+        }
+    }
+
+    // Paragraphs pasted in the middle of a paragraph carry on the text either
+    // side of the caret, as Typora does; a heading at an end stays a block.
+    #[gpui::test]
+    fn paragraphs_pasted_mid_paragraph_join_the_text_around_them(cx: &mut TestAppContext) {
+        for (pasted, expected) in [
+            ("one\n\ntwo", "AAA one\n\ntwoBBB"),
+            ("one\n\nmid\n\ntwo", "AAA one\n\nmid\n\ntwoBBB"),
+            ("one\n\n# Head", "AAA one\n\n# Head\n\nBBB"),
+        ] {
+            let mut h = open_with(cx, &[("p.md", "AAA BBB\n")], |_| {});
+            h.keys("cmd-up alt-right right");
+            h.cx.write_to_clipboard(gpui::ClipboardItem::new_string(pasted.into()));
+            h.keys("cmd-v");
+            assert_eq!(h.markdown(), expected, "{pasted:?}");
+            h.assert_round_trip("paragraphs pasted mid-paragraph");
         }
     }
 

@@ -160,21 +160,26 @@ fn collapse(state: &EditorState, dir: Direction, extend: bool) -> Option<Transac
     if extend || selection.is_empty(doc) {
         return None;
     }
-    let target = match dir {
-        Direction::Forward => selection.to(doc),
-        Direction::Backward => selection.from(doc),
+    // A text range collapses onto its own edge, so the search looks back into
+    // it. A selected node has no inside to land in: looking back from its edge
+    // finds the node again — its start is the very position that selects it —
+    // and the arrow would never leave it. It looks the way the arrow points,
+    // from past the node, instead.
+    let node = matches!(selection, Selection::Node { .. });
+    let (target, bias) = match dir {
+        Direction::Forward => (selection.to(doc), if node { 1 } else { -1 }),
+        Direction::Backward if node => (selection.from(doc).saturating_sub(1), -1),
+        Direction::Backward => (selection.from(doc), 1),
     };
+    // Nowhere else to go — a node with nothing past it — is not a motion, so a
+    // chain can offer something after this.
+    let next = Selection::near(state.schema(), doc, target, bias);
+    if next == *selection {
+        return None;
+    }
     Some(
         TransactionSpec::new()
-            .selection(Selection::near(
-                state.schema(),
-                doc,
-                target,
-                match dir {
-                    Direction::Forward => -1,
-                    Direction::Backward => 1,
-                },
-            ))
+            .selection(next)
             .user_event("move")
             .scroll_into_view(),
     )

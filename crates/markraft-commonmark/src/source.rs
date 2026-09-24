@@ -196,6 +196,26 @@ impl SourceDocument {
                 let before = block_markdown(schema, &self.document, &old[index..=index]);
                 let after = block_markdown(schema, document, &new[index..=index]);
                 let range = self.blocks[index].clone();
+                // A table whose rows were added, removed or edited, its columns
+                // as they were: each row it kept keeps its line, an edited row
+                // keeps its own spacing around the text that changed, and a new
+                // row is spelled the way the table's header is. See
+                // `table_rows`.
+                if let Some(patched) = table_rows(
+                    schema,
+                    &old[index],
+                    &new[index],
+                    &result[range.clone()],
+                    self.newline,
+                )
+                .and_then(|rows| {
+                    let mut candidate = result.clone();
+                    candidate.replace_range(range.clone(), &rows);
+                    self.validate(schema, &target, candidate).ok()
+                }) {
+                    result = patched;
+                    continue;
+                }
                 // A table's body row added goes in as a line of its own. A diff of
                 // the two tables' canonical spellings could place it anywhere their
                 // padding happens to agree, inside a hand-written row, and the
@@ -266,6 +286,36 @@ impl SourceDocument {
             if prefix == end {
                 return self.insert_blocks(schema, document, result, prefix, suffix, &after);
             } else {
+                // Whole blocks went and nothing took their place — a divider
+                // deleted: their lines go with the gap before them. Patching
+                // them out would leave both gaps, a blank line too many, where
+                // they stood.
+                if prefix + suffix == new.len() {
+                    let mut candidate = result.clone();
+                    candidate.replace_range(self.dropped_range(prefix, end, suffix), "");
+                    if let Ok(done) = self.validate(schema, document, candidate) {
+                        return Ok(done);
+                    }
+                }
+                // A table that took in the text of the blocks after it —
+                // Backspace after a table joins its last cell — keeps its
+                // rows' spelling, and the blocks go with the gap before them.
+                if new.len() - suffix == prefix + 1
+                    && let Some(rows) = table_rows(
+                        schema,
+                        &old[prefix],
+                        &new[prefix],
+                        &result[self.blocks[prefix].clone()],
+                        self.newline,
+                    )
+                {
+                    let mut candidate = result.clone();
+                    candidate.replace_range(self.blocks[prefix].end..self.blocks[end - 1].end, "");
+                    candidate.replace_range(self.blocks[prefix].clone(), &rows);
+                    if let Ok(done) = self.validate(schema, document, candidate) {
+                        return Ok(done);
+                    }
+                }
                 let range = self.blocks[prefix].start..self.blocks[end - 1].end;
                 result = match self.patch(schema, document, result.clone(), range, &before, &after)
                 {
@@ -275,14 +325,7 @@ impl SourceDocument {
                     // a table padded otherwise. Their spelling does not matter to
                     // a deletion: drop their lines and the gap before them.
                     Err(_) if prefix + suffix == new.len() => {
-                        let range = if prefix > 0 {
-                            self.blocks[prefix - 1].end..self.blocks[end - 1].end
-                        } else if suffix > 0 {
-                            self.blocks[prefix].start..self.blocks[end].start
-                        } else {
-                            self.blocks[prefix].start..self.blocks[end - 1].end
-                        };
-                        result.replace_range(range, "");
+                        result.replace_range(self.dropped_range(prefix, end, suffix), "");
                         result
                     }
                     // Blocks were joined, split, wrapped or lifted out: the
@@ -296,6 +339,19 @@ impl SourceDocument {
             }
         }
         self.validate(schema, document, result)
+    }
+
+    /// The source top-level blocks `prefix..end` take, with the gap that parts
+    /// them from the block before — or, first in the note, from the block
+    /// after — so that dropping it leaves the one gap the blocks around need.
+    fn dropped_range(&self, prefix: usize, end: usize, suffix: usize) -> Range<usize> {
+        if prefix > 0 {
+            self.blocks[prefix - 1].end..self.blocks[end - 1].end
+        } else if suffix > 0 {
+            self.blocks[prefix].start..self.blocks[end].start
+        } else {
+            self.blocks[prefix].start..self.blocks[end - 1].end
+        }
     }
 
     /// Replace `range` — whole top-level blocks — with `after`, their Markdown
@@ -660,6 +716,242 @@ fn removed_row(schema: &Schema, old: &Node, new: &Node) -> Option<usize> {
 /// is the table `old` with it.
 fn added_row(schema: &Schema, old: &Node, new: &Node) -> Option<usize> {
     removed_row(schema, new, old)
+}
+
+/// A top-level table's source, `raw`, rewritten row by row from `old` to
+/// `new`, or `None` when the two differ other than in their rows — a column
+/// added or aligned — or `raw` is not one line per row, and the caller falls
+/// back to patching the table whole.
+///
+/// The rows are matched as a diff would match lines: those equal at either end
+/// keep their lines byte for byte, and those between pair up in order, the
+/// surplus added or dropped. A paired row keeps its line's pipes and the
+/// spaces around each cell, only the text of a changed cell replaced; an added
+/// row takes its spacing from the header — `|a|b|` makes `|z| |`, `| a | b |`
+/// makes `| z |  |` — rather than the padding the writer would give a table
+/// of its own, which would sit oddly among rows written by hand.
+fn table_rows(schema: &Schema, old: &Node, new: &Node, raw: &str, newline: &str) -> Option<String> {
+    if schema.node_id(crate::schema::TABLE) != Some(old.type_id()) || !old.same_markup(new) {
+        return None;
+    }
+    let columns = old.child(0).child_count();
+    if new.children().any(|row| row.child_count() != columns)
+        || old.children().any(|row| row.child_count() != columns)
+    {
+        return None;
+    }
+    let lines: Vec<&str> = raw.split(newline).collect();
+    if lines.len() != old.child_count() + 1 {
+        return None;
+    }
+    // Row `index`'s line: the header's is the first, the delimiter row sits
+    // between it and the body.
+    let line_of = |index: usize| lines[if index == 0 { 0 } else { index + 1 }];
+    let header = RowLine::parse(line_of(0))?;
+    let (o, n) = (old.child_count(), new.child_count());
+    let head = old
+        .children()
+        .zip(new.children())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let tail = old
+        .children()
+        .rev()
+        .zip(new.children().rev())
+        .take(o.min(n) - head)
+        .take_while(|(a, b)| a == b)
+        .count();
+    // The old row each new row keeps the line of, if any.
+    let mut source_of: Vec<Option<usize>> = (0..n)
+        .map(|index| {
+            if index < head {
+                Some(index)
+            } else if index >= n - tail {
+                Some(index + o - n)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for (old_index, new_index) in pair_rows(old, new, head..o - tail, head..n - tail) {
+        source_of[new_index] = Some(old_index);
+    }
+    let mut out: Vec<String> = Vec::with_capacity(n + 1);
+    for (index, source) in source_of.into_iter().enumerate() {
+        let row = new.child(index);
+        let line = match source {
+            Some(from) if old.child(from) == row => line_of(from).to_owned(),
+            Some(from) => {
+                let mut line = RowLine::parse(line_of(from))?;
+                if line.cells.len() != columns {
+                    return None;
+                }
+                let was = old.child(from);
+                for column in 0..columns {
+                    if was.child(column) != row.child(column) {
+                        line.set(column, guarded_source(schema, row.child(column))?, &header);
+                    }
+                }
+                line.to_string()
+            }
+            None => {
+                let mut line = header.emptied();
+                for column in 0..columns {
+                    line.set(column, guarded_source(schema, row.child(column))?, &header);
+                }
+                line.to_string()
+            }
+        };
+        if line.contains('\n') {
+            return None;
+        }
+        out.push(line);
+        if index == 0 {
+            out.push(lines[1].to_owned());
+        }
+    }
+    Some(out.join(newline))
+}
+
+/// Which rows of `old` in `olds` the rows of `new` in `news` are edits of, as
+/// pairs in order: the pairing that keeps the most cells as they were, a row
+/// with no partner being one added or removed. Two rows paired count for one
+/// more than their equal cells, so an edited row pairs rather than reading as
+/// one row dropped and another added.
+fn pair_rows(
+    old: &Node,
+    new: &Node,
+    olds: Range<usize>,
+    news: Range<usize>,
+) -> Vec<(usize, usize)> {
+    let (a, b) = (olds.len(), news.len());
+    let score = |i: usize, j: usize| {
+        let (x, y) = (old.child(olds.start + i), new.child(news.start + j));
+        1 + x
+            .children()
+            .zip(y.children())
+            .filter(|(p, q)| p == q)
+            .count()
+    };
+    // best[i][j]: the most a pairing of old rows i.. with new rows j.. keeps.
+    let mut best = vec![vec![0usize; b + 1]; a + 1];
+    for i in (0..a).rev() {
+        for j in (0..b).rev() {
+            best[i][j] = (score(i, j) + best[i + 1][j + 1])
+                .max(best[i + 1][j])
+                .max(best[i][j + 1]);
+        }
+    }
+    let (mut i, mut j, mut pairs) = (0, 0, Vec::new());
+    while i < a && j < b {
+        if best[i][j] == score(i, j) + best[i + 1][j + 1] {
+            pairs.push((olds.start + i, news.start + j));
+            i += 1;
+            j += 1;
+        } else if best[i][j] == best[i + 1][j] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    pairs
+}
+
+/// One table row's line, cut at its pipes: what stands before the first cell,
+/// each cell's text with the spaces either side of it, and what follows the
+/// last.
+#[derive(Clone)]
+struct RowLine {
+    lead: String,
+    cells: Vec<(String, String, String)>,
+    trail: String,
+}
+
+impl RowLine {
+    fn parse(line: &str) -> Option<RowLine> {
+        let mut parts = Vec::new();
+        let mut current = String::new();
+        let mut escaped = false;
+        for c in line.chars() {
+            if c == '|' && !escaped {
+                parts.push(std::mem::take(&mut current));
+            } else {
+                current.push(c);
+            }
+            escaped = c == '\\' && !escaped;
+        }
+        parts.push(current);
+        // Pipes at the edges are optional: with one, what lies outside it is
+        // indentation or trailing space rather than a cell.
+        let trimmed = line.trim();
+        let lead = if trimmed.starts_with('|') {
+            Some(parts.remove(0))
+        } else {
+            None
+        };
+        let trail = if trimmed.ends_with('|') && trimmed.len() > 1 {
+            parts.pop()
+        } else {
+            None
+        };
+        if parts.is_empty() {
+            return None;
+        }
+        let cells = parts
+            .into_iter()
+            .map(|part| {
+                let text = part.trim();
+                let start = part.find(text).unwrap_or(part.len());
+                let (before, rest) = part.split_at(start);
+                let (text, after) = rest.split_at(text.len());
+                (before.to_owned(), text.to_owned(), after.to_owned())
+            })
+            .collect();
+        Some(RowLine {
+            lead: lead.map(|lead| format!("{lead}|")).unwrap_or_default(),
+            cells,
+            trail: trail.map(|trail| format!("|{trail}")).unwrap_or_default(),
+        })
+    }
+
+    /// This line's shape with every cell empty: how a new row is spelled.
+    fn emptied(&self) -> RowLine {
+        RowLine {
+            cells: vec![(String::new(), String::new(), String::new()); self.cells.len()],
+            ..self.clone()
+        }
+    }
+
+    /// Put `text` in cell `column`. A cell with text keeps the spaces around
+    /// it; an empty one — all space, or new — takes the header's first cell's.
+    fn set(&mut self, column: usize, text: String, header: &RowLine) {
+        let (before, old, after) = &mut self.cells[column];
+        if old.is_empty() {
+            let (pad_before, _, pad_after) = &header.cells[0];
+            let pad = |side: &str| if side.is_empty() { "" } else { " " };
+            *before = pad(pad_before).to_owned();
+            *after = pad(pad_after).to_owned();
+        }
+        // A cell with nothing in it between two pipes still needs room to read
+        // as a cell to a person.
+        if text.is_empty() && before.is_empty() && after.is_empty() {
+            *before = " ".to_owned();
+        }
+        *old = text;
+    }
+}
+
+impl std::fmt::Display for RowLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.lead)?;
+        for (index, (before, text, after)) in self.cells.iter().enumerate() {
+            if index > 0 {
+                f.write_str("|")?;
+            }
+            write!(f, "{before}{text}{after}")?;
+        }
+        f.write_str(&self.trail)
+    }
 }
 
 /// The byte range of `raw`'s line `index` with the line break before it — a

@@ -262,8 +262,16 @@ fn a_fragment_opens_the_same_way_markdown_does() {
     let parser = parser();
     let inline = parser.parse_fragment("<p>hello</p>").expect("parses");
     assert_eq!((inline.open_start(), inline.open_end()), (1, 1));
+    // Of several blocks, a paragraph at an end is open on its side, so it joins
+    // the text around the caret; a heading stays a block of its own.
     let blocks = parser.parse_fragment("<h1>a</h1><p>b</p>").expect("parses");
-    assert_eq!((blocks.open_start(), blocks.open_end()), (0, 0));
+    assert_eq!((blocks.open_start(), blocks.open_end()), (0, 1));
+    let paragraphs = parser.parse_fragment("<p>a</p><p>b</p>").expect("parses");
+    assert_eq!((paragraphs.open_start(), paragraphs.open_end()), (1, 1));
+    let list = parser
+        .parse_fragment("<p>a</p><ul><li>b</li></ul>")
+        .expect("parses");
+    assert_eq!((list.open_start(), list.open_end()), (1, 0));
 }
 
 #[test]

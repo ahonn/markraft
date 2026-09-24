@@ -740,7 +740,19 @@ impl LayoutLine {
 
     /// The `char` offset under `local`, a point relative to the line's origin.
     pub(crate) fn char_at(&self, local: Point<Pixels>) -> usize {
-        self.to_source(self.display_at(local))
+        self.source_at(self.display_at(local))
+    }
+
+    /// [`LayoutLine::to_source`], except at the very end of the line's text: a
+    /// point there — a click past the last word, ⌘→ — goes past the markup
+    /// that closes the line too, as Typora puts it, so what is typed next
+    /// carries on after a bold or a code span rather than inside it.
+    fn source_at(&self, display: usize) -> usize {
+        if display >= self.to_display(self.char_len) {
+            self.char_len
+        } else {
+            self.to_source(display)
+        }
     }
 
     /// The source shown as text that `local` falls inside — an inline HTML tag,
@@ -3913,8 +3925,18 @@ impl Element for EditorSurface {
                         } else {
                             style.selection_inactive
                         };
-                        for rect in row.rectangles(from..to.min(row.char_len), spans_next) {
-                            window.paint_quad(fill(rect, selection));
+                        if matches!(row.decoration, Some(Decoration::Divider)) {
+                            // A divider has no text to cover: a selection over it
+                            // covers the whole rule, or a selected divider would
+                            // show as the stub a selection leaves past a line end.
+                            window.paint_quad(fill(
+                                Bounds::new(row.origin, size(row.width, row.line_height)),
+                                selection,
+                            ));
+                        } else {
+                            for rect in row.rectangles(from..to.min(row.char_len), spans_next) {
+                                window.paint_quad(fill(rect, selection));
+                            }
                         }
                     }
                 }
@@ -6352,6 +6374,20 @@ mod tests {
             stale.iter().all(|row| !row.contains(caret)),
             "a row that does not hold the caret never draws it"
         );
+    }
+
+    /// Past the last word of a line, a point lands after the markup that closes
+    /// the line's last span, not inside it; elsewhere a collapsed run keeps the
+    /// caret on its near side.
+    #[test]
+    fn the_end_of_a_line_lies_past_its_closing_markup() {
+        for source in ["x **bold**", "x `code`", "x *it*", "x ~~s~~"] {
+            let rows = shaped_revealing(source, 0..0, None);
+            let row = &rows[0];
+            let end = row.to_display(row.char_len);
+            assert_eq!(row.source_at(end), row.char_len, "{source:?}");
+            assert_eq!(row.source_at(2), 2, "{source:?}: before the span opens");
+        }
     }
 
     /// One line may hold several spans of one style. The caret opens the span it

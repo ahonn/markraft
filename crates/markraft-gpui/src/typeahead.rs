@@ -34,6 +34,8 @@ pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("up", TypeaheadPrev, CONTEXT),
         KeyBinding::new("down", TypeaheadNext, CONTEXT),
+        KeyBinding::new("ctrl-p", TypeaheadPrev, CONTEXT),
+        KeyBinding::new("ctrl-n", TypeaheadNext, CONTEXT),
         KeyBinding::new("enter", TypeaheadAccept, CONTEXT),
         KeyBinding::new("tab", TypeaheadAccept, CONTEXT),
         KeyBinding::new("escape", TypeaheadDismiss, CONTEXT),

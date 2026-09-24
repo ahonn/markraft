@@ -13,10 +13,10 @@
 use crate::types::DocTypes;
 use markraft_core::commands::structure::markup_of;
 use markraft_core::commands::{
-    Command, Direction, add_row_after, chain, changes_spec, command, create_paragraph_near,
-    delete_by, delete_by_grapheme, delete_empty_table, delete_selection, exit_code,
-    goto_cell_below, goto_next_cell, goto_prev_cell, guard_cell_boundary, guard_cell_range,
-    guard_cell_split, insert_hard_break, join_backward, join_forward, join_textblock_backward,
+    Command, Direction, chain, changes_spec, command, create_paragraph_near, delete_by,
+    delete_by_grapheme, delete_empty_table, delete_selection, exit_code, goto_cell_below,
+    goto_next_cell, goto_prev_cell, guard_cell_boundary, guard_cell_range, guard_cell_split,
+    insert_hard_break, join_backward, join_forward, join_textblock_backward,
     join_textblock_forward, lift, lift_empty_block, lift_list_item, move_by, move_by_grapheme,
     new_line_in_code, select_node_backward, select_node_forward, set_block_type, sink_list_item,
     split_block_keep_marks, split_list_item, undo_input_rule, wrap_in, wrap_in_list,
@@ -439,6 +439,94 @@ fn join_text_forward(types: &DocTypes) -> Command {
     })
 }
 
+/// Backspace at the start of a textblock right after a leaf block — a divider
+/// — or Delete at the end of one right before it: take the leaf at once, as
+/// Typora does, rather than selecting it for a second press. Delete then
+/// carries the next textblock's text on this one, as it does in Typora.
+fn take_leaf_block(types: &DocTypes, dir: Direction) -> Command {
+    let types = types.clone();
+    command(move |state| {
+        if !state.selection().is_cursor() || types.in_verbatim_block_at(state) {
+            return None;
+        }
+        let doc = state.doc();
+        let schema = state.schema();
+        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        let depth = (1..=resolved.depth())
+            .rev()
+            .find(|&d| resolved.node(d).is_textblock(schema))?;
+        let index = resolved.index(depth - 1);
+        let (at_edge, index) = match dir {
+            Direction::Backward => (at_textblock_start(state), index.checked_sub(1)?),
+            Direction::Forward => (resolved.pos() == resolved.end(depth), index + 1),
+        };
+        let leaf = resolved.node(depth - 1).maybe_child(index)?;
+        if !at_edge || !leaf.is_leaf() || leaf.is_inline(schema) {
+            return None;
+        }
+        let from = match dir {
+            Direction::Backward => resolved.before(depth) - leaf.node_size(),
+            Direction::Forward => resolved.after(depth),
+        };
+        let take = markraft_core::commands::delete_range(from, from + leaf.node_size());
+        match dir {
+            Direction::Backward => take(state),
+            Direction::Forward => composed(vec![take, join_text_forward(&types)])(state),
+        }
+    })
+}
+
+/// Backspace at the start of a paragraph right after a table: its text carries
+/// on the table's last cell, as Typora does, and the caret stays at the seam.
+/// A paragraph holding a line break stays where it is, since a cell's row holds
+/// one line.
+fn join_into_table_after(types: &DocTypes) -> Command {
+    let types = types.clone();
+    command(move |state| {
+        let table = types.table?;
+        if !at_textblock_start(state) || types.in_verbatim_block_at(state) {
+            return None;
+        }
+        let doc = state.doc();
+        let schema = state.schema();
+        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        let depth = (1..=resolved.depth())
+            .rev()
+            .find(|&d| resolved.node(d).is_textblock(schema))?;
+        let paragraph = resolved.node(depth);
+        let before = resolved
+            .node(depth - 1)
+            .maybe_child(resolved.index(depth - 1).checked_sub(1)?)?;
+        let breaks = paragraph.content().iter().any(|child| {
+            Some(child.type_id()) == types.hard_break
+                || child.text().is_some_and(|text| text.contains('\n'))
+        });
+        if before.type_id() != table || breaks {
+            return None;
+        }
+        // The end of the last cell's content: one token back for each node the
+        // walk down the table's last children closes.
+        let mut cell = before;
+        let mut end = resolved.before(depth) - 1;
+        while !cell.is_textblock(schema) {
+            cell = cell.last_child()?;
+            end -= 1;
+        }
+        if types.table_cell != Some(cell.type_id()) {
+            return None;
+        }
+        let spec = changes_spec(
+            state,
+            vec![
+                Change::insert(end, Slice::from_fragment(paragraph.content().clone())),
+                Change::delete(resolved.before(depth), resolved.after(depth)),
+            ],
+            "delete.backward",
+        )?;
+        Some(spec.selection(Selection::cursor(end)))
+    })
+}
+
 /// Backspace.
 pub(crate) fn backspace(types: &DocTypes) -> Command {
     let outdent = {
@@ -461,6 +549,8 @@ pub(crate) fn backspace(types: &DocTypes) -> Command {
         Some(outdent),
         Some(clear_empty_verbatim(types)),
         Some(join_text_after_wrapper(types)),
+        Some(take_leaf_block(types, Direction::Backward)),
+        Some(join_into_table_after(types)),
         Some(join_backward()),
         Some(select_node_backward()),
     ])
@@ -505,7 +595,9 @@ fn clear_heading_at_start(types: &DocTypes) -> Command {
     })
 }
 
-/// At the start of a quoted block, Backspace lifts one quote level.
+/// At the start of a quoted block, Backspace lifts one quote level. A block
+/// with another before it in the same quote is left to the joins after this,
+/// so its text carries on the block before, as Typora does.
 fn lift_quote_at_start(types: &DocTypes) -> Command {
     let types = types.clone();
     command(move |state| {
@@ -521,6 +613,13 @@ fn lift_quote_at_start(types: &DocTypes) -> Command {
         if !in_quote {
             return None;
         }
+        let textblock = (1..=resolved.depth())
+            .rev()
+            .find(|&d| resolved.node(d).is_textblock(state.schema()))?;
+        if resolved.node(textblock - 1).type_id() == blockquote && resolved.index(textblock - 1) > 0
+        {
+            return None;
+        }
         markraft_core::commands::lift()(state)
     })
 }
@@ -533,8 +632,51 @@ pub(crate) fn delete_forward(types: &DocTypes) -> Command {
         Some(delete_by_grapheme(Direction::Forward)),
         types.table_types().map(guard_cell_boundary),
         Some(join_text_forward(types)),
+        Some(take_leaf_block(types, Direction::Forward)),
         Some(stop_before_kept_text(types, join_forward())),
         Some(select_node_forward()),
+    ])
+}
+
+/// ⌃A and ⌃E: to the start or the end of the caret's textblock, as the
+/// Emacs keys of every macOS text view go to the paragraph's.
+pub(crate) fn textblock_edge(end: bool) -> Command {
+    if end {
+        markraft_core::commands::select_textblock_end()
+    } else {
+        markraft_core::commands::select_textblock_start()
+    }
+}
+
+/// ⌃K: delete to the end of the caret's textblock, or — at its end already —
+/// join the next one, as Delete does there.
+pub(crate) fn delete_to_textblock_end(types: &DocTypes) -> Command {
+    let within = {
+        let types = types.clone();
+        command(move |state| {
+            let doc = state.doc();
+            if !state.selection().is_cursor() {
+                return None;
+            }
+            let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+            if !resolved.parent().is_textblock(state.schema()) {
+                return None;
+            }
+            let end = resolved.end(resolved.depth());
+            (resolved.pos() < end)
+                .then(|| delete_within_textblock(&types, resolved.pos(), end)(state))
+                .flatten()
+        })
+    };
+    chain([within, delete_forward(types)])
+}
+
+/// Delete `from..to`, a stretch of one textblock, with the guards Backspace
+/// keeps: nothing in a table cell reaches past it.
+pub(crate) fn delete_within_textblock(types: &DocTypes, from: usize, to: usize) -> Command {
+    some([
+        types.table_types().map(guard_cell_range),
+        Some(markraft_core::commands::delete_range(from, to)),
     ])
 }
 
@@ -557,7 +699,29 @@ pub(crate) fn delete_word(types: &DocTypes, dir: Direction) -> Command {
 }
 
 pub(crate) fn move_grapheme(dir: Direction, extend: bool) -> Command {
-    move_by_grapheme(dir, extend)
+    match (dir, extend) {
+        (Direction::Forward, false) => chain([move_by_grapheme(dir, extend), exit_leaf_below()]),
+        _ => move_by_grapheme(dir, extend),
+    }
+}
+
+/// → or ↓ on a selected leaf block — a divider — with nothing after it in its
+/// parent: a new paragraph after it to carry on in, as ↓ out of a table's last
+/// row makes one. Without it the caret could not get past the block.
+pub(crate) fn exit_leaf_below() -> Command {
+    command(|state| {
+        let doc = state.doc();
+        let Selection::Node { pos } = *state.selection() else {
+            return None;
+        };
+        let resolved = doc.resolve(pos).ok()?;
+        let leaf = resolved.node_after()?;
+        let last = resolved.index(resolved.depth()) + 1 == resolved.parent().child_count();
+        if !last || !leaf.is_leaf() || leaf.is_inline(state.schema()) {
+            return None;
+        }
+        create_paragraph_near()(state)
+    })
 }
 
 /// ⌥← and ⌥→, shifted or not: move to the word boundary a reader sees. See
@@ -935,7 +1099,7 @@ pub(crate) fn toggle_task(types: &DocTypes) -> Command {
     let types = types.clone();
     command(move |state| {
         if let Some(table) = types.table_types().filter(|_| types.in_table_cell(state)) {
-            return add_row_after(table)(state);
+            return markraft_core::commands::insert_row_below(table)(state);
         }
         let task = types.task_item?;
         let Some((ty, attrs, before)) = types.item_at_cursor(state) else {
@@ -1411,10 +1575,10 @@ mod tests {
         assert_eq!(projection_of(&grown).lines().len(), 6, "a row was appended");
         assert_eq!(cell_of(&grown), Some((2, 1)));
         // ⌘⏎ adds a row under the caret's own row rather than at the bottom,
-        // and leaves the caret in the cell it was typing in.
+        // and moves into its first cell to fill it in, as Typora does.
         let added = applied(&at(&state, inside), &toggle_task(&types)).expect("⌘⏎ adds a row");
         assert_eq!(projection_of(&added).lines().len(), 6);
-        assert_eq!(cell_of(&added), Some((0, 0)));
+        assert_eq!(cell_of(&added), Some((1, 0)));
     }
 
     /// Joining across a cell boundary would merge two cells and leave their
@@ -1817,6 +1981,109 @@ mod tests {
                 "{source:?}"
             );
         }
+    }
+
+    /// Around a divider, Backspace and Delete take it at once, as Typora does,
+    /// rather than first selecting it: Backspace leaves the caret where it was,
+    /// and Delete carries the text after the divider on the line it ends.
+    #[test]
+    fn backspace_and_delete_take_a_divider_at_once() {
+        let state = state_of("one\n\n---\n\ntwo");
+        let types = types_of(&state);
+        let back = applied(&at(&state, caret_in(&state, "two")), &backspace(&types))
+            .expect("Backspace takes the divider");
+        assert_eq!(to_markdown(back.schema(), back.doc()), "one\n\ntwo");
+        assert_eq!(
+            back.selection().head(back.doc()),
+            caret_in(&back, "two"),
+            "the caret stays at the start of the line"
+        );
+        let forward = applied(
+            &at(&state, caret_in(&state, "one") + 3),
+            &delete_forward(&types),
+        )
+        .expect("Delete takes the divider");
+        assert_eq!(to_markdown(forward.schema(), forward.doc()), "onetwo");
+        assert_eq!(
+            forward.selection().head(forward.doc()),
+            caret_in(&forward, "onetwo") + 3
+        );
+        // With nothing to join after it, Delete still takes the divider.
+        let last = state_of("one\n\n---");
+        let gone = after(
+            &at(&last, caret_in(&last, "one") + 3),
+            &delete_forward(&types_of(&last)),
+        );
+        assert_eq!(gone.as_deref(), Some("one"));
+    }
+
+    /// → leaves a selected divider for the line after it, and makes one when
+    /// the divider ends the note; ← goes back to the line before.
+    #[test]
+    fn arrows_leave_a_selected_divider() {
+        for (source, expected) in [
+            ("one\n\n---\n\ntwo", "one\n\n---\n\ntwo"),
+            ("one\n\n---", "one\n\n---\n\n"),
+        ] {
+            let state = state_of(source);
+            let rule = projection_of(&state).lines()[1].from();
+            let selected = state
+                .update([TransactionSpec::new().selection(Selection::node(rule))])
+                .expect("the divider is selectable")
+                .state()
+                .clone();
+            let right = applied(&selected, &move_grapheme(Direction::Forward, false))
+                .expect("→ leaves the divider");
+            assert!(right.selection().is_cursor(), "{source:?}");
+            assert_eq!(
+                to_markdown(right.schema(), right.doc()),
+                expected.trim_end()
+            );
+            assert!(
+                right.selection().head(right.doc()) > rule,
+                "{source:?}: the caret is past the divider"
+            );
+            let left = applied(&selected, &move_grapheme(Direction::Backward, false))
+                .expect("← leaves the divider");
+            assert_eq!(
+                left.selection(),
+                &Selection::cursor(caret_in(&state, "one") + 3)
+            );
+        }
+    }
+
+    /// Backspace at the start of a paragraph right after a table carries its
+    /// text into the table's last cell, as Typora does.
+    #[test]
+    fn backspace_after_a_table_joins_its_last_cell() {
+        let state = state_of("| a | b |\n| - | - |\n| c | d |\n\ntwo");
+        let state = at(&state, caret_in(&state, "two"));
+        let joined = applied(&state, &backspace(&types_of(&state))).expect("the join applies");
+        let markdown = to_markdown(joined.schema(), joined.doc());
+        assert!(markdown.contains("| dtwo"), "{markdown}");
+        assert_eq!(joined.doc().child_count(), 1, "the paragraph is gone");
+        assert_eq!(
+            cell_of(&joined),
+            Some((1, 1)),
+            "the caret is in the last cell"
+        );
+    }
+
+    /// Backspace at the start of a quote's later paragraph joins the paragraph
+    /// before it in the same quote, as Typora does; only the quote's first
+    /// block lifts out of it.
+    #[test]
+    fn backspace_in_a_quotes_later_paragraph_joins_the_one_before() {
+        let state = state_of("> one\n>\n> two");
+        let state = at(&state, caret_in(&state, "two"));
+        let joined = after(&state, &backspace(&types_of(&state)));
+        assert_eq!(joined.as_deref(), Some("> onetwo"));
+        let first = state_of("> one\n>\n> two");
+        let lifted = after(
+            &at(&first, caret_in(&first, "one")),
+            &backspace(&types_of(&first)),
+        );
+        assert_eq!(lifted.as_deref(), Some("one\n\n> two"));
     }
 
     /// The first item of a list has nothing before it to return to: an empty

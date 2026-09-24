@@ -767,3 +767,37 @@ fn converting_inline_scopes_to_code_keeps_visible_text_and_caret() {
     assert_eq!(schema.describe(code.doc()), r#"doc(code_block("abcd"))"#);
     assert_eq!(code.selection().head(code.doc()), 3);
 }
+
+#[test]
+fn arrows_leave_a_selected_rule_the_way_they_point() {
+    let schema = shared_schema();
+    let start = state(
+        doc(
+            &schema,
+            [
+                n(&schema, "paragraph", [t(&schema, "ab")]),
+                n(&schema, "horizontal_rule", []),
+                n(&schema, "paragraph", [t(&schema, "cd")]),
+            ],
+        ),
+        Extension::none(),
+    );
+    // paragraph("ab") spans 0..4, the rule 4..5, paragraph("cd") 5..9.
+    let selected = start
+        .update([TransactionSpec::new().selection(Selection::node(4))])
+        .expect("valid")
+        .state()
+        .clone();
+    let forward = run(&selected, &move_by_grapheme(Direction::Forward, false));
+    assert_eq!(
+        forward.selection(),
+        &Selection::cursor(6),
+        "the start of the next line"
+    );
+    let backward = run(&selected, &move_by_grapheme(Direction::Backward, false));
+    assert_eq!(
+        backward.selection(),
+        &Selection::cursor(3),
+        "the end of the line before"
+    );
+}

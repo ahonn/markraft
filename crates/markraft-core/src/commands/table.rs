@@ -430,6 +430,29 @@ fn append_row(
     )
 }
 
+/// Insert an empty row below the cursor's and move the cursor into its first
+/// cell, ready to fill it in — what ⌘Enter does in a table in Typora. Unlike
+/// [`add_row_after`], which a toolbar runs, the cursor does not stay behind.
+pub fn insert_row_below(types: TableTypes) -> Command {
+    command(move |state| {
+        let ctx = context(types, state)?;
+        let schema = state.schema();
+        let row = empty_row(schema, types, ctx.columns)?;
+        let index = ctx.pos.row + 1;
+        let at = ctx.row_start(index);
+        let (set, new_doc) = resolve_changes(state, vec![Change::insert(at, node_slice(row))])?;
+        let selection = cursor_in_cell(schema, &new_doc, ctx.pos.table, index, 0)?;
+        selection.check(&new_doc, schema).ok()?;
+        Some(
+            TransactionSpec::new()
+                .change_set(set)
+                .selection(selection)
+                .user_event("insert")
+                .scroll_into_view(),
+        )
+    })
+}
+
 /// Move the cursor to the start of the next cell, in row-major order.
 ///
 /// In the last cell an empty row is appended and the cursor moves into its

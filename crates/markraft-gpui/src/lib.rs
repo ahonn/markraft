@@ -119,6 +119,11 @@ actions!(
         DocumentEnd,
         SelectDocumentStart,
         SelectDocumentEnd,
+        DeleteToLineStart,
+        DeleteToLineEnd,
+        ParagraphStart,
+        ParagraphEnd,
+        DeleteToParagraphEnd,
         CancelComposition
     ]
 );
@@ -226,11 +231,30 @@ pub fn bind_keys(cx: &mut App) {
         "cmd-up" => DocumentStart, "cmd-down" => DocumentEnd,
         "cmd-shift-up" => SelectDocumentStart, "cmd-shift-down" => SelectDocumentEnd,
         "escape" => CancelComposition,
+        "cmd-backspace" => DeleteToLineStart, "cmd-delete" => DeleteToLineEnd,
     }
+    cx.bind_keys(emacs_key_bindings());
     cx.bind_keys(list_key_bindings());
     // Last, so that at the same context depth an extension's bindings win while its
     // identifier is in the editor's key context.
     typeahead::bind_keys(cx);
+}
+
+/// The Emacs keys every macOS text view takes. Not in a vim mode that reads
+/// keys as commands, where they would edit under a Normal-mode caret.
+fn emacs_key_bindings() -> Vec<KeyBinding> {
+    const CONTEXT: Option<&str> = Some("Markraft && (!vim_mode || vim_mode == insert)");
+    vec![
+        KeyBinding::new("ctrl-a", ParagraphStart, CONTEXT),
+        KeyBinding::new("ctrl-e", ParagraphEnd, CONTEXT),
+        KeyBinding::new("ctrl-k", DeleteToParagraphEnd, CONTEXT),
+        KeyBinding::new("ctrl-d", Delete, CONTEXT),
+        KeyBinding::new("ctrl-h", Backspace, CONTEXT),
+        KeyBinding::new("ctrl-f", Right, CONTEXT),
+        KeyBinding::new("ctrl-b", Left, CONTEXT),
+        KeyBinding::new("ctrl-n", Down, CONTEXT),
+        KeyBinding::new("ctrl-p", Up, CONTEXT),
+    ]
 }
 
 // GPUI folds Shift into non-letter keys on macOS: Cmd+Shift+7/8/9
@@ -872,6 +896,18 @@ impl EditorView {
     /// The caret, or the moving end of a range.
     pub fn head(&self) -> usize {
         self.state.selection().head(self.state.doc())
+    }
+
+    /// Where arrows and line edges measure from: the head, except for a
+    /// selected node. Its head lies just past it, which no row holds when the
+    /// node is a leaf block — a divider's row is the single position before it
+    /// — so the node's start stands in and the motion leaves from its row.
+    fn motion_head(&self) -> usize {
+        let doc = self.state.doc();
+        match self.state.selection() {
+            Selection::Node { .. } => self.state.selection().from(doc),
+            selection => selection.head(doc),
+        }
     }
     pub fn is_composing(&self) -> bool {
         markraft_core::composition::is_composing(&self.state)
@@ -1547,7 +1583,7 @@ impl EditorView {
     /// The caret `delta` visual rows away and the column to keep there. `None` before the
     /// first paint, when there is no layout to walk.
     pub(crate) fn visual_row_target(&self, delta: isize) -> Option<(usize, Pixels, bool)> {
-        let head = self.head();
+        let head = self.motion_head();
         let (row, offset) = self.row_at(head)?;
         let caret = row.caret(offset, self.upstream);
         let x = self.preferred_x.unwrap_or(caret.x);
@@ -1571,12 +1607,12 @@ impl EditorView {
             self.row_at(pos)
                 .map(|(row, offset)| row.caret(offset, upstream).y)
         };
-        caret_y(position, upstream) == caret_y(self.head(), self.upstream)
+        caret_y(position, upstream) == caret_y(self.motion_head(), self.upstream)
     }
 
     /// The start or end of the caret's visual row. A wrapped block has several.
     pub(crate) fn line_edge_target(&self, end: bool) -> Option<(usize, bool)> {
-        let head = self.head();
+        let head = self.motion_head();
         let (row, offset) = self.row_at(head)?;
         let caret = row.caret(offset, self.upstream);
         Some(self.hit_upstream(point(
@@ -1620,11 +1656,67 @@ impl EditorView {
                 return;
             }
         }
+        // ↓ on a selected divider with nothing after it has nowhere to go
+        // either: leave it for a new paragraph, as → does.
+        if delta > 0
+            && !extend
+            && matches!(self.state.selection(), Selection::Node { .. })
+            && target.is_none_or(|(position, _, upstream)| self.same_visual_row(position, upstream))
+        {
+            let command = keymap::exit_leaf_below();
+            if self.run_command(&command, cx) {
+                return;
+            }
+        }
         if let Some((position, x, upstream)) = target {
             self.upstream = upstream;
             self.select(position, extend, cx);
             self.preferred_x = Some(x);
         }
+    }
+
+    /// ⌘⌫ and ⌘⌦: delete to the start or the end of the caret's visual row, as
+    /// every macOS text view does. On a textblock's first row — or its last,
+    /// going forward — the deletion reaches the textblock's own edge, so a
+    /// style's hidden opening or closing markup goes with the text it styled.
+    /// At the edge already, or over a selection, the key does what Backspace or
+    /// Delete does.
+    fn delete_to_line_edge(&mut self, end: bool, cx: &mut Context<Self>) {
+        let fallback = || {
+            if end {
+                keymap::delete_forward(&self.types)
+            } else {
+                keymap::backspace(&self.types)
+            }
+        };
+        let head = self.head();
+        let range = self
+            .state
+            .selection()
+            .is_cursor()
+            .then(|| self.line_edge_range(head, end))
+            .flatten();
+        let command = match range {
+            Some((from, to)) if from < to => keymap::delete_within_textblock(&self.types, from, to),
+            _ => fallback(),
+        };
+        if !self.run_command(&command, cx) {
+            cx.propagate();
+        }
+    }
+
+    /// From `head` to the edge of its visual row that `end` names, ordered.
+    fn line_edge_range(&self, head: usize, end: bool) -> Option<(usize, usize)> {
+        let (row, offset) = self.row_at(head)?;
+        let caret = row.caret(offset, self.upstream);
+        let first = caret.y < row.origin.y + row.line_height;
+        let last = caret.y >= row.origin.y + row.line_height * (row.visual_rows() as f32 - 1.);
+        let edge = match end {
+            false if first => row.from,
+            true if last => row.to(),
+            _ => self.line_edge_target(end)?.0,
+        };
+        Some((head.min(edge), head.max(edge)))
     }
 
     fn line_edge(&mut self, end: bool, extend: bool, cx: &mut Context<Self>) {
@@ -2081,6 +2173,16 @@ impl EditorView {
         }
         run!(Backspace, keymap::backspace);
         run!(Delete, keymap::delete_forward);
+        run!(ParagraphStart, |_: &DocTypes| keymap::textblock_edge(false));
+        run!(ParagraphEnd, |_: &DocTypes| keymap::textblock_edge(true));
+        run!(DeleteToParagraphEnd, keymap::delete_to_textblock_end);
+        root =
+            root.on_action(cx.listener(|this, _: &DeleteToLineStart, _, cx| {
+                this.delete_to_line_edge(false, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &DeleteToLineEnd, _, cx| this.delete_to_line_edge(true, cx)),
+            );
         root = root.on_action(cx.listener(|this, _: &Enter, _, cx| {
             if this.single_line {
                 cx.propagate();

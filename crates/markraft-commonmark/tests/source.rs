@@ -265,7 +265,9 @@ fn deleting_a_wiki_link_removes_exactly_its_source_bytes() {
     for (original, expected) in [
         ("Read [[page|label]] now\n", "Read  now\n"),
         ("Read ![[image.png]] now\n", "Read  now\n"),
-        ("[[only]]\n\nnext\n", "\n\nnext\n"),
+        // A link that was the whole block takes the block's lines, and the
+        // gap after them, with it.
+        ("[[only]]\n\nnext\n", "next\n"),
     ] {
         assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
     }
@@ -828,21 +830,19 @@ fn deleting_a_row_of_a_hand_written_table_drops_its_line() {
 }
 
 /// A body row added to a hand-written table goes in as a line of its own,
-/// leaving every row that was there as it was spelled.
+/// spaced the way the header is, leaving every row that was there as it was
+/// spelled.
 #[test]
 fn adding_a_row_to_a_hand_written_table_leaves_its_rows_alone() {
     for (original, expected) in [
-        (
-            "|a|b|\n|-|-|\n|1|2|\n",
-            "|a|b|\n|-|-|\n|     |     |\n|1|2|\n",
-        ),
+        ("|a|b|\n|-|-|\n|1|2|\n", "|a|b|\n|-|-|\n| | |\n|1|2|\n"),
         (
             "|a|b|\n|-|-|\n|1|2|\n|3|4|\n\nnext\n",
-            "|a|b|\n|-|-|\n|1|2|\n|     |     |\n|3|4|\n\nnext\n",
+            "|a|b|\n|-|-|\n|1|2|\n| | |\n|3|4|\n\nnext\n",
         ),
         (
             "|a|b|\r\n|-|-|\r\n|1|2|\r\n",
-            "|a|b|\r\n|-|-|\r\n|1|2|\r\n|     |     |\r\n",
+            "|a|b|\r\n|-|-|\r\n|1|2|\r\n| | |\r\n",
         ),
     ] {
         assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
@@ -1056,4 +1056,24 @@ fn text_a_spelling_cannot_hold_respells_its_block() {
         edit_between("Title\n===\n\ntext\n", "# ~~~~Title\n\ntext\n"),
         "# ~~~~Title\n\ntext\n"
     );
+}
+
+/// Rows added, edited and removed together in a hand-written table: every row
+/// left alone keeps its bytes, an edited row keeps its own spacing around the
+/// text that changed, and a new row is spaced as the header is.
+#[test]
+fn a_hand_written_tables_rows_keep_their_spelling_through_several_edits() {
+    for (original, expected) in [
+        (
+            "|a|b|\n|-|-|\n|1|2|\n|3|4|\n",
+            "|a|b|\n|-|-|\n|1|2|\n|z| |\n|3y|4|\n",
+        ),
+        (
+            "| a | b |\n|---|---|\n|  1 |2|\n| 3 | 4 |\n",
+            "| a | b |\n|---|---|\n|  1x |2|\n| z |  |\n",
+        ),
+        ("a | b\n--|--\n1 | 2\n", "a | b\n--|--\n1 | 2\nz | \n"),
+    ] {
+        assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
+    }
 }

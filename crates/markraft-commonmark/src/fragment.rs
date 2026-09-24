@@ -24,9 +24,13 @@ use crate::fit::{fit, fit_document};
 ///
 /// A fragment that is a single textblock is open on both sides: it has no
 /// block of its own to contribute, so its inline content merges into the one
-/// the caret sits in. Everything else is closed, because its blocks *are* the
-/// content — a heading pasted in the middle of a paragraph splits it and stays
-/// a heading rather than dissolving into the text.
+/// the caret sits in. Of several blocks, a plain paragraph at either end is
+/// open on its side, as it is in Typora: two paragraphs pasted in the middle
+/// of a third carry on the text before the caret and the text after it,
+/// rather than standing between them as paragraphs of their own. Every other
+/// end is closed, because its block *is* the content — a heading pasted in
+/// the middle of a paragraph splits it and stays a heading rather than
+/// dissolving into the text.
 ///
 /// A code block is never opened: its content is literal, and merging it into
 /// ordinary text would change what it is.
@@ -37,10 +41,14 @@ pub fn open_fragment(schema: &Schema, content: Fragment) -> Slice {
             ty.is_textblock() && !ty.is_code() && !ty.is_isolating()
         });
     if lone_textblock {
-        Slice::new(content, 1, 1)
-    } else {
-        Slice::new(content, 0, 0)
+        return Slice::new(content, 1, 1);
     }
+    let paragraph = schema.node_id(crate::schema::PARAGRAPH);
+    let open = |block: Option<&Node>| {
+        usize::from(block.is_some_and(|block| Some(block.type_id()) == paragraph))
+    };
+    let (start, end) = (open(content.first_child()), open(content.last_child()));
+    Slice::new(content, start, end)
 }
 
 /// The blocks of a slice's content, grouping any inline content into the
