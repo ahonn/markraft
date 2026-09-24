@@ -273,6 +273,22 @@ mod tests {
         CommonMarkCodecs::new(commonmark_schema())
     }
 
+    /// Text indented at the top level pastes as prose, with its indent gone;
+    /// a fenced block is still code, and an indented block inside a list item
+    /// is still the item's.
+    #[test]
+    fn indented_text_pastes_as_prose() {
+        let codecs = CommonMarkCodecs::new(commonmark_schema());
+        let markup = |source: &str| {
+            let slice = codecs.from_markup(source).expect("a fragment");
+            codecs.to_markup(&slice).expect("Markdown")
+        };
+        assert_eq!(markup("    indented text?"), "indented text?");
+        assert_eq!(markup("    one\n    two\n\n    three"), "one\ntwo\n\nthree");
+        assert_eq!(markup("```\n    code\n```"), "```\n    code\n```");
+        assert_eq!(markup("- a\n\n      code"), "- a\n\n  ```\n  code\n  ```");
+    }
+
     #[test]
     fn every_flavour_round_trips_a_fragment() {
         let codecs = codecs();

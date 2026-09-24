@@ -215,13 +215,18 @@ pub(crate) fn delete_charwise(state: &EditorState, range: Range<usize>) -> Optio
 /// plain deletion would leave `x ** y` and `x **b` — asterisks that no longer
 /// pair, read back as text. `x` is the one command that takes source as it
 /// comes, for editing the spelling itself.
+///
+/// A change keeps the spelling of what it empties too — `keep_emptied` — so the
+/// text typed next goes inside it: `cw` on `bold` types a new bold word. See
+/// [`emptied_pair`] for what an Escape with nothing typed does with the pair.
 pub(crate) fn delete_charwise_keeping_markup(
     state: &EditorState,
     projection: &Projection,
     syntax: Option<MarkTypeId>,
     range: Range<usize>,
+    keep_emptied: bool,
 ) -> Option<TransactionSpec> {
-    let ranges = markup_safe(projection, syntax, range.clone());
+    let ranges = markup_safe(projection, syntax, range.clone(), keep_emptied);
     if ranges.is_empty() {
         return None;
     }
@@ -244,6 +249,7 @@ pub(crate) fn markup_safe(
     projection: &Projection,
     syntax: Option<MarkTypeId>,
     range: Range<usize>,
+    keep_emptied: bool,
 ) -> Vec<Range<usize>> {
     let mut take = vec![range.clone()];
     let mut keep = Vec::new();
@@ -265,7 +271,7 @@ pub(crate) fn markup_safe(
             };
             let emptied =
                 !content.is_empty() && range.start <= content.start && content.end <= range.end;
-            if emptied {
+            if emptied && !keep_emptied {
                 take.push(first.start..last.end);
             } else {
                 keep.extend(runs);
@@ -273,6 +279,65 @@ pub(crate) fn markup_safe(
         }
     }
     subtract(union(take), &keep)
+}
+
+/// The spelling a change over `range` leaves with nothing between it: every
+/// run of each span whose text the range takes, in order — `****` for `cw` on
+/// `**bold**` — where it will stand once the text is gone, and how much of it
+/// comes before the caret. `None` when the range empties no span.
+pub(crate) fn emptied_pair(
+    projection: &Projection,
+    syntax: Option<MarkTypeId>,
+    range: Range<usize>,
+) -> Option<EmptiedPair> {
+    let mut runs: Vec<Range<usize>> = projection
+        .lines()
+        .iter()
+        .filter(|line| line.from() <= range.end && range.start <= line.to())
+        .flat_map(|line| markraft_gpui::markup_spans(syntax, line))
+        .filter(|runs| {
+            runs.len() > 1
+                && runs.first().zip(runs.last()).is_some_and(|(first, last)| {
+                    first.end < last.start && range.start <= first.end && last.start <= range.end
+                })
+        })
+        .flatten()
+        .collect();
+    runs.sort_by_key(|run| run.start);
+    let at = runs.first()?.start;
+    let text: String = runs
+        .iter()
+        .filter_map(|run| projection.text_between(run.start, run.end))
+        .collect();
+    let caret = runs
+        .iter()
+        .filter(|run| run.end <= range.start)
+        .map(|run| run.end - run.start)
+        .sum::<usize>();
+    Some(EmptiedPair {
+        at,
+        caret: at + caret,
+        text,
+    })
+}
+
+/// A style's spelling a change emptied: where it stands, the caret between
+/// its halves, and its characters.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EmptiedPair {
+    pub at: usize,
+    pub caret: usize,
+    pub text: String,
+}
+
+impl EmptiedPair {
+    /// The pair still as the change left it — the caret between its halves and
+    /// nothing typed there — and the range it takes, for Escape to remove.
+    pub(crate) fn untouched(&self, projection: &Projection, head: usize) -> Option<Range<usize>> {
+        let end = self.at + self.text.chars().count();
+        (head == self.caret && projection.text_between(self.at, end) == Some(self.text.as_str()))
+            .then_some(self.at..end)
+    }
 }
 
 /// `ranges` merged where they touch or overlap, in order.

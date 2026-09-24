@@ -14,8 +14,48 @@
 //! other two flavours come from the host's [`Codecs`], so the view never learns
 //! which document kind it is editing.
 
+use crate::types::DocTypes;
 use gpui::{App, ClipboardItem};
-use markraft_core::{Schema, Slice, kind::Codecs};
+use markraft_core::{EditorState, Fragment, Schema, Selection, Slice, kind::Codecs};
+
+/// A selection from the start of a list item's text into a later item of the
+/// same list, as whole items in their list, as Typora copies it: pasted, it is
+/// the list it was, where the open slice the selection spells would make its
+/// first item a paragraph. `None` for every other selection.
+pub(crate) fn whole_items(state: &EditorState, types: &DocTypes) -> Option<Slice> {
+    let doc = state.doc();
+    let schema = state.schema();
+    let selection = state.selection();
+    if !matches!(selection, Selection::Text { .. }) {
+        return None;
+    }
+    let (from, to) = (selection.from(doc), selection.to(doc));
+    let start = doc.resolve(from).ok()?;
+    let text = (1..=start.depth())
+        .rev()
+        .find(|&depth| start.node(depth).is_textblock(schema))?;
+    // Inline containers the caret sits in open no text of their own.
+    let hidden = start.depth() - text;
+    if text < 2 || start.pos().checked_sub(hidden) != Some(start.start(text)) {
+        return None;
+    }
+    let item = text - 1;
+    let list = item - 1;
+    if !types.is_item(start.node(item).type_id())
+        || !types.is_list(start.node(list).type_id())
+        || start.index(item) != 0
+        || to <= start.after(item)
+        || to >= start.end(list)
+    {
+        return None;
+    }
+    let items = doc.slice(start.before(item), to).ok()?;
+    Some(Slice::new(
+        Fragment::from_node(start.node(list).copy(items.content().clone())),
+        0,
+        items.open_end() + 1,
+    ))
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum PasteMode {
@@ -183,6 +223,50 @@ mod tests {
         // A span copied whole, delimiters and all, is carried as it is.
         let whole = state.doc().slice(1 + 2, 1 + 10).expect("a slice");
         assert_eq!(codecs.copied(&whole), whole);
+    }
+
+    /// Items copied from the start of one into another come as the list they
+    /// were in, and paste as that list; a selection that starts inside an
+    /// item's text, or stays in one item, copies as it always has.
+    #[test]
+    fn items_copied_from_an_items_start_paste_as_a_list() {
+        use markraft_core::commands::{replace_selection, run_command};
+        let state = crate::typeahead::tests::state_of("x\n\n- a\n- bc\n- d");
+        let schema = state.schema().clone();
+        let types = crate::typeahead::tests::types_of(&state);
+        let codecs = CommonMarkCodecs::new(schema.clone());
+        let select = |from: usize, to: usize| {
+            state
+                .update(
+                    [markraft_core::TransactionSpec::new().selection(Selection::text(from, to))],
+                )
+                .unwrap()
+                .state()
+                .clone()
+        };
+        let text = markraft_core::projection::projection_of(&state);
+        let (a, b) = (text.lines()[1].from(), text.lines()[2].from());
+        let selected = select(a, b + 1);
+        let slice = whole_items(&selected, &types).expect("whole items");
+        assert_eq!(markup(&codecs, &slice), "- a\n- b");
+        let at_x = crate::typeahead::tests::at(&state, 2);
+        let pasted = run_command(&at_x, &replace_selection(slice))
+            .expect("the paste runs")
+            .expect("the paste applies")
+            .state()
+            .clone();
+        // Pasted after `x`, the items join the list that follows, as two
+        // neighbouring lists of one kind read in Markdown.
+        assert_eq!(
+            markraft_commonmark::to_markdown(&schema, pasted.doc()),
+            "x\n\n- a\n- b\n- a\n- bc\n- d"
+        );
+        assert_eq!(
+            whole_items(&select(a + 1, b + 1), &types),
+            None,
+            "inside the text"
+        );
+        assert_eq!(whole_items(&select(a, a + 1), &types), None, "one item");
     }
 
     /// A plain paste keeps every character literal.

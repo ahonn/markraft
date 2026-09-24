@@ -316,15 +316,55 @@ impl MarkdownParser {
     /// Unlike [`MarkdownParser::parse`], the spaces and tabs at the end of the
     /// source are kept: a reader strips a paragraph's trailing whitespace, but
     /// a pasted `hello ` has to stay apart from the `tail` after the caret.
+    ///
+    /// Text indented four spaces at the top level reads as prose, not as an
+    /// indented code block, as Typora pastes it: what another application puts
+    /// on the clipboard is indented for a reader — a log, a terminal's output,
+    /// a quoted mail — far more often than it is Markdown's older code syntax,
+    /// and a fenced block still says code unmistakably.
     pub fn parse_fragment(&self, source: &str) -> Result<Slice, ParseError> {
         let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
         let kept = normalized[normalized.trim_end_matches([' ', '\t']).len()..].to_string();
+        let normalized = self.without_indented_code(&normalized);
         let doc = self.parse(&normalized)?;
         let doc = crate::fragment::append_trailing(&self.schema, &doc, &kept);
         Ok(crate::fragment::open_fragment(
             &self.schema,
             doc.content().clone(),
         ))
+    }
+
+    /// `source` with the lines of each top-level indented code block taken to
+    /// the margin, so they read as the paragraphs they were meant as. Such a
+    /// block nested in a list or a quote is the list's or the quote's own and
+    /// is left as it is.
+    fn without_indented_code(&self, source: &str) -> String {
+        let arena = Arena::new();
+        let root = parse_document(&arena, source, &self.options);
+        let mut indented = Vec::new();
+        for child in root.children() {
+            let data = child.data.borrow();
+            if let NodeValue::CodeBlock(code) = &data.value
+                && !code.fenced
+            {
+                indented.push(data.sourcepos.start.line..=data.sourcepos.end.line);
+            }
+        }
+        if indented.is_empty() {
+            return source.to_owned();
+        }
+        source
+            .split('\n')
+            .enumerate()
+            .map(|(index, line)| {
+                if indented.iter().any(|lines| lines.contains(&(index + 1))) {
+                    line.trim_start()
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Read `source` into a document.

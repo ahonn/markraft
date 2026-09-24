@@ -538,7 +538,11 @@ pub(crate) fn backspace(types: &DocTypes) -> Command {
         // An edit reaching from one cell into another is refused outright; the
         // boundary guard then stops the chain before anything joins two cells.
         types.table_types().map(guard_cell_range),
-        Some(undo_input_rule()),
+        // A shortcut inside the text — an emoji code, a link — is taken back to
+        // what was typed. One that made the block — `- `, `# `, `> ` — leaves
+        // the caret at the block's start, where Backspace takes the format off
+        // as Typora does, rather than giving the characters back.
+        Some(when(|state| !at_textblock_start(state), undo_input_rule())),
         Some(delete_selection()),
         Some(clear_heading_at_start(types)),
         Some(lift_quote_at_start(types)),
@@ -762,6 +766,7 @@ pub(crate) fn move_document_edge(end: bool, extend: bool) -> Command {
 /// A cell holds inline content, so no verbatim block can sit in one and the two
 /// never compete.
 pub(crate) fn indent(types: &DocTypes, text: &str) -> Command {
+    let lines = shift_code_lines(types, text, false);
     let verbatim = {
         let types = types.clone();
         when(
@@ -771,8 +776,95 @@ pub(crate) fn indent(types: &DocTypes, text: &str) -> Command {
     };
     let mut list = vec![types.table_types().map(goto_next_cell)];
     list.extend(per_item(types, sink_list_item));
+    list.push(Some(lines));
     list.push(Some(verbatim));
     some(list)
+}
+
+/// Tab over a selection in a code block, and Shift-Tab there with or without
+/// one: indent or outdent every line the selection covers, as a code editor
+/// does, the selection staying on them. A line the selection only reaches the
+/// start of is not one it covers. Outdenting takes `text` — what Tab inserts
+/// — from a line that starts with it, or else a tab, or else up to as many
+/// spaces as one level is wide.
+fn shift_code_lines(types: &DocTypes, text: &str, outdent: bool) -> Command {
+    let types = types.clone();
+    let text = text.to_owned();
+    command(move |state| {
+        let doc = state.doc();
+        let schema = state.schema();
+        let selection = state.selection();
+        if !matches!(selection, Selection::Text { .. })
+            || (!outdent && selection.is_empty(doc))
+            || !types.in_verbatim_block_at(state)
+        {
+            return None;
+        }
+        let (from, to) = (selection.from(doc), selection.to(doc));
+        let start = doc.resolve(from).ok()?;
+        let block = start.parent();
+        let content = start.start(start.depth());
+        if !block.is_textblock(schema) || to > start.end(start.depth()) {
+            return None;
+        }
+        let source: Vec<char> = block
+            .children()
+            .map(|child| child.text().unwrap_or("\u{fffc}"))
+            .collect::<String>()
+            .chars()
+            .collect();
+        let (from, to) = (from - content, to - content);
+        let starts = std::iter::once(0).chain(
+            (0..source.len())
+                .filter(|&i| source[i] == '\n')
+                .map(|i| i + 1),
+        );
+        let covered: Vec<usize> = starts
+            .filter(|&line| {
+                let end = source[line..]
+                    .iter()
+                    .position(|&c| c == '\n')
+                    .map_or(source.len(), |at| line + at);
+                end >= from && (line <= from || line < to)
+            })
+            .collect();
+        let width = if text.chars().all(|c| c == ' ') && !text.is_empty() {
+            text.chars().count()
+        } else {
+            4
+        };
+        let changes: Vec<Change> = covered
+            .into_iter()
+            .filter_map(|line| {
+                let at = content + line;
+                if !outdent {
+                    return Some(Change::insert(
+                        at,
+                        Slice::from_fragment(markraft_core::Fragment::from_node(
+                            schema.text(&text),
+                        )),
+                    ));
+                }
+                let rest = &source[line..];
+                let starts_with = |s: &str| {
+                    let s: Vec<char> = s.chars().collect();
+                    !s.is_empty() && rest.starts_with(&s)
+                };
+                let taken = if starts_with(&text) {
+                    text.chars().count()
+                } else if rest.first() == Some(&'\t') {
+                    1
+                } else {
+                    rest.iter().take(width).take_while(|&&c| c == ' ').count()
+                };
+                (taken > 0).then(|| Change::delete(at, at + taken))
+            })
+            .collect();
+        if changes.is_empty() {
+            return None;
+        }
+        changes_spec(state, changes, if outdent { "delete" } else { "input" })
+    })
 }
 
 /// Shift-Tab: step to the previous table cell, lift a list item, or lift a
@@ -781,8 +873,10 @@ pub(crate) fn indent(types: &DocTypes, text: &str) -> Command {
 /// [`goto_prev_cell`] does not apply in the first cell, and lifting a cell out
 /// of its row would leave that row short, so inside a table the rest of the
 /// chain is skipped rather than run.
-pub(crate) fn outdent(types: &DocTypes) -> Command {
-    let mut tail = per_item(types, lift_list_item);
+pub(crate) fn outdent(types: &DocTypes, text: &str) -> Command {
+    let lines = shift_code_lines(types, text, true);
+    let mut tail = vec![Some(lines)];
+    tail.extend(per_item(types, lift_list_item));
     tail.push(Some(lift()));
     let outside = {
         let types = types.clone();
@@ -1362,8 +1456,39 @@ mod tests {
         assert_eq!(sunk, "- one\n  - two");
         let state = state_of("- one\n  - two");
         let state = at(&state, caret_in(&state, "two"));
-        let lifted = after(&state, &outdent(&types_of(&state))).expect("the lift applies");
+        let lifted = after(&state, &outdent(&types_of(&state), "\t")).expect("the lift applies");
         assert_eq!(lifted, "- one\n- two");
+    }
+
+    /// Over a selection in a code block, Tab indents every line it covers and
+    /// Shift-Tab outdents them; a line the selection only reaches the start of
+    /// stays as it is. Shift-Tab at a caret outdents its own line.
+    #[test]
+    fn tab_and_shift_tab_shift_the_lines_of_a_code_selection() {
+        let state = state_of("```\na\n\tb\n    c\nd\n```");
+        let types = types_of(&state);
+        let first = projection_of(&state).lines()[0].from();
+        let select = |from: usize, to: usize| {
+            state
+                .update([
+                    TransactionSpec::new().selection(Selection::text(first + from, first + to))
+                ])
+                .unwrap()
+                .state()
+                .clone()
+        };
+        // `a` to the start of `d`: three lines.
+        let indented = after(&select(0, 11), &indent(&types, "\t"));
+        assert_eq!(
+            indented.as_deref(),
+            Some("```\n\ta\n\t\tb\n\t    c\nd\n```")
+        );
+        let outdented = after(&select(0, 11), &outdent(&types, "\t"));
+        assert_eq!(outdented.as_deref(), Some("```\na\nb\nc\nd\n```"));
+        let spaces = after(&select(0, 11), &indent(&types, "  "));
+        assert_eq!(spaces.as_deref(), Some("```\n  a\n  \tb\n      c\nd\n```"));
+        let caret = after(&at(&state, first + 3), &outdent(&types, "\t"));
+        assert_eq!(caret.as_deref(), Some("```\na\nb\n    c\nd\n```"));
     }
 
     #[test]
@@ -1549,10 +1674,10 @@ mod tests {
         assert_eq!(cell_of(&grown), Some((2, 0)));
         // ⇧Tab steps back, and stops rather than lifting the first cell out of
         // its row, which would leave that row one cell short.
-        let back = applied(&at(&state, lines.lines()[1].from()), &outdent(&types))
+        let back = applied(&at(&state, lines.lines()[1].from()), &outdent(&types, "\t"))
             .expect("⇧Tab steps left");
         assert_eq!(cell_of(&back), Some((0, 0)));
-        let stopped = applied(&at(&state, first), &outdent(&types));
+        let stopped = applied(&at(&state, first), &outdent(&types, "\t"));
         assert!(stopped.is_none(), "⇧Tab in the first cell does nothing");
     }
 

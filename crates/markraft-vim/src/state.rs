@@ -147,6 +147,9 @@ pub(crate) struct State {
     /// Whether an input method is composing, mirrored from the editor so that the key
     /// context can keep Escape away from a live composition.
     pub composing: bool,
+    /// The spelling of a style a change emptied, which Escape takes away when
+    /// nothing was typed into it.
+    pub emptied: Option<crate::edit::EmptiedPair>,
     /// The mode the host has been told about.
     reported: Option<Mode>,
 }

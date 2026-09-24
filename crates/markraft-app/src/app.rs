@@ -1,4 +1,5 @@
 mod assets;
+mod carry;
 mod feedback;
 mod interaction;
 mod lists;
@@ -301,6 +302,12 @@ impl MarkraftApp {
     ) {
         let editor_was_focused = self.editor().focus_handle(cx).is_focused(window);
         self.sync_documents(cx);
+        // The active note's caret, to carry over to the version read from disk.
+        let active = self.library.active_id.clone();
+        let caret = self.sessions.get(&active).map(|session| {
+            let state = session.editor().read(cx).state();
+            (state.doc().clone(), state.selection().clone())
+        });
         let mut ids = Vec::new();
         let mut archived = 0;
         let mut vanished = 0;
@@ -363,6 +370,20 @@ impl MarkraftApp {
             ids.push(id);
         }
         self.ensure_session(window, cx);
+        if let Some((old, selection)) = caret
+            && self.library.active_id == active
+            && ids.contains(&active)
+        {
+            let editor = self.editor();
+            editor.update(cx, |editor, cx| {
+                let new = editor.state().doc().clone();
+                let carried = carry::carry(doc::schema(), &old, &new, &selection);
+                editor.dispatch(
+                    [markraft_core::TransactionSpec::new().selection(carried)],
+                    cx,
+                );
+            });
+        }
         self.refresh_link_targets();
         if editor_was_focused {
             self.focus_editor(window, cx);
@@ -1117,7 +1138,7 @@ impl MarkraftApp {
                 .update(cx, |e, cx| e.set_style(style.clone(), cx));
         }
     }
-    /// ⌘+, ⌘− and ⌘0, and the Settings window's stepper. The size stays in the range
+    /// ⌘+, ⌘− and ⌘⇧0, and the Settings window's stepper. The size stays in the range
     /// the stepper offers, so the two never disagree.
     pub(in crate::app) fn set_text_size(&mut self, size: f32, cx: &mut Context<Self>) {
         let range = crate::storage::Preferences::TEXT_SIZES;
@@ -2108,7 +2129,10 @@ pub fn bind_app_keys(cx: &mut App) {
         KeyBinding::new("cmd-=", IncreaseTextSize, Some("MarkraftApp")),
         KeyBinding::new("cmd-shift-=", IncreaseTextSize, Some("MarkraftApp")),
         KeyBinding::new("cmd--", DecreaseTextSize, Some("MarkraftApp")),
-        KeyBinding::new("cmd-0", ResetTextSize, Some("MarkraftApp")),
+        // ⌘0 makes a paragraph, as in Typora. GPUI folds Shift into a digit on
+        // macOS, so ⌘⇧0 arrives as ⌘).
+        KeyBinding::new("cmd-)", ResetTextSize, Some("MarkraftApp")),
+        KeyBinding::new("cmd-shift-0", ResetTextSize, Some("MarkraftApp")),
     ]);
     ui::settings::bind_keys(cx);
     cx.set_menus([

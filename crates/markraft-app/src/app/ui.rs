@@ -1120,42 +1120,42 @@ impl MarkraftApp {
             Command::new(
                 "format-heading",
                 "Heading 1",
-                "⌥⌘1",
+                "⌘1",
                 Intent::Block(doc::Block::Heading(1)),
             )
             .slash(1, SlashEffect::Block(doc::Block::Heading(1))),
             Command::new(
                 "format-heading-2",
                 "Heading 2",
-                "⌥⌘2",
+                "⌘2",
                 Intent::Block(doc::Block::Heading(2)),
             )
             .slash(2, SlashEffect::Block(doc::Block::Heading(2))),
             Command::new(
                 "format-heading-3",
                 "Heading 3",
-                "⌥⌘3",
+                "⌘3",
                 Intent::Block(doc::Block::Heading(3)),
             )
             .slash(3, SlashEffect::Block(doc::Block::Heading(3))),
             Command::new(
                 "format-heading-4",
                 "Heading 4",
-                "⌥⌘4",
+                "⌘4",
                 Intent::Block(doc::Block::Heading(4)),
             )
             .slash(4, SlashEffect::Block(doc::Block::Heading(4))),
             Command::new(
                 "format-heading-5",
                 "Heading 5",
-                "⌥⌘5",
+                "⌘5",
                 Intent::Block(doc::Block::Heading(5)),
             )
             .slash(5, SlashEffect::Block(doc::Block::Heading(5))),
             Command::new(
                 "format-heading-6",
                 "Heading 6",
-                "⌥⌘6",
+                "⌘6",
                 Intent::Block(doc::Block::Heading(6)),
             )
             .slash(6, SlashEffect::Block(doc::Block::Heading(6))),
@@ -1183,7 +1183,7 @@ impl MarkraftApp {
             Command::new(
                 "format-paragraph",
                 "Paragraph",
-                "⌥⌘0",
+                "⌘0",
                 Intent::Block(doc::Block::Paragraph),
             )
             .slash(0, SlashEffect::Block(doc::Block::Paragraph)),

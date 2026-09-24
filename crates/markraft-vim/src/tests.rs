@@ -1644,7 +1644,6 @@ fn operators_keep_markup_whole() {
         ("wdw", "x y"),
         ("wD", "x "),
         ("wlD", "x **b**"),
-        ("wcw", "x  y"),
         ("wvex", "x  y"),
         ("$db", "x y"),
         ("$bdb", "**bold** y"),
@@ -1653,6 +1652,32 @@ fn operators_keep_markup_whole() {
         at.keys(keys);
         assert_eq!(at.markdown(), expected, "{keys}");
     }
+}
+
+#[test]
+fn changing_a_styled_word_keeps_its_style() {
+    // `cw` over the whole of a bold word keeps the bold: what is typed goes
+    // between its delimiters.
+    let mut keys = Keys::new("x **bold** y").at(0, 0);
+    keys.keys("wcw").typed("new").keys("<esc>");
+    assert_eq!(keys.markdown(), "x **new** y");
+    // Escape with nothing typed takes the empty pair away rather than
+    // leaving `****` in the text.
+    let mut keys = Keys::new("x **bold** y").at(0, 0);
+    keys.keys("wcw<esc>");
+    assert_eq!(keys.markdown(), "x  y");
+    // `C` from the word's start keeps the style it empties, and takes the
+    // rest of the line.
+    let mut keys = Keys::new("x **bold** y").at(0, 0);
+    keys.keys("wC").typed("new").keys("<esc>");
+    assert_eq!(keys.markdown(), "x **new**");
+    // One undo takes the whole change back.
+    let mut keys = Keys::new("x **bold** y").at(0, 0);
+    keys.keys("wcw").typed("new").keys("<esc>u");
+    assert_eq!(keys.markdown(), "x **bold** y");
+    let mut keys = Keys::new("x **bold** y").at(0, 0);
+    keys.keys("wcw<esc>u");
+    assert_eq!(keys.markdown(), "x **bold** y");
 }
 
 #[test]

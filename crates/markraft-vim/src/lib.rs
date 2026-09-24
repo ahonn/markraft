@@ -88,6 +88,8 @@
 //!   takes goes with its spelling, and one it only reaches into keeps every
 //!   run of it, so `dw` on `bold` leaves `x y` and `D` from its `o` leaves
 //!   `x **b**`. A yank takes the same, so a word yanked whole pastes styled.
+//!   A change keeps even the spelling it empties, so `cw` on `bold` types a
+//!   new bold word; Escape with nothing typed takes the empty pair away.
 //!
 //! # Registers
 //!

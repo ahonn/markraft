@@ -34,7 +34,8 @@ pub fn delete_word(types: &DocTypes, dir: Direction) -> Command {
     keymap::delete_word(types, dir)
 }
 
-/// Tab: sink a list item, or insert a tab inside a code block.
+/// Tab: sink a list item, indent the lines a selection covers in a code block,
+/// or insert a tab at a caret there.
 ///
 /// [`EditorView`](crate::EditorView) inserts its
 /// [indent text](crate::EditorView::set_indent_text) instead.
@@ -42,9 +43,13 @@ pub fn indent(types: &DocTypes) -> Command {
     keymap::indent(types, "\t")
 }
 
-/// Shift-Tab: lift a list item, or lift a block out of its wrapper.
+/// Shift-Tab: outdent the lines of a code block, lift a list item, or lift a
+/// block out of its wrapper.
+///
+/// [`EditorView`](crate::EditorView) outdents by its
+/// [indent text](crate::EditorView::set_indent_text) instead of a tab.
 pub fn outdent(types: &DocTypes) -> Command {
-    keymap::outdent(types)
+    keymap::outdent(types, "\t")
 }
 
 /// ⌥⌘C as Typora does it: a new code block at the caret in a paragraph with

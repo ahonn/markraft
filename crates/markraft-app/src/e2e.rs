@@ -626,6 +626,28 @@ mod tests {
         }
     }
 
+    // Backspace right after a block shortcut takes the format off, as Typora
+    // does, rather than giving back the characters that made it. A shortcut
+    // inside the text is still undone to what was typed.
+    #[gpui::test]
+    fn backspace_after_a_block_shortcut_takes_the_format_off(cx: &mut TestAppContext) {
+        for typed in ["- ", "1. ", "# ", "## ", "> ", "- [ ] "] {
+            let mut h = open(cx, |_| {});
+            h.type_text(typed);
+            h.keys("backspace");
+            h.type_text("x");
+            assert_eq!(h.markdown(), "x", "{typed:?}");
+        }
+        // In a list already, the item leaves the list, as Backspace at any
+        // first item's start does.
+        let mut h = open_with(cx, &[("l.md", "a\n")], |_| {});
+        h.keys("cmd-down enter");
+        h.type_text("- ");
+        h.keys("backspace");
+        h.type_text("x");
+        assert_eq!(h.markdown(), "a\n\nx");
+    }
+
     // A divider typed with stars or underscores keeps them, as Typora does.
     #[gpui::test]
     fn a_typed_divider_keeps_its_characters(cx: &mut TestAppContext) {
@@ -688,10 +710,10 @@ mod tests {
     #[gpui::test]
     fn block_formats_inside_a_task_item(cx: &mut TestAppContext) {
         let keys = [
-            "alt-cmd-1",
-            "alt-cmd-2",
-            "alt-cmd-6",
-            "alt-cmd-0",
+            "cmd-1",
+            "cmd-2",
+            "cmd-6",
+            "cmd-0",
             "cmd-shift-b",
             "alt-cmd-c",
             "cmd-&",
@@ -716,7 +738,7 @@ mod tests {
             h.type_text(text);
             h.assert_round_trip("typing");
         }
-        h.keys("cmd-up alt-cmd-2");
+        h.keys("cmd-up cmd-2");
         h.assert_round_trip("a heading after several saves");
         h.keys("cmd-down enter");
         h.type_text("c");
@@ -728,7 +750,7 @@ mod tests {
     fn undo_after_a_save_restores_the_file(cx: &mut TestAppContext) {
         let original = "Title\n\n* one\n*  two\n\n|a|b|\n|-|-|\n";
         let mut h = open_with(cx, &[("u.md", original)], |_| {});
-        h.keys("cmd-up alt-cmd-1");
+        h.keys("cmd-up cmd-1");
         h.assert_round_trip("a heading");
         h.keys("cmd-z");
         h.assert_round_trip("undone");
@@ -989,9 +1011,9 @@ mod tests {
         "cmd-i",
         "cmd-e",
         "cmd-shift-s",
-        "alt-cmd-1",
-        "alt-cmd-2",
-        "alt-cmd-0",
+        "cmd-1",
+        "cmd-2",
+        "cmd-0",
         "cmd-shift-b",
         "alt-cmd-c",
         "cmd-&",

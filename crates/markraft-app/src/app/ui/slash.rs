@@ -210,7 +210,7 @@ mod tests {
             Command::new(
                 "format-heading",
                 "Heading 1",
-                "⌥⌘1",
+                "⌘1",
                 Intent::Block(doc::Block::Heading(1)),
             )
             .slash(1, SlashEffect::Block(doc::Block::Heading(1))),

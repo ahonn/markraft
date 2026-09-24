@@ -217,10 +217,10 @@ pub fn bind_keys(cx: &mut App) {
         "tab" => Indent, "shift-tab" => Outdent,
         "cmd-z" => Undo, "cmd-shift-z" => Redo, "cmd-b" => Bold,
         "cmd-i" => Italic, "cmd-e" => Code,
-        "cmd-shift-s" => Strikethrough, "cmd-alt-0" => Paragraph,
-        "cmd-alt-1" => Heading, "cmd-alt-2" => Heading2,
-        "cmd-alt-3" => Heading3, "cmd-alt-4" => Heading4,
-        "cmd-alt-5" => Heading5, "cmd-alt-6" => Heading6,
+        "cmd-shift-s" => Strikethrough, "cmd-0" => Paragraph,
+        "cmd-1" => Heading, "cmd-2" => Heading2,
+        "cmd-3" => Heading3, "cmd-4" => Heading4,
+        "cmd-5" => Heading5, "cmd-6" => Heading6,
         "cmd-shift-b" => Quote, "cmd-alt-c" => CodeBlock,
         "cmd-enter" => ToggleTask,
         "cmd-alt-l" => ChooseCodeLanguage, "cmd-alt-shift-c" => CopyCodeBlock,
@@ -1668,6 +1668,16 @@ impl EditorView {
                 return;
             }
         }
+        // Nowhere up from the first row or down from the last: the caret goes
+        // to the start or the end of the document, as it does in every macOS
+        // text view, and a shifted arrow takes the selection there.
+        if target.is_none_or(|(position, _, upstream)| self.same_visual_row(position, upstream)) {
+            let command = keymap::move_document_edge(delta > 0, extend);
+            if self.run_command(&command, cx) {
+                self.preferred_x = None;
+            }
+            return;
+        }
         if let Some((position, x, upstream)) = target {
             self.upstream = upstream;
             self.select(position, extend, cx);
@@ -1729,9 +1739,11 @@ impl EditorView {
 
     /// The selected content, as a slice.
     pub fn selection_slice(&self) -> markraft_core::Slice {
-        self.state
-            .selection()
-            .content_with_schema(self.state.doc(), self.state.schema())
+        clipboard::whole_items(&self.state, &self.types).unwrap_or_else(|| {
+            self.state
+                .selection()
+                .content_with_schema(self.state.doc(), self.state.schema())
+        })
     }
 
     fn copy(&mut self, cx: &mut Context<Self>) {
@@ -2217,7 +2229,16 @@ impl EditorView {
                 cx.propagate();
             }
         }));
-        rich!(Outdent, keymap::outdent);
+        root = root.on_action(cx.listener(|this, _: &Outdent, _, cx| {
+            if this.single_line {
+                cx.propagate();
+                return;
+            }
+            let command = keymap::outdent(&this.types, &this.indent_text);
+            if !this.run_command(&command, cx) {
+                cx.propagate();
+            }
+        }));
         run!(Left, |_: &DocTypes| keymap::move_grapheme(
             Direction::Backward,
             false

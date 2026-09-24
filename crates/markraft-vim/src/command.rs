@@ -235,7 +235,7 @@ fn charwise(
     let yanked = if source {
         range.clone()
     } else {
-        let parts = edit::markup_safe(&cx.projection(), cx.types().syntax, range.clone());
+        let parts = edit::markup_safe(&cx.projection(), cx.types().syntax, range.clone(), false);
         match (parts.first(), parts.last()) {
             (Some(first), Some(last)) => first.start..last.end,
             _ => range.clone(),
@@ -259,7 +259,17 @@ fn charwise(
         }
         Operator::Change => {
             enter_insert(state, cx);
-            if let Some(spec) = delete(cx, range, source) {
+            state.emptied = (!source)
+                .then(|| edit::emptied_pair(&cx.projection(), cx.types().syntax, range.clone()))
+                .flatten();
+            let spec = if source {
+                edit::delete_charwise(cx.state(), range)
+            } else {
+                let projection = cx.projection();
+                let syntax = cx.types().syntax;
+                edit::delete_charwise_keeping_markup(cx.state(), &projection, syntax, range, true)
+            };
+            if let Some(spec) = spec {
                 cx.dispatch(vec![spec]);
             }
         }
@@ -271,7 +281,13 @@ fn delete(cx: &mut impl Host, range: Range<usize>, source: bool) -> Option<Trans
         edit::delete_charwise(cx.state(), range)
     } else {
         let projection = cx.projection();
-        edit::delete_charwise_keeping_markup(cx.state(), &projection, cx.types().syntax, range)
+        edit::delete_charwise_keeping_markup(
+            cx.state(),
+            &projection,
+            cx.types().syntax,
+            range,
+            false,
+        )
     }
 }
 
@@ -627,6 +643,15 @@ pub(crate) fn visual(state: &mut State, cx: &mut impl Host, linewise: bool) {
 pub(crate) fn normal(state: &mut State, cx: &mut impl Host) {
     state.pending.clear();
     let leaving_insert = state.mode == Mode::Insert;
+    // A change that emptied a style and had nothing typed into it leaves no
+    // `****` behind. It goes in the Insert session's undo step.
+    if let Some(pair) = state.emptied.take()
+        && leaving_insert
+        && let Some(range) = pair.untouched(&cx.projection(), host::head(cx))
+        && let Some(spec) = edit::delete_charwise(cx.state(), range)
+    {
+        cx.dispatch(vec![spec]);
+    }
     if leaving_insert {
         cx.end_undo_group();
     }
