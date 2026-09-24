@@ -3,7 +3,7 @@
 //! title; each page is a form of right-aligned labels; the window keeps its width and
 //! takes the height of the page on screen.
 //!
-//! The preferences still belong to [`NotesApp`]: the window holds no copy of them. It
+//! The preferences still belong to [`MarkraftApp`]: the window holds no copy of them. It
 //! reads what the app holds each frame and hands every change back as a [`Change`],
 //! applied in the note window's context because the theme, the editors and the folder
 //! prompts all belong there. The app is observed, so a change made anywhere redraws it.
@@ -180,7 +180,7 @@ struct Snapshot {
     errors: SettingsErrors,
 }
 
-impl NotesApp {
+impl MarkraftApp {
     /// ⌘, and the Settings commands: open the window, or bring the open one forward.
     pub(in crate::app) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(platform) = &mut self.platform {
@@ -464,7 +464,7 @@ impl NotesApp {
 /// The way back from the window to the app it configures.
 #[derive(Clone)]
 struct Link {
-    app: WeakEntity<NotesApp>,
+    app: WeakEntity<MarkraftApp>,
     main: AnyWindowHandle,
 }
 
@@ -705,7 +705,12 @@ pub(in crate::app) struct SettingsView {
 }
 
 impl SettingsView {
-    fn new(app: Entity<NotesApp>, link: Link, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        app: Entity<MarkraftApp>,
+        link: Link,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let recorders = [
             cx.focus_handle().tab_stop(true),
             cx.focus_handle().tab_stop(true),

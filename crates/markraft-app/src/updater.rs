@@ -73,7 +73,7 @@ impl Updater {
                 },
                 relaunch_handler: Some(Rc::new(move |_, continuation| {
                     // Never borrow GPUI from a native callback: Sparkle can call back
-                    // synchronously while NotesApp is already being updated.
+                    // synchronously while MarkraftApp is already being updated.
                     pending.borrow_mut().request(continuation);
                 })),
                 ..Default::default()
@@ -86,6 +86,18 @@ impl Updater {
             )),
         }
         this
+    }
+
+    /// An updater that never checks: for the headless tests, which run off the main
+    /// thread and outside any bundle.
+    #[cfg(test)]
+    pub fn disabled() -> Self {
+        Self {
+            native: None,
+            unavailable: UNBUNDLED.into(),
+            pending: Rc::new(RefCell::new(PendingRelaunch::default())),
+            startup_error: None,
+        }
     }
 
     fn fail(&mut self, message: String) {

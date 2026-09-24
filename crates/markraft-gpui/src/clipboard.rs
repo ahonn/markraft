@@ -78,7 +78,7 @@ pub(crate) fn read_fragment(
     {
         return Some(slice);
     }
-    if let Some(html) = platform::read_html()
+    if let Some(html) = platform::read_html(text.as_deref())
         && let Some(slice) = codecs.from_html(&html)
     {
         return Some(slice);
@@ -88,12 +88,22 @@ pub(crate) fn read_fragment(
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeHTML};
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypeString};
     use objc2_foundation::{NSArray, NSString};
 
-    pub(super) fn read_html() -> Option<String> {
+    /// The HTML flavour on the pasteboard, when it belongs to the item being
+    /// pasted: the pasteboard's plain text is the item's `text`. An item that
+    /// did not come from the pasteboard — a test's, one a host built — is not
+    /// read through HTML someone else put there.
+    pub(super) fn read_html(text: Option<&str>) -> Option<String> {
         let pasteboard = NSPasteboard::generalPasteboard();
-        // AppKit's immutable HTML type is process-global; no owner is retained.
+        // AppKit's immutable type names are process-global; no owner is retained.
+        let plain = pasteboard
+            .stringForType(unsafe { NSPasteboardTypeString })
+            .map(|value| value.to_string());
+        if plain.as_deref() != text {
+            return None;
+        }
         pasteboard
             .stringForType(unsafe { NSPasteboardTypeHTML })
             .map(|value| value.to_string())
@@ -112,7 +122,7 @@ mod platform {
 
 #[cfg(not(target_os = "macos"))]
 mod platform {
-    pub(super) fn read_html() -> Option<String> {
+    pub(super) fn read_html(_: Option<&str>) -> Option<String> {
         None
     }
 

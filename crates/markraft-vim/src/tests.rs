@@ -586,7 +586,7 @@ fn deleting_every_line_leaves_the_smallest_valid_document() {
     assert_eq!(keys.lines(), 1);
     assert_eq!(keys.line_col(), (0, 0));
     keys.keys("u");
-    assert_eq!(keys.markdown(), "# one\n\n- two\n\n---");
+    assert_eq!(keys.markdown(), "# one\n\n- two\n\n***");
 }
 
 #[test]
@@ -600,7 +600,7 @@ fn x_takes_graphemes_within_the_line_and_never_touches_a_rule() {
     assert_eq!(keys.text(), "");
     let mut keys = Keys::new("***\n\nafter").at(0, 0);
     keys.keys("x");
-    assert_eq!(keys.markdown(), "---\n\nafter");
+    assert_eq!(keys.markdown(), "***\n\nafter");
 }
 
 #[test]
@@ -1172,10 +1172,10 @@ fn linewise_operators_preserve_unselected_container_children() {
 fn linewise_paste_next_to_a_leaf_block_has_no_ancestor_requirement() {
     let mut keys = Keys::new("text\n\n***").at(0, 0);
     keys.keys("yyjp");
-    assert_eq!(keys.markdown(), "text\n\n---\n\ntext");
+    assert_eq!(keys.markdown(), "text\n\n***\n\ntext");
     let mut keys = Keys::new("text\n\n***").at(0, 0);
     keys.keys("yyjP");
-    assert_eq!(keys.markdown(), "text\n\ntext\n\n---");
+    assert_eq!(keys.markdown(), "text\n\ntext\n\n***");
 }
 
 #[test]

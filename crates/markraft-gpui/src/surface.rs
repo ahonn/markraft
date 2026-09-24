@@ -8,9 +8,11 @@
 //! Every geometry query is in visible `char` offsets. The projection retained
 //! by each layout maps document positions past hidden inline boundaries.
 //!
-//! HTML is never rendered or interpreted: a raw block and an inline HTML
-//! primitive alike are drawn as the source they hold, in the code font, so a
-//! note shows exactly what it will be written back as.
+//! HTML is never rendered or interpreted: a raw block is drawn as the source
+//! it holds, in the code font, and an inline HTML primitive as its source in
+//! the prose around it, so a note shows exactly what it will be written back
+//! as. The one tag drawn as what it means is a `<br>` in a table cell, which
+//! is the cell's line break there, as Typora draws it.
 
 use crate::conceal::{Reveal, Shown};
 use crate::style::EditorStyle;
@@ -70,6 +72,8 @@ const CODE_FONT: &str = ".AppleSystemUIFontMonospaced";
 /// which stays the system's whatever [`EditorStyle::font_family`] the note's
 /// text is set in.
 const UI_FONT: &str = ".SystemUIFont";
+/// The rounded system design, which has no italic of its own.
+const ROUNDED_FONT: &str = ".AppleSystemUIFontRounded";
 const CODE_PADDING: Pixels = px(12.);
 /// How far a code block's panel reaches above and below its text. It spells no
 /// fences, focused or not — as in Typora — so this is padding and nothing else,
@@ -182,9 +186,15 @@ impl InlineCode {
 enum AtomShape {
     /// An image's stand-in: a picture glyph and a label on a rounded fill.
     Pill,
-    /// The source of an inline HTML primitive, shaped as the quiet code-font
-    /// text it is — the view keeps HTML verbatim and never renders it.
+    /// The source an atom under the caret was read from, shaped as the quiet
+    /// code-font markup it is, as other revealed markup is.
     Source,
+    /// Source the view does not render — an inline HTML primitive, a shortcode
+    /// no emoji answers to — shaped as the prose around it.
+    Text,
+    /// A `<br>` in a table cell: the cell's line break, as a newline in the
+    /// row, which starts a new row there.
+    Break,
     /// A wiki link's label, shaped as the prose it stands in, in the link
     /// colour. Its brackets and its target are source the view does not show.
     Link,
@@ -199,14 +209,25 @@ impl AtomShape {
     fn chrome(self) -> Pixels {
         match self {
             AtomShape::Pill => PILL_PADDING * 2. + PILL_ICON + PILL_ICON_GAP,
-            AtomShape::Source | AtomShape::Link | AtomShape::Glyph => px(0.),
+            AtomShape::Source
+            | AtomShape::Text
+            | AtomShape::Break
+            | AtomShape::Link
+            | AtomShape::Glyph => px(0.),
         }
     }
 
     /// Whether the row shapes the atom's own label in place of a placeholder,
     /// so it takes exactly the width its glyphs advance.
     fn is_own_text(self) -> bool {
-        matches!(self, AtomShape::Source | AtomShape::Link | AtomShape::Glyph)
+        matches!(
+            self,
+            AtomShape::Source
+                | AtomShape::Text
+                | AtomShape::Break
+                | AtomShape::Link
+                | AtomShape::Glyph
+        )
     }
 }
 
@@ -719,6 +740,37 @@ impl LayoutLine {
 
     /// The `char` offset under `local`, a point relative to the line's origin.
     pub(crate) fn char_at(&self, local: Point<Pixels>) -> usize {
+        self.to_source(self.display_at(local))
+    }
+
+    /// The source shown as text that `local` falls inside — an inline HTML tag,
+    /// an unknown shortcode — as the offset before its atom, the source, and how
+    /// many of its characters lie before the point. `None` at either edge of it
+    /// and anywhere else, where [`LayoutLine::char_at`] already says where the
+    /// caret goes.
+    pub(crate) fn source_text_at(&self, local: Point<Pixels>) -> Option<(usize, String, usize)> {
+        self.source_text_in(self.display_at(local))
+    }
+
+    /// [`LayoutLine::source_text_at`] for a display-text `char` offset.
+    fn source_text_in(&self, display: usize) -> Option<(usize, String, usize)> {
+        let widening = self.widenings.iter().find(|widening| {
+            widening.shape == Some(AtomShape::Text)
+                && display > widening.display
+                && display < widening.display + widening.len
+        })?;
+        let text: String = self
+            .rows
+            .iter()
+            .flat_map(|row| row.text().chars().chain(std::iter::once('\n')))
+            .skip(widening.display)
+            .take(widening.len)
+            .collect();
+        Some((widening.source, text, display - widening.display))
+    }
+
+    /// The display-text `char` offset under `local`.
+    fn display_at(&self, local: Point<Pixels>) -> usize {
         if self.rows.is_empty() {
             return 0;
         }
@@ -739,7 +791,7 @@ impl LayoutLine {
                 Ok(index) | Err(index) => index,
             }
         });
-        self.to_source(row.char_start + byte_to_char(row.text(), byte))
+        row.char_start + byte_to_char(row.text(), byte)
     }
 
     /// The `char` range of each visual row, clamped to the line's own content so
@@ -2355,7 +2407,7 @@ fn atom_label<'a>(types: &DocTypes, node: &'a Node) -> Option<(AtomShape, &'a st
     } else if Some(ty) == types.raw_inline {
         // HTML is kept verbatim and shown as source, so the tag reads exactly as
         // it was written — a closing tag included.
-        Some((AtomShape::Source, attr(node, "source")))
+        Some((AtomShape::Text, attr(node, "source")))
     } else if Some(ty) == types.wiki_link {
         if crate::wiki::wiki_link_embed(node) {
             // `![[…]]` puts a file in the note rather than pointing at a page, so
@@ -2377,7 +2429,7 @@ fn atom_label<'a>(types: &DocTypes, node: &'a Node) -> Option<(AtomShape, &'a st
         let code = attr(node, "code");
         match emojis::get_by_shortcode(code) {
             Some(emoji) => Some((AtomShape::Glyph, emoji.as_str())),
-            None => Some((AtomShape::Source, code)),
+            None => Some((AtomShape::Text, code)),
         }
     } else {
         None
@@ -2429,9 +2481,29 @@ fn atom_of(
         };
         touches(&input.selection) || input.composition.as_ref().is_some_and(touches)
     };
+    // A `<br>` in a table cell is the cell's line break, as in Typora.
+    if line
+        .node_type()
+        .is_some_and(|parent| types.is_cell_break(parent, node))
+    {
+        let label = Rc::new(text_system.shape_line("".into(), font_size, &[], None));
+        return Some(Atom {
+            shape: AtomShape::Break,
+            text: "\n".to_owned(),
+            label,
+            width: px(0.),
+            image: None,
+            frame: None,
+            broken: false,
+            note: false,
+        });
+    }
+    // Source the view shows as it is — inline HTML, an unknown shortcode — is
+    // already the text a save writes, under the caret or not.
+    let plain = atom_label(types, node).is_some_and(|(shape, _)| shape == AtomShape::Text);
     // An atom under the caret shows the source it was read from, which only the
     // host's kind can spell — it is the same text a save writes.
-    let source = revealed
+    let source = (revealed && !plain)
         .then(|| {
             input
                 .spelling
@@ -2495,9 +2567,11 @@ fn atom_of(
     let (face, size) = match shape {
         AtomShape::Pill => (font(UI_FONT), font_size * PILL_SCALE),
         AtomShape::Source => (font(CODE_FONT), font_size),
-        // A wiki link's label is the row's own text, so it is measured in the
-        // face the row sets it in.
-        AtomShape::Link => (font(style.font_family.clone()), font_size),
+        // A wiki link's label and source shown as text are the row's own text,
+        // so they are measured in the face the row sets them in.
+        AtomShape::Link | AtomShape::Text | AtomShape::Break => {
+            (font(style.font_family.clone()), font_size)
+        }
         AtomShape::Glyph => (font(UI_FONT), font_size),
     };
     // A link the host says it cannot open is still drawn as a link, because that is
@@ -2510,7 +2584,7 @@ fn atom_of(
     let ink = match shape {
         AtomShape::Link if broken => style.broken_link,
         AtomShape::Link => style.link,
-        AtomShape::Glyph => style.text,
+        AtomShape::Glyph | AtomShape::Text | AtomShape::Break => style.text,
         AtomShape::Pill | AtomShape::Source => style.muted_text,
     };
     let room = (column * PILL_MAX_RATIO - shape.chrome()).max(px(16.));
@@ -2536,7 +2610,8 @@ fn atom_of(
     // unbreakable run, so nothing downstream could shorten it; a label the row
     // shapes itself could wrap, but a target or a tag long enough to need it is
     // better read short than spread over three lines.
-    while label.width > room && graphemes.len() > 1 {
+    // Source shown as text is prose: it wraps as prose does rather than being cut.
+    while shape != AtomShape::Text && label.width > room && graphemes.len() > 1 {
         graphemes.pop();
         shown = format!("{}…", graphemes.concat());
         label = shaped(shown.clone());
@@ -2697,6 +2772,11 @@ fn text_runs(
         }
         if has(types.em, marks) {
             face.style = FontStyle::Italic;
+            // Asked for an italic it does not have, the rounded design would set the
+            // emphasis upright; the system face it is drawn from has one.
+            if face.family.as_ref() == ROUNDED_FONT {
+                face.family = UI_FONT.into();
+            }
         }
         let atom = matches!(run.content, RunContent::Atom(_));
         // What an atom's placeholder holds: a pill is painted over its fillers,
@@ -2720,8 +2800,12 @@ fn text_runs(
         if widened && !is_code {
             face.family = UI_FONT.into();
         }
-        // An emoji is a character of the sentence, not something to follow.
-        let glyph = placeholder == Some(AtomShape::Glyph);
+        // An emoji is a character of the sentence, not something to follow, and
+        // source shown as text is the sentence's own text.
+        let glyph = matches!(
+            placeholder,
+            Some(AtomShape::Glyph | AtomShape::Text | AtomShape::Break)
+        );
         // Revealed markup — a `**`, a link's `](…)`, an escape's `\` — is
         // quieter than the text it styles, so the words still read first.
         let markup = has(types.syntax, marks) && !code_block && !raw;
@@ -4389,11 +4473,11 @@ fn paint_marker(
 mod tests {
     use super::{
         AtomShape, CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_FONT, CODE_INSET,
-        Decoration, LayoutLine, LayoutRow, Marker, PREVIEW_GAP, QUOTE_BAR, Runs, ShapeInput,
-        TableScroll, Widening, atom_label, cell_under, chrome_marker, column_demands,
-        column_widths, decoration_of, display_text, drawn_image, file_name, gap_below, max_indent,
-        merge_row_centers, picture_source, place_table, quote_bars, reveal_offset, shape,
-        table_overflows, text_runs, unbreakable_units, visible_strips,
+        Decoration, LayoutLine, LayoutRow, Marker, PREVIEW_GAP, QUOTE_BAR, ROUNDED_FONT, Runs,
+        ShapeInput, TableScroll, UI_FONT, Widening, atom_label, cell_under, chrome_marker,
+        column_demands, column_widths, decoration_of, display_text, drawn_image, file_name,
+        gap_below, max_indent, merge_row_centers, picture_source, place_table, quote_bars,
+        reveal_offset, shape, table_overflows, text_runs, unbreakable_units, visible_strips,
     };
     use crate::style::EditorStyle;
     use crate::typeahead::tests::{at, run, state_of};
@@ -4997,6 +5081,24 @@ mod tests {
         assert_eq!(run_over(&text, &runs, 'c').font.family.as_ref(), CODE_FONT);
     }
 
+    /// The rounded system design has no italic, so emphasis set in it falls back to
+    /// the system face, which has; the rest of the prose stays rounded.
+    #[test]
+    fn emphasis_in_the_rounded_face_is_set_in_one_with_an_italic() {
+        let style = EditorStyle {
+            font_family: ROUNDED_FONT.into(),
+            ..EditorStyle::notes()
+        };
+        let (text, runs, _) = runs_styled("a *b*", 0..0, style);
+        assert_eq!(
+            run_over(&text, &runs, 'a').font.family.as_ref(),
+            ROUNDED_FONT
+        );
+        let emphasis = run_over(&text, &runs, 'b');
+        assert_eq!(emphasis.font.family.as_ref(), UI_FONT);
+        assert_eq!(emphasis.font.style, gpui::FontStyle::Italic);
+    }
+
     /// Link definitions are drawn as Typora draws them: in the prose face, the
     /// label bold and the destination underlined. Other raw source stays
     /// monospaced.
@@ -5471,8 +5573,8 @@ mod tests {
     }
 
     /// HTML is never rendered: an inline primitive is drawn as the source it
-    /// stands for, so the row reserves the width of exactly that text and
-    /// nothing around it.
+    /// stands for, as the prose around it, so the row reserves the width of
+    /// exactly that text and nothing around it.
     #[test]
     fn a_raw_inline_atom_reserves_the_width_of_its_own_source() {
         let state = state_of("press <kbd>K</kbd> twice");
@@ -5489,11 +5591,11 @@ mod tests {
             .collect();
         assert_eq!(
             drawn,
-            vec![(AtomShape::Source, "<kbd>"), (AtomShape::Source, "</kbd>")],
+            vec![(AtomShape::Text, "<kbd>"), (AtomShape::Text, "</kbd>")],
             "both tags read as they were written"
         );
         assert_eq!(
-            AtomShape::Source.chrome(),
+            AtomShape::Text.chrome(),
             px(0.),
             "source text reserves its own width and no padding"
         );
@@ -5502,6 +5604,42 @@ mod tests {
         let row = &shaped("press <kbd>K</kbd> twice")[0];
         assert_eq!(row.rows[0].text(), "press <kbd>K</kbd> twice");
         assert!(!row.rows[0].text().contains(super::PILL_FILLER));
+    }
+
+    /// A point inside a tag shown as source finds the tag and how far into it
+    /// the point is, so a click puts the caret there. Its edges are the
+    /// atom's own caret stops, and find nothing.
+    #[test]
+    fn a_point_inside_source_shown_as_text_finds_how_far_in_it_is() {
+        let line = &shaped("press <kbd>K</kbd> now")[0];
+        // `press ` is six characters; `<kbd>` is shown from there.
+        assert_eq!(line.source_text_in(8), Some((6, "<kbd>".to_owned(), 2)));
+        assert_eq!(line.source_text_in(10), Some((6, "<kbd>".to_owned(), 4)));
+        assert_eq!(line.source_text_in(6), None, "the tag's left edge");
+        assert_eq!(line.source_text_in(11), None, "the tag's right edge");
+        assert_eq!(line.source_text_in(3), None, "plain text");
+        // `</kbd>` follows `K`: shown from 12, it is the third character's atom.
+        assert_eq!(line.source_text_in(14), Some((8, "</kbd>".to_owned(), 2)));
+    }
+
+    /// A `<br>` in a table cell is the cell's line break, as Typora draws it:
+    /// the cell's text goes on in a row of its own. Anywhere else the tag is
+    /// source like any other inline HTML.
+    #[test]
+    fn a_break_tag_in_a_table_cell_starts_a_new_row() {
+        let lines = shaped("| a |\n| - |\n| 1<br/>2 |\n\nx<br/>y");
+        let cell: Vec<&str> = lines
+            .iter()
+            .find(|line| line.rows.len() == 2)
+            .expect("a cell of two rows")
+            .rows
+            .iter()
+            .map(|row| row.text())
+            .collect();
+        assert_eq!(cell, ["1", "2"]);
+        let paragraph = lines.last().expect("the paragraph");
+        assert_eq!(paragraph.rows.len(), 1);
+        assert_eq!(paragraph.rows[0].text(), "x<br/>y");
     }
 
     /// A wiki link is drawn as the prose it stands in: its alias, or its

@@ -28,6 +28,10 @@ notify = "8"
 url = "2"
 ureq = "3"
 
+[dev-dependencies]
+# The app's own flows run headless against GPUI's test platform; see src/e2e.rs.
+gpui = { workspace = true, features = ["test-support"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 global-hotkey = "0.7"

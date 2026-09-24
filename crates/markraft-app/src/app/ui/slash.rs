@@ -164,7 +164,7 @@ impl TypeaheadProvider for SlashProvider {
     }
 }
 
-impl NotesApp {
+impl MarkraftApp {
     /// The `/` menu for a note editor, built from the app's one command list.
     pub(in crate::app) fn slash_menu(&self) -> Typeahead {
         Typeahead::new(
@@ -174,6 +174,8 @@ impl NotesApp {
             // the commands that do not depend on where the caret is.
             SlashProvider::new(self.action_items(Caret::default())),
         )
+        // Commands are named in phrases — "Code Block", "Bullet List" — searched as typed.
+        .spaces_in_query()
     }
 
     /// Run what a `/` menu item asked the host to do. The editor has already made its

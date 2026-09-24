@@ -1,7 +1,6 @@
 mod code;
 mod focus;
 mod formatting;
-pub(super) mod html;
 mod icons;
 mod link;
 mod rename;
@@ -22,9 +21,6 @@ use tokens::{POPOVER_RADIUS, ROW_HEIGHT, ROW_RADIUS, keycaps, popover_shadow};
 
 #[derive(Clone)]
 enum Intent {
-    SaveHtml,
-    CancelHtml,
-    EditHtml(usize),
     New,
     Browse,
     Actions,
@@ -71,7 +67,6 @@ enum Intent {
     ToggleTask,
     ChooseCodeLanguage,
     CopyCodeBlock,
-    EditRawHtml,
     Mark(doc::Inline),
     Block(doc::Block),
     InsertTable,
@@ -105,8 +100,7 @@ impl Intent {
             | Self::Unlink
             | Self::ToggleTask
             | Self::ChooseCodeLanguage
-            | Self::CopyCodeBlock
-            | Self::EditRawHtml => ActionGroup::Context,
+            | Self::CopyCodeBlock => ActionGroup::Context,
             Self::Save
             | Self::Export
             | Self::Rename
@@ -133,8 +127,6 @@ struct Caret {
     table: Option<TableInfo>,
     /// A code block keeps its text literal, so nothing is inserted into one.
     in_code: bool,
-    /// Raw HTML is shown as its own source, and edited through the source dialog.
-    in_raw_html: bool,
     in_task: bool,
 }
 /// Soft fade for the format toolbar and its toggle glyphs — a touch slower than the
@@ -191,7 +183,6 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::ToggleTask => Icon::Task,
         Intent::ChooseCodeLanguage => Icon::CodeBlock,
         Intent::CopyCodeBlock => Icon::Copy,
-        Intent::EditRawHtml => Icon::Code,
         Intent::ToggleFormatToolbar => Icon::Text,
         Intent::ToggleCount => Icon::Count,
         // Anything that hands the note to something outside Markraft.
@@ -222,19 +213,9 @@ fn intent_icon(intent: &Intent) -> Icon {
     }
 }
 
-impl NotesApp {
+impl MarkraftApp {
     fn intent(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.interaction.html().is_some()
-            && !matches!(intent, Intent::SaveHtml | Intent::CancelHtml)
-        {
-            return;
-        }
         match intent {
-            Intent::SaveHtml => self.save_html_source(window, cx),
-            Intent::CancelHtml => {
-                self.cancel_html_source(window, cx);
-            }
-            Intent::EditHtml(pos) => self.open_html_source(pos, window, cx),
             Intent::New => self.new_note(window, cx),
             Intent::Browse => self.open_panel(Panel::Browse, window, cx),
             Intent::Actions => self.open_panel(Panel::Actions, window, cx),
@@ -289,16 +270,12 @@ impl NotesApp {
             }
             // The caret is already where these act, so the panel closes and the
             // editor's own action does the work.
-            Intent::ToggleTask
-            | Intent::ChooseCodeLanguage
-            | Intent::CopyCodeBlock
-            | Intent::EditRawHtml => {
+            Intent::ToggleTask | Intent::ChooseCodeLanguage | Intent::CopyCodeBlock => {
                 self.intent(Intent::Back, window, cx);
                 let action: Box<dyn Action> = match intent {
                     Intent::ToggleTask => Box::new(markraft_gpui::ToggleTask),
                     Intent::ChooseCodeLanguage => Box::new(markraft_gpui::ChooseCodeLanguage),
-                    Intent::CopyCodeBlock => Box::new(markraft_gpui::CopyCodeBlock),
-                    _ => Box::new(markraft_gpui::EditRawHtml),
+                    _ => Box::new(markraft_gpui::CopyCodeBlock),
                 };
                 window.dispatch_action(action, cx);
             }
@@ -705,7 +682,7 @@ impl NotesApp {
             .child(self.query_field(cx))
     }
     /// The input editor owned by the current surface. It carries the name
-    /// of the surface it is serving, set with its text in [`NotesApp::set_query`], so
+    /// of the surface it is serving, set with its text in [`MarkraftApp::set_query`], so
     /// this is only the box around it.
     fn query_field(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         div()
@@ -1005,9 +982,6 @@ impl NotesApp {
     }
 
     fn panel_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.interaction.html().is_some() {
-            return self.html_key(key, window, cx);
-        }
         // A ringed control answers first, whichever surface it belongs to.
         if key == "enter" && self.focus_activate(window, cx) {
             return true;
@@ -1296,14 +1270,6 @@ impl NotesApp {
                 ),
             ]);
         }
-        if caret.in_raw_html {
-            items.push(Command::new(
-                "edit-raw-html",
-                "Edit HTML Source",
-                "⌥⌘R",
-                Intent::EditRawHtml,
-            ));
-        }
         if caret.in_link {
             items.extend([
                 Command::new("copy-link", "Copy Link", "", Intent::CopyLink),
@@ -1434,7 +1400,6 @@ impl NotesApp {
             // caret is in even while the panel has the keyboard.
             table: editor.table_at_caret(),
             in_code: block == Some(doc::Block::Code),
-            in_raw_html: editor.raw_html_at_caret().is_some(),
             in_task: block == Some(doc::Block::Task),
         };
         let mut items: Vec<_> = self
@@ -1601,7 +1566,7 @@ impl NotesApp {
             .child(contents)
     }
 }
-impl Render for NotesApp {
+impl Render for MarkraftApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.interaction.code_language().is_some() && self.code_language.take_focus() {
             window.focus(&self.query().focus_handle(cx), cx);
@@ -1662,29 +1627,33 @@ impl Render for NotesApp {
             // Tab walks the open surface's controls. With nothing open it falls through,
             // so the note still indents.
             .capture_action(cx.listener(|this, _: &markraft_gpui::Indent, w, cx| {
-                if this.html_focus_step(true, w, cx) || this.focus_step(true, w, cx) {
+                if this.focus_step(true, w, cx) {
                     cx.stop_propagation();
                 } else {
                     cx.propagate();
                 }
             }))
             .capture_action(cx.listener(|this, _: &markraft_gpui::Outdent, w, cx| {
-                if this.html_focus_step(false, w, cx) || this.focus_step(false, w, cx) {
+                if this.focus_step(false, w, cx) {
                     cx.stop_propagation();
                 } else {
                     cx.propagate();
                 }
             }))
-            // The editor's own ⌘&, ⌘* and ⌘( make a list with the schema's marker; the
-            // note's lists take the one the preferences ask for, as the toolbar's do.
+            // The editor's own ⌘&, ⌘*, ⌘( and ⌥⌘C make their block with the schema's
+            // markers; the note's take the ones the preferences ask for, as the
+            // toolbar's do.
+            .capture_action(cx.listener(|this, _: &markraft_gpui::CodeBlock, w, cx| {
+                this.run_block_shortcut(doc::Block::Code, w, cx);
+            }))
             .capture_action(cx.listener(|this, _: &markraft_gpui::Ordered, w, cx| {
-                this.run_list_shortcut(doc::Block::Ordered, w, cx);
+                this.run_block_shortcut(doc::Block::Ordered, w, cx);
             }))
             .capture_action(cx.listener(|this, _: &markraft_gpui::Bullet, w, cx| {
-                this.run_list_shortcut(doc::Block::Bullet, w, cx);
+                this.run_block_shortcut(doc::Block::Bullet, w, cx);
             }))
             .capture_action(cx.listener(|this, _: &markraft_gpui::Task, w, cx| {
-                this.run_list_shortcut(doc::Block::Task, w, cx);
+                this.run_block_shortcut(doc::Block::Task, w, cx);
             }))
             // Every keystroke passes here on its way down, which is where the chrome
             // learns that someone is at the window. Space additionally runs the ringed
@@ -1692,17 +1661,9 @@ impl Render for NotesApp {
             // field owns the keyboard.
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, w, cx| {
                 this.note_key_press(cx);
-                if this.interaction.html().is_some()
-                    && event.keystroke.key == "enter"
-                    && event.keystroke.modifiers.platform
-                {
-                    this.save_html_source(w, cx);
-                    cx.stop_propagation();
-                    return;
-                }
                 if event.keystroke.key == "space"
                     && !event.keystroke.modifiers.modified()
-                    && (this.html_key("space", w, cx) || this.focus_activate(w, cx))
+                    && this.focus_activate(w, cx)
                 {
                     cx.stop_propagation();
                 }
@@ -1723,13 +1684,7 @@ impl Render for NotesApp {
             // The outline only exists while something is being dragged over, so the
             // note keeps the whole window the rest of the time.
             .drag_over::<ExternalPaths>(move |s, _, _, _| s.border_2().border_color(accent))
-            .on_action(cx.listener(|this, _: &Save, w, cx| {
-                if this.interaction.html().is_some() {
-                    this.save_html_source(w, cx);
-                } else {
-                    this.save_now(w, cx);
-                }
-            }))
+            .on_action(cx.listener(|this, _: &Save, w, cx| this.save_now(w, cx)))
             .on_action(cx.listener(|this, _: &CopyMarkdown, _, cx| this.copy_markdown(cx)))
             .on_action(cx.listener(|this, _: &Quit, window, cx| this.quit(window, cx)))
             .on_action(cx.listener(|this, _: &Hide, w, cx| this.dismiss(w, cx)))
@@ -2092,9 +2047,6 @@ impl Render for NotesApp {
             .when_some(self.table_toolbar(window, cx), |s, toolbar| {
                 s.child(popover_enter("table-enter", toolbar, true, reduce_motion))
             })
-            .when_some(self.html_source_entry(window, cx), |s, entry| {
-                s.child(entry)
-            })
             .when(self.interaction.panel() != Panel::Editor, |s| {
                 s.child(popover_enter(
                     "overlay-enter",
@@ -2102,9 +2054,6 @@ impl Render for NotesApp {
                     false,
                     reduce_motion,
                 ))
-            })
-            .when_some(self.html_source_popover(window, cx), |s, popover| {
-                s.child(popover_enter("html-enter", popover, false, reduce_motion))
             })
     }
 }

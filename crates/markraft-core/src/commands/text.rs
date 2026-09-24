@@ -321,6 +321,9 @@ pub fn replace_selection_changes(
     if !into_inline || !block_first || resolved_from.depth() == 0 {
         return vec![Change::replace(from, to, slice.clone()).with_fit(Fit::Auto)];
     }
+    if let Some(change) = items_for_empty_item(schema, &resolved_from, &resolved_to, slice) {
+        return vec![change];
+    }
 
     // Closed block content cannot merge into a textblock, so split it open.
     let mut start = from;
@@ -339,4 +342,52 @@ pub fn replace_selection_changes(
         tokens.push(Token::Open(resolved_to.parent().markup().clone()));
     }
     vec![Change::replace(start, end, Slice::from_tokens(&tokens)).with_fit(Fit::Auto)]
+}
+
+/// A list pasted into an empty item of a list: the pasted items take that
+/// item's place, beside the items around it, rather than nesting a list of
+/// their own inside it — where the item before would read as holding them.
+///
+/// The empty textblock must be all the item holds, and every pasted item one
+/// the surrounding list can hold, so an ordered list pasted into a bullet list
+/// gives it more items rather than a list inside one.
+fn items_for_empty_item(
+    schema: &Schema,
+    from: &ResolvedPos,
+    to: &ResolvedPos,
+    slice: &Slice,
+) -> Option<Change> {
+    let depth = from.depth();
+    let block = from.parent();
+    if depth < 2
+        || !from.same_parent(to)
+        || block.content_size() != 0
+        || slice.open_end() != 0
+        || slice.content().child_count() != 1
+    {
+        return None;
+    }
+    let item = from.node(depth - 1);
+    let list = from.node(depth - 2);
+    let pasted = slice.content().first_child()?;
+    let fits = |node: &Node| {
+        schema.can_contain(list.type_id(), node.type_id())
+            && schema.can_contain(list.type_id(), item.type_id())
+    };
+    if item.child_count() != 1
+        || pasted.type_id() == item.type_id()
+        || pasted.child_count() == 0
+        || !pasted.children().all(fits)
+    {
+        return None;
+    }
+    let items = Fragment::from_nodes(pasted.children().cloned());
+    Some(
+        Change::replace(
+            from.before(depth - 1),
+            from.after(depth - 1),
+            Slice::from_fragment(items),
+        )
+        .with_fit(Fit::Auto),
+    )
 }

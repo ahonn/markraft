@@ -502,9 +502,28 @@ impl Library {
                         .is_some_and(|location| location.to_lowercase().contains(&query))
             })
             .collect();
+        // How closely a note answers the query: its title the query itself, then a
+        // title that starts with it, then one that holds it, then anything else that
+        // matched — body or path. Without a query every note ranks alike.
+        let rank = |note: &Note| -> u8 {
+            if query.is_empty() {
+                return 0;
+            }
+            let title = note.title().to_lowercase();
+            if title == query {
+                0
+            } else if title.starts_with(&query) {
+                1
+            } else if title.contains(&query) {
+                2
+            } else {
+                3
+            }
+        };
         notes.sort_by(|a, b| {
-            b.pinned
-                .cmp(&a.pinned)
+            rank(a)
+                .cmp(&rank(b))
+                .then(b.pinned.cmp(&a.pinned))
                 .then(b.updated_at.cmp(&a.updated_at))
                 .then(a.id.cmp(&b.id))
         });
@@ -705,6 +724,30 @@ mod tests {
         assert!(library.delete(&initial));
         assert_eq!(library.search("", None).len(), 1);
         assert_eq!(library.active_note().document, doc::empty());
+    }
+
+    #[test]
+    fn a_search_puts_the_note_titled_by_it_first() {
+        let mut library = Library::default();
+        let titled = library.new_note(doc::from_markdown("hello world"));
+        let starts = library.new_note(doc::from_markdown("hello world tour"));
+        // Written last, so recency alone would put it first.
+        let mentions = library.new_note(doc::from_markdown("links\n\nsee [[hello world]]"));
+        for note in &mut library.notes {
+            note.updated_at = if note.id == mentions {
+                3
+            } else if note.id == starts {
+                2
+            } else {
+                1
+            };
+        }
+        let order: Vec<_> = library
+            .search("Hello World", None)
+            .iter()
+            .map(|note| note.id.clone())
+            .collect();
+        assert_eq!(order, [titled, starts, mentions]);
     }
 
     #[test]

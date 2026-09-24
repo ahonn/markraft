@@ -53,6 +53,7 @@
 //! when neither works.
 
 mod inline;
+pub(crate) use inline::is_break_tag;
 
 use std::cell::Ref;
 

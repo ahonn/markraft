@@ -79,7 +79,7 @@ use crate::derive::{BlockKind, Conceal, DeriveContext, Derived, Style, StyleSpan
 use crate::house::emphasis_candidates;
 use crate::house_style;
 use crate::inline::style_delimiters;
-use crate::pending::{Layer, pending, pending_after, reads_back, runs};
+use crate::pending::{Layer, pending, pending_after, runs};
 use crate::schema as md;
 use crate::serialize::spell_run;
 use crate::textblock::{Item, Items, block_kind, document_context, style_mark, syntax_mark};
@@ -1056,15 +1056,16 @@ fn toggle_at_cursor(state: &EditorState, style: &Style) -> Formatted {
             .ok_or_else(refusal);
     }
 
-    // At the end of what was typed in the pair, when a reader does not take
-    // it as the style — `**ni |**`, whose closing run follows a space — step
-    // out past the closing runs. Leaving the pair moves them inside the
-    // whitespace, `**ni** |`, as leaving it any other way does.
+    // At the end of what was typed in the pair the toggle wrote: step out past
+    // the closing runs, so ⌘B, text, ⌘B types the text bold and goes on plain.
+    // A span that was there before is another matter; see below. When a reader
+    // does not take what was typed as the style — `**ni |**`, whose closing run
+    // follows a space — leaving the pair moves the runs inside the whitespace,
+    // `**ni** |`, as leaving it any other way does.
     if let Some(pending) = pending(state).filter(|pending| {
         !pending.is_empty()
             && pending.close.start == caret
             && pending.layers.iter().any(|layer| layer.style == *style)
-            && !reads_back(schema, doc, pending)
     }) {
         return Ok(Some(caret_moved(pending.close.end)));
     }
@@ -1079,48 +1080,45 @@ fn toggle_at_cursor(state: &EditorState, style: &Style) -> Formatted {
             .ok_or_else(refusal);
     }
 
-    // Inside a span of this style, the innermost one: leave it.
+    // Inside a span of this style, the innermost one — right after its closing
+    // run counts, as the caret there is in the span to Typora — take the
+    // style off the whole span, as Typora does, the caret staying where it
+    // was in the text.
     let span = block.derived.styles.iter().rfind(|span| {
         let (open, close) = delimiters(&block.derived, span);
-        span.style == *style && !open.is_empty() && open.end <= offset && offset <= close.start
+        span.style == *style && !open.is_empty() && open.end <= offset && offset <= close.end
     });
     if let Some(span) = span {
         let (open, close) = delimiters(&block.derived, span);
-        // Only delimiters — of the spans inside this one — between the caret
-        // and the edge of the span's content: step over the delimiters.
-        let only_delimiters = |range: Range<usize>| {
-            range.clone().all(|index| {
-                block
-                    .derived
-                    .conceal_at(index)
-                    .is_some_and(|conceal| is_delimiter(&block.derived, conceal))
-            })
-        };
-        let to = if only_delimiters(offset..close.start) {
-            Some(close.end)
-        } else if only_delimiters(open.end..offset) {
-            Some(open.start)
-        } else {
-            None
-        };
-        if let Some(to) = to {
-            return Ok(Some(caret_moved(start + to)));
+        if open.end < close.start {
+            return format_around(
+                state,
+                start + open.end..start + close.start,
+                caret,
+                Op::Remove(style.clone()),
+            );
         }
-        // Strictly inside: close the span at the caret and open it again,
-        // with the caret between.
-        let text = block.items.text();
-        let run = |range: Range<usize>| -> String {
-            text.chars().skip(range.start).take(range.len()).collect()
-        };
-        let layer = Layer {
-            style: style.clone(),
-            adds: false,
-            open: run(close),
-            close: run(open),
-        };
-        return write_pair(schema, &block, offset..offset, vec![layer])
-            .map(Some)
-            .ok_or_else(refusal);
+    }
+
+    // In a code span every other style is characters: refuse it rather than
+    // style the word the code holds.
+    let in_literal = block.derived.styles.iter().any(|span| {
+        let (open, close) = delimiters(&block.derived, span);
+        is_literal(&span.style) && open.end <= offset && offset <= close.start
+    });
+    if in_literal {
+        return Err(refusal());
+    }
+
+    // In a word: put the style on the whole word, as Typora does, the caret
+    // staying where it was in it.
+    if let Some(word) = word_around(&block.items.text(), offset) {
+        return format_around(
+            state,
+            start + word.start..start + word.end,
+            caret,
+            Op::Add(style.clone()),
+        );
     }
 
     // Anywhere else: the empty pair, where typing takes the style on.
@@ -1158,6 +1156,81 @@ fn toggle_at_cursor(state: &EditorState, style: &Style) -> Formatted {
         Some(to) => Ok(Some(caret_moved(start + to))),
         None => Err(refusal()),
     }
+}
+
+/// [`format`] over `range` rather than the selection, with the caret left
+/// where it was in the text: `format` rewrites the range whole, and selects
+/// the text it put the delimiters around, so the caret goes that far into it.
+/// At the start of `range` it lands inside the new delimiters; past its end —
+/// right after a closing run — at the end of the text.
+fn format_around(state: &EditorState, range: Range<usize>, caret: usize, op: Op) -> Formatted {
+    let over = state
+        .update([TransactionSpec::new().selection(Selection::text(range.start, range.end))])
+        .map_err(|_| unreadable())?
+        .state()
+        .clone();
+    let Some(spec) = format(&over, op, "format.mark")? else {
+        return Ok(None);
+    };
+    let applied = over.update([spec.clone()]).map_err(|_| unreadable())?;
+    let doc = applied.new_doc();
+    let text = applied.selection().ok_or_else(unreadable)?;
+    let (from, to) = (text.from(doc), text.to(doc));
+    let caret = (from + caret.saturating_sub(range.start)).min(to);
+    Ok(Some(spec.selection(Selection::cursor(caret))))
+}
+
+/// The word the caret at `offset` in `text` stands in or at an end of, as
+/// Typora takes it for a style toggled at a caret: a run of letters and
+/// digits — a `.` between two digits included, as in `12.34` — or a run of
+/// CJK characters. Anything else ends a word. The word before the caret wins
+/// over the one after it.
+fn word_around(text: &str, offset: usize) -> Option<Range<usize>> {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Class {
+        Word,
+        Cjk,
+    }
+    fn is_cjk(c: char) -> bool {
+        matches!(c,
+            '\u{3040}'..='\u{30FF}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{AC00}'..='\u{D7AF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{20000}'..='\u{2FA1F}')
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let class_at = |index: usize| -> Option<Class> {
+        let c = *chars.get(index)?;
+        let between_digits = c == '.'
+            && index > 0
+            && chars[index - 1].is_ascii_digit()
+            && chars.get(index + 1).is_some_and(char::is_ascii_digit);
+        if is_cjk(c) {
+            Some(Class::Cjk)
+        } else if c.is_alphanumeric() || between_digits {
+            Some(Class::Word)
+        } else {
+            None
+        }
+    };
+    let (seed, class) = match offset
+        .checked_sub(1)
+        .and_then(|before| Some((before, class_at(before)?)))
+    {
+        Some(found) => found,
+        None => (offset, class_at(offset)?),
+    };
+    let mut from = seed;
+    while from > 0 && class_at(from - 1) == Some(class) {
+        from -= 1;
+    }
+    let mut to = seed + 1;
+    while class_at(to) == Some(class) {
+        to += 1;
+    }
+    Some(from..to)
 }
 
 /// The caret moved to `pos`, and nothing else.

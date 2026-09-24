@@ -93,7 +93,7 @@ impl Sessions {
     }
 }
 
-impl NotesApp {
+impl MarkraftApp {
     pub(super) fn editor(&self) -> Entity<EditorView> {
         self.sessions
             .get(&self.library.active_id)
@@ -137,6 +137,16 @@ impl NotesApp {
             .zip(note.path.as_ref())
             .map(|(source, path)| assets::image_root(source.source(), path))
             .unwrap_or(Ok(None));
+        // A note not yet saved has no file for its edits to be written back through,
+        // and its first save writes it whole. It is held to an empty source, which
+        // refuses what a whole write could not say — the same edits a saved note's
+        // guard refuses — rather than taking them and losing them on that first save.
+        let source = source.or_else(|| {
+            (note.path.is_none() && self.persistence.is_some()).then(|| {
+                markraft_commonmark::SourceDocument::parse(doc::schema(), "")
+                    .map_err(|error| error.to_string())
+            })
+        });
         let style = self.editor_style();
         let editor = cx.new(|cx| {
             EditorView::new(
@@ -147,7 +157,7 @@ impl NotesApp {
                     .mark_toggle(doc::mark_toggle(refusal_message))
                     .link_setter(doc::link_setter(refusal_message))
                     .split_wrap(doc::split_wrap())
-                    .enter_rule(doc::enter_rule())
+                    .enter_rule(doc::enter_rule(self.shortcuts.clone()))
                     // Shift-Return writes the break the preferences ask for.
                     .break_spelling(std::sync::Arc::new(|| {
                         markraft_commonmark::house_style().hard_break.marker()
@@ -235,14 +245,6 @@ impl NotesApp {
                         && this.interaction.panel() == Panel::Editor
                     {
                         this.open_code_language(*pos, cx);
-                    }
-                    return;
-                }
-                if let EditorEvent::RawHtmlRequested { pos } = event {
-                    if this.library.active_id == note_id
-                        && this.interaction.panel() == Panel::Editor
-                    {
-                        this.open_html_source(*pos, window, cx);
                     }
                     return;
                 }
@@ -340,7 +342,7 @@ impl NotesApp {
     }
 }
 
-impl NotesApp {
+impl MarkraftApp {
     /// What a note editor fetches remote images with: nothing while the preference
     /// is off, so each one reads as an image this editor does not load.
     fn remote_image_fetcher(&self) -> Option<markraft_gpui::RemoteImageFetcher> {
@@ -351,7 +353,7 @@ impl NotesApp {
     }
 
     /// Write emoji characters rather than shortcodes, or back, in every open note at
-    /// once: their menus and auto-replace share [`NotesApp::emoji`].
+    /// once: their menus and auto-replace share [`MarkraftApp::emoji`].
     pub(super) fn set_emoji_characters(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.library.preferences.emoji_characters == enabled {
             return;

@@ -714,19 +714,18 @@ fn typing_consecutive_and_trailing_spaces_survives_each_guard_check() {
     }
 }
 
-/// Nothing inline is guarded any more. What is still refused is a change the
-/// codec can neither patch in place nor rewrite whole: here the setext
-/// underline is block-level spelling the writer would respell as `#`, so the
-/// block is not rewritten and no local patch turns it into a level-three
-/// heading.
+/// A block-level change the user asks for respells the block it touches the
+/// way the writer writes it: a setext heading made level three becomes an ATX
+/// heading, and the paragraph after it keeps its bytes.
 #[test]
-fn a_block_the_writer_would_respell_is_not_rewritten_whole() {
+fn a_structural_edit_respells_the_block_it_touches() {
     assert_eq!(
         edit(
             "Title\n=====\n\nmath $x$ ^id\n",
             "### Title\n\nmath $x$ ^id\n"
-        ),
-        Err(SourceError::UnsupportedEdit)
+        )
+        .unwrap(),
+        "### Title\n\nmath $x$ ^id\n"
     );
 }
 
@@ -746,4 +745,315 @@ fn edits_in_and_around_footnote_definitions_save_exactly() {
             expected
         );
     }
+}
+
+/// Ticking or unticking a task box changes the one character inside the box,
+/// however the rest of the item is spelled — an `[X]`, a `+` marker, two
+/// spaces after the marker — and whichever item of the list it is.
+#[test]
+fn toggling_a_task_box_changes_only_the_box() {
+    for (original, expected) in [
+        ("- [X] done\n", "- [ ] done\n"),
+        ("*  [x] a\n", "*  [ ] a\n"),
+        ("+ [ ] a\n", "+ [x] a\n"),
+        ("+ [ ] [x] a\n", "+ [x] [x] a\n"),
+        (
+            "- [X] a\n-  [X] b\n\ntext [X]\n",
+            "- [X] a\n-  [ ] b\n\ntext [X]\n",
+        ),
+        ("> 1.  [X] quoted\n", "> 1.  [ ] quoted\n"),
+    ] {
+        assert_eq!(
+            edit(original, expected).unwrap_or_else(|error| panic!("{original:?}: {error}")),
+            expected
+        );
+    }
+}
+
+/// A table edit the user asks for by shape — a column added or deleted, an
+/// alignment changed — respells the table the way the writer writes tables
+/// when its hand-written spelling cannot take the change in place, as Typora
+/// does. Only that table is rewritten.
+#[test]
+fn a_structural_edit_respells_a_hand_written_table() {
+    let before = "Intro  \nwith a break\n\n|a|b|\n|-|-|\n|1|2|\n\n*  after\n";
+    for (edited, table) in [
+        (
+            "|a|b||\n|-|-|-|\n|1|2||\n",
+            "| a   | b   |     |\n| --- | --- | --- |\n| 1   | 2   |     |\n",
+        ),
+        ("|a|\n|-|\n|1|\n", "| a   |\n| --- |\n| 1   |\n"),
+        (
+            "|a|b|\n|:-:|-|\n|1|2|\n",
+            "| a   | b   |\n| :-: | --- |\n| 1   | 2   |\n",
+        ),
+    ] {
+        let original = before;
+        let target = before.replace("|a|b|\n|-|-|\n|1|2|\n", edited);
+        let expected = before.replace("|a|b|\n|-|-|\n|1|2|\n", table);
+        assert_eq!(
+            edit(original, &target).unwrap_or_else(|error| panic!("{edited:?}: {error}")),
+            expected,
+            "{edited:?}"
+        );
+    }
+}
+
+/// Text typed into a hand-written table's cell still patches just that cell:
+/// only a change of the table's shape respells it.
+#[test]
+fn a_text_edit_keeps_a_hand_written_table_spelling() {
+    let original = "|a|b|\n|-|-|\n|1|2|\n";
+    for expected in ["|a|b|\n|-|-|\n|1 more|2|\n", "|a|b|\n|-|-|\n|1|2 \\| 3|\n"] {
+        assert_eq!(edit(original, expected).unwrap(), expected);
+    }
+}
+
+/// Deleting a body row of a hand-written table drops just that row's line.
+#[test]
+fn deleting_a_row_of_a_hand_written_table_drops_its_line() {
+    for (original, expected) in [
+        ("|a|b|\n|-|-|\n|1|2|\n", "|a|b|\n|-|-|\n"),
+        (
+            "|a|b|\n|-|-|\n|1|2|\n|3|4|\n\nnext\n",
+            "|a|b|\n|-|-|\n|3|4|\n\nnext\n",
+        ),
+        (
+            "|a|b|\r\n|-|-|\r\n|1|2|\r\n|3|4|\r\n",
+            "|a|b|\r\n|-|-|\r\n|1|2|\r\n",
+        ),
+    ] {
+        assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
+    }
+}
+
+/// A body row added to a hand-written table goes in as a line of its own,
+/// leaving every row that was there as it was spelled.
+#[test]
+fn adding_a_row_to_a_hand_written_table_leaves_its_rows_alone() {
+    for (original, expected) in [
+        (
+            "|a|b|\n|-|-|\n|1|2|\n",
+            "|a|b|\n|-|-|\n|     |     |\n|1|2|\n",
+        ),
+        (
+            "|a|b|\n|-|-|\n|1|2|\n|3|4|\n\nnext\n",
+            "|a|b|\n|-|-|\n|1|2|\n|     |     |\n|3|4|\n\nnext\n",
+        ),
+        (
+            "|a|b|\r\n|-|-|\r\n|1|2|\r\n",
+            "|a|b|\r\n|-|-|\r\n|1|2|\r\n|     |     |\r\n",
+        ),
+    ] {
+        assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
+    }
+}
+
+/// `node` with `edit` applied to the container at `path`'s children.
+fn edit_children(
+    node: &markraft_core::Node,
+    path: &[usize],
+    edit: &dyn Fn(&mut Vec<markraft_core::Node>),
+) -> markraft_core::Node {
+    let mut children: Vec<_> = node.children().cloned().collect();
+    match path {
+        [] => edit(&mut children),
+        [index, rest @ ..] => children[*index] = edit_children(&children[*index], rest, edit),
+    }
+    node.copy(markraft_core::Fragment::from_nodes(children))
+}
+
+fn empty_paragraph() -> markraft_core::Node {
+    let schema = commonmark_schema();
+    let source = SourceDocument::parse(&schema, "a").unwrap();
+    source
+        .document()
+        .child(0)
+        .copy(markraft_core::Fragment::empty())
+}
+
+/// `original` saved with an empty paragraph put at `index` of the container
+/// at `path` — what Return at the start of a block leaves behind.
+fn with_empty_paragraph(
+    original: &str,
+    path: &[usize],
+    index: usize,
+) -> Result<String, SourceError> {
+    let schema = commonmark_schema();
+    let source = SourceDocument::parse(&schema, original).unwrap();
+    let target = edit_children(source.document(), path, &|children| {
+        children.insert(index, empty_paragraph())
+    });
+    source.render(&schema, &target)
+}
+
+/// An empty paragraph is typing in progress — Return pressed at the start of a
+/// block, before anything is typed on the new line. It says nothing a file can
+/// hold, so saving one leaves the file as it was, or at most adds the blank
+/// line it stands for, and the note reads back as it was.
+#[test]
+fn an_empty_paragraph_saves_as_nothing() {
+    let schema = commonmark_schema();
+    for (original, path, index) in [
+        ("para one\n\nsecond *em*\n", &[][..], 0),
+        ("para one\n\nsecond *em*\n", &[][..], 1),
+        ("# Head\n\ntext\n", &[][..], 0),
+        ("Title\n===\n\ntext\n", &[][..], 0),
+        ("text[^1]\n\n[^1]: note\n", &[][..], 0),
+        ("$$\nx^2\n$$\n\ninline $y$ math\n", &[][..], 0),
+        ("<div>html</div>\n\nafter\n", &[][..], 0),
+        ("> quote\n> more\n\n> [!note]\n> callout\n", &[0][..], 0),
+        ("> quote\n> more\n\n> [!note]\n> callout\n", &[1][..], 0),
+        ("> quote\n> more\n\n> [!note]\n> callout\n", &[1][..], 1),
+        ("text[^1]\n\n[^1]: note\n", &[1][..], 0),
+    ] {
+        let saved = with_empty_paragraph(original, path, index)
+            .unwrap_or_else(|error| panic!("{original:?} {path:?} {index}: {error}"));
+        assert_eq!(
+            SourceDocument::parse(&schema, &saved).unwrap().document(),
+            SourceDocument::parse(&schema, original).unwrap().document(),
+            "{original:?} {path:?} {index}: {saved:?}"
+        );
+    }
+    assert_eq!(
+        with_empty_paragraph("para one\n\nsecond\n", &[], 0).unwrap(),
+        "para one\n\nsecond\n"
+    );
+}
+
+/// A list item that starts with an empty paragraph and goes on — its first
+/// line emptied, or Return at the end of an item's first paragraph splitting
+/// it as Typora does — is written with its marker alone on its line and the
+/// rest of the item on the lines after it, which reads back as the same item
+/// without the empty paragraph.
+#[test]
+fn an_empty_paragraph_that_holds_a_list_item_open_is_written_as_an_empty_line() {
+    let schema = commonmark_schema();
+    let original = "- first\n\n  para2\n- next\n";
+    let source = SourceDocument::parse(&schema, original).unwrap();
+    let emptied = edit_children(source.document(), &[0, 0], &|children| {
+        children[0] = empty_paragraph()
+    });
+    assert_eq!(
+        source.render(&schema, &emptied).as_deref(),
+        Ok("- \n  para2\n\n- next\n")
+    );
+    let opened = edit_children(source.document(), &[0, 0], &|children| {
+        children.insert(0, empty_paragraph())
+    });
+    assert_eq!(
+        source.render(&schema, &opened).as_deref(),
+        Ok("- \n  first\n\n  para2\n- next\n")
+    );
+}
+
+/// A callout whose body is emptied still saves as that callout, never as a
+/// quote holding the marker as text.
+#[test]
+fn a_callout_emptied_to_an_empty_paragraph_stays_a_callout() {
+    let schema = commonmark_schema();
+    let original = "> [!note]\n> callout\n\nafter\n";
+    let source = SourceDocument::parse(&schema, original).unwrap();
+    let emptied = edit_children(source.document(), &[0], &|children| {
+        children[0] = empty_paragraph()
+    });
+    let saved = source.render(&schema, &emptied).unwrap();
+    let callout = SourceDocument::parse(&schema, &saved)
+        .unwrap()
+        .document()
+        .child(0)
+        .clone();
+    assert!(callout.same_markup(emptied.child(0)), "{saved:?}");
+    assert!(saved.ends_with("\n\nafter\n"), "{saved:?}");
+}
+
+/// `edit`, with a hand-written block either side of `original` and `edited`
+/// that the save must leave byte for byte.
+fn edit_between(original: &str, edited: &str) -> String {
+    const BEFORE: &str = "Before\n======\n\n";
+    const AFTER: &str = "\n+  after  \n   more\n";
+    let saved = edit(
+        &format!("{BEFORE}{original}{AFTER}"),
+        &format!("{BEFORE}{edited}{AFTER}"),
+    )
+    .unwrap_or_else(|error| panic!("{original:?} -> {edited:?}: {error}"));
+    assert!(saved.starts_with(BEFORE), "{saved:?}");
+    assert!(saved.ends_with(AFTER), "{saved:?}");
+    saved[BEFORE.len()..saved.len() - AFTER.len()].to_owned()
+}
+
+/// Structural edits on hand-written blocks — a setext heading, a list spaced
+/// or ticked otherwise than the writer would — respell just the blocks they
+/// touch, as a new note would write them, and leave the blocks around them as
+/// they were: formats, list conversions, joins and lifts.
+#[test]
+fn structural_edits_respell_only_the_hand_written_blocks_they_touch() {
+    for (original, edited) in [
+        // A setext heading made a paragraph, another level, a quote, a code
+        // block or a list, or joined with the paragraph after it.
+        ("Title\n===\n\ntext\n", "Title\n\ntext\n"),
+        ("Title\n===\n\ntext\n", "## Title\n\ntext\n"),
+        ("Title\n===\n\ntext\n", "> # Title\n\ntext\n"),
+        ("Title\n===\n\ntext\n", "```\nTitle\n```\n\ntext\n"),
+        ("Title\n===\n\ntext\n", "- # Title\n\ntext\n"),
+        ("Title\n===\n\ntext\n", "1. # Title\n\ntext\n"),
+        ("Title\n===\n\ntext\n", "- [ ] Title\n\ntext\n"),
+        ("Title\n===\n\ntext\n", "# Titletext\n"),
+        // An item's text made a code block.
+        ("* a\n*  b\n", "* a\n* ```\n  b\n  ```\n"),
+        // A task list converted, joined, or its last item lifted out.
+        ("- [ ] t\n- [X] u\n", "- t\n- u\n"),
+        ("- [ ] t\n- [X] u\n", "1. [ ] t\n2. [X] u\n"),
+        ("- [ ] t\n- [X] u\n", "- [ ] tu\n"),
+        ("- [ ] t\n- [X] u\n", "- [ ] t\n\nu\n"),
+        // A loose item's paragraphs joined, the list converted, a paragraph
+        // lifted out of it.
+        ("- first\n\n  para2\n- next\n", "- firstpara2\n- next\n"),
+        ("- first\n\n  para2\n- next\n", "- first\n\n  para2next\n"),
+        (
+            "- first\n\n  para2\n- next\n",
+            "1. first\n\n   para2\n2. next\n",
+        ),
+        (
+            "- first\n\n  para2\n- next\n",
+            "- first\n\npara2\n\n- next\n",
+        ),
+    ] {
+        // The patch may find a smaller change than the whole block — a
+        // lifted paragraph only loses its indent — so what is held is the
+        // note the file reads back as.
+        let schema = commonmark_schema();
+        let saved = edit_between(original, edited);
+        assert_eq!(
+            SourceDocument::parse(&schema, &saved).unwrap().document(),
+            SourceDocument::parse(&schema, edited).unwrap().document(),
+            "{original:?} -> {saved:?}"
+        );
+    }
+}
+
+/// Typing in a setext heading or a hand-spaced item keeps its spelling, and
+/// so does a style added to the heading's text.
+#[test]
+fn text_edits_keep_hand_written_block_spelling() {
+    for (original, edited) in [
+        ("Title\n===\n\ntext\n", "Title and more\n===\n\ntext\n"),
+        ("Title\n===\n\ntext\n", "~~Title~~\n===\n\ntext\n"),
+        ("Title\n===\n\ntext\n", "Ti~~~~tle\n===\n\ntext\n"),
+        ("* a\n*  b\n", "* a\n*  bc\n"),
+        ("- [ ] t\n- [X] u\n", "- [ ] t\n- [X] uv\n"),
+    ] {
+        assert_eq!(edit_between(original, edited), edited, "{original:?}");
+    }
+}
+
+/// Text the hand-written spelling cannot hold respells its block: a setext
+/// heading whose text opens with `~~~~` — a style's empty pair written at its
+/// start — would read as a code fence, so the heading becomes an ATX one.
+#[test]
+fn text_a_spelling_cannot_hold_respells_its_block() {
+    assert_eq!(
+        edit_between("Title\n===\n\ntext\n", "# ~~~~Title\n\ntext\n"),
+        "# ~~~~Title\n\ntext\n"
+    );
 }

@@ -15,10 +15,19 @@
 //! A footnote definition, too, ends on Enter the way Typora ends it: at the
 //! end of its last paragraph, the next paragraph goes after the definition
 //! rather than into it.
+//!
+//! A block a line makes goes where the line was, unless the container holding
+//! the line needs a paragraph first. A task item is one: GFM writes its check
+//! box at the start of its first paragraph, so a fence ended on the check box
+//! line leaves that line an empty paragraph — `- [ ] ` on a line of its own —
+//! and puts the code block under it, still inside the item. The item stays a
+//! task, the block is where it was typed, and `- [ ] ` followed by an indented
+//! fence reads back as exactly that.
 
+use markraft_core::commands::structure::can_replace_with;
 use markraft_core::commands::{Command, command};
 use markraft_core::{
-    Attrs, Change, EditorState, Fragment, MarkSet, Selection, Slice, TransactionSpec, attrs,
+    Attrs, Change, EditorState, Fragment, MarkSet, Node, Selection, Slice, TransactionSpec, attrs,
 };
 
 use crate::from_markdown;
@@ -97,6 +106,12 @@ struct Line {
     /// The position after it.
     after: usize,
     text: String,
+    /// The node holding the paragraph, and the paragraph's index in it.
+    parent: Node,
+    index: usize,
+    /// The paragraph itself, emptied: what stays when its container needs a
+    /// paragraph before the new block.
+    emptied: Node,
 }
 
 impl Line {
@@ -119,20 +134,45 @@ impl Line {
         if items.0.iter().any(|item| !matches!(item, Item::Char(_))) {
             return None;
         }
+        let container = depth.checked_sub(1)?;
         Some(Line {
             before: resolved.before(depth),
             after: resolved.after(depth),
             text: items.text(),
+            parent: resolved.node(container).clone(),
+            index: resolved.index(container),
+            emptied: paragraph.copy(Fragment::empty()),
         })
     }
 
     /// Put `blocks` where the paragraph is, with the caret in their first
     /// textblock after `skip` others.
+    ///
+    /// Where the paragraph's container cannot hold `blocks` in its place — a
+    /// task item whose first block has to be the paragraph its check box is
+    /// written in — the paragraph stays, emptied, with `blocks` after it. Where
+    /// even that does not fit, the line is left as it is.
     fn replace_with(
         &self,
         state: &EditorState,
         (blocks, skip): (Fragment, usize),
     ) -> Option<TransactionSpec> {
+        let schema = state.schema();
+        let fits = |blocks: &Fragment| {
+            let types: Vec<_> = blocks.iter().map(Node::type_id).collect();
+            can_replace_with(schema, &self.parent, self.index, self.index + 1, &types)
+        };
+        let (blocks, skip) = if fits(&blocks) {
+            (blocks, skip)
+        } else {
+            let kept = Fragment::from_nodes(
+                std::iter::once(self.emptied.clone()).chain(blocks.iter().cloned()),
+            );
+            if !fits(&kept) {
+                return None;
+            }
+            (kept, skip + 1)
+        };
         let spec = TransactionSpec::new().changes(vec![Change::replace(
             self.before,
             self.after,
@@ -140,7 +180,6 @@ impl Line {
         )]);
         let applied = state.update([spec]).ok()?;
         let doc = applied.new_doc();
-        let schema = state.schema();
         let mut caret = None;
         let mut seen = 0;
         doc.nodes_between(self.before, doc.content_size(), &mut |node, pos, _, _| {
@@ -229,7 +268,15 @@ fn divider(state: &EditorState, text: &str) -> Option<(Fragment, usize)> {
             )
             .ok()
     };
-    let divider = create(md::HORIZONTAL_RULE)?;
+    let mark = text.chars().find(|c| !matches!(c, ' ' | '\t'))?;
+    let divider = schema
+        .create(
+            schema.node_id(md::HORIZONTAL_RULE)?,
+            attrs! { "mark" => mark.to_string() },
+            MarkSet::empty(),
+            Fragment::empty(),
+        )
+        .ok()?;
     let paragraph = create(md::PARAGRAPH)?;
     Some((Fragment::from_nodes([divider, paragraph]), 0))
 }

@@ -26,7 +26,6 @@ struct NotePopover {
 pub(super) struct Interaction {
     panel: Panel,
     popover: Option<NotePopover>,
-    html: Option<ui::html::HtmlEditor>,
 }
 
 impl Default for Interaction {
@@ -34,7 +33,6 @@ impl Default for Interaction {
         Self {
             panel: Panel::Editor,
             popover: None,
-            html: None,
         }
     }
 }
@@ -47,9 +45,6 @@ impl Interaction {
         self.popover.as_ref().map(|popover| &popover.content)
     }
     pub fn input_kind(&self) -> Option<InputKind> {
-        if self.html.is_some() {
-            return None;
-        }
         match self.popover() {
             Some(Popover::Link(LinkPopover::Edit)) => return Some(InputKind::Link),
             Some(Popover::CodeLanguage(_)) => return Some(InputKind::Language),
@@ -63,17 +58,11 @@ impl Interaction {
         }
     }
     pub fn switch_panel(&mut self, panel: Panel) -> bool {
-        if self.html.is_some() {
-            return false;
-        }
         self.panel = panel;
         self.popover = None;
         true
     }
     pub fn open(&mut self, note: &str, popover: Popover) -> bool {
-        if self.html.is_some() {
-            return false;
-        }
         self.panel = Panel::Editor;
         self.popover = Some(NotePopover {
             note: note.to_owned(),
@@ -130,17 +119,6 @@ impl Interaction {
     pub fn file_status(&self) -> bool {
         matches!(self.popover(), Some(Popover::FileStatus))
     }
-    pub fn html(&self) -> Option<&ui::html::HtmlEditor> {
-        self.html.as_ref()
-    }
-    pub fn begin_html(&mut self, editor: ui::html::HtmlEditor) {
-        self.panel = Panel::Editor;
-        self.popover = None;
-        self.html = Some(editor);
-    }
-    pub fn end_html(&mut self) {
-        self.html = None;
-    }
 }
 
 pub(super) struct InputSession {
@@ -150,7 +128,7 @@ pub(super) struct InputSession {
     _changes: Subscription,
 }
 
-impl NotesApp {
+impl MarkraftApp {
     /// Only a surface with an input may read it. Each opening creates a fresh editor,
     /// so selection, undo and IME state cannot leak into the next surface.
     pub(super) fn query(&self) -> &Entity<EditorView> {
@@ -223,18 +201,12 @@ impl NotesApp {
     }
 
     pub(super) fn set_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
-        if self.interaction.html().is_some() {
-            return;
-        }
         self.leave_input(cx);
         self.interaction.switch_panel(panel);
         self.picker.forget_question();
     }
 
     pub(super) fn show_popover(&mut self, popover: Popover, cx: &mut Context<Self>) {
-        if self.interaction.html().is_some() {
-            return;
-        }
         self.leave_input(cx);
         self.interaction.open(&self.library.active_id, popover);
         self.picker.forget_question();

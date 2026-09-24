@@ -110,7 +110,7 @@ impl TableEdit {
     }
 }
 
-impl NotesApp {
+impl MarkraftApp {
     /// Whether the ring rests on the table toolbar rather than on the surface below it.
     fn table_ringed(&self) -> bool {
         self.ring.at().is_some_and(|id| id.starts_with(STOP))
@@ -137,7 +137,6 @@ impl NotesApp {
         let ringed = self.table_ringed();
         let open = self.interaction.panel() == Panel::Editor
             && self.interaction.popover().is_none()
-            && self.interaction.html().is_none()
             && (ringed || self.editor().focus_handle(cx).is_focused(window));
         self.toolbar.set_table(
             open.then(|| self.editor().read(cx).table_at_caret())

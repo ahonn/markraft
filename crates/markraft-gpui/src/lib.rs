@@ -16,7 +16,6 @@ mod emoji;
 mod extension;
 mod footnotes;
 mod format_state;
-mod html;
 mod images;
 pub mod ime;
 mod keymap;
@@ -107,7 +106,6 @@ actions!(
         Task,
         ToggleTask,
         ChooseCodeLanguage,
-        EditRawHtml,
         CopyCodeBlock,
         CharacterPalette,
         LineBreak,
@@ -154,6 +152,48 @@ fn is_web_url(text: &str) -> bool {
         && !text.contains(char::is_whitespace)
 }
 
+/// What a paste puts in a table cell. A GFM row is one line, so the cell takes
+/// the inline content of each block pasted, one after another with `between`
+/// — a space where it is `None` — rather than the blocks themselves, which
+/// would open cells and rows of their own.
+fn cell_content(
+    schema: &Schema,
+    slice: &markraft_core::Slice,
+    between: Option<&Node>,
+) -> markraft_core::Slice {
+    fn runs(schema: &Schema, node: &Node, out: &mut Vec<Vec<Node>>, inline: &mut bool) {
+        if node.is_inline(schema) {
+            if !*inline {
+                out.push(Vec::new());
+                *inline = true;
+            }
+            out.last_mut().expect("pushed").push(node.clone());
+        } else if node.is_textblock(schema) {
+            out.push(node.children().cloned().collect());
+            *inline = false;
+        } else {
+            *inline = false;
+            for child in node.children() {
+                runs(schema, child, out, inline);
+            }
+            *inline = false;
+        }
+    }
+    let mut found = Vec::new();
+    let mut inline = false;
+    for node in slice.content().iter() {
+        runs(schema, node, &mut found, &mut inline);
+    }
+    let mut nodes = Vec::new();
+    for run in found.into_iter().filter(|run| !run.is_empty()) {
+        if !nodes.is_empty() {
+            nodes.push(between.cloned().unwrap_or_else(|| schema.text(" ")));
+        }
+        nodes.extend(run);
+    }
+    markraft_core::Slice::from_fragment(markraft_core::Fragment::from_nodes(nodes))
+}
+
 pub fn bind_keys(cx: &mut App) {
     macro_rules! bind { ($($key:literal => $action:ident),* $(,)?) => {
         cx.bind_keys([$(KeyBinding::new($key, $action, Some("Markraft"))),*]);
@@ -179,7 +219,6 @@ pub fn bind_keys(cx: &mut App) {
         "cmd-shift-b" => Quote, "cmd-alt-c" => CodeBlock,
         "cmd-enter" => ToggleTask,
         "cmd-alt-l" => ChooseCodeLanguage, "cmd-alt-shift-c" => CopyCodeBlock,
-        "cmd-alt-r" => EditRawHtml,
         "ctrl-cmd-space" => CharacterPalette,
         "alt-left" => WordLeft, "alt-right" => WordRight,
         "alt-shift-left" => SelectWordLeft, "alt-shift-right" => SelectWordRight,
@@ -219,10 +258,6 @@ pub enum EditorEvent {
         pos: usize,
     },
     CodeCopied,
-    /// An opaque inline HTML primitive was clicked; the host can edit its source.
-    RawHtmlRequested {
-        pos: usize,
-    },
     /// A wiki link was clicked. `target` is what the source spelled before any
     /// `|`, which only the host can turn into a document to open. `embed` says the
     /// link was written `![[…]]`, so it names a file to open rather than a page.
@@ -1419,6 +1454,15 @@ impl EditorView {
         if point.y >= last.origin.y + last.height {
             return last.offset_to_pos(last.char_len);
         }
+        let (row, local) = self.row_under(point);
+        if row.in_callout_header(point.y) {
+            return row.offset_to_pos(0);
+        }
+        row.hit_position(row.char_at(local), &self.projection)
+    }
+
+    /// The laid-out line `point` falls on, and the point relative to its origin.
+    fn row_under(&self, point: Point<Pixels>) -> (&LayoutLine, Point<Pixels>) {
         let row = self
             .layout
             .iter()
@@ -1431,11 +1475,42 @@ impl EditorView {
             Some(table) => surface::cell_under(&self.layout, table, point).unwrap_or(row),
             None => row,
         };
-        if row.in_callout_header(point.y) {
-            return row.offset_to_pos(0);
-        }
         let local = gpui::point(point.x - row.origin.x, point.y - row.origin.y);
-        row.hit_position(row.char_at(local), &self.projection)
+        (row, local)
+    }
+
+    /// A click inside source shown as text — an inline HTML tag — puts the caret
+    /// where it was clicked, as it would in any other text. The click lands on
+    /// the atom's edge, which spells the source out, and the caret then moves
+    /// into the spelling. Where the spelling is not what was shown, the caret
+    /// stays at the edge.
+    fn caret_into_source(&mut self, point: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(last) = self.layout.last() else {
+            return;
+        };
+        if point.y >= last.origin.y + last.height {
+            return;
+        }
+        let (row, local) = self.row_under(point);
+        let Some((offset, source, before)) = row.source_text_at(local) else {
+            return;
+        };
+        let pos = row.offset_to_pos(offset);
+        let doc = self.state.doc();
+        let Ok(resolved) = doc.resolve(pos) else {
+            return;
+        };
+        let start = resolved.parent_offset();
+        let spelled = resolved.parent().text_between(
+            self.state.schema(),
+            start,
+            (start + source.chars().count()).min(resolved.parent().content_size()),
+            None,
+            None,
+        );
+        if spelled == source {
+            self.select(pos + before, false, cx);
+        }
     }
 
     fn select_point(&mut self, point: Point<Pixels>, extend: bool, cx: &mut Context<Self>) {
@@ -1611,25 +1686,60 @@ impl EditorView {
         }
         let schema = self.state.schema().clone();
         let verbatim = self.types.in_verbatim_block_at(&self.state);
+        let in_cell = self
+            .types
+            .table_types()
+            .and_then(|types| markraft_core::commands::cell_at(types, &self.state))
+            .is_some();
+        let cell_break = self.types.raw_inline.and_then(|raw| {
+            schema
+                .create(
+                    raw,
+                    markraft_core::attrs! { "source" => "<br/>" },
+                    MarkSet::empty(),
+                    markraft_core::Fragment::empty(),
+                )
+                .ok()
+        });
         let spec = if let Some(codecs) = self
+            .codecs
+            .clone()
+            .filter(|_| in_cell && !self.single_line && clipboard_text.is_some())
+            .filter(|_| !is_web_url(text.trim()) || self.types.link.is_none())
+            && let Some(cell_break) = cell_break
+        {
+            // A GFM row is one line: each line pasted goes into the cell as its
+            // inline content, with a `<br/>` between them — one for each line
+            // ending, a blank line's included — as Typora writes them.
+            let text = text.strip_suffix('\n').unwrap_or(text);
+            let lines = text.split('\n').map(|line| {
+                let line = line.trim_end_matches('\r');
+                let slice = match mode {
+                    clipboard::PasteMode::Plain => Some(codecs.from_text(line)),
+                    _ => codecs.from_markup(line),
+                };
+                slice.map(|slice| cell_content(&schema, &slice, None))
+            });
+            let mut nodes = Vec::new();
+            for (index, line) in lines.enumerate() {
+                if index > 0 {
+                    nodes.push(cell_break.clone());
+                }
+                if let Some(line) = line {
+                    nodes.extend(line.content().iter().cloned());
+                }
+            }
+            let slice =
+                markraft_core::Slice::from_fragment(markraft_core::Fragment::from_nodes(nodes));
+            markraft_core::commands::replace_selection(slice)(&self.state)
+        } else if let Some(codecs) = self
             .codecs
             .clone()
             .filter(|_| matches!(mode, clipboard::PasteMode::Plain))
             .filter(|_| !self.single_line && !verbatim)
         {
-            // The kind reads plain text as the characters it is. A table cell
-            // holds one line, so its line endings become spaces there.
-            let in_cell = self
-                .types
-                .table_types()
-                .and_then(|types| markraft_core::commands::cell_at(types, &self.state))
-                .is_some();
-            let text = if in_cell {
-                text.replace('\n', " ")
-            } else {
-                text.to_owned()
-            };
-            markraft_core::commands::replace_selection(codecs.from_text(&text))(&self.state)
+            // The kind reads plain text as the characters it is.
+            markraft_core::commands::replace_selection(codecs.from_text(text))(&self.state)
         } else if literal {
             let text = single_line::text(text, self.single_line);
             keymap::insert_plain(&self.types, &text)(&self.state)
@@ -1651,6 +1761,13 @@ impl EditorView {
             .clone()
             .and_then(|codecs| clipboard::read_fragment(&schema, codecs.as_ref(), &item, mode))
         {
+            // Only an item with no text reaches here in a cell: its blocks go in
+            // one after another, a `<br/>` between them.
+            let slice = if in_cell {
+                cell_content(&schema, &slice, cell_break.as_ref())
+            } else {
+                slice
+            };
             markraft_core::commands::replace_selection(slice)(&self.state)
         } else {
             None
@@ -1693,13 +1810,6 @@ impl EditorView {
             self.go_to(target, cx);
             return;
         }
-        if !event.modifiers.shift
-            && let Some(pos) = self.raw_html_under(event.position)
-        {
-            self.selecting = false;
-            cx.emit(EditorEvent::RawHtmlRequested { pos });
-            return;
-        }
         // A focused code block's language tag is chrome over the block's text:
         // a click on it opens the picker rather than placing the caret.
         if let Some(pos) = self.layout.iter().find_map(|row| {
@@ -1733,6 +1843,9 @@ impl EditorView {
             return;
         }
         self.select_point(event.position, event.modifiers.shift, cx);
+        if event.click_count == 1 && !event.modifiers.shift {
+            self.caret_into_source(event.position, cx);
+        }
         if event.click_count == 1
             && !event.modifiers.shift
             && !self.single_line
@@ -2116,11 +2229,10 @@ impl EditorView {
             types.heading,
             Attrs::from_pairs([("level", 6i64)])
         ));
-        rich!(CodeBlock, |types: &DocTypes| block(
-            types,
-            types.code_block,
-            Attrs::empty()
-        ));
+        rich!(CodeBlock, |types: &DocTypes| match types.code_block {
+            Some(ty) => keymap::code_block(types, ty, Attrs::empty()),
+            None => markraft_core::commands::command(|_| None),
+        });
         rich!(Quote, keymap::toggle_quote);
         rich!(Ordered, |types: &DocTypes| list(
             types,
@@ -2139,13 +2251,6 @@ impl EditorView {
         ));
         rich!(ToggleTask, keymap::toggle_task);
         root = root
-            .on_action(cx.listener(|this, _: &EditRawHtml, _, cx| {
-                if let Some(pos) = this.raw_html_at_caret() {
-                    cx.emit(EditorEvent::RawHtmlRequested { pos });
-                } else {
-                    cx.propagate();
-                }
-            }))
             .on_action(cx.listener(|this, _: &ChooseCodeLanguage, window, cx| {
                 if let Some(pos) = this.active_code_pos() {
                     this.run_control(

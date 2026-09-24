@@ -80,7 +80,7 @@ enum FormatMenu {
     Inline,
     List,
 }
-pub struct NotesApp {
+pub struct MarkraftApp {
     library: Library,
     persistence: Option<Persistence>,
     /// The notes folder, once one has been chosen.
@@ -140,7 +140,7 @@ pub struct NotesApp {
     _activation: Subscription,
     _quit: Subscription,
 }
-impl NotesApp {
+impl MarkraftApp {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         path: Option<PathBuf>,
@@ -148,7 +148,10 @@ impl NotesApp {
         store: Option<Store>,
         library: Library,
         error: Option<String>,
-        platform: Result<Platform, String>,
+        // None runs without the menu bar, the shortcuts and the native window: the
+        // headless tests, which have none of them.
+        platform: Option<Result<Platform, String>>,
+        updater: Updater,
         instance: Instance,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -160,7 +163,8 @@ impl NotesApp {
         ));
         let mut platform_error = None;
         let platform = match platform {
-            Ok(mut p) => {
+            None => None,
+            Some(Ok(mut p)) => {
                 if let Err(e) = p
                     .configure_window(window)
                     .and_then(|_| apply_platform_preferences(&mut p, &library.preferences, window))
@@ -169,7 +173,7 @@ impl NotesApp {
                 }
                 Some(p)
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 platform_error = Some(e);
                 None
             }
@@ -245,7 +249,7 @@ impl NotesApp {
             path,
             settings_path,
             platform,
-            updater: Updater::new(),
+            updater,
             instance,
             sessions: Sessions::default(),
             interaction: Interaction::default(),
@@ -658,9 +662,7 @@ impl NotesApp {
     }
     fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ring.release();
-        if !self.focus_html_source(window, cx) {
-            window.focus(&self.editor().focus_handle(cx), cx);
-        }
+        window.focus(&self.editor().focus_handle(cx), cx);
     }
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let follow_pointer = self.library.preferences.follow_pointer;
@@ -674,8 +676,6 @@ impl NotesApp {
         self.ring.release();
         if self.persistence.is_none() {
             window.focus(self.ring.panel(), cx);
-        } else if self.focus_html_source(window, cx) {
-            // Keep the source draft as the keyboard owner after hiding the app.
         } else if self.interaction.panel() != Panel::Editor {
             window.focus(&self.query().focus_handle(cx), cx);
         } else {
@@ -744,9 +744,9 @@ impl NotesApp {
         self.show_popover(Popover::FileStatus, cx);
         cx.notify();
     }
-    /// ⌘&, ⌘* or ⌘( in the note: the list the toolbar would make. Anywhere else the key is
-    /// left to whoever has the keyboard.
-    fn run_list_shortcut(
+    /// ⌘&, ⌘*, ⌘( or ⌥⌘C in the note: the block the toolbar would make. Anywhere
+    /// else the key is left to whoever has the keyboard.
+    fn run_block_shortcut(
         &mut self,
         block: doc::Block,
         window: &mut Window,
@@ -768,9 +768,6 @@ impl NotesApp {
         }
     }
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.cancel_html_source(window, cx) {
-            return;
-        }
         if self.input_composing(cx) {
             self.cancel_input(cx);
             return;
@@ -839,7 +836,7 @@ impl NotesApp {
         }
     }
     /// Open what a clicked wiki link names, exactly as selecting it in Browse
-    /// would — [`NotesApp::select_note`] is what `Intent::Select` runs, so the
+    /// would — [`MarkraftApp::select_note`] is what `Intent::Select` runs, so the
     /// session, the focus and the panel all end up where Browse leaves them.
     ///
     /// A target that names nothing is said out loud rather than created: a file
@@ -913,7 +910,11 @@ impl NotesApp {
     }
     fn matching_notes(&self, query: &str) -> Vec<&crate::storage::Note> {
         let mut notes = self.library.search(query, self.path.as_deref());
-        notes.sort_by_key(|note| note.id != self.library.active_id);
+        // The note on screen heads the list only when nothing was searched for; a
+        // search puts the best answer first, whichever note it is.
+        if query.trim().is_empty() {
+            notes.sort_by_key(|note| note.id != self.library.active_id);
+        }
         notes
     }
     fn toggle_pin(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1046,6 +1047,57 @@ impl NotesApp {
     }
     /// The note editors' style: the theme's, in the typeface, size and line height the
     /// preferences ask for.
+    /// The failure the note is showing — the one "Not saved" stands for — for the
+    /// headless tests.
+    #[cfg(test)]
+    pub(crate) fn shown_error(&self) -> Option<String> {
+        self.feedback.error().cloned()
+    }
+    /// Name new notes and images as `notes` and `images` say, for the headless tests.
+    #[cfg(test)]
+    pub(crate) fn set_workspace_naming(
+        &mut self,
+        notes: crate::storage::NoteNaming,
+        images: crate::storage::ImageNaming,
+    ) {
+        self.library.workspace.new_note_name = notes;
+        self.library.workspace.image_name = images;
+    }
+    /// A new note holding `markdown`, not yet saved, for the headless tests: what a
+    /// note is before its first save, with no file for the guard to hold it to.
+    #[cfg(test)]
+    pub(crate) fn test_new_note(
+        &mut self,
+        markdown: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_documents(cx);
+        self.library.new_note(doc::from_markdown(markdown));
+        self.ensure_session(window, cx);
+        self.set_panel(Panel::Editor, cx);
+        self.focus_editor(window, cx);
+    }
+    /// Give the keyboard back to the note, as clicking into it does, for the
+    /// headless tests.
+    #[cfg(test)]
+    pub(crate) fn test_focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_editor(window, cx);
+    }
+    /// The active note's editor and file, for the headless tests.
+    #[cfg(test)]
+    pub(crate) fn test_editor(&self) -> Entity<EditorView> {
+        self.editor().clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn active_path(&self) -> Option<PathBuf> {
+        self.library.active_note().path.clone()
+    }
+    /// The active note's document as its editor holds it, for the headless tests.
+    #[cfg(test)]
+    pub(crate) fn active_document(&self, cx: &App) -> markraft_core::Node {
+        self.editor().read(cx).committed_document().clone()
+    }
     fn editor_style(&self) -> EditorStyle {
         let preferences = &self.library.preferences;
         let mut style = scaled(notes_style(self.dark), preferences.text_size);

@@ -31,10 +31,10 @@ pub struct SourceDocument {
 /// A source-preserving save could not safely represent an editor operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceError {
-    /// Rewritten source did not reparse into the edited document, or the block
-    /// the change needs rewritten whole is not spelled the way the codec would
-    /// write it. Retain the editor buffer and offer a separate export instead
-    /// of overwriting.
+    /// Rewritten source did not reparse into the edited document — even with
+    /// the blocks the edit touched respelled — or the source's blocks could
+    /// not be mapped at all. Retain the editor buffer and offer a separate
+    /// export instead of overwriting.
     UnsupportedEdit,
 }
 
@@ -177,16 +177,80 @@ impl SourceDocument {
                     result = patched;
                     continue;
                 }
+                // A task box ticked or unticked: its one character changes,
+                // however the rest of the item is spelled — `[X]`, a `+`
+                // marker, extra spaces — none of which the writer keeps.
+                if let Some((nth, checked)) = toggled_box(schema, &old[index], &new[index])
+                    && let Ok(patched) = self.flip_box(
+                        schema,
+                        &target,
+                        result.clone(),
+                        self.blocks[index].clone(),
+                        nth,
+                        checked,
+                    )
+                {
+                    result = patched;
+                    continue;
+                }
                 let before = block_markdown(schema, &self.document, &old[index..=index]);
                 let after = block_markdown(schema, document, &new[index..=index]);
-                result = self.patch(
+                let range = self.blocks[index].clone();
+                // A table's body row added goes in as a line of its own. A diff of
+                // the two tables' canonical spellings could place it anywhere their
+                // padding happens to agree, inside a hand-written row, and the
+                // table would still read the same.
+                if let Some(patched) = added_row(schema, &old[index], &new[index]).and_then(|row| {
+                    let line = after.split('\n').nth(row + 1)?;
+                    let raw = &result[range.clone()];
+                    let at = match row_line(raw, self.newline, row + 1) {
+                        Some(existing) => existing.start + self.newline.len(),
+                        None => raw.len(),
+                    };
+                    let text = if at == raw.len() {
+                        format!("{}{line}", self.newline)
+                    } else {
+                        format!("{line}{}", self.newline)
+                    };
+                    let mut candidate = result.clone();
+                    candidate.insert_str(range.start + at, &text);
+                    self.validate(schema, &target, candidate).ok()
+                }) {
+                    result = patched;
+                    continue;
+                }
+                result = match self.patch(
                     schema,
                     &target,
-                    result,
-                    self.blocks[index].clone(),
+                    result.clone(),
+                    range.clone(),
                     &before,
                     &after,
-                )?;
+                ) {
+                    Ok(patched) => patched,
+                    // The block's hand-written spelling cannot take the
+                    // change in place — a heading's level, a list's type, a
+                    // table's columns, or text its spelling cannot hold — so
+                    // it is respelled; see `respell`. A table's body row
+                    // deleted takes just its line with it rather than the
+                    // whole table.
+                    Err(_) => {
+                        let dropped = removed_row(schema, &old[index], &new[index])
+                            .and_then(|row| row_line(&result[range.clone()], self.newline, row + 1))
+                            .and_then(|line| {
+                                let mut candidate = result.clone();
+                                candidate.replace_range(
+                                    range.start + line.start..range.start + line.end,
+                                    "",
+                                );
+                                self.validate(schema, &target, candidate).ok()
+                            });
+                        match dropped {
+                            Some(patched) => patched,
+                            None => self.respell(schema, &target, result, range, &after)?,
+                        }
+                    }
+                };
             }
         } else {
             let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
@@ -221,11 +285,43 @@ impl SourceDocument {
                         result.replace_range(range, "");
                         result
                     }
-                    Err(error) => return Err(error),
+                    // Blocks were joined, split, wrapped or lifted out: the
+                    // structure changed, so the blocks it touched are
+                    // respelled whole.
+                    Err(_) => {
+                        let range = self.blocks[prefix].start..self.blocks[end - 1].end;
+                        return self.respell(schema, document, result, range, &after);
+                    }
                 };
             }
         }
         self.validate(schema, document, result)
+    }
+
+    /// Replace `range` — whole top-level blocks — with `after`, their Markdown
+    /// as the writer spells it.
+    ///
+    /// This is the last resort, once no patch keeps the blocks' spelling: an
+    /// edit to a block's structure — a heading made a paragraph, a list
+    /// converted or lifted, blocks joined, a table's columns changed — or text
+    /// the spelling cannot hold, such as a setext heading whose text now opens
+    /// with `~~~`, which would read as a code fence. The blocks the edit
+    /// touched are written the way the writer writes them, as Typora does,
+    /// rather than the edit being refused: a setext heading becomes an ATX
+    /// one, a list's markers are re-spaced. Every other block keeps its bytes,
+    /// and the whole document still has to read back as `target`. Typing in a
+    /// block never gets this far while a patch can place it, so a hand-written
+    /// block keeps its spelling for as long as it can.
+    fn respell(
+        &self,
+        schema: &Schema,
+        target: &Node,
+        mut source: String,
+        range: Range<usize>,
+        after: &str,
+    ) -> Result<String, SourceError> {
+        source.replace_range(range, &self.with_newlines(after));
+        self.validate(schema, target, source)
     }
 
     /// Insert the Markdown of new top-level blocks between the untouched ones
@@ -305,6 +401,18 @@ impl SourceDocument {
         // unsupported syntax still require the original strict comparison.
         let trimmed = without_trailing_spaces(schema, target);
         if trimmed != *target && to_markdown(schema, &parsed) == to_markdown(schema, &trimmed) {
+            return Ok(source);
+        }
+        // An empty paragraph is typing in progress — Return at the start of a
+        // block, with nothing yet on the new line. The file holds nothing for
+        // it, so a document that differs from its reading only by empty
+        // paragraphs is the same note. Only the ones whose going changes
+        // nothing else are let go; see `without_empty_paragraphs`.
+        let bare = without_empty_paragraphs(schema, &trimmed);
+        let read = without_empty_paragraphs(schema, &parsed);
+        if bare != trimmed
+            && (read == bare || to_markdown(schema, &read) == to_markdown(schema, &bare))
+        {
             Ok(source)
         } else {
             Err(SourceError::UnsupportedEdit)
@@ -396,6 +504,175 @@ impl SourceDocument {
         }
         Err(SourceError::UnsupportedEdit)
     }
+
+    /// Tick (`checked`) or untick the `nth` task box of the block in `range`,
+    /// changing only the character inside it.
+    ///
+    /// A box is a `[ ]`, `[x]` or `[X]` that follows nothing but list markers
+    /// and quote prefixes on its line. The `nth` of those is tried first — the
+    /// source order of the boxes is the order of the task items — and the
+    /// others after it, for a line that only looks like an item, such as one
+    /// inside an indented code block. Whichever is taken, the whole document
+    /// has to parse back to `target`.
+    fn flip_box(
+        &self,
+        schema: &Schema,
+        target: &Node,
+        source: String,
+        range: Range<usize>,
+        nth: usize,
+        checked: bool,
+    ) -> Result<String, SourceError> {
+        let raw = &source[range.clone()];
+        let mut boxes: Vec<usize> = raw
+            .match_indices('[')
+            .map(|(offset, _)| offset + 1)
+            .filter(|&inner| {
+                matches!(raw.as_bytes().get(inner), Some(b' ' | b'x' | b'X'))
+                    && raw.as_bytes().get(inner + 1) == Some(&b']')
+                    && after_item_markers(
+                        &raw[raw[..inner - 1].rfind('\n').map_or(0, |at| at + 1)..inner - 1],
+                    )
+            })
+            .collect();
+        if nth < boxes.len() {
+            let first = boxes.remove(nth);
+            boxes.insert(0, first);
+        }
+        boxes.truncate(64);
+        let mark = if checked { "x" } else { " " };
+        for inner in boxes {
+            if (raw.as_bytes()[inner] != b' ') == checked {
+                continue;
+            }
+            let at = range.start + inner;
+            let mut candidate = source.clone();
+            candidate.replace_range(at..at + 1, mark);
+            if let Ok(valid) = self.validate(schema, target, candidate) {
+                return Ok(valid);
+            }
+        }
+        Err(SourceError::UnsupportedEdit)
+    }
+}
+
+/// Whether `prefix`, the start of a line up to a `[`, is nothing but quote
+/// prefixes and list markers, each marker followed by the space or tab that
+/// makes it one — at least one marker, as a task box needs an item.
+fn after_item_markers(prefix: &str) -> bool {
+    let mut rest = prefix;
+    let mut marker = false;
+    loop {
+        rest = rest.trim_start_matches([' ', '\t']);
+        if rest.is_empty() {
+            return marker && prefix.ends_with([' ', '\t']);
+        }
+        if let Some(after) = rest.strip_prefix('>') {
+            rest = after;
+            marker = false;
+            continue;
+        }
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let length = match rest.as_bytes()[0] {
+            b'-' | b'+' | b'*' => 1,
+            _ if (1..=9).contains(&digits)
+                && matches!(rest.as_bytes().get(digits), Some(b'.' | b')')) =>
+            {
+                digits + 1
+            }
+            _ => return false,
+        };
+        if !rest[length..].starts_with([' ', '\t']) {
+            return false;
+        }
+        rest = &rest[length..];
+        marker = true;
+    }
+}
+
+/// The source-order index among `old`'s task items of the one whose box `new`
+/// ticks or unticks, and whether it ends up ticked, when the two differ in
+/// nothing else.
+fn toggled_box(schema: &Schema, old: &Node, new: &Node) -> Option<(usize, bool)> {
+    fn walk(
+        task: markraft_core::NodeTypeId,
+        old: &Node,
+        new: &Node,
+        seen: &mut usize,
+        found: &mut Option<(usize, bool)>,
+    ) -> bool {
+        if old.type_id() != new.type_id()
+            || old.marks() != new.marks()
+            || old.text() != new.text()
+            || old.child_count() != new.child_count()
+        {
+            return false;
+        }
+        if old.type_id() == task {
+            if old.attrs() != new.attrs() {
+                let Some(checked) = new
+                    .attrs()
+                    .get(markraft_core::kind::TASK_CHECKED_ATTR)
+                    .and_then(|value| value.as_bool())
+                else {
+                    return false;
+                };
+                let only_the_box = old
+                    .attrs()
+                    .with(markraft_core::kind::TASK_CHECKED_ATTR, checked)
+                    == *new.attrs();
+                if !only_the_box || found.replace((*seen, checked)).is_some() {
+                    return false;
+                }
+            }
+            *seen += 1;
+        } else if old.attrs() != new.attrs() {
+            return false;
+        }
+        old.children()
+            .zip(new.children())
+            .all(|(a, b)| walk(task, a, b, seen, found))
+    }
+    let task = schema.node_id(crate::schema::TASK_ITEM)?;
+    let mut found = None;
+    walk(task, old, new, &mut 0, &mut found).then_some(found)?
+}
+
+/// The index of the one body row the table `new` lacks, when it is the table
+/// `old` without it.
+fn removed_row(schema: &Schema, old: &Node, new: &Node) -> Option<usize> {
+    if schema.node_id(crate::schema::TABLE) != Some(old.type_id())
+        || !old.same_markup(new)
+        || old.child_count() != new.child_count() + 1
+    {
+        return None;
+    }
+    let row = old
+        .children()
+        .zip(new.children())
+        .position(|(a, b)| a != b)
+        .unwrap_or(new.child_count());
+    let rest_equal = old.children().skip(row + 1).eq(new.children().skip(row));
+    (row > 0 && rest_equal).then_some(row)
+}
+
+/// The index of the one body row the table `new` has that `old` lacks, when it
+/// is the table `old` with it.
+fn added_row(schema: &Schema, old: &Node, new: &Node) -> Option<usize> {
+    removed_row(schema, new, old)
+}
+
+/// The byte range of `raw`'s line `index` with the line break before it — a
+/// table's rows after the header are its lines from the third on.
+fn row_line(raw: &str, newline: &str, index: usize) -> Option<Range<usize>> {
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(raw.match_indices(newline).map(|(at, _)| at + newline.len()))
+        .collect();
+    let start = *starts.get(index)?;
+    let end = starts
+        .get(index + 1)
+        .map_or(raw.len(), |next| next - newline.len());
+    Some(start.checked_sub(newline.len())?..end)
 }
 
 /// The one-based first and last line of each of the document's top-level
@@ -485,6 +762,35 @@ fn without_trailing_spaces(schema: &Schema, node: &Node) -> Node {
     node.copy(Fragment::from_nodes(children))
 }
 
+/// `node` without the empty paragraphs a reader would not give back.
+///
+/// Such a paragraph writes as nothing, or as the blank line it stands for, so
+/// the file reads back without it. That includes the first block of a list
+/// item that goes on: the writer leaves the marker alone on its line and the
+/// next block on the line after it, which reads back as the item without the
+/// paragraph. The one kept is an empty item's only block, which the item
+/// cannot do without.
+pub fn without_empty_paragraphs(schema: &Schema, node: &Node) -> Node {
+    if node.is_text() || node.child_count() == 0 {
+        return node.clone();
+    }
+    let paragraph = schema.node_id(crate::schema::PARAGRAPH);
+    let item = [crate::schema::LIST_ITEM, crate::schema::TASK_ITEM]
+        .iter()
+        .any(|name| schema.node_id(name) == Some(node.type_id()));
+    let children: Vec<_> = node
+        .children()
+        .enumerate()
+        .filter(|(index, child)| {
+            Some(child.type_id()) != paragraph
+                || child.child_count() > 0
+                || (item && *index == 0 && node.child_count() == 1)
+        })
+        .map(|(_, child)| without_empty_paragraphs(schema, child))
+        .collect();
+    node.copy(Fragment::from_nodes(children))
+}
+
 fn text_changes<'a>(old: &'a Node, new: &'a Node, changes: &mut Vec<(&'a str, &'a str)>) -> bool {
     if !old.same_markup(new) || old.child_count() != new.child_count() {
         return false;
@@ -529,8 +835,9 @@ fn changed_textblock<'a>(
 }
 
 /// A textblock's text as the writer puts it in the file, with its guard's
-/// backslashes, or `None` when it holds an atom, which has a spelling of its
-/// own.
+/// backslashes and each atom's own spelling — `<br/>` for the raw HTML a
+/// paste puts in a table cell — or `None` when it holds an atom the writer
+/// has no spelling for.
 fn guarded_source(schema: &Schema, block: &Node) -> Option<String> {
     let kind = block_kind(schema, block.type_id())?;
     let items = Items::from_nodes(schema, block.children());
@@ -544,7 +851,13 @@ fn guarded_source(schema: &Schema, block: &Node) -> Option<String> {
         match item {
             Item::Char(c) => out.push(*c),
             Item::Break => out.push('\n'),
-            Item::Atom(_) => return None,
+            Item::Atom(atom) => {
+                let spelling = crate::textblock::atom_spelling(schema, atom);
+                if spelling == markraft_core::projection::OBJECT_REPLACEMENT.to_string() {
+                    return None;
+                }
+                out.push_str(&spelling);
+            }
         }
     }
     Some(out)

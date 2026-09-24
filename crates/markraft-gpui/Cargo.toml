@@ -19,6 +19,7 @@ url = "2"
 
 [dev-dependencies]
 markraft-commonmark.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSPasteboard"] }

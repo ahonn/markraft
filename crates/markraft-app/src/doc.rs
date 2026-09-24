@@ -134,9 +134,16 @@ pub fn split_wrap() -> SplitWrap {
 
 /// What Enter makes of a line that spells a whole block's opening — a fence, a
 /// table's header row, a thematic break — and where it goes on after a
-/// footnote definition.
-pub fn enter_rule() -> Command {
-    markraft_commonmark::block_from_line()
+/// footnote definition. It is Markdown turned into formatting as it is typed, so
+/// it runs only while `shortcuts` holds, as the input rules do.
+pub fn enter_rule(shortcuts: Arc<AtomicBool>) -> Command {
+    let rule = markraft_commonmark::block_from_line();
+    command(move |state| {
+        shortcuts
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .then(|| rule(state))
+            .flatten()
+    })
 }
 
 /// A kind's formatting command, its refusal put in the application's words.
@@ -220,7 +227,9 @@ pub fn count(doc: &Node, projection: &Projection, words: bool) -> usize {
 ///
 /// A block the model keeps verbatim — an HTML block, a table — contributes what
 /// a reader would see in it rather than its markup, so a note opening with
-/// `<div class="note">` is not named after the tag. A note with nothing to read
+/// `<div class="note">` is not named after the tag. A line of nothing but
+/// punctuation — a fence typed with Markdown shortcuts off, `***` — is not text
+/// either, so a note is not filed as `` ```.md ``. A note with nothing to read
 /// has no title line.
 pub fn title_line(doc: &Node) -> Option<String> {
     doc.children().find_map(title_of)
@@ -234,7 +243,10 @@ fn title_of(block: &Node) -> Option<String> {
     };
     text.lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())
+        .find(|line| {
+            line.chars()
+                .any(|c| c.is_alphanumeric() || !c.is_ascii() && !c.is_whitespace())
+        })
         .map(one_line)
 }
 
@@ -342,7 +354,7 @@ impl Block {
                 node(md::HEADING),
                 Attrs::from_pairs([("level", i64::from(level))]),
             ),
-            Block::Code => markraft_gpui::commands::toggle_block(
+            Block::Code => markraft_gpui::commands::code_block(
                 types,
                 node(md::CODE_BLOCK),
                 Attrs::from_pairs([("fence_char", markers().fence.to_string())]),
@@ -551,6 +563,10 @@ mod tests {
             ("<p>Inline text</p>", Some("Inline text")),
             ("<hr/>", None),
             ("***", None),
+            // A line of punctuation alone is markup, not a name for the note.
+            ("\\```\n\nbody", Some("body")),
+            ("\\```", None),
+            ("--> 中文", Some("--> 中文")),
             // A table's cells are laid out with tabs between them; a title is one line
             // of prose, and it also names a file, so no control character survives it.
             ("| a | b |\n| - | - |\n| c | d |", Some("a b")),
@@ -597,8 +613,14 @@ mod tests {
 
     #[test]
     fn a_list_or_code_block_made_from_the_toolbar_takes_the_preferred_markers() {
+        // Over the text, as a toolbar format runs when the text is selected: a
+        // code block over a caret in text is a new one, not this paragraph.
         let run = |block: Block| {
-            let state = state_of("text");
+            let state = state_of("text")
+                .update([TransactionSpec::new().selection(Selection::text(1, 5))])
+                .expect("a selection")
+                .state()
+                .clone();
             let done = markraft_core::commands::run_command(&state, &block.command())
                 .expect("the command applies")
                 .expect("a transaction")

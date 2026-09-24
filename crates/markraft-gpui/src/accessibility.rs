@@ -19,7 +19,6 @@ pub(crate) enum ControlAction {
     ToggleTask(usize),
     CodeLanguage(usize),
     CopyCode(usize),
-    EditHtml(usize),
     OpenWikiLink(usize),
     EnterCallout(usize),
 }
@@ -52,20 +51,6 @@ fn wiki_link_label(label: &str) -> String {
     }
 }
 
-fn html_label(source: &str) -> String {
-    let source = source.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut graphemes = source.graphemes(true);
-    let mut preview = graphemes.by_ref().take(60).collect::<String>();
-    if graphemes.next().is_some() {
-        preview.push('…');
-    }
-    if preview.is_empty() {
-        "Edit empty HTML source".into()
-    } else {
-        format!("Edit HTML source: {preview}")
-    }
-}
-
 impl AccessibleControl {
     fn node(&self) -> accesskit::Node {
         let mut node = accesskit::Node::new(if self.checked.is_some() {
@@ -90,7 +75,6 @@ impl AccessibleControl {
             ControlAction::ToggleTask(_) => Some("Command+Enter"),
             ControlAction::CodeLanguage(_) => Some("Command+Option+L"),
             ControlAction::CopyCode(_) => Some("Command+Option+Shift+C"),
-            ControlAction::EditHtml(_) => Some("Command+Option+R"),
             ControlAction::OpenWikiLink(_) | ControlAction::EnterCallout(_) => None,
         };
         if let Some(shortcut) = shortcut {
@@ -209,17 +193,9 @@ impl AccessibleText {
                 let markraft_core::projection::RunContent::Atom(node) = &run.content else {
                     continue;
                 };
-                let control = if Some(node.type_id()) == types.raw_inline {
-                    let source = node
-                        .attrs()
-                        .get("source")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default();
-                    Some((
-                        ControlAction::EditHtml(line.abs(run.start)),
-                        html_label(source),
-                    ))
-                } else if Some(node.type_id()) == types.wiki_link {
+                // Inline HTML is text the caret edits in place, so it is no
+                // control of its own.
+                let control = if Some(node.type_id()) == types.wiki_link {
                     let label = crate::wiki::wiki_link_label(node);
                     Some((
                         ControlAction::OpenWikiLink(line.abs(run.start)),
@@ -442,15 +418,6 @@ impl crate::EditorView {
             return;
         }
         let (index, position) = match action {
-            ControlAction::EditHtml(position) => {
-                if self.raw_html_at(position).is_none() {
-                    return;
-                }
-                let Some((index, _)) = self.projection.pos_to_line_offset(position) else {
-                    return;
-                };
-                (index, position)
-            }
             ControlAction::EnterCallout(position) => {
                 let Some((index, _)) = self.projection.pos_to_line_offset(position) else {
                     return;
@@ -510,7 +477,6 @@ impl crate::EditorView {
             return;
         }
         match action {
-            ControlAction::EditHtml(pos) => cx.emit(crate::EditorEvent::RawHtmlRequested { pos }),
             ControlAction::OpenWikiLink(pos) => {
                 if let Some(node) = self.wiki_link_at(pos) {
                     cx.emit(crate::EditorEvent::WikiLinkClicked {
@@ -541,21 +507,6 @@ impl crate::EditorView {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn html_control_labels_identify_source_without_splitting_graphemes() {
-        assert_eq!(
-            html_label("<span\n title=\"hello\">"),
-            "Edit HTML source: <span title=\"hello\">"
-        );
-        assert_ne!(html_label("<span>"), html_label("</span>"));
-        let cluster = "👩🏽‍💻";
-        assert_eq!(
-            html_label(&cluster.repeat(61)),
-            format!("Edit HTML source: {}…", cluster.repeat(60))
-        );
-        assert_eq!(html_label(" \n "), "Edit empty HTML source");
-    }
 
     #[test]
     fn controls_expose_states_actions_and_document_targets() {
@@ -590,7 +541,9 @@ mod tests {
         );
         let mut text = AccessibleText::default();
         text.update(&projection, &state, &types, &rows, 2.);
-        assert_eq!(text.controls.len(), 4);
+        // Inline HTML is edited as text in place, so only the task boxes are
+        // controls.
+        assert_eq!(text.controls.len(), 2);
         for (control, checked) in text.controls[..2].iter().zip([false, true]) {
             let node = control.node();
             assert_eq!(node.role(), Role::CheckBox);
@@ -609,20 +562,6 @@ mod tests {
         // A code block has no controls of its own on screen; its language and
         // copy are commands.
         assert!(rows[2].code_pos.is_some());
-        for control in &text.controls[2..] {
-            let ControlAction::EditHtml(pos) = control.action else {
-                panic!("HTML control")
-            };
-            assert_eq!(
-                Some(state.doc().node_at(pos).unwrap().type_id()),
-                types.raw_inline
-            );
-            let node = state.doc().node_at(pos).unwrap();
-            assert_eq!(
-                control.label,
-                html_label(node.attrs().get("source").unwrap().as_str().unwrap())
-            );
-        }
     }
 
     /// A screen reader reads what the screen shows: concealed delimiters are

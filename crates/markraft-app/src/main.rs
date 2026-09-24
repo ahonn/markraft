@@ -1,5 +1,7 @@
 mod app;
 mod doc;
+#[cfg(test)]
+mod e2e;
 mod instance;
 mod persistence;
 mod platform;
@@ -8,7 +10,7 @@ mod storage;
 mod updater;
 mod vault;
 
-use app::{NotesApp, bind_app_keys};
+use app::{MarkraftApp, bind_app_keys};
 use gpui::*;
 use instance::{Instance, Launch, Request};
 use platform::Platform;
@@ -184,13 +186,14 @@ fn main() {
             },
             move |window, cx| {
                 let app = cx.new(|cx| {
-                    NotesApp::new(
+                    MarkraftApp::new(
                         Some(directory),
                         settings_path,
                         store,
                         library,
                         error,
-                        platform,
+                        Some(platform),
+                        updater::Updater::new(),
                         instance,
                         window,
                         cx,
@@ -266,7 +269,7 @@ fn distance(bounds: Bounds<Pixels>, point: Point<Pixels>) -> f32 {
     ))
 }
 
-fn window_handle_show(app: &WeakEntity<NotesApp>, cx: &mut App) -> Result<(), ()> {
+fn window_handle_show(app: &WeakEntity<MarkraftApp>, cx: &mut App) -> Result<(), ()> {
     let handle = cx.windows().first().copied().ok_or(())?;
     handle
         .update(cx, |_, window, cx| {

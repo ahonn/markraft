@@ -178,7 +178,7 @@ impl TypeaheadProvider for WikiProvider {
     }
 }
 
-impl NotesApp {
+impl MarkraftApp {
     /// The `[[` menu for a note editor. It reads the shared list, so a note written
     /// after this editor opened can still be linked to.
     pub(in crate::app) fn wiki_menu(&self) -> Typeahead {

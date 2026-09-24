@@ -47,6 +47,12 @@ pub fn outdent(types: &DocTypes) -> Command {
     keymap::outdent(types)
 }
 
+/// ⌥⌘C as Typora does it: a new code block at the caret in a paragraph with
+/// text, the block type toggled anywhere else. See `keymap::code_block`.
+pub fn code_block(types: &DocTypes, ty: NodeTypeId, attrs: Attrs) -> Command {
+    keymap::code_block(types, ty, attrs)
+}
+
 /// Set a textblock type, or return to a paragraph when it is already that type.
 pub fn toggle_block(types: &DocTypes, ty: NodeTypeId, attrs: Attrs) -> Command {
     keymap::toggle_block(types, ty, attrs)

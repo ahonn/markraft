@@ -297,14 +297,15 @@ fn toggled(codec: &Codec, state: &EditorState, mark: &str) -> EditorState {
         .clone()
 }
 
-/// A cursor toggle leaves an empty pair to type into, and what is typed there
-/// becomes the style — the Typora-like flow.
+/// A cursor toggle where no word is at the caret leaves an empty pair to type
+/// into, and what is typed there becomes the style — the Typora-like flow.
+/// In a word the toggle styles the word; see `formatting.rs`.
 #[test]
 fn toggling_at_a_cursor_leaves_a_pair_to_type_into() {
     let codec = Codec::new();
     let state = toggled(
         &codec,
-        &edited(&codec, "ab", Selection::cursor(2)),
+        &edited(&codec, "a  b", Selection::cursor(3)),
         md::STRONG,
     );
     let state = run_command(&state, &insert_text("X"))
@@ -312,7 +313,7 @@ fn toggling_at_a_cursor_leaves_a_pair_to_type_into() {
         .unwrap()
         .state()
         .clone();
-    assert_eq!(to_markdown(&codec.schema, state.doc()).trim(), "a**X**b");
+    assert_eq!(to_markdown(&codec.schema, state.doc()).trim(), "a **X** b");
 }
 
 /// Taking a style off keeps every other mark that was inside it.

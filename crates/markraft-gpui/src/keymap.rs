@@ -1,12 +1,14 @@
 //! What each bound action does, as a chain of catalogue commands.
 //!
-//! The chains mirror ProseMirror's base and list keymaps, with the three
-//! departures the editor's own tests describe: Backspace at the start of a list
-//! item joins it to the item before, or, in a list's first item, outdents
-//! before it lifts — except in an empty item between two others, which it
-//! deletes — Enter in an empty list item leaves the
-//! list, and Backspace in an empty verbatim block turns it into a
-//! paragraph — or, for a raw block after another block, deletes it.
+//! The chains mirror ProseMirror's base and list keymaps, with the departures
+//! the editor's own tests describe, each of them what Typora does: Backspace
+//! at the start of a list item joins it to the item before — or, first in a
+//! nested list, to the item the list is in — and in a top-level list's first
+//! item outdents before it lifts; Backspace at the start of a block after a
+//! list or a quote, and Delete at the end of any textblock, join the two
+//! textblocks' text wherever they sit; Enter in an empty list item leaves the
+//! list; and Backspace in an empty verbatim block turns it into a paragraph —
+//! or, for a raw block after another block, deletes it.
 
 use crate::types::DocTypes;
 use markraft_core::commands::structure::markup_of;
@@ -14,10 +16,10 @@ use markraft_core::commands::{
     Command, Direction, add_row_after, chain, changes_spec, command, create_paragraph_near,
     delete_by, delete_by_grapheme, delete_empty_table, delete_selection, exit_code,
     goto_cell_below, goto_next_cell, goto_prev_cell, guard_cell_boundary, guard_cell_range,
-    guard_cell_split, insert_hard_break, join_backward, join_forward, lift, lift_empty_block,
-    lift_list_item, move_by, move_by_grapheme, new_line_in_code, select_node_backward,
-    select_node_forward, set_block_type, sink_list_item, split_block_keep_marks, split_list_item,
-    undo_input_rule, wrap_in, wrap_in_list,
+    guard_cell_split, insert_hard_break, join_backward, join_forward, join_textblock_backward,
+    join_textblock_forward, lift, lift_empty_block, lift_list_item, move_by, move_by_grapheme,
+    new_line_in_code, select_node_backward, select_node_forward, set_block_type, sink_list_item,
+    split_block_keep_marks, split_list_item, undo_input_rule, wrap_in, wrap_in_list,
 };
 use markraft_core::projection::projection_of;
 use markraft_core::{
@@ -190,6 +192,9 @@ pub(crate) fn enter_with(
         types.table_types().map(goto_cell_below),
         types.table_types().map(guard_cell_split),
         rule.cloned(),
+        // A verbatim block keeps Return for its own newlines, in a list item
+        // as anywhere: splitting the item there would cut the block in two.
+        Some(new_line_keeping_indent()),
         types.list_item.map(split_list_item).map(splits),
         types
             .task_item
@@ -198,7 +203,6 @@ pub(crate) fn enter_with(
     ];
     list.extend(per_item(types, lift_list_item));
     list.extend([
-        Some(new_line_in_code()),
         Some(create_paragraph_near()),
         Some(lift_empty_block()),
         Some(splits(split_block_keep_marks())),
@@ -231,7 +235,60 @@ pub(crate) fn line_break(types: &DocTypes, spelling: Option<&crate::BreakSpellin
         };
         when(move |state| !types.in_table_cell(state), insert)
     });
-    some([Some(new_line_in_code()), hard_break])
+    some([
+        Some(new_line_keeping_indent()),
+        cell_break(types),
+        hard_break,
+    ])
+}
+
+/// Shift-Return in a table cell: a GFM row is one line, so the cell's line
+/// break is the HTML `<br />`, as Typora writes it, drawn as a break.
+fn cell_break(types: &DocTypes) -> Option<Command> {
+    let raw = types.raw_inline?;
+    let types = types.clone();
+    Some(command(move |state| {
+        if !types.in_table_cell(state) {
+            return None;
+        }
+        let tag = state
+            .schema()
+            .create(
+                raw,
+                markraft_core::attrs! { "source" => "<br />" },
+                markraft_core::MarkSet::empty(),
+                markraft_core::Fragment::empty(),
+            )
+            .ok()?;
+        markraft_core::commands::replace_selection(Slice::from_fragment(
+            markraft_core::Fragment::from_node(tag),
+        ))(state)
+        .map(|spec| spec.user_event("input.type"))
+    }))
+}
+
+/// A new line in a verbatim block, starting with the spaces and tabs the line
+/// it splits starts with — no more than lie before the caret — so code goes on
+/// at the depth it was at.
+fn new_line_keeping_indent() -> Command {
+    command(|state| {
+        let doc = state.doc();
+        let from = doc.resolve(state.selection().from(doc)).ok()?;
+        let block = from.parent();
+        let before = block.text_between(state.schema(), 0, from.parent_offset(), None, None);
+        let line = before.rsplit('\n').next().unwrap_or_default();
+        let indent: String = line
+            .chars()
+            .take_while(|c| matches!(c, ' ' | '\t'))
+            .collect();
+        // `new_line_in_code` decides where a newline is text rather than a block
+        // break; the indent only follows where it applies.
+        let newline = new_line_in_code()(state)?;
+        if indent.is_empty() {
+            return Some(newline);
+        }
+        markraft_core::commands::insert_text(&format!("\n{indent}"))(state)
+    })
 }
 
 /// Backspace at the start of an empty verbatim block: turn it into a paragraph.
@@ -263,48 +320,13 @@ fn clear_empty_verbatim(types: &DocTypes) -> Command {
     })
 }
 
-/// Backspace at the start of an empty list item that has items before and
-/// after it: delete the item and put the caret at the end of the one before.
-///
-/// Lifting it out, as Backspace does elsewhere at an item's start, would
-/// leave an empty paragraph between two halves of the list, which Markdown
-/// cannot spell: the file has only a blank line there, and reads the halves
-/// back as one loose list. The last item and the first keep the lift — the
-/// paragraph then stands after or before the list.
-fn delete_empty_middle_item(types: &DocTypes) -> Command {
-    let types = types.clone();
-    command(move |state| {
-        if !types.at_item_start(state) {
-            return None;
-        }
-        let doc = state.doc();
-        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
-        let depth = resolved.depth();
-        if depth < 2 || resolved.parent().content_size() != 0 {
-            return None;
-        }
-        let item = resolved.node(depth - 1);
-        let list = resolved.node(depth - 2);
-        let index = resolved.index(depth - 2);
-        if !types.is_item(item.type_id())
-            || item.child_count() != 1
-            || index == 0
-            || index + 1 >= list.child_count()
-        {
-            return None;
-        }
-        let (from, to) = (resolved.before(depth - 1), resolved.after(depth - 1));
-        // Everything before the item keeps its position.
-        let end = Selection::find_from(state.schema(), doc, from, -1, true)?;
-        let spec = changes_spec(state, vec![Change::delete(from, to)], "delete.backward")?;
-        Some(spec.selection(end))
-    })
-}
-
 /// Backspace at the start of a list item that has an item before it: join the
 /// item to that one, its blocks carrying on the item before as Typora does,
-/// rather than lifting it out of the list. The first item still outdents or
-/// leaves the list, and an empty item is left to the commands for those.
+/// rather than lifting it out of the list. An empty item joins the same way,
+/// leaving an empty paragraph in the item before for what is typed next. The
+/// first item of a list nested in an item joins that item, the rest of the
+/// nested list staying where it was. The first item of a top-level list still
+/// outdents or leaves the list.
 fn join_item_backward(types: &DocTypes) -> Command {
     let types = types.clone();
     command(move |state| {
@@ -314,14 +336,106 @@ fn join_item_backward(types: &DocTypes) -> Command {
         let doc = state.doc();
         let resolved = doc.resolve(state.selection().head(doc)).ok()?;
         let depth = resolved.depth();
-        if depth < 2 || resolved.parent().content_size() == 0 {
+        if depth < 2 {
             return None;
         }
         let item = resolved.node(depth - 1);
-        if !types.is_item(item.type_id()) || resolved.index(depth - 2) == 0 {
+        if !types.is_item(item.type_id()) {
             return None;
         }
-        join_backward()(state)
+        if resolved.index(depth - 2) > 0 {
+            return join_backward()(state);
+        }
+        if depth < 3 || !types.is_item(resolved.node(depth - 3).type_id()) {
+            return None;
+        }
+        // Lifted out, the item is the one after the item its list was in,
+        // and joins it as any other item does.
+        composed(vec![lift_list_item(item.type_id()), join_backward()])(state)
+    })
+}
+
+/// Whether the textblock a text selection nearest `pos` in direction `dir`
+/// would land in takes text joined into it: not a verbatim block, which keeps
+/// its text to itself, and not a table cell, whose row holds one line.
+fn prose_textblock_near(types: &DocTypes, state: &EditorState, pos: usize, dir: i32) -> bool {
+    let doc = state.doc();
+    Selection::find_from(state.schema(), doc, pos, dir, true)
+        .and_then(|found| doc.resolve(found.head(doc)).ok())
+        .is_some_and(|resolved| {
+            let ty = resolved.parent().type_id();
+            resolved.parent().is_textblock(state.schema())
+                && !types.is_verbatim(ty)
+                && types.table_cell != Some(ty)
+        })
+}
+
+/// Backspace at the start of a textblock right after a list or a quote: its
+/// text carries on the last textblock inside them, as Typora does, rather
+/// than the block moving into the list as an item or into the quote.
+fn join_text_after_wrapper(types: &DocTypes) -> Command {
+    let types = types.clone();
+    let join = join_textblock_backward();
+    command(move |state| {
+        if !at_textblock_start(state) || types.in_verbatim_block_at(state) {
+            return None;
+        }
+        let doc = state.doc();
+        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        let depth = (1..=resolved.depth())
+            .rev()
+            .find(|&d| resolved.node(d).is_textblock(state.schema()))?;
+        let index = resolved.index(depth - 1);
+        let before = resolved
+            .node(depth - 1)
+            .maybe_child(index.checked_sub(1)?)?;
+        let wrapper = Some(before.type_id()) == types.blockquote || types.is_list(before.type_id());
+        if !wrapper || !prose_textblock_near(&types, state, resolved.before(depth), -1) {
+            return None;
+        }
+        join(state)
+    })
+}
+
+/// `command`, unless the caret ends a textblock that a code block or a table
+/// follows. Delete there does nothing, as in Typora: joining would pull the
+/// block's text into the paragraph, or the paragraph's into a cell.
+fn stop_before_kept_text(types: &DocTypes, command: Command) -> Command {
+    let types = types.clone();
+    markraft_core::commands::command(move |state| {
+        let doc = state.doc();
+        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        let depth = (1..=resolved.depth())
+            .rev()
+            .find(|&d| resolved.node(d).is_textblock(state.schema()))?;
+        let at_end = state.selection().is_cursor() && resolved.pos() == resolved.end(depth);
+        if at_end && !prose_textblock_near(&types, state, resolved.after(depth), 1) {
+            return None;
+        }
+        command(state)
+    })
+}
+
+/// Delete at the end of a textblock: the text of the next textblock carries
+/// on this one wherever it sits — the next item, a nested list's first item,
+/// the first item of a list after a paragraph, a paragraph after a list — as
+/// Typora does. A verbatim block on either side keeps its text to itself.
+fn join_text_forward(types: &DocTypes) -> Command {
+    let types = types.clone();
+    let join = join_textblock_forward();
+    command(move |state| {
+        if types.in_verbatim_block_at(state) {
+            return None;
+        }
+        let doc = state.doc();
+        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        let depth = (1..=resolved.depth())
+            .rev()
+            .find(|&d| resolved.node(d).is_textblock(state.schema()))?;
+        if !prose_textblock_near(&types, state, resolved.after(depth), 1) {
+            return None;
+        }
+        join(state)
     })
 }
 
@@ -343,10 +457,10 @@ pub(crate) fn backspace(types: &DocTypes) -> Command {
         Some(delete_by_grapheme(Direction::Backward)),
         types.table_types().map(delete_empty_table),
         types.table_types().map(guard_cell_boundary),
-        Some(delete_empty_middle_item(types)),
         Some(join_item_backward(types)),
         Some(outdent),
         Some(clear_empty_verbatim(types)),
+        Some(join_text_after_wrapper(types)),
         Some(join_backward()),
         Some(select_node_backward()),
     ])
@@ -418,7 +532,8 @@ pub(crate) fn delete_forward(types: &DocTypes) -> Command {
         Some(delete_selection()),
         Some(delete_by_grapheme(Direction::Forward)),
         types.table_types().map(guard_cell_boundary),
-        Some(join_forward()),
+        Some(join_text_forward(types)),
+        Some(stop_before_kept_text(types, join_forward())),
         Some(select_node_forward()),
     ])
 }
@@ -523,6 +638,62 @@ pub(crate) fn history(undo: bool) -> Command {
     })
 }
 
+/// ⌥⌘C, as Typora does it: with the caret in a paragraph that has text, a new
+/// empty code block of `ty` with `attrs` at the caret — after the paragraph at
+/// its end, before it at its start, and splitting it anywhere else — with the
+/// caret in the block. On an empty line, over a selection, or in a code block
+/// already, the block type toggles as any other's does; a selection then
+/// collapses to its start, as in Typora, so typing does not replace the code.
+pub(crate) fn code_block(types: &DocTypes, ty: NodeTypeId, attrs: Attrs) -> Command {
+    let types = types.clone();
+    let toggle = toggle_block(&types, ty, attrs.clone());
+    command(move |state| {
+        let doc = state.doc();
+        let schema = state.schema();
+        let selection = state.selection();
+        let resolved = doc.resolve(selection.head(doc)).ok()?;
+        let parent = resolved.parent();
+        let in_prose = Some(parent.type_id()) == types.paragraph && parent.content_size() > 0;
+        if !selection.is_cursor() {
+            let start = selection.from(doc);
+            return toggle(state).map(|spec| spec.selection(Selection::cursor(start)));
+        }
+        if !in_prose {
+            return toggle(state);
+        }
+        let code = schema
+            .create(
+                ty,
+                attrs.clone(),
+                markraft_core::MarkSet::empty(),
+                markraft_core::Fragment::empty(),
+            )
+            .ok()?;
+        let depth = resolved.depth();
+        let offset = resolved.parent_offset();
+        let (at, tokens, caret) = if offset == parent.content_size() {
+            let at = resolved.after(depth);
+            (at, vec![Token::Node(code)], at + 1)
+        } else if offset == 0 {
+            let at = resolved.before(depth);
+            (at, vec![Token::Node(code)], at + 1)
+        } else {
+            let markup = parent.markup().clone();
+            let at = resolved.pos();
+            let tokens = vec![
+                Token::Close(markup.clone()),
+                Token::Node(code),
+                Token::Open(markup),
+            ];
+            (at, tokens, at + 2)
+        };
+        let change =
+            Change::insert(at, Slice::from_tokens(&tokens)).with_fit(markraft_core::Fit::Auto);
+        let spec = changes_spec(state, vec![change], "format.block")?;
+        Some(spec.selection(Selection::cursor(caret)).scroll_into_view())
+    })
+}
+
 /// Set a textblock type, or return to a paragraph when it is already that type.
 pub(crate) fn toggle_block(types: &DocTypes, ty: NodeTypeId, attrs: Attrs) -> Command {
     let types = types.clone();
@@ -596,6 +767,10 @@ pub(crate) fn toggle_wrap_in(ty: NodeTypeId, attrs: Attrs) -> Command {
 
 /// Wrap in a list of `ty` carrying `list_attrs`, or leave the list when the
 /// cursor is already in one of that type holding items of `item`.
+///
+/// In a list of another kind — ordered where `ty` is a bullet list, or holding
+/// the other kind of item — the whole list the cursor is in becomes the kind
+/// asked for, as Typora converts it, rather than a new list nesting in its item.
 pub(crate) fn toggle_list(
     types: &DocTypes,
     ty: NodeTypeId,
@@ -609,15 +784,88 @@ pub(crate) fn toggle_list(
         if current == Some(ty) && current_item == Some(item) {
             return lift_list_item(item)(state);
         }
-        if current == Some(ty) && current_item.is_some() {
-            // The same list type but the other kind of item: change the items
-            // rather than nesting a second list.
-            return convert_items(&types, item)(state);
+        if current.is_some() && current_item.is_some() {
+            return convert_list(&types, ty, &list_attrs, item)(state);
         }
         composed(vec![
             wrap_in_list(ty, list_attrs.clone()),
             convert_items(&types, item),
         ])(state)
+    })
+}
+
+/// Turn the innermost list the cursor is in into a list of `ty` holding items
+/// of `item`, the items keeping their content and the lists nested in them
+/// keeping their kind.
+///
+/// A list that changes type takes `list_attrs` — its marker is the new kind's,
+/// not a spelling of the old one's — and keeps only its tightness, which is
+/// how its items are spaced rather than how it is marked. One already of `ty`
+/// keeps its attributes whole, and an item already of `item` keeps its own.
+fn convert_list(types: &DocTypes, ty: NodeTypeId, list_attrs: &Attrs, item: NodeTypeId) -> Command {
+    let types = types.clone();
+    let list_attrs = list_attrs.clone();
+    command(move |state| {
+        let doc = state.doc();
+        let schema = state.schema();
+        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        let depth = (1..=resolved.depth())
+            .rev()
+            .find(|depth| types.is_list(resolved.node(*depth).type_id()))?;
+        let list = resolved.node(depth);
+        let before = resolved.before(depth);
+        // The open and close tokens of the node at `at`, of `size`, as `markup`.
+        let retype = |at: usize, size: usize, markup: Markup| {
+            [
+                Change::replace(
+                    at,
+                    at + 1,
+                    Slice::from_tokens(&[Token::Open(markup.clone())]),
+                ),
+                Change::replace(
+                    at + size - 1,
+                    at + size,
+                    Slice::from_tokens(&[Token::Close(markup)]),
+                ),
+            ]
+        };
+        let mut changes = Vec::new();
+        let mut close = None;
+        if list.type_id() != ty {
+            let mut attrs = list_attrs.clone();
+            if let Some(tight) = list.attrs().get("tight")
+                && attrs.get("tight").is_none()
+                && schema.node_type(ty).default_attrs().get("tight").is_some()
+            {
+                attrs = attrs.with("tight", tight.clone());
+            }
+            let [open, closing] = retype(before, list.node_size(), markup_of(schema, ty, &attrs));
+            changes.push(open);
+            close = Some(closing);
+        }
+        let mut at = before + 1;
+        for child in list.children() {
+            if child.type_id() != item {
+                // Built rather than retyped in place, so an item whose content
+                // the new kind cannot hold refuses the whole conversion.
+                let replaced = schema
+                    .create(
+                        item,
+                        schema.node_type(item).default_attrs().clone(),
+                        child.marks().clone(),
+                        child.content().clone(),
+                    )
+                    .ok()?;
+                changes.extend(retype(at, child.node_size(), replaced.markup().clone()));
+            }
+            at += child.node_size();
+        }
+        changes.extend(close);
+        if changes.is_empty() {
+            return None;
+        }
+        changes_spec(state, changes, "format.block")
+            .map(|spec| spec.selection(state.selection().clone()))
     })
 }
 
@@ -806,7 +1054,7 @@ pub(crate) fn select_all(types: &DocTypes) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typeahead::tests::{at, state_of, types_of};
+    use crate::typeahead::tests::{at, run, state_of, types_of};
     use markraft_commonmark::{schema as md, to_markdown};
     use markraft_core::commands::{delete_range, run_command};
     use markraft_core::projection::projection_of;
@@ -887,14 +1135,15 @@ mod tests {
         }
     }
 
+    /// Backspace at the start of a nested list's first item joins it to the
+    /// item the list is in, as a paragraph of that item, as Typora does; in a
+    /// top-level list's first item it leaves the list altogether.
     #[test]
-    fn backspace_at_a_list_items_start_outdents_before_it_leaves_the_list() {
-        // A nested first item outdents one level first.
-        let state = state_of("- one\n  - two");
+    fn backspace_at_a_first_items_start_joins_the_item_above_or_leaves_the_list() {
+        let state = state_of("- one\n  - two\n  - three");
         let state = at(&state, caret_in(&state, "two"));
-        let outdented = after(&state, &backspace(&types_of(&state))).expect("the outdent applies");
-        assert_eq!(outdented, "- one\n- two");
-        // A top-level first item then leaves the list altogether.
+        let joined = after(&state, &backspace(&types_of(&state))).expect("the join applies");
+        assert_eq!(joined, "- one\n\n  two\n\n  - three");
         let state = state_of("- one\n- two");
         let state = at(&state, caret_in(&state, "one"));
         let lifted = after(&state, &backspace(&types_of(&state))).expect("the lift applies");
@@ -965,6 +1214,158 @@ mod tests {
         assert_eq!(
             after(&state, &indent(&types, "    ")).as_deref(),
             Some("```\na    b\n```")
+        );
+    }
+
+    /// Return in a code block starts the new line at the depth of the line it
+    /// splits, in the spaces or tabs that line uses, and no deeper than the
+    /// caret: splitting inside the indent carries only what lies before it.
+    #[test]
+    fn return_in_a_code_block_keeps_the_lines_indent() {
+        for (source, needle, offset, typed) in [
+            (
+                "```\nfn a() {\n    x\n```",
+                "    x",
+                5,
+                "```\nfn a() {\n    x\n    y\n```",
+            ),
+            ("```\n\tx\n```", "\tx", 2, "```\n\tx\n\ty\n```"),
+            ("```\n  \t x\n```", "  \t x", 5, "```\n  \t x\n  \t y\n```"),
+            ("```\n    x\n```", "    x", 2, "```\n  \n  y  x\n```"),
+            ("```\nx\n```", "x", 1, "```\nx\ny\n```"),
+        ] {
+            let state = state_of(source);
+            let mut start = None;
+            state.doc().descendants(&mut |node, pos, _, _| {
+                if let Some(at) = node.text().and_then(|text| text.find(needle)) {
+                    start = start.or(Some(pos + at));
+                }
+                true
+            });
+            let state = at(&state, start.expect("the line") + offset);
+            let entered = applied(&state, &enter(&types_of(&state))).expect("a new line");
+            let entered = run(&entered, &markraft_core::commands::insert_text("y"));
+            assert_eq!(
+                to_markdown(state.schema(), entered.doc()),
+                typed,
+                "{source:?}"
+            );
+        }
+    }
+
+    /// Return at the end of a paragraph that more blocks of its item follow
+    /// splits the item, as Typora does: the new item takes those blocks. Until
+    /// something is typed it opens on an empty line, which the source holds as
+    /// the marker alone on its line.
+    #[test]
+    fn return_before_more_blocks_of_an_item_splits_it() {
+        for (source, new) in [
+            ("- first\n\n  para2\n- next\n", "- new\n\n  para2"),
+            (
+                "- [ ] first\n\n  para2\n- [ ] next\n",
+                "- [ ] new\n\n  para2",
+            ),
+            ("- first\n  - sub\n- next\n", "- new\n  - sub"),
+        ] {
+            let state = state_of(source);
+            let state = at(&state, caret_in(&state, "first") + 5);
+            let entered = applied(&state, &enter(&types_of(&state))).expect("a split");
+            let baseline = markraft_commonmark::SourceDocument::parse(state.schema(), source)
+                .expect("the source parses");
+            assert!(
+                baseline.render(state.schema(), entered.doc()).is_ok(),
+                "{source:?}: {}",
+                state.schema().describe(entered.doc())
+            );
+            let typed = run(&entered, &markraft_core::commands::insert_text("new"));
+            let markdown = to_markdown(state.schema(), typed.doc());
+            assert!(markdown.contains(new), "{source:?}: {markdown:?}");
+            assert!(
+                baseline.render(state.schema(), typed.doc()).is_ok(),
+                "{source:?}: {markdown:?}"
+            );
+        }
+        // A code block keeps Return for its own newlines, wherever it is in
+        // the item: no split cuts it in two or moves what follows it.
+        for (source, offset, expected) in [
+            (
+                "- ```\n  ab\n  ```\n\n  para\n",
+                2,
+                "- ```\n  ab\n  \n  ```\n\n  para",
+            ),
+            ("- ```\n  ab\n  ```\n", 1, "- ```\n  a\n  b\n  ```"),
+            (
+                "- [ ] \n  ```\n  ab\n  ```\n",
+                2,
+                "- [ ] \n  ```\n  ab\n  \n  ```",
+            ),
+        ] {
+            let state = state_of(source);
+            let state = at(&state, caret_in(&state, "ab") + offset);
+            assert_eq!(
+                after(&state, &enter(&types_of(&state))).as_deref(),
+                Some(expected),
+                "{source:?}"
+            );
+        }
+        // Where nothing follows in the item, Return still splits it.
+        let state = state_of("- first\n\n  para2\n- next\n");
+        let state = at(&state, caret_in(&state, "para2") + 5);
+        assert_eq!(
+            after(&state, &enter(&types_of(&state))).as_deref(),
+            Some("- first\n\n  para2\n\n- \n\n- next")
+        );
+    }
+
+    /// A list shortcut in a list of another kind turns the whole list into the
+    /// kind asked for, as Typora does, rather than nesting a new list in the
+    /// item. The new list is marked with the attributes the shortcut gives.
+    #[test]
+    fn a_list_shortcut_converts_the_whole_list_it_is_in() {
+        let state = state_of("1) a\n2) b\n");
+        let state = at(&state, caret_in(&state, "b"));
+        let types = types_of(&state);
+        let (bullet, ordered) = (types.bullet_list.unwrap(), types.ordered_list.unwrap());
+        let (item, task) = (types.list_item.unwrap(), types.task_item.unwrap());
+        let stars = toggle_list(
+            &types,
+            bullet,
+            markraft_core::attrs! {"bullet_char" => "*"},
+            item,
+        );
+        assert_eq!(after(&state, &stars).as_deref(), Some("* a\n* b"));
+        let tasks = toggle_list(&types, bullet, Attrs::empty(), task);
+        assert_eq!(after(&state, &tasks).as_deref(), Some("- [ ] a\n- [ ] b"));
+
+        let state = state_of("* a\n* b\n  - nested\n");
+        let state = at(&state, caret_in(&state, "b"));
+        let numbers = toggle_list(&types, ordered, Attrs::empty(), item);
+        assert_eq!(
+            after(&state, &numbers).as_deref(),
+            Some("1. a\n2. b\n   - nested"),
+            "a nested list keeps its kind"
+        );
+        let tasks = toggle_list(&types, bullet, Attrs::empty(), task);
+        assert_eq!(
+            after(&state, &tasks).as_deref(),
+            Some("* [ ] a\n* [ ] b\n  - nested"),
+            "the same list keeps its marker when only its items change"
+        );
+
+        let state = state_of("- [x] a\n- [ ] b\n");
+        let state = at(&state, caret_in(&state, "b"));
+        let numbers = toggle_list(&types, ordered, Attrs::empty(), task);
+        assert_eq!(
+            after(&state, &numbers).as_deref(),
+            Some("1. [x] a\n2. [ ] b"),
+            "a task keeps its box"
+        );
+        let loose = state_of("1. a\n\n2. b\n");
+        let loose = at(&loose, caret_in(&loose, "b"));
+        assert_eq!(
+            after(&loose, &toggle_list(&types, bullet, Attrs::empty(), item)).as_deref(),
+            Some("- a\n\n- b"),
+            "the spacing between items stays"
         );
     }
 
@@ -1293,25 +1694,25 @@ mod tests {
     }
 
     /// Return in the last item of a list, then Backspace twice: the first
-    /// lifts the empty item out as a paragraph, the second deletes that
-    /// paragraph and leaves the caret where it started — not in the list that
-    /// follows.
+    /// joins the empty item to the one before as an empty paragraph, as Typora
+    /// does, the second joins that paragraph back and leaves the caret where it
+    /// started — not in the list that follows.
     #[test]
     fn backspace_twice_from_a_new_last_item_returns_to_the_item_before() {
         let state = state_of("1. eight\n9. nine\n\n- bullet a");
         let types = types_of(&state);
         let end_of_nine = caret_in(&state, "nine") + 4;
         let state = applied(&at(&state, end_of_nine), &enter(&types)).expect("Return applies");
-        let lifted = applied(&state, &backspace(&types)).expect("Backspace lifts the item");
+        let joined = applied(&state, &backspace(&types)).expect("Backspace joins the item");
         assert_eq!(
-            lifted.doc().child_count(),
-            3,
-            "an empty paragraph between the lists"
+            joined.doc().child(0).child_count(),
+            2,
+            "the empty item joined"
         );
-        let joined = applied(&lifted, &backspace(&types)).expect("Backspace deletes it");
-        assert_eq!(joined.doc().child_count(), 2);
-        assert_eq!(joined.selection().head(joined.doc()), end_of_nine);
-        let typed = applied(&joined, &markraft_core::commands::insert_text("5")).expect("typing");
+        let back = applied(&joined, &backspace(&types)).expect("Backspace joins the paragraph");
+        assert_eq!(back.doc().child_count(), 2);
+        assert_eq!(back.selection().head(back.doc()), end_of_nine);
+        let typed = applied(&back, &markraft_core::commands::insert_text("5")).expect("typing");
         assert_eq!(
             to_markdown(typed.schema(), typed.doc()),
             "1. eight\n2. nine5\n\n- bullet a"
@@ -1319,51 +1720,101 @@ mod tests {
     }
 
     /// Return at the end of `eight` in the middle of an ordered list, then
-    /// Backspace: the new empty item goes and the caret is back at the end of
-    /// `eight`. Lifting it out instead would leave a paragraph between two
-    /// halves of one list, which Markdown cannot spell, so nothing happened.
+    /// Backspace: the new empty item joins `eight` as an empty paragraph, and
+    /// what is typed next is a paragraph of that item, as Typora does. The
+    /// empty paragraph writes nothing, so the list is saved as it was until then.
     #[test]
-    fn backspace_in_an_empty_middle_item_returns_to_the_item_before() {
-        let state = state_of("7. seven\n8. eight\n9. nine");
+    fn backspace_in_an_empty_middle_item_joins_the_item_before() {
+        let source = "7. seven\n8. eight\n9. nine\n";
+        let state = state_of(source);
         let types = types_of(&state);
         let end_of_eight = caret_in(&state, "eight") + 5;
         let state = applied(&at(&state, end_of_eight), &enter(&types)).expect("Return applies");
+        let joined = applied(&state, &backspace(&types)).expect("Backspace joins the item");
         assert_eq!(
-            state.doc().child(0).child_count(),
-            4,
-            "an empty item after eight"
+            joined.doc().child(0).child_count(),
+            3,
+            "the empty item joined"
         );
-        let deleted = applied(&state, &backspace(&types)).expect("Backspace deletes the item");
-        assert_eq!(deleted.selection().head(deleted.doc()), end_of_eight);
-        let typed = applied(&deleted, &markraft_core::commands::insert_text("5")).expect("typing");
+        let saved =
+            markraft_commonmark::SourceDocument::parse(joined.schema(), source).expect("parses");
+        assert_eq!(
+            saved.render(joined.schema(), joined.doc()).as_deref(),
+            Ok(source)
+        );
+        let typed = applied(&joined, &markraft_core::commands::insert_text("5")).expect("typing");
         assert_eq!(
             to_markdown(typed.schema(), typed.doc()),
-            "7. seven\n8. eight5\n9. nine"
+            "7. seven\n\n8. eight\n\n   5\n\n9. nine"
         );
     }
 
     #[test]
-    fn backspace_in_an_empty_middle_bullet_or_task_item_returns_to_the_item_before() {
+    fn backspace_in_an_empty_middle_bullet_or_task_item_joins_the_item_before() {
         for (source, line, expected) in [
-            ("- one\n- two\n- three", "two", "- one\n- two5\n- three"),
+            (
+                "- one\n- two\n- three",
+                "two",
+                "- one\n\n- two\n\n  5\n\n- three",
+            ),
             (
                 "- [ ] one\n- [ ] two\n- [ ] three",
                 "two",
-                "- [ ] one\n- [ ] two5\n- [ ] three",
+                "- [ ] one\n\n- [ ] two\n\n  5\n\n- [ ] three",
             ),
         ] {
             let state = state_of(source);
             let types = types_of(&state);
             let end = caret_in(&state, line) + line.len();
             let state = applied(&at(&state, end), &enter(&types)).expect("Return applies");
-            let deleted = applied(&state, &backspace(&types)).expect("Backspace deletes the item");
-            assert_eq!(deleted.selection().head(deleted.doc()), end, "{source}");
+            let joined = applied(&state, &backspace(&types)).expect("Backspace joins the item");
             let typed =
-                applied(&deleted, &markraft_core::commands::insert_text("5")).expect("typing");
+                applied(&joined, &markraft_core::commands::insert_text("5")).expect("typing");
             assert_eq!(
                 to_markdown(typed.schema(), typed.doc()),
                 expected,
                 "{source}"
+            );
+        }
+    }
+
+    /// Delete at the end of a textblock and Backspace at the start of one right
+    /// after a list or a quote join the two textblocks' text wherever they sit,
+    /// as Typora does. A code block keeps its text to itself.
+    #[test]
+    fn delete_and_backspace_join_text_across_lists_and_quotes() {
+        let forward = [
+            ("- one\n- two", "one", "- onetwo"),
+            ("zero\n\n- one", "zero", "zeroone"),
+            ("- one\n\ntwo", "one", "- onetwo"),
+            ("- one\n  - two", "one", "- onetwo"),
+            ("> one\n\ntwo", "one", "> onetwo"),
+        ];
+        for (source, line, expected) in forward {
+            let state = state_of(source);
+            let state = at(&state, caret_in(&state, line) + line.len());
+            let joined = after(&state, &delete_forward(&types_of(&state)));
+            assert_eq!(joined.as_deref(), Some(expected), "Delete in {source:?}");
+        }
+        let backward = [
+            ("- one\n\ntwo", "two", "- onetwo"),
+            ("> one\n\ntwo", "two", "> onetwo"),
+            ("- one\n  - two\n\nthree", "three", "- one\n  - twothree"),
+        ];
+        for (source, line, expected) in backward {
+            let state = state_of(source);
+            let state = at(&state, caret_in(&state, line));
+            let joined = after(&state, &backspace(&types_of(&state)));
+            assert_eq!(joined.as_deref(), Some(expected), "Backspace in {source:?}");
+        }
+        // Before a code block or a table, Delete does nothing.
+        for source in ["one\n\n```\ncode\n```", "one\n\n| a |\n| - |\n| b |"] {
+            let state = state_of(source);
+            let state = at(&state, caret_in(&state, "one") + 3);
+            assert_eq!(
+                after(&state, &delete_forward(&types_of(&state))),
+                None,
+                "{source:?}"
             );
         }
     }
@@ -1382,8 +1833,9 @@ mod tests {
     /// Return at the start of a list's first item, ↑ into the empty item it
     /// leaves, Backspace to lift it out, then type: the file saved from the
     /// original source has one blank line either side of the new paragraph,
-    /// for an ordered list and a bullet list alike. Lifting the last item the
-    /// same way writes the paragraph one blank line after the list.
+    /// for an ordered list and a bullet list alike. The last item, which has an
+    /// item before it, joins that one instead, as Typora does: what is typed is
+    /// a paragraph of the item before, and the list is written loose.
     #[test]
     fn typing_into_a_lifted_first_item_saves_one_blank_line_either_side() {
         use markraft_commonmark::SourceDocument;
@@ -1404,7 +1856,7 @@ mod tests {
                 "# Lists\n\n1. eight\n9. nine\n",
                 "nine",
                 false,
-                "# Lists\n\n1. eight\n9. nine\n\n5\n",
+                "# Lists\n\n1. eight\n\n9. nine\n\n   5\n",
             ),
         ] {
             let state = state_of(source);
@@ -1532,9 +1984,14 @@ mod tests {
         .expect("Shift-Return applies in code");
         assert_eq!(after(&broken, &typed).as_deref(), Some("```\nx\nb\n```"));
 
+        // A GFM row is one line: in a table cell the break is `<br />`, as
+        // Typora writes it.
         let (state, _) = table_state();
         let caret = caret_in(&state, "c") + 1;
-        assert!(run_command(&at(&state, caret), &line_break(&types, None)).is_none());
+        let broken = applied(&at(&state, caret), &line_break(&types, None))
+            .expect("Shift-Return applies in a cell");
+        let markdown = to_markdown(broken.schema(), broken.doc());
+        assert!(markdown.contains("c<br />"), "{markdown:?}");
     }
 
     /// A kind that spells hard breaks with two spaces gets them from

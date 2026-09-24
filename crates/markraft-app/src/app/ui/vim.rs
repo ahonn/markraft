@@ -4,7 +4,7 @@
 use super::*;
 use markraft_vim::Mode;
 
-impl NotesApp {
+impl MarkraftApp {
     /// Register vim on `editor`. The handle is what keeps it registered: dropping it
     /// unregisters the extension before the editor's next update.
     pub(in crate::app) fn attach_vim(

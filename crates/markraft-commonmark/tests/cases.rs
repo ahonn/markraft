@@ -1546,24 +1546,32 @@ let x = 1;
     doc.check(&codec.schema).expect("a valid document");
 }
 
+/// A thematic break keeps the character it was written with, as Typora does,
+/// unless that would read as something else.
 #[test]
-fn a_thematic_break_is_dashes_unless_that_would_read_as_something_else() {
+fn a_thematic_break_keeps_its_character_unless_that_would_read_as_something_else() {
     let codec = Codec::new();
-    // On its own, and after a blank line, three dashes are a thematic break.
-    assert_eq!(codec.normalize("***"), "---");
-    assert_eq!(codec.normalize("a\n\n***\n\nb"), "a\n\n---\n\nb");
-    assert_eq!(codec.normalize("> a\n\n> ***"), "> a\n\n> ---");
-    // A `-` marker and three dashes are four dashes, which is a break itself.
-    // `* ***` is likewise all stars, so it is a break rather than an item.
-    assert_eq!(codec.normalize("- ***"), "- ***");
-    assert_eq!(codec.normalize("* ***"), "---");
-    assert_eq!(codec.normalize("+ ***"), "+ ---");
-    assert_eq!(codec.normalize("1. ***"), "1. ---");
-    // Directly under a line of text, three dashes underline it.
-    assert_eq!(codec.normalize("* a\n\n  ***"), "* a\n\n  ---");
-    assert_eq!(codec.normalize("* a\n  ***"), "* a\n  ***");
-    // And every one of them still reads back as a thematic break.
-    for source in ["---", "- ***", "+ ***", "* a\n  ***"] {
+    for source in [
+        "---",
+        "***",
+        "___",
+        "a\n\n***\n\nb",
+        "> a\n\n> ___",
+        // A `-` marker and three stars are not all one character.
+        "- ***",
+        "+ ***",
+        "1. ___",
+        // Directly under a line of text, stars and underscores underline nothing.
+        "* a\n\n  ***",
+        "* a\n  ***",
+        "* a\n  ___",
+    ] {
+        assert_eq!(codec.normalize(source), source, "{source:?}");
+    }
+    // `* ***` is all stars, so it is a break rather than an item, and stays one.
+    assert_eq!(codec.normalize("* ***"), "***");
+    // Every one of them still reads back as a thematic break.
+    for source in ["---", "***", "- ***", "+ ***", "* a\n  ***", "* a\n  ___"] {
         assert_eq!(
             codec.normalize(source),
             codec.normalize(&codec.normalize(source))

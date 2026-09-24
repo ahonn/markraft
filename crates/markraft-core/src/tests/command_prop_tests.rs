@@ -6,6 +6,7 @@ use crate::change::{Change, ChangeSet};
 use crate::commands::*;
 use crate::decorations::{RangeItem, RangeSet};
 use crate::fragment::Fragment;
+use crate::history::{HistoryConfig, history, redo, undo};
 use crate::node::Node;
 use crate::projection::Projection;
 use crate::schema::Schema;
@@ -82,6 +83,19 @@ fn catalogue(schema: &Schema) -> Vec<(&'static str, Command)> {
             "move_by_word.backward",
             move_by_word(Direction::Backward, true),
         ),
+        (
+            "delete_by_grapheme.backward",
+            delete_by_grapheme(Direction::Backward),
+        ),
+        (
+            "delete_by_grapheme.forward",
+            delete_by_grapheme(Direction::Forward),
+        ),
+        (
+            "delete_by_word.backward",
+            delete_by_word(Direction::Backward),
+        ),
+        ("delete_by_word.forward", delete_by_word(Direction::Forward)),
     ]
 }
 
@@ -146,6 +160,74 @@ fn every_command_leaves_a_valid_document_and_selection() {
             }
         }
     }
+}
+
+/// Every command that changes the document is one undo step: undo gives back the
+/// document and selection it started from, and redo gives back what it made.
+#[test]
+fn every_command_undoes_to_where_it_started_and_redoes_to_what_it_made() {
+    let schema = shared_schema();
+    let commands = catalogue(&schema);
+    let mut rng = Rng::new(0x5eed_4321);
+    let mut checked = 0;
+    for _ in 0..40 {
+        let document = random_doc(&schema, &mut rng);
+        for selection in selections(&schema, &mut rng, &document) {
+            let Ok(start) = EditorState::create(
+                crate::state::EditorStateConfig::new(schema.clone())
+                    .doc(document.clone())
+                    .selection(selection.clone())
+                    .extensions(history(HistoryConfig::default())),
+            ) else {
+                continue;
+            };
+            for (name, command) in &commands {
+                let Some(Ok(tr)) = run_command(&start, command) else {
+                    continue;
+                };
+                let next = tr.state().clone();
+                if next.doc() == start.doc() {
+                    continue;
+                }
+                checked += 1;
+                let undone = next
+                    .update(
+                        [undo(&next).unwrap_or_else(|| panic!("`{name}` left nothing to undo"))],
+                    )
+                    .unwrap_or_else(|error| panic!("undoing `{name}` failed: {error}"))
+                    .state()
+                    .clone();
+                assert_eq!(
+                    undone.doc(),
+                    start.doc(),
+                    "undoing `{name}` gave another document\nwas:  {}\nundone: {}",
+                    schema.describe(start.doc()),
+                    schema.describe(undone.doc())
+                );
+                assert_eq!(
+                    undone.selection(),
+                    start.selection(),
+                    "undoing `{name}` moved the selection in {}",
+                    schema.describe(start.doc())
+                );
+                let redone = undone
+                    .update([
+                        redo(&undone).unwrap_or_else(|| panic!("`{name}` left nothing to redo"))
+                    ])
+                    .unwrap_or_else(|error| panic!("redoing `{name}` failed: {error}"))
+                    .state()
+                    .clone();
+                assert_eq!(
+                    redone.doc(),
+                    next.doc(),
+                    "redoing `{name}` gave another document\nmade:   {}\nredone: {}",
+                    schema.describe(next.doc()),
+                    schema.describe(redone.doc())
+                );
+            }
+        }
+    }
+    assert!(checked > 100, "only {checked} edits were checked");
 }
 
 #[test]

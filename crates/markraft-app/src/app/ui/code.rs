@@ -1,11 +1,8 @@
 use super::*;
 use markraft_gpui::canonical_language;
 
-impl NotesApp {
+impl MarkraftApp {
     pub(in crate::app) fn open_code_language(&mut self, pos: usize, cx: &mut Context<Self>) {
-        if self.interaction.html().is_some() {
-            return;
-        }
         let editor = self.editor();
         let Some(active) = editor.read(cx).code_language(pos) else {
             return;

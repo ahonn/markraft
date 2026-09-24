@@ -133,29 +133,64 @@ pub(crate) struct TriggerMatch {
 /// it and the caret, where the trigger itself opens the line or follows whitespace, so
 /// a later trigger inside the run stays part of the query. A code block never matches.
 /// Callers additionally require a collapsed selection and no live composition.
+///
+/// With `spaces`, the query may hold single spaces between its words — `/code bl` —
+/// and the nearest trigger that opens the line or follows whitespace starts it. It
+/// may not start with a space or hold two in a row, which is where a menu over prose
+/// gives up; that the provider finds nothing for it closes the rest.
 pub(crate) fn trigger_match(
     projection: &Projection,
     in_code: bool,
     caret: usize,
     triggers: &[char],
+    spaces: bool,
 ) -> Option<TriggerMatch> {
     if in_code {
         return None;
     }
     let index = projection.line_at(caret)?;
-    let (start, trigger) = projection
+    let before: Vec<(usize, &str)> = projection
         .graphemes(index)
         .filter(|(pos, _)| *pos < caret)
-        .rev()
-        .take_while(|(_, grapheme)| !grapheme.chars().any(char::is_whitespace))
-        .last()?;
+        .collect();
+    let (start, trigger) = if spaces {
+        let mut found = None;
+        let mut spaced = false;
+        for (at, &(pos, grapheme)) in before.iter().enumerate().rev() {
+            if grapheme.chars().any(char::is_whitespace) {
+                if spaced {
+                    return None;
+                }
+                spaced = true;
+                continue;
+            }
+            spaced = false;
+            let opens = at == 0 || before[at - 1].1.chars().any(char::is_whitespace);
+            if is_trigger(grapheme, triggers) && opens {
+                found = Some((pos, grapheme));
+                break;
+            }
+        }
+        found?
+    } else {
+        let (start, trigger) = before
+            .iter()
+            .rev()
+            .take_while(|(_, grapheme)| !grapheme.chars().any(char::is_whitespace))
+            .last()?;
+        (*start, *trigger)
+    };
     if !is_trigger(trigger, triggers) {
         return None;
     }
     let end = start + trigger.chars().count();
+    let query = projection.text_between(end, caret)?.to_owned();
+    if query.starts_with(char::is_whitespace) {
+        return None;
+    }
     Some(TriggerMatch {
         trigger: start..end,
-        query: projection.text_between(end, caret)?.to_owned(),
+        query,
     })
 }
 
@@ -168,8 +203,9 @@ pub(crate) fn open_match(
     caret: usize,
     triggers: &[char],
     min_query: usize,
+    spaces: bool,
 ) -> Option<TriggerMatch> {
-    let found = trigger_match(projection, in_code, caret, triggers)?;
+    let found = trigger_match(projection, in_code, caret, triggers, spaces)?;
     (found.query.graphemes(true).count() >= min_query).then_some(found)
 }
 
@@ -250,6 +286,8 @@ pub struct Typeahead {
     id: &'static str,
     triggers: Vec<char>,
     min_query: usize,
+    /// Whether the query may run on past a space; see [`trigger_match`].
+    spaces: bool,
     provider: Rc<dyn TypeaheadProvider>,
     state: Rc<RefCell<State>>,
     scroll: ScrollHandle,
@@ -263,6 +301,7 @@ impl Typeahead {
             id,
             triggers,
             min_query: 0,
+            spaces: false,
             provider: Rc::new(provider),
             state: Rc::default(),
             scroll: ScrollHandle::new(),
@@ -273,6 +312,12 @@ impl Typeahead {
     /// menu. The default, 0, opens on the bare trigger.
     pub fn min_query(mut self, graphemes: usize) -> Self {
         self.min_query = graphemes;
+        self
+    }
+    /// Let the query run on past single spaces, for a menu searched by phrases: the
+    /// `/` menu's "Code Block".
+    pub fn spaces_in_query(mut self) -> Self {
+        self.spaces = true;
         self
     }
 }
@@ -308,6 +353,7 @@ impl Extension for Typeahead {
                     cx.head(),
                     &self.triggers,
                     self.min_query,
+                    self.spaces,
                 )
             })
             .flatten();
@@ -524,11 +570,37 @@ pub(crate) mod tests {
             types.in_verbatim_block_at(&state),
             pos,
             &SLASH,
+            false,
         )
     }
 
     fn query(state: &EditorState, pos: usize) -> Option<String> {
         found(state, pos).map(|found| found.query)
+    }
+
+    #[test]
+    fn a_phrase_query_runs_past_single_spaces_but_not_a_leading_or_double_one() {
+        let spaced = |text: &str| {
+            let state = state_of(text);
+            let caret = state.doc().content_size() - 1;
+            let types = types_of(&state);
+            let state = at(&state, caret);
+            trigger_match(
+                &projection_of(&state),
+                types.in_verbatim_block_at(&state),
+                caret,
+                &SLASH,
+                true,
+            )
+            .map(|found| found.query)
+        };
+        assert_eq!(spaced("/code bl").as_deref(), Some("code bl"));
+        assert_eq!(spaced("say /code bl").as_deref(), Some("code bl"));
+        assert_eq!(spaced("/ code"), None);
+        assert_eq!(spaced("/code  bl"), None);
+        assert_eq!(spaced("a/b c"), None);
+        // Without spaces the word the caret is in has to start with the trigger.
+        assert_eq!(query(&state_of("/code bl"), 9), None);
     }
 
     #[test]
@@ -626,7 +698,8 @@ pub(crate) mod tests {
     fn a_minimum_query_keeps_the_menu_shut_for_a_short_run() {
         let state = state_of("/ab");
         let projection = projection_of(&state);
-        let at = |pos, min| open_match(&projection, false, pos, &SLASH, min).map(|f| f.query);
+        let at =
+            |pos, min| open_match(&projection, false, pos, &SLASH, min, false).map(|f| f.query);
         // The default opens on the bare trigger.
         assert_eq!(at(2, 0).as_deref(), Some(""));
         assert_eq!(at(2, 2), None);
@@ -637,7 +710,8 @@ pub(crate) mod tests {
         let state = state_of(&format!("/{family}x"));
         let projection = projection_of(&state);
         let chars = family.chars().count();
-        let at = |pos, min| open_match(&projection, false, pos, &SLASH, min).map(|f| f.query);
+        let at =
+            |pos, min| open_match(&projection, false, pos, &SLASH, min, false).map(|f| f.query);
         assert_eq!(at(2 + chars, 2), None);
         assert_eq!(
             at(3 + chars, 2).as_deref(),
@@ -661,7 +735,8 @@ pub(crate) mod tests {
         let state = state_of("");
         let state = run(&state, &insert_text("/head"));
         let projection = projection_of(&state);
-        let found = trigger_match(&projection, false, 6, &SLASH).expect("a match at the caret");
+        let found =
+            trigger_match(&projection, false, 6, &SLASH, false).expect("a match at the caret");
         let delete = delete_range(found.trigger.start, 6)(&state).expect("a deletion");
         let after = state
             .update([delete.clone()])

@@ -265,19 +265,49 @@ fn a_style_markdown_cannot_spell_here_is_refused() {
     assert!(refusal.to_string().contains("strong"), "{refusal}");
 }
 
-/// A cursor toggle writes an empty pair, and typing lands inside it.
+/// A cursor toggle where no word is at the caret writes an empty pair, and
+/// typing lands inside it.
 #[test]
 fn a_cursor_toggle_leaves_a_pair_to_type_into() {
     let codec = Codec::new();
-    let state = editor(&codec, "ab", Selection::cursor(at(1)));
+    let state = editor(&codec, "ab.", Selection::cursor(at(3)));
     let paired = formatted(&state, &toggle(&codec, md::EM));
-    assert_eq!(block_source(&paired, 0), "a**b");
+    assert_eq!(block_source(&paired, 0), "ab.**");
     let typed = run_command(&paired, &insert_text("X"))
         .expect("typing runs")
         .expect("typing applies")
         .state()
         .clone();
-    assert_saves(&codec, &typed, "a*X*b");
+    assert_saves(&codec, &typed, "ab.*X*");
+}
+
+/// A cursor toggle in a word — at its start, inside it or at its end — puts
+/// the style on the whole word, as Typora does, and the caret stays where it
+/// was in it. A word is a run of letters and digits, a `.` between digits
+/// included, or a run of CJK characters; the word before the caret wins.
+#[test]
+fn a_cursor_toggle_in_a_word_styles_the_whole_word() {
+    let codec = Codec::new();
+    for (mark, source, offset, file) in [
+        (md::STRONG, "123 456", 5, "123 **4X56**"),
+        (md::STRONG, "12 34", 2, "**12X** 34"),
+        (md::STRONG, "12 34", 3, "12 **X34**"),
+        (md::STRONG, "12,34", 1, "**1X2**,34"),
+        (md::STRONG, "12-34", 1, "**1X2**-34"),
+        (md::STRONG, "(12) 5", 2, "(**1X2**) 5"),
+        (md::STRONG, "12.34 5", 1, "**1X2.34** 5"),
+        (md::STRONG, "中文，测试", 1, "**中X文**，测试"),
+        (md::STRONG, "中文测试 5", 2, "**中文X测试** 5"),
+        (md::STRONG, "12中文", 1, "**1X2**中文"),
+        (md::EM, "12 34", 4, "12 *3X4*"),
+        (md::STRIKETHROUGH, "ab", 1, "~~aXb~~"),
+        (md::CODE, "ab", 1, "`aXb`"),
+    ] {
+        let state = editor(&codec, source, Selection::cursor(at(offset)));
+        let styled = toggled(&codec, &state, mark);
+        assert_saves(&codec, &typed(&styled, "X"), file);
+        assert_one_undo(&state, &styled);
+    }
 }
 
 // -- a cursor -------------------------------------------------------------------
@@ -484,7 +514,7 @@ fn undoing_backspace_in_an_empty_pair_gives_back_a_pair_that_still_goes() {
 #[test]
 fn undoing_enter_in_an_empty_pair_gives_back_a_pair_that_still_goes() {
     let codec = Codec::new();
-    let state = editor(&codec, "ab", Selection::cursor(at(1)));
+    let state = editor(&codec, "a,.b", Selection::cursor(at(2)));
     let paired = toggled(&codec, &state, md::STRONG);
     let split = entered(&paired);
     let back = undone(&split);
@@ -492,7 +522,7 @@ fn undoing_enter_in_an_empty_pair_gives_back_a_pair_that_still_goes() {
     assert_eq!(caret(&back), caret(&paired));
     let up = moved(&back, at(0));
     assert_eq!(up.doc(), state.doc());
-    assert_saves(&codec, &up, "ab");
+    assert_saves(&codec, &up, "a,.b");
 
     assert_eq!(redone(&back).doc(), split.doc());
 }
@@ -501,7 +531,7 @@ fn undoing_enter_in_an_empty_pair_gives_back_a_pair_that_still_goes() {
 #[test]
 fn undoing_past_typing_after_enter_gives_back_the_pair() {
     let codec = Codec::new();
-    let state = editor(&codec, "ab", Selection::cursor(at(1)));
+    let state = editor(&codec, "a,.b", Selection::cursor(at(2)));
     let paired = toggled(&codec, &state, md::STRONG);
     let written = typed(&entered(&paired), "X");
     let back = undone(&undone(&written));
@@ -671,10 +701,10 @@ fn leaving_a_pair_that_ends_with_a_space_closes_it_before_the_space() {
 #[test]
 fn leaving_a_pair_that_starts_with_a_space_opens_it_after_the_space() {
     let codec = Codec::new();
-    let state = editor(&codec, "ab", Selection::cursor(at(2)));
+    let state = editor(&codec, "ab.", Selection::cursor(at(3)));
     let spaced = typed(&toggled(&codec, &state, md::STRONG), " c ");
     let left = moved(&spaced, at(0));
-    assert_eq!(block_source(&left, 0), "ab **c** ");
+    assert_eq!(block_source(&left, 0), "ab. **c** ");
 }
 
 /// Only whitespace between the runs: nothing reads, the runs go and the
@@ -682,10 +712,10 @@ fn leaving_a_pair_that_starts_with_a_space_opens_it_after_the_space() {
 #[test]
 fn leaving_a_pair_of_only_whitespace_deletes_its_runs() {
     let codec = Codec::new();
-    let state = editor(&codec, "ab", Selection::cursor(at(2)));
+    let state = editor(&codec, "ab.", Selection::cursor(at(3)));
     let spaced = typed(&toggled(&codec, &state, md::STRONG), " ");
     let left = moved(&spaced, at(0));
-    assert_eq!(block_source(&left, 0), "ab ");
+    assert_eq!(block_source(&left, 0), "ab. ");
 }
 
 /// A pair that reads is left as it is, whitespace and all: a code span keeps
@@ -693,10 +723,10 @@ fn leaving_a_pair_of_only_whitespace_deletes_its_runs() {
 #[test]
 fn leaving_a_code_pair_with_a_space_keeps_it() {
     let codec = Codec::new();
-    let state = editor(&codec, "ab", Selection::cursor(at(2)));
+    let state = editor(&codec, "ab.", Selection::cursor(at(3)));
     let spaced = typed(&toggled(&codec, &state, md::CODE), "c ");
     let left = moved(&spaced, at(0));
-    assert_eq!(block_source(&left, 0), "ab`c `");
+    assert_eq!(block_source(&left, 0), "ab.`c `");
 }
 
 /// ⌘B, `ni `, ⌘B, `2`: the second toggle steps out past the closing run,
@@ -743,13 +773,13 @@ fn a_selection_the_history_does_not_record_settles_nothing() {
 fn every_delimited_style_pairs_at_a_caret() {
     let codec = Codec::new();
     for (mark, file) in [
-        (md::STRONG, "ab**X**"),
-        (md::EM, "ab*X*"),
-        (md::STRIKETHROUGH, "ab~~X~~"),
-        (md::CODE, "ab`X`"),
-        (md::UNDERLINE, "ab<u>X</u>"),
+        (md::STRONG, "ab.**X**"),
+        (md::EM, "ab.*X*"),
+        (md::STRIKETHROUGH, "ab.~~X~~"),
+        (md::CODE, "ab.`X`"),
+        (md::UNDERLINE, "ab.<u>X</u>"),
     ] {
-        let state = editor(&codec, "ab", Selection::cursor(at(2)));
+        let state = editor(&codec, "ab.", Selection::cursor(at(3)));
         let paired = toggled(&codec, &state, mark);
         assert_saves(&codec, &typed(&paired, "X"), file);
         assert_eq!(toggled(&codec, &paired, mark).doc(), state.doc(), "{mark}");
@@ -757,40 +787,32 @@ fn every_delimited_style_pairs_at_a_caret() {
     }
 }
 
-/// At either edge of a span's content the toggle steps over its delimiter,
-/// out of the span; right outside it, it steps back in.
+/// Anywhere inside a span — at either edge of its content, strictly inside it,
+/// or right after its closing run — the toggle takes the style off the whole
+/// span, as Typora does, the caret staying where it was in the text.
 #[test]
-fn at_the_edge_of_a_span_the_toggle_steps_over_its_delimiter() {
+fn inside_a_span_the_toggle_takes_its_style_off_the_whole_span() {
     let codec = Codec::new();
-    let state = editor(&codec, "**abc**", Selection::cursor(at(5)));
-    let out = toggled(&codec, &state, md::STRONG);
-    assert_eq!(out.doc(), state.doc());
-    assert_eq!(caret(&out), at(7));
-    assert_saves(&codec, &typed(&out, "X"), "**abc**X");
-    let back = toggled(&codec, &out, md::STRONG);
-    assert_eq!(caret(&back), at(5));
-
-    let state = editor(&codec, "**abc**", Selection::cursor(at(2)));
-    let out = toggled(&codec, &state, md::STRONG);
-    assert_eq!(out.doc(), state.doc());
-    assert_eq!(caret(&out), at(0));
-    assert_saves(&codec, &typed(&out, "X"), "X**abc**");
+    for (offset, back) in [(2, 0), (4, 2), (5, 3), (7, 3)] {
+        let state = editor(&codec, "**abc**", Selection::cursor(at(offset)));
+        let off = toggled(&codec, &state, md::STRONG);
+        assert_saves(&codec, &off, "abc");
+        assert_eq!(caret(&off), at(back), "from {offset}");
+        assert_one_undo(&state, &off);
+    }
 }
 
-/// Strictly inside a span the toggle closes it at the caret and opens it
-/// again, so typing there is plain; left empty, the span is whole again.
+/// ⌘B, text, ⌘B types the text bold and goes on plain: at the end of what was
+/// typed in the pair the toggle wrote, the toggle steps out of it rather than
+/// taking the style off. The device report's sequence, kept over Typora's.
 #[test]
-fn inside_a_span_the_toggle_splits_it_at_the_caret() {
+fn at_the_end_of_a_pair_just_typed_in_the_toggle_steps_out() {
     let codec = Codec::new();
-    let state = editor(&codec, "**abc**", Selection::cursor(at(4)));
-    let split = toggled(&codec, &state, md::STRONG);
-    assert_eq!(block_source(&split, 0), "**ab****c**");
-    assert_eq!(caret(&split), at(6));
-    assert_saves(&codec, &typed(&split, "X"), "**ab**X**c**");
-    assert_eq!(moved(&split, at(0)).doc(), state.doc());
-    let rejoined = toggled(&codec, &split, md::STRONG);
-    assert_eq!(rejoined.doc(), state.doc());
-    assert_eq!(caret(&rejoined), at(4));
+    let state = editor(&codec, "ab.", Selection::cursor(at(3)));
+    let written = typed(&toggled(&codec, &state, md::STRONG), "c");
+    let out = toggled(&codec, &written, md::STRONG);
+    assert_eq!(out.doc(), written.doc());
+    assert_saves(&codec, &typed(&out, "d"), "ab.**c**d");
 }
 
 /// Pairs nest: a second style's pair goes inside the first, a toggle takes
@@ -798,53 +820,38 @@ fn inside_a_span_the_toggle_splits_it_at_the_caret() {
 #[test]
 fn pairs_nest_and_come_off_one_layer_at_a_time() {
     let codec = Codec::new();
-    let state = editor(&codec, "ab", Selection::cursor(at(2)));
+    let state = editor(&codec, "ab.", Selection::cursor(at(3)));
     let both = toggled(&codec, &toggled(&codec, &state, md::STRONG), md::EM);
-    assert_eq!(block_source(&both, 0), "ab******");
-    assert_saves(&codec, &typed(&both, "X"), "ab***X***");
+    assert_eq!(block_source(&both, 0), "ab.******");
+    assert_saves(&codec, &typed(&both, "X"), "ab.***X***");
     let em = toggled(&codec, &both, md::STRONG);
-    assert_saves(&codec, &typed(&em, "X"), "ab*X*");
+    assert_saves(&codec, &typed(&em, "X"), "ab.*X*");
     assert_eq!(moved(&both, at(0)).doc(), state.doc());
     assert_eq!(moved(&em, at(0)).doc(), state.doc());
 }
 
-/// In `***abc***` emphasis holds strong. At the end of the text ⌘B steps out
-/// of strong alone, and ⌘I out of both, since emphasis closes after strong. A
-/// split in the middle has no spelling a reader takes, so it is refused and
-/// the spans are left alone.
+/// In `***abc***` emphasis holds strong. Anywhere in the text ⌘B takes strong
+/// off and ⌘I emphasis, leaving the other.
 #[test]
-fn nested_spans_are_left_whole() {
+fn nested_spans_come_off_one_style_at_a_time() {
     let codec = Codec::new();
-    let state = editor(&codec, "***abc***", Selection::cursor(at(6)));
-    let strong_out = toggled(&codec, &state, md::STRONG);
-    assert_eq!(caret(&strong_out), at(8));
-    assert_saves(&codec, &typed(&strong_out, "X"), "***abc**X*");
-    let both_out = toggled(&codec, &state, md::EM);
-    assert_eq!(caret(&both_out), at(9));
-    assert_saves(&codec, &typed(&both_out, "X"), "***abc***X");
-
-    let state = editor(&codec, "***abc***", Selection::cursor(at(4)));
-    for mark in [md::STRONG, md::EM] {
-        let refusal = toggle(&codec, mark)(&state).expect_err("the split is refused");
-        assert_eq!(
-            refusal,
-            CommandRefusal::NotExpressible {
-                reason: Inexpressible::Delimiters { mark }
-            }
-        );
+    for offset in [4, 6] {
+        let state = editor(&codec, "***abc***", Selection::cursor(at(offset)));
+        assert_saves(&codec, &toggled(&codec, &state, md::STRONG), "*abc*");
+        assert_saves(&codec, &toggled(&codec, &state, md::EM), "**abc**");
     }
 }
 
-/// Between two spans of the same style a new pair would run into their
-/// delimiters, so the toggle goes into the span next to the caret instead.
+/// Right after a span's closing run the caret is in the span, and the toggle
+/// takes its style off. Between the space and the next span's opening run a
+/// new pair would run into its delimiters, so the toggle goes into that span.
 #[test]
 fn adjacent_spans_are_left_whole() {
     let codec = Codec::new();
     let state = editor(&codec, "**a** **b**", Selection::cursor(at(5)));
-    let into = toggled(&codec, &state, md::STRONG);
-    assert_eq!(into.doc(), state.doc());
-    assert_eq!(caret(&into), at(3));
-    assert_saves(&codec, &typed(&into, "X"), "**aX** **b**");
+    let off = toggled(&codec, &state, md::STRONG);
+    assert_saves(&codec, &off, "a **b**");
+    assert_eq!(caret(&off), at(1));
 
     let state = editor(&codec, "**a** **b**", Selection::cursor(at(6)));
     let into = toggled(&codec, &state, md::STRONG);
@@ -865,8 +872,8 @@ fn a_literal_empty_pair_is_taken_off() {
 }
 
 /// A code span's content is plain text to a reader: no other style can be
-/// typed into it, so those toggles are refused. The code toggle itself steps
-/// out of it or splits it like any other span's.
+/// typed into it, so those toggles are refused. The code toggle itself takes
+/// the span off, as any other span's does.
 #[test]
 fn inside_a_code_span_only_code_toggles() {
     let codec = Codec::new();
@@ -878,9 +885,8 @@ fn inside_a_code_span_only_code_toggles() {
             reason: Inexpressible::Delimiters { mark: md::STRONG }
         }
     );
-    let split = toggled(&codec, &state, md::CODE);
-    assert_saves(&codec, &typed(&split, "X"), "`a`X`bc`");
-    assert_eq!(moved(&split, at(0)).doc(), state.doc());
+    let off = toggled(&codec, &state, md::CODE);
+    assert_saves(&codec, &typed(&off, "X"), "aXbc");
 }
 
 // -- links ----------------------------------------------------------------------
@@ -1107,15 +1113,15 @@ fn entered_in_list(state: &EditorState) -> EditorState {
 #[test]
 fn enter_in_an_empty_pair_splits_without_it() {
     let codec = Codec::new();
-    let state = editor(&codec, "ab", Selection::cursor(at(1)));
+    let state = editor(&codec, "a,.b", Selection::cursor(at(2)));
     let paired = toggled(&codec, &state, md::STRONG);
-    assert_eq!(block_source(&paired, 0), "a****b");
+    assert_eq!(block_source(&paired, 0), "a,****.b");
     let split = entered(&paired);
     let plain = entered(&state);
-    assert_saves(&codec, &split, "a\n\nb");
+    assert_saves(&codec, &split, "a,\n\n.b");
     assert_eq!(split.doc(), plain.doc());
     assert_eq!(caret(&split), caret(&plain));
-    assert_saves(&codec, &type_x(&split), "a\n\nXb");
+    assert_saves(&codec, &type_x(&split), "a,\n\nX.b");
 
     assert_eq!(undo_depth(&split), undo_depth(&paired) + 1);
     let back = undone(&split);
@@ -1127,13 +1133,13 @@ fn enter_in_an_empty_pair_splits_without_it() {
 #[test]
 fn enter_in_an_empty_pair_in_a_list_item_splits_without_it() {
     let codec = Codec::new();
-    // `- a|b`: the list, the item and the paragraph open before `a`.
-    let state = editor(&codec, "- ab", Selection::cursor(4));
+    // `- a,|.b`: the list, the item and the paragraph open before `a`.
+    let state = editor(&codec, "- a,.b", Selection::cursor(5));
     let paired = toggled(&codec, &state, md::STRONG);
-    assert_saves(&codec, &paired, "- a****b");
+    assert_saves(&codec, &paired, "- a,****.b");
     let split = entered_in_list(&paired);
     let plain = entered_in_list(&state);
-    assert_saves(&codec, &split, "- a\n- b");
+    assert_saves(&codec, &split, "- a,\n- .b");
     assert_eq!(split.doc(), plain.doc());
     assert_eq!(caret(&split), caret(&plain));
 
@@ -1148,21 +1154,21 @@ fn enter_in_an_empty_pair_in_a_list_item_splits_without_it() {
 #[test]
 fn enter_in_a_pair_that_holds_something_keeps_the_style() {
     let codec = Codec::new();
-    let state = editor(&codec, "ab", Selection::cursor(at(1)));
+    let state = editor(&codec, "a,.b", Selection::cursor(at(2)));
     let written = typed(&typed(&toggled(&codec, &state, md::STRONG), "c"), "d");
-    let written = moved(&written, at(4));
-    assert_eq!(block_source(&written, 0), "a**cd**b");
+    let written = moved(&written, at(5));
+    assert_eq!(block_source(&written, 0), "a,**cd**.b");
     let split = entered(&written);
-    assert_saves(&codec, &split, "a**c**\n\n**d**b");
+    assert_saves(&codec, &split, "a,**c**\n\n**d**.b");
 }
 
 /// Typing in the pair is still left alone.
 #[test]
 fn typing_in_an_empty_pair_does_not_break_it() {
     let codec = Codec::new();
-    let state = editor(&codec, "ab", Selection::cursor(at(1)));
+    let state = editor(&codec, "a,.b", Selection::cursor(at(2)));
     let written = typed(&toggled(&codec, &state, md::STRONG), "c");
-    assert_eq!(block_source(&written, 0), "a**c**b");
+    assert_eq!(block_source(&written, 0), "a,**c**.b");
 }
 
 /// At the end of a paragraph Enter opens an empty one after it, pair or not.
@@ -1282,11 +1288,11 @@ fn the_underscore_house_style_leaves_a_pair_of_underscores_between_words() {
 }
 
 #[test]
-fn the_underscore_house_style_leaves_a_pair_of_asterisks_inside_a_word() {
+fn the_underscore_house_style_styles_a_whole_word_at_a_caret() {
     let _style = Underscores::on();
     let codec = Codec::new();
     let state = editor(&codec, "ab", Selection::cursor(at(1)));
-    let paired = toggled(&codec, &state, md::EM);
-    assert_eq!(block_source(&paired, 0), "a**b");
-    assert_saves(&codec, &typed(&paired, "X"), "a*X*b");
+    let styled = toggled(&codec, &state, md::EM);
+    assert_eq!(block_source(&styled, 0), "_ab_");
+    assert_saves(&codec, &typed(&styled, "X"), "_aXb_");
 }

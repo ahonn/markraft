@@ -232,8 +232,10 @@ fn is_code(state: &EditorState, types: &DocTypes, from: usize, to: usize) -> boo
 }
 
 /// The emoji whose shortcodes match `query`, best first: the whole shortcode, then its
-/// start, then a match inside it. Ties keep the CLDR order [`emojis::iter`] yields, and
-/// the list is capped at [`LIMIT`].
+/// start, then a match inside it. Within each, the shorter shortcode — the one the
+/// query is nearer to spelling out — comes first, so `:smil` offers `:smile:` before
+/// `:smiley:`; ties keep the CLDR order [`emojis::iter`] yields. The list is capped at
+/// [`LIMIT`].
 fn ranked(query: &str) -> Vec<(&'static Emoji, &'static str)> {
     let query: Vec<u8> = query.bytes().map(fold).collect();
     let mut matches: Vec<_> = emojis::iter()
@@ -247,7 +249,7 @@ fn ranked(query: &str) -> Vec<(&'static Emoji, &'static str)> {
             Some((rank, emoji, shortcode))
         })
         .collect();
-    matches.sort_by_key(|(rank, _, _)| *rank);
+    matches.sort_by_key(|(rank, _, shortcode)| (*rank, shortcode.len()));
     matches.truncate(LIMIT);
     matches
         .into_iter()
@@ -291,6 +293,7 @@ fn matches_at(shortcode: &str, query: &[u8], start: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::typeahead::open_match;
     use crate::typeahead::tests::{at, run, state_of, text_state};
@@ -349,10 +352,10 @@ mod tests {
     }
 
     #[test]
-    fn the_list_is_capped_and_keeps_the_table_order_within_a_rank() {
+    fn the_list_is_capped_and_puts_the_nearest_shortcode_first_within_a_rank() {
         assert_eq!(labels("a").len(), LIMIT);
-        // All prefixes of equal rank, so the table's own order decides.
-        assert_eq!(&labels("smil")[..2], ["smiley", "smile"]);
+        // Both prefixes, so the shorter one — nearer to what was typed — leads.
+        assert_eq!(&labels("smil")[..2], ["smile", "smiley"]);
     }
 
     #[test]
@@ -524,7 +527,8 @@ mod tests {
     fn the_menu_stays_shut_until_the_query_is_long_enough() {
         let state = state_of(":D");
         let projection = projection_of(&state);
-        let at = |pos, min| open_match(&projection, false, pos, &COLONS, min).map(|f| f.query);
+        let at =
+            |pos, min| open_match(&projection, false, pos, &COLONS, min, false).map(|f| f.query);
         assert_eq!(at(2, MIN_QUERY), None, "a lone colon opens nothing");
         assert_eq!(at(3, MIN_QUERY), None, "`:D` keeps Return to itself");
         assert_eq!(at(3, 0).as_deref(), Some("D"), "the `/` menu is unchanged");
@@ -534,11 +538,11 @@ mod tests {
         let chars = family.chars().count();
         // Graphemes, not bytes: one family plus one letter is two.
         assert_eq!(
-            open_match(&projection, false, 2 + chars, &COLONS, MIN_QUERY),
+            open_match(&projection, false, 2 + chars, &COLONS, MIN_QUERY, false),
             None
         );
         assert_eq!(
-            open_match(&projection, false, 3 + chars, &COLONS, MIN_QUERY)
+            open_match(&projection, false, 3 + chars, &COLONS, MIN_QUERY, false)
                 .map(|found| found.query)
                 .as_deref(),
             Some(format!("{family}x").as_str())
@@ -556,8 +560,8 @@ mod tests {
             let state = state_of(text);
             let projection = projection_of(&state);
             let caret = projection.lines()[0].to();
-            let slash = open_match(&projection, false, caret, &SLASHES, 0).is_some();
-            let emoji = open_match(&projection, false, caret, &COLONS, MIN_QUERY).is_some();
+            let slash = open_match(&projection, false, caret, &SLASHES, 0, false).is_some();
+            let emoji = open_match(&projection, false, caret, &COLONS, MIN_QUERY, false).is_some();
             assert!(!(slash && emoji), "{text:?} opened both menus");
         }
     }

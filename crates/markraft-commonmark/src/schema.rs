@@ -383,7 +383,9 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
         .node(
             NodeTypeSpec::leaf(HORIZONTAL_RULE)
                 .group(BLOCK_GROUP)
-                .selectable(true),
+                .selectable(true)
+                // The character the break is written with: `-`, `*` or `_`.
+                .attr(str_attr("mark", "-")),
         )
         .node(
             NodeTypeSpec::new(RAW_BLOCK, "text*")

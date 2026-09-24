@@ -134,6 +134,9 @@ fn unfold(tr: &Transaction) -> Option<Vec<TransactionSpec>> {
 
 /// The spelled atoms directly before and after `pos`, as the positions before
 /// them, when `pos` stands in a textblock of inline source.
+///
+/// A `<br>` in a table cell is left folded: it is the line break the cell is
+/// drawn with, as Typora draws it, not markup to walk into.
 fn atoms_against(schema: &Schema, doc: &Node, pos: usize) -> Vec<(usize, Node)> {
     let Ok(resolved) = doc.resolve(pos) else {
         return Vec::new();
@@ -141,7 +144,18 @@ fn atoms_against(schema: &Schema, doc: &Node, pos: usize) -> Vec<(usize, Node)> 
     if block_kind(schema, resolved.parent().type_id()).is_none() {
         return Vec::new();
     }
-    let spelled = |node: &Node| node.text().is_none() && is_spelled_atom(schema, node);
+    let in_cell = schema.node_id(md::TABLE_CELL) == Some(resolved.parent().type_id());
+    let cell_break = |node: &Node| {
+        in_cell
+            && schema.node_id(md::RAW_INLINE) == Some(node.type_id())
+            && node
+                .attrs()
+                .get("source")
+                .and_then(|value| value.as_str())
+                .is_some_and(crate::parse::is_break_tag)
+    };
+    let spelled =
+        |node: &Node| node.text().is_none() && is_spelled_atom(schema, node) && !cell_break(node);
     let mut out = Vec::new();
     if let Some(before) = resolved.node_before().filter(spelled) {
         out.push((pos - 1, before));

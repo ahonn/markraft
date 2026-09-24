@@ -106,7 +106,7 @@ fn retarget(
     qualified_target(target, path, root?).filter(|spelled| reaches(spelled, from.1, after))
 }
 
-impl NotesApp {
+impl MarkraftApp {
     fn places(&self) -> Places {
         self.library
             .notes

@@ -169,7 +169,10 @@ fn a_fence_makes_a_code_block_and_rules_stop_firing_inside_it() {
 
 #[test]
 fn three_dashes_make_a_thematic_break_and_leave_a_block_to_type_in() {
-    assert_eq!(typed("---"), "doc(horizontal_rule, paragraph())");
+    assert_eq!(
+        typed("---"),
+        r#"doc(horizontal_rule[mark=Str("-")], paragraph())"#
+    );
 }
 
 #[test]
@@ -635,6 +638,59 @@ fn enter_after_a_fence_opens_a_code_block_in_its_language() {
     }
 }
 
+/// A fence ended on a task item's check box line: GFM writes the box at the
+/// start of the item's first paragraph, so the line stays as that paragraph,
+/// emptied, and the code block goes under it in the item. The shape reads
+/// back as itself, so a file holding it can be saved; in a bullet item the
+/// block takes the line's place as before.
+#[test]
+fn enter_after_a_fence_in_a_task_item_keeps_the_check_box_line() {
+    let schema = commonmark_schema();
+    for (source, markdown) in [
+        (
+            "- [ ] t1\n- [ ] x\n",
+            "- [ ] t1\n- [ ] \n  ```\n  code\n  ```",
+        ),
+        ("- [x] x\n", "- [x] \n  ```\n  code\n  ```"),
+        ("- b1\n- x\n", "- b1\n- ```\n  code\n  ```"),
+    ] {
+        let doc = markraft_commonmark::from_markdown(&schema, source).expect("parses");
+        // Where the `x` that ends the last item starts: its paragraph, item
+        // and list close after it.
+        let x = doc.content_size() - 4;
+        let state = start_from(doc, &schema, x);
+        let fenced = markraft_core::TransactionSpec::new()
+            .changes(vec![markraft_core::Change::replace(
+                x,
+                x + 1,
+                text(&schema, "```"),
+            )])
+            .selection(Selection::cursor(x + 3));
+        let state = state.update([fenced]).expect("the fence").state().clone();
+        let entered = run_command(&state, &markraft_commonmark::block_from_line())
+            .unwrap_or_else(|| panic!("{source:?}: the fence makes a block"))
+            .expect("the transaction resolves")
+            .state()
+            .clone();
+        entered.doc().check(&schema).expect("a valid document");
+        let typed = type_all(&entered, "code");
+        assert_eq!(
+            markraft_commonmark::to_markdown(&schema, typed.doc()),
+            markdown,
+            "{source:?}"
+        );
+        let baseline =
+            markraft_commonmark::SourceDocument::parse(&schema, source).expect("the file parses");
+        for state in [&entered, &typed] {
+            assert!(
+                baseline.render(&schema, state.doc()).is_ok(),
+                "{source:?}: {}",
+                schema.describe(state.doc())
+            );
+        }
+    }
+}
+
 #[test]
 fn enter_after_a_header_row_makes_a_table_with_a_row_to_type_in() {
     let schema = commonmark_schema();
@@ -708,17 +764,23 @@ fn enter_at_the_end_of_a_footnote_goes_on_after_the_definition() {
 #[test]
 fn enter_after_a_thematic_break_of_stars_or_underscores_makes_a_divider() {
     let schema = commonmark_schema();
-    for line in ["***", "___", "*****", "_ _ _"] {
+    // The divider keeps the character it was typed with, as Typora does.
+    for (line, mark, written) in [
+        ("***", "*", "***"),
+        ("___", "_", "___"),
+        ("*****", "*", "***"),
+        ("_ _ _", "_", "___"),
+    ] {
         let state = entered(line).unwrap_or_else(|| panic!("{line:?} makes a divider"));
         assert_eq!(
             schema.describe(state.doc()),
-            "doc(horizontal_rule, paragraph())",
+            format!(r#"doc(horizontal_rule[mark=Str("{mark}")], paragraph())"#),
             "{line:?}"
         );
         let typed = type_all(&state, "x");
         assert_eq!(
             markraft_commonmark::to_markdown(&schema, typed.doc()),
-            "---\n\nx",
+            format!("{written}\n\nx"),
             "{line:?}: the caret is in the paragraph after it"
         );
     }

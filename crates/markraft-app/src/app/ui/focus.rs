@@ -41,7 +41,7 @@ enum Act {
 
 /// One keyboard stop, in Tab order.
 struct Stop {
-    /// Matches the [`NotesApp::ring`] call that decorates the control.
+    /// Matches the [`MarkraftApp::ring`] call that decorates the control.
     id: SharedString,
     act: Act,
     /// The list row the stop belongs to, so reaching it also selects that row.
@@ -72,7 +72,7 @@ impl Stop {
     }
 }
 
-impl NotesApp {
+impl MarkraftApp {
     pub(super) fn surface(&self) -> Surface {
         if self.persistence.is_none() {
             return Surface::Chooser;
@@ -94,10 +94,7 @@ impl NotesApp {
         if self.interaction.file_status() {
             return Surface::FileStatus;
         }
-        if self.interaction.panel() == Panel::Editor
-            && self.interaction.html().is_none()
-            && self.toolbar.table().is_some()
-        {
+        if self.interaction.panel() == Panel::Editor && self.toolbar.table().is_some() {
             return Surface::Table;
         }
         match self.interaction.panel() {

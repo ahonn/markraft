@@ -8,7 +8,7 @@
 use markraft_core::commands::{ColumnAlignment, TableTypes};
 use markraft_core::kind::TABLE_ALIGNMENTS_ATTR;
 use markraft_core::projection::{Ancestor, Line};
-use markraft_core::{Attrs, EditorState, MarkTypeId, NodeTypeId, Schema, kind::DocTypeNames};
+use markraft_core::{Attrs, EditorState, MarkTypeId, Node, NodeTypeId, Schema, kind::DocTypeNames};
 
 /// The conventional schema names of the two roles [`DocTypeNames`] has no
 /// entry for.
@@ -252,6 +252,28 @@ impl DocTypes {
     /// a tab, and nothing typed is read as markup.
     pub(crate) fn is_verbatim_block(&self, line: &Line) -> bool {
         self.is_code_block(line) || self.is_raw_block(line)
+    }
+
+    /// Whether `node`, sitting in a textblock of type `parent`, is a `<br>` in
+    /// a table cell: the cell's line break, drawn as one, as Typora does,
+    /// rather than inline HTML shown as its source.
+    pub(crate) fn is_cell_break(&self, parent: NodeTypeId, node: &Node) -> bool {
+        Some(parent) == self.table_cell
+            && Some(node.type_id()) == self.raw_inline
+            && node
+                .attrs()
+                .get("source")
+                .and_then(|value| value.as_str())
+                .is_some_and(|source| {
+                    let tag = source.trim().to_ascii_lowercase();
+                    matches!(tag.as_str(), "<br>" | "<br/>" | "<br />")
+                })
+    }
+
+    /// Whether a block of type `ty` holds its text verbatim, as
+    /// [`DocTypes::is_verbatim_block`] asks of a line.
+    pub(crate) fn is_verbatim(&self, ty: NodeTypeId) -> bool {
+        Some(ty) == self.code_block || Some(ty) == self.raw_block
     }
 
     /// Whether the cursor sits in a verbatim block, for the paths that ask

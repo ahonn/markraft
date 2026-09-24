@@ -92,13 +92,30 @@ pub fn commonmark_node_rules() -> NodeRules {
     );
     rules.insert(
         md::PARAGRAPH.to_string(),
-        rule(|state, node, _, _| {
+        rule(|state, node, parent, index| {
             // Empty paragraphs have no CommonMark spelling. Writing a `<br>` HTML
             // block would be a Markraft-only encoding; leave them blank like
             // Obsidian and Typora. A sole empty container (empty list item, empty
             // quote, empty document) already writes as nothing via close_block.
             if node.content_size() > 0 {
                 state.render_inline(node);
+                state.close_block(node);
+                return;
+            }
+            // One opening an item that goes on — Return at the end of an item's
+            // first paragraph, which splits the item as Typora does — leaves the
+            // marker alone on its line and the item's next block on the line
+            // after it: an item may open on an empty line, but a marker and a
+            // blank line end it.
+            let opens_item = index == 0
+                && parent.is_some_and(|item| {
+                    let name = state.schema().node_type(item.type_id()).name();
+                    (name == md::LIST_ITEM || name == md::TASK_ITEM) && item.child_count() > 1
+                });
+            if opens_item {
+                state.write("");
+                state.ensure_newline();
+                return;
             }
             state.close_block(node);
         }),
@@ -118,7 +135,7 @@ pub fn commonmark_node_rules() -> NodeRules {
     rules.insert(
         md::HORIZONTAL_RULE.to_string(),
         rule(|state, node, _, _| {
-            state.write(thematic_break(state));
+            state.write(thematic_break(state, node));
             state.close_block(node);
         }),
     );
@@ -187,25 +204,41 @@ pub fn commonmark_node_rules() -> NodeRules {
 
 /// The spelling of a thematic break that reads as one where it sits.
 ///
-/// `---` is the usual spelling, and the one already in a user's files. Two
-/// places need `***` instead:
+/// A break keeps the character it was written with, as Typora does: `___`
+/// reads as a break anywhere, and `***` does except after a `*` list marker,
+/// where the line is four stars — a break of its own — and `---` is written.
+/// For a break of dashes `---` is the usual spelling, and the one already in
+/// a user's files. Two places need another:
 ///
-/// * after a marker of the same character — a thematic break is three or more
-///   of one character with nothing else on the line, so `- ---` is four dashes
-///   rather than an item holding a break;
+/// * after a `-` list marker — a thematic break is three or more of one
+///   character with nothing else on the line, so `- ---` is four dashes
+///   rather than an item holding a break — `***`, which the reader takes back
+///   as a break of dashes (see the parse rule);
 /// * directly under a line that already has text on it, where `---` is that
-///   paragraph's setext underline. Only a tight list writes a block there.
-fn thematic_break(state: &SerializerState<'_>) -> &'static str {
+///   paragraph's setext underline. Only a tight list and a callout's marker
+///   line put a block there. `- - -` is still dashes, and an underline has no
+///   spaces in it.
+fn thematic_break(state: &SerializerState<'_>, node: &Node) -> &'static str {
+    let out = state.out();
+    let line = &out[out.rfind('\n').map_or(0, |index| index + 1)..];
+    let marker = line.trim();
+    match node.attrs().get("mark").and_then(|value| value.as_str()) {
+        Some("_") => return "___",
+        Some("*") if state.closed().is_some() || !marker.starts_with('*') => return "***",
+        Some("*") => return "---",
+        _ => {}
+    }
     // A block waiting to be separated from this one says what will sit above:
     // one line ending — a tight list — puts the break directly under the line
     // before, where three dashes would underline it instead.
     if state.closed().is_some() {
-        return if state.flush_size() > 1 { "---" } else { "***" };
+        return if state.flush_size() > 1 {
+            "---"
+        } else {
+            "- - -"
+        };
     }
     // Nothing above, so what shares the line is a list marker, if any.
-    let out = state.out();
-    let line = &out[out.rfind('\n').map_or(0, |index| index + 1)..];
-    let marker = line.trim();
     if !marker.is_empty() {
         return if marker.chars().all(|c| c == '-') {
             "***"
@@ -220,7 +253,7 @@ fn thematic_break(state: &SerializerState<'_>) -> &'static str {
     let above = out[..out.len() - line.len()].trim_end_matches('\n');
     let previous = &above[above.rfind('\n').map_or(0, |index| index + 1)..];
     if out.ends_with('\n') && !previous.trim_matches([' ', '\t', '>']).is_empty() {
-        "***"
+        "- - -"
     } else {
         "---"
     }
@@ -540,11 +573,19 @@ fn tight_attr(node: &Node) -> bool {
 /// to be the last block of its item; what the *next* item's marker starts is a
 /// new item, not more of the block. What may come before them is the ordinary
 /// rule's business: neither can interrupt a paragraph either.
+///
+/// An empty paragraph writes as nothing, so it has no say: Backspace in an
+/// empty item leaves one in the item before, and the list stays as it was
+/// written until something is typed there.
 fn writable_tight(state: &SerializerState<'_>, list: &Node) -> bool {
+    let paragraph = state.schema().node_id(md::PARAGRAPH);
     list.children().all(|item| {
         let last = item.child_count().saturating_sub(1);
         let mut previous: Option<&Node> = None;
         item.children().enumerate().all(|(index, block)| {
+            if Some(block.type_id()) == paragraph && block.content_size() == 0 {
+                return true;
+            }
             let ok = (index == last || !runs_until_a_blank_line(state, block))
                 && previous.is_none_or(|before| {
                     !is_open_paragraph(state, before) || interrupts_paragraph(state, block)

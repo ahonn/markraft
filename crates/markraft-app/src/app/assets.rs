@@ -122,7 +122,14 @@ fn image_path(folder: &Path, document: &Path, naming: ImageNaming, extension: &s
                 .unwrap_or_else(|| "image".to_owned());
             let local = crate::storage::timestamp()
                 .saturating_add_signed(crate::platform::local_utc_offset() * 1000);
-            format!("{note} {}", time_stamp(local))
+            let stamp = time_stamp(local);
+            // A note named for the day it was made already says the date.
+            let (date, time) = stamp.split_once(' ').unwrap_or((&stamp, ""));
+            if note.contains(date) {
+                format!("{note} {time}")
+            } else {
+                format!("{note} {stamp}")
+            }
         }
     };
     // Two images pasted within a second take the same stamp; the later one is numbered.
@@ -591,6 +598,14 @@ mod tests {
         assert!(
             second.to_string_lossy().ends_with(" 2.png") || second.file_name() != first.file_name()
         );
+        // A note named for today keeps the date once: the image adds only the time.
+        let local = crate::storage::timestamp()
+            .saturating_add_signed(crate::platform::local_utc_offset() * 1000);
+        let today = time_stamp(local)[..10].to_owned();
+        let dated = folder.path().join(format!("{today} 09.53.md"));
+        let image = image_path(folder.path(), &dated, ImageNaming::NoteAndDate, "png");
+        let image = image.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(image.matches(&today).count(), 1, "{image}");
         let random = image_path(folder.path(), note, ImageNaming::RandomId, "png");
         assert!(
             random

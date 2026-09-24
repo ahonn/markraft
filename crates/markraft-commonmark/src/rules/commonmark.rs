@@ -30,7 +30,7 @@ pub fn commonmark_rules() -> ParseRules {
         .with(&NodeValue::Paragraph, ParseRule::block(md::PARAGRAPH))
         .with(
             &NodeValue::ThematicBreak,
-            ParseRule::block(md::HORIZONTAL_RULE),
+            ParseRule::block_with(md::HORIZONTAL_RULE, attrs_fn(thematic_break_attrs)),
         )
         .with(
             &NodeValue::Heading(NodeHeading::default()),
@@ -282,6 +282,32 @@ fn list_type(target: ParseTarget<'_>) -> String {
     } else {
         md::BULLET_LIST.to_string()
     }
+}
+
+/// The character a thematic break is written with, so it is written again.
+///
+/// First in an item of a `-` list, a break of dashes cannot be written — the
+/// line would be one break of four dashes — so the writer spells it `***`,
+/// and a break there is read as dashes whatever it is spelled with: the two
+/// write the same.
+fn thematic_break_attrs(target: ParseTarget<'_>) -> Attrs {
+    let mut mark = target
+        .source()
+        .chars()
+        .find(|c| matches!(c, '-' | '*' | '_'))
+        .unwrap_or('-');
+    let first_in_dash_item = target.node.previous_sibling().is_none()
+        && target.node.parent().is_some_and(|item| {
+            matches!(item.data.borrow().value, NodeValue::Item(_) | NodeValue::TaskItem(_))
+                && item.parent().is_some_and(|list| {
+                    matches!(&list.data.borrow().value,
+                        NodeValue::List(list) if list.list_type == ListType::Bullet && list.bullet_char == b'-')
+                })
+        });
+    if first_in_dash_item && mark == '*' {
+        mark = '-';
+    }
+    attrs! { "mark" => mark.to_string() }
 }
 
 fn list_attrs(target: ParseTarget<'_>) -> Attrs {

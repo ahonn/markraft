@@ -241,6 +241,39 @@ fn replace_selection_with_a_closed_block_splits_the_paragraph() {
     );
 }
 
+#[test]
+fn a_list_pasted_into_an_empty_item_adds_its_items_beside_it() {
+    let schema = shared_schema();
+    let item = |text: &str| {
+        n(
+            &schema,
+            "list_item",
+            [if text.is_empty() {
+                n(&schema, "paragraph", [])
+            } else {
+                n(&schema, "paragraph", [t(&schema, text)])
+            }],
+        )
+    };
+    let start = state(
+        doc(&schema, [n(&schema, "bullet_list", [item("a"), item("")])]),
+        Extension::none(),
+    );
+    for pasted in ["bullet_list", "ordered_list"] {
+        let slice = Slice::from_fragment(Fragment::from_node(n(
+            &schema,
+            pasted,
+            [item("b"), item("c")],
+        )));
+        let after = run(&at(&start, 8), &replace_selection(slice));
+        assert_eq!(
+            schema.describe(after.doc()),
+            r#"doc(bullet_list(list_item(paragraph("a")), list_item(paragraph("b")), list_item(paragraph("c"))))"#,
+            "{pasted}"
+        );
+    }
+}
+
 // --- selection and motion -------------------------------------------------
 
 #[test]

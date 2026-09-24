@@ -20,7 +20,7 @@ const CAPSULE_ICON: f32 = 14.;
 ///
 /// These are *states*, not events: each one outlives any sentence about it, which is
 /// why none of them is a notice. Ordered most pressing first, which is the order
-/// [`NotesApp::file_states`] builds them in.
+/// [`MarkraftApp::file_states`] builds them in.
 pub(super) struct FileState {
     /// Element id, and the spring's key; stable per kind so the entry animation
     /// does not replay as the label's number changes.
@@ -49,7 +49,7 @@ impl FileState {
 // and 4px padding on each side. Keep menu anchors tied to this geometry.
 const TOOLBAR_CAPSULE: Pixels = px(268.);
 
-impl NotesApp {
+impl MarkraftApp {
     pub(super) fn capsule(&self) -> Div {
         div()
             .flex()
@@ -97,9 +97,6 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.interaction.html().is_some() {
-            return;
-        }
         let closing = self.interaction.format_menu() == Some(menu);
         self.editor()
             .update(cx, |editor, cx| editor.cancel_composition(cx));
