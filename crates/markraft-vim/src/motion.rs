@@ -70,9 +70,11 @@ impl Motion {
 /// A motion moves over what the reader sees. Each such run is one step for
 /// `h`, `l` and `x`, and no motion lands inside one: `l` from before `**b**`
 /// lands on the run's start — which reveals the span — rather than on its
-/// second `*`, and a `3x` never stops between the two. Once revealed, a span's
-/// characters are what the reader sees, and the cursor walks them one by one.
-/// Which runs these are is the view's to say; see
+/// second `*`. Once revealed, a span's characters are what the reader sees,
+/// and the cursor walks them one by one. What is concealed is judged afresh
+/// at every step of a count, as it is for a caret in the editor: `3l` from
+/// before `**b**` reveals the span on its first step and walks into it on the
+/// next. Which runs these are is the view's to say; see
 /// [`markraft_gpui::concealed_steps`].
 pub(crate) struct Hidden {
     syntax: Option<MarkTypeId>,
@@ -95,6 +97,12 @@ impl Hidden {
     /// Nothing concealed: every grapheme is a step.
     pub(crate) fn none() -> Hidden {
         Hidden::at(None, 0)
+    }
+
+    /// The runs a cursor that has stepped to `caret` leaves concealed: one
+    /// step of a count is taken from where the last one stopped.
+    pub(crate) fn from(&self, caret: usize) -> Hidden {
+        Hidden::at(self.syntax, caret)
     }
 
     /// The concealed run holding `pos`, as long as `pos` is past its start.
@@ -292,7 +300,7 @@ pub(crate) fn target(
         _ => {
             let mut position = from;
             for _ in 0..count {
-                let next = step(projection, hidden, position, motion);
+                let next = step(projection, &hidden.from(position), position, motion);
                 if next == position {
                     break;
                 }

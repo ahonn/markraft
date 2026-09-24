@@ -81,9 +81,11 @@
 //!   markup, concealed or revealed: `w` from `x` in `x **bold** y` lands on
 //!   `b`, `e` on `d`.
 //! - `h`, `l` and `x` take a run the cursor leaves concealed as one step, and
-//!   no motion stops inside one. Landing on its start reveals it, and from
-//!   there the cursor walks its characters like any others — the way to edit
-//!   the spelling itself, which `x` takes as it comes.
+//!   no motion stops inside one. Landing on its start reveals it, as the caret
+//!   reaching a span does outside vim, and from there the cursor walks its
+//!   characters like any others — the way to edit the spelling itself, which
+//!   `x` takes as it comes. A count takes its steps one at a time, so `2x`
+//!   before `**b**` takes the space and then one `*`, as `xx` does.
 //! - An operator over a range keeps markup whole: a span whose text the range
 //!   takes goes with its spelling, and one it only reaches into keeps every
 //!   run of it, so `dw` on `bold` leaves `x y` and `D` from its `o` leaves

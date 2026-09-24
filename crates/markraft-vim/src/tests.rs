@@ -1596,16 +1596,22 @@ fn x_and_shift_d_keep_to_the_cell_they_are_in() {
 fn h_and_l_step_over_a_concealed_run_as_one_grapheme() {
     // `x **a** y` shows `x a y` with the cursor away from the bold span.
     let mut keys = Keys::new("x **a** y").at(0, 0);
-    // One step lands on the run's start, which reveals it; the next count
-    // never stops between its two `*`.
+    // One step lands on the run's start, which reveals it, as the caret
+    // reaching a span does outside vim; a count takes its steps one at a time,
+    // so the next walks onto the second `*`, as `lll` does.
     assert_eq!(keys.keys("2l").line_col(), (0, 2));
     let mut keys = Keys::new("x **a** y").at(0, 0);
-    assert_eq!(keys.keys("3l").line_col(), (0, 4));
-    // Back from `y`: the space, then the whole closing run, then `a`.
+    assert_eq!(keys.keys("3l").line_col(), (0, 3));
+    let mut keys = Keys::new("x **a** y").at(0, 0);
+    assert_eq!(keys.keys("lll").line_col(), (0, 3));
+    // Back from `y`: the space, which brings the cursor to the closing run
+    // and reveals it, then its `*`s one at a time, as `hh` does.
     let mut keys = Keys::new("x **a** y").at(0, 8);
-    assert_eq!(keys.keys("2h").line_col(), (0, 5));
+    assert_eq!(keys.keys("2h").line_col(), (0, 6));
     let mut keys = Keys::new("x **a** y").at(0, 8);
-    assert_eq!(keys.keys("3h").line_col(), (0, 4));
+    assert_eq!(keys.keys("hh").line_col(), (0, 6));
+    let mut keys = Keys::new("x **a** y").at(0, 8);
+    assert_eq!(keys.keys("3h").line_col(), (0, 5));
     // A revealed span is source a reader sees, walked one grapheme at a time.
     let mut keys = Keys::new("x **a** y").at(0, 2);
     assert_eq!(keys.keys("l").line_col(), (0, 3));
@@ -1698,11 +1704,15 @@ fn a_run_of_punctuation_is_one_word() {
 }
 
 #[test]
-fn x_takes_a_concealed_run_whole() {
-    // `2x` on the space takes it and the whole opening run, never one `*`.
+fn x_reveals_a_run_it_reaches_and_takes_it_a_grapheme_at_a_time() {
+    // `2x` on the space takes it, which brings the cursor to the run and so
+    // reveals it; the second step takes one `*`, as `xx` does.
     let mut keys = Keys::new("x **a** y").at(0, 1);
     keys.keys("2x");
-    assert_eq!(keys.markdown(), "xa** y");
+    assert_eq!(keys.markdown(), "x*a** y");
+    let mut keys = Keys::new("x **a** y").at(0, 1);
+    keys.keys("xx");
+    assert_eq!(keys.markdown(), "x*a** y");
     // On a revealed run it takes the grapheme under the cursor, as ever.
     let mut keys = Keys::new("x **a** y").at(0, 2);
     keys.keys("x");

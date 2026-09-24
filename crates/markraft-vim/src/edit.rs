@@ -523,7 +523,7 @@ pub(crate) fn delete_chars_range(
 ) -> Range<usize> {
     let mut end = cursor;
     for _ in 0..count.clamp(1, motion::MAX_COUNT) {
-        let next = motion::next_step(projection, hidden, end);
+        let next = motion::next_step(projection, &hidden.from(end), end);
         if next == end {
             break;
         }
