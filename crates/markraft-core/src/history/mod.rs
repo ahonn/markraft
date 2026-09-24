@@ -414,7 +414,10 @@ fn composing_after(state: &HistoryState, user_event: Option<&str>, tr: &Transact
         return false;
     }
     match user_event {
-        Some(COMPOSE_USER_EVENT) => true,
+        // A composition folds only once it has written something: its first
+        // replacement is grouped like any other typing, so one that starts
+        // after a pause, or elsewhere, is an entry of its own.
+        Some(COMPOSE_USER_EVENT) => tr.doc_changed() || state.composing,
         Some(_) => false,
         None => state.composing && !tr.doc_changed(),
     }

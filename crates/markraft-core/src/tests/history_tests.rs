@@ -89,6 +89,49 @@ fn typing_in_quick_succession_makes_one_entry() {
 }
 
 #[test]
+fn typing_in_two_places_in_quick_succession_makes_two_entries() {
+    let schema = shared_schema();
+    let start = history_state(doc(
+        &schema,
+        [n(&schema, "paragraph", [t(&schema, "hello world")])],
+    ));
+    // Close in time and the same kind of edit, but not touching: moving the
+    // caret between them starts a new step, so undo takes back one at a time.
+    let state = run(&start, typed(&schema, 1, "A", 0));
+    let state = run(&state, typed(&schema, 9, "B", 10));
+    assert_eq!(undo_depth(&state), 2);
+    let undone = run(&state, undo(&state).expect("something to undo"));
+    assert_eq!(
+        schema.describe(undone.doc()),
+        r#"doc(paragraph("Ahello world"))"#
+    );
+}
+
+#[test]
+fn a_composition_after_a_pause_is_its_own_entry() {
+    let schema = shared_schema();
+    let start = state(
+        doc(&schema, [n(&schema, "paragraph", [t(&schema, "ab")])]),
+        Extension::all([history(HistoryConfig::default()), composition()]),
+    );
+    // Composing is typing, so it folds into typing right before it; after a
+    // pause it starts its own entry like any other typing would.
+    let quick = run(&start, typed(&schema, 2, "X", 0));
+    let quick = run(&quick, start_composition(CompositionRange::new(3, 3)));
+    let quick = run(&quick, update_composition(&quick, "n", 1).unwrap().time(1));
+    assert_eq!(schema.describe(quick.doc()), r#"doc(paragraph("aXnb"))"#);
+    assert_eq!(undo_depth(&quick), 1);
+
+    let paused = run(&start, typed(&schema, 2, "X", 0));
+    let paused = run(&paused, start_composition(CompositionRange::new(3, 3)));
+    let paused = run(
+        &paused,
+        update_composition(&paused, "n", 1).unwrap().time(5_000),
+    );
+    assert_eq!(undo_depth(&paused), 2);
+}
+
+#[test]
 fn a_pause_or_a_different_user_event_starts_a_new_entry() {
     let schema = shared_schema();
     let start = history_state(doc(
@@ -278,6 +321,31 @@ fn undo_closes_an_open_composition_and_group() {
     let after = run(&undone, typed(&schema, 2, "X", 100));
     let after = run(&after, typed(&schema, 3, "Y", 10_000));
     assert_eq!(undo_depth(&after), 2);
+}
+
+#[test]
+fn a_redo_lands_where_a_remote_change_moved_its_place() {
+    let schema = shared_schema();
+    let start = history_state(doc(
+        &schema,
+        [n(&schema, "paragraph", [t(&schema, "hello")])],
+    ));
+    let state = run(&start, typed(&schema, 3, "X", 0));
+    let undone = run(&state, undo(&state).expect("something to undo"));
+    // Someone else inserts before the place the undone edit was made.
+    let moved = run(
+        &undone,
+        TransactionSpec::new()
+            .changes([insert_text(&schema, 1, "Z")])
+            .add_to_history(false)
+            .remote(true)
+            .time(1),
+    );
+    let redone = run(&moved, redo(&moved).expect("something to redo"));
+    assert_eq!(
+        schema.describe(redone.doc()),
+        r#"doc(paragraph("ZheXllo"))"#
+    );
 }
 
 #[test]
@@ -561,4 +629,44 @@ fn a_failed_rebase_is_reported_once_and_cleared_by_the_next_transaction() {
     );
     assert!(!history_lost(&fine));
     assert_eq!(undo_depth(&fine), 1);
+}
+
+#[test]
+fn two_compositions_apart_in_time_are_two_entries() {
+    let schema = shared_schema();
+    let start = state(
+        doc(&schema, [n(&schema, "paragraph", [t(&schema, "ab")])]),
+        Extension::all([history(HistoryConfig::default()), composition()]),
+    );
+    // Each marked range is started explicitly, as an input method that names
+    // the range it replaces does.
+    let state = run(&start, start_composition(CompositionRange::new(2, 2)));
+    let state = run(&state, update_composition(&state, "n", 1).unwrap().time(0));
+    let state = run(
+        &state,
+        update_composition(&state, "\u{4f60}", 1).unwrap().time(1),
+    );
+    let state = run(&state, finish_composition());
+    let state = run(&state, start_composition(CompositionRange::new(3, 3)));
+    let state = run(
+        &state,
+        update_composition(&state, "h", 1).unwrap().time(10_000),
+    );
+    let state = run(
+        &state,
+        update_composition(&state, "\u{597d}", 1)
+            .unwrap()
+            .time(10_001),
+    );
+    let state = run(&state, finish_composition());
+    assert_eq!(
+        schema.describe(state.doc()),
+        "doc(paragraph(\"a\u{4f60}\u{597d}b\"))"
+    );
+    assert_eq!(undo_depth(&state), 2);
+    let undone = run(&state, undo(&state).expect("something to undo"));
+    assert_eq!(
+        schema.describe(undone.doc()),
+        "doc(paragraph(\"a\u{4f60}b\"))"
+    );
 }
