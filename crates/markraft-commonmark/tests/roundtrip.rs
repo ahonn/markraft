@@ -145,9 +145,24 @@ impl Gen<'_> {
             picked.push(self.mark(md::LINK, attrs! {"href" => href, "title" => title}));
         }
         let style: &[&str] = if self.allow_underline {
-            &[md::UNDERLINE, md::STRIKETHROUGH, md::STRONG, md::EM]
+            &[
+                md::UNDERLINE,
+                md::STRIKETHROUGH,
+                md::STRONG,
+                md::EM,
+                md::HIGHLIGHT,
+                md::SUPERSCRIPT,
+                md::SUBSCRIPT,
+            ]
         } else {
-            &[md::STRIKETHROUGH, md::STRONG, md::EM]
+            &[
+                md::STRIKETHROUGH,
+                md::STRONG,
+                md::EM,
+                md::HIGHLIGHT,
+                md::SUPERSCRIPT,
+                md::SUBSCRIPT,
+            ]
         };
         for name in style {
             if self.rng.one_in(4) {
@@ -183,7 +198,9 @@ impl Gen<'_> {
         for index in 0..count {
             let make_break =
                 breaks && index > 0 && index + 1 < count && !after_break && self.rng.one_in(6);
-            if index > 0 && !after_break && !make_break {
+            // Now and then no space, so styled runs meet and emphasis falls
+            // inside words.
+            if index > 0 && !after_break && !make_break && !self.rng.one_in(4) {
                 out.push(self.schema.text(" "));
             }
             after_break = make_break;
@@ -486,9 +503,135 @@ fn merge(nodes: Vec<Node>) -> Vec<Node> {
     out
 }
 
+/// What a document reads as: each textblock's characters with the style marks
+/// on them, the spelling marked `syntax` left out, and every other node by its
+/// type. Runs are merged, so how the text is split into nodes does not count.
+/// With `fold`, each run of whitespace reads as one space, as HTML reads it.
+fn reading(schema: &Schema, doc: &Node, fold: bool) -> Vec<String> {
+    let syntax = schema.mark_id(markraft_commonmark::schema::SYNTAX);
+    let mut out = Vec::new();
+    doc.descendants(&mut |node, _, _, _| {
+        if node.is_textblock(schema) {
+            let mut runs: Vec<(String, String)> = Vec::new();
+            for child in node.children() {
+                let marks = child.marks();
+                let spelling = syntax.is_some_and(|syntax| marks.contains_type(syntax));
+                // Spelling reads as nothing, except a character reference, which
+                // reads as the character it names.
+                let text = match (spelling, child.text()) {
+                    (true, Some(text)) => match character_reference(text) {
+                        Some(ch) => ch.to_string(),
+                        None => continue,
+                    },
+                    (true, None) => continue,
+                    (false, Some(text)) => text.to_string(),
+                    (false, None) => format!("<{}>", schema.node_type(child.type_id()).name()),
+                };
+                let names = marks
+                    .iter()
+                    .filter(|mark| Some(mark.ty) != syntax)
+                    .map(|mark| schema.mark_type(mark.ty).name().to_string())
+                    .collect::<Vec<_>>()
+                    .join("+");
+                match runs.last_mut() {
+                    Some((last, on)) if *on == names => last.push_str(&text),
+                    _ => runs.push((text, names)),
+                }
+            }
+            out.push(
+                runs.iter()
+                    .map(|(text, on)| {
+                        let text = if fold {
+                            fold_whitespace(text)
+                        } else {
+                            text.clone()
+                        };
+                        format!("{text:?}{{{on}}}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            return false;
+        }
+        if !node.is_text() {
+            out.push(schema.node_type(node.type_id()).name().to_string());
+        }
+        true
+    });
+    out
+}
+
+/// `text` with each run of whitespace made one space.
+fn fold_whitespace(text: &str) -> String {
+    let mut out = String::new();
+    let mut space = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            space = true;
+            continue;
+        }
+        if space {
+            out.push(' ');
+            space = false;
+        }
+        out.push(ch);
+    }
+    if space {
+        out.push(' ');
+    }
+    out
+}
+
+/// Each textblock's characters and atoms, with the styles on each by name and
+/// attributes. Spelling marked `syntax` reads as nothing, except a numeric
+/// character reference, which reads as the character it names.
+fn styled_units(schema: &Schema, doc: &Node) -> Vec<Vec<(Option<char>, Vec<String>)>> {
+    let syntax = schema.mark_id(markraft_commonmark::schema::SYNTAX);
+    let mut out = Vec::new();
+    doc.descendants(&mut |node, _, _, _| {
+        if !node.is_textblock(schema) {
+            return true;
+        }
+        let mut units = Vec::new();
+        for child in node.children() {
+            let marks = child.marks();
+            let styles: Vec<String> = marks
+                .iter()
+                .filter(|mark| Some(mark.ty) != syntax)
+                .map(|mark| format!("{}{:?}", schema.mark_type(mark.ty).name(), mark.attrs))
+                .collect();
+            let spelling = syntax.is_some_and(|syntax| marks.contains_type(syntax));
+            match child.text() {
+                Some(text) if spelling => {
+                    if let Some(ch) = character_reference(text) {
+                        units.push((Some(ch), styles));
+                    }
+                }
+                Some(text) => units.extend(text.chars().map(|ch| (Some(ch), styles.clone()))),
+                None if spelling => {}
+                None => units.push((None, styles)),
+            }
+        }
+        out.push(units);
+        false
+    });
+    out
+}
+
+/// The character a numeric reference such as `&#10;` or `&#x2a;` names.
+fn character_reference(text: &str) -> Option<char> {
+    let number = text.strip_prefix("&#")?.strip_suffix(';')?;
+    let code = match number.strip_prefix(['x', 'X']) {
+        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+        None => number.parse().ok()?,
+    };
+    char::from_u32(code)
+}
+
 #[test]
 fn random_documents_survive_a_round_trip() {
     let codec = Codec::new();
+    let mut tally = std::collections::BTreeMap::<String, (usize, usize)>::new();
     for seed in 1..2000u64 {
         let mut generator = Gen {
             schema: &codec.schema,
@@ -504,6 +647,50 @@ fn random_documents_survive_a_round_trip() {
         let doc = spell_document(&codec.serializer, &semantic);
         doc.check(&codec.schema)
             .expect("spelling keeps the document valid");
+        // `write` echoes inline source, so the round trip alone would pass a
+        // `spell` that dropped every delimiter: what the spelled text reads as
+        // must be what the semantic document said, less the styles Markdown
+        // cannot say there, which are given up rather than left as delimiters.
+        let spelled = styled_units(&codec.schema, &doc);
+        let meant = styled_units(&codec.schema, &semantic);
+        // Each block's text, an atom as U+FFFC.
+        let text = |blocks: &[Vec<(Option<char>, Vec<String>)>]| -> Vec<String> {
+            blocks
+                .iter()
+                .map(|units| {
+                    units
+                        .iter()
+                        .map(|unit| unit.0.unwrap_or('\u{fffc}'))
+                        .collect()
+                })
+                .collect()
+        };
+        let (got, want) = (text(&spelled), text(&meant));
+        if let Some((got, want)) = got.iter().zip(&want).find(|(got, want)| got != want) {
+            panic!("seed {seed}: the text changed\n  read  {got:?}\n  meant {want:?}");
+        }
+        assert_eq!(got.len(), want.len(), "seed {seed}: blocks changed");
+        for (got, want) in spelled.iter().flatten().zip(meant.iter().flatten()) {
+            if got.0.is_some_and(char::is_whitespace) {
+                continue;
+            }
+            assert!(
+                got.1.iter().all(|style| want.1.contains(style)),
+                "seed {seed}: {:?} gained a style, spelled as {:?}",
+                got,
+                codec.write(&doc)
+            );
+            for style in &want.1 {
+                let name = style
+                    .split(['A', '('])
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                let entry = tally.entry(name).or_insert((0usize, 0usize));
+                entry.0 += 1;
+                entry.1 += usize::from(!got.1.contains(style));
+            }
+        }
         let written = codec.write(&doc);
         let again = codec.parse(&written);
         assert_eq!(
@@ -516,6 +703,31 @@ fn random_documents_survive_a_round_trip() {
             codec.write(&again),
             written,
             "seed {seed} is not a fixed point"
+        );
+    }
+    // Giving a style up must stay the exception, or a `spell` that wrote no
+    // delimiters at all would pass. What each style may lose, in percent, a
+    // little above what was measured when this was set: a subscript cannot hold
+    // a space and the generated runs often do (82%); a superscript is lost in
+    // a link's text and where runs meet (29%); the rest only where runs meet
+    // (under 3%).
+    let ceilings = [
+        ("code", 1),
+        ("link", 1),
+        ("underline", 5),
+        ("strong", 5),
+        ("em", 5),
+        ("strikethrough", 5),
+        ("highlight", 5),
+        ("superscript", 40),
+        ("subscript", 90),
+    ];
+    for (name, ceiling) in ceilings {
+        let (all, lost) = tally.get(name).copied().unwrap_or_default();
+        assert!(all > 1000, "only {all} {name} runs were generated");
+        assert!(
+            lost * 100 <= all * ceiling,
+            "{lost} of {all} {name} styles were given up, over {ceiling}%"
         );
     }
 }
@@ -540,6 +752,15 @@ fn random_documents_survive_an_html_round_trip() {
             .parse(&written)
             .unwrap_or_else(|error| panic!("seed {seed} did not parse: {error}\n{written}"));
         back.check(&codec.schema).expect("a valid document");
+        // A fixed point alone would pass an importer that dropped a mark both
+        // times: what comes back must read as what went out.
+        // HTML folds a run of whitespace into one space, so that much is not a
+        // difference.
+        assert_eq!(
+            reading(&codec.schema, &back, true),
+            reading(&codec.schema, &doc, true),
+            "seed {seed}: {written}"
+        );
         // HTML spells a soft break and the whitespace around a marked run
         // however it likes; the judge collapses that noise.
         assert_eq!(

@@ -273,8 +273,12 @@ fn tag_of(html: &str) -> Option<(String, bool, bool)> {
 }
 
 /// Whether an inline HTML node is read as something other than an atom: a
-/// style tag — `<u>`, `<em>`, `<strong>`, `<del>`, `<a href>` — paired with
-/// its partner among its siblings, or a `<br>` a soft break follows.
+/// style tag — `<u>`, `<em>`, `<strong>`, `<del>`, `<mark>`, `<sup>`, `<sub>`,
+/// `<a href>` — paired with its partner among its siblings, or a `<br>` a soft
+/// break follows.
+///
+/// This restates the tags derive reads as styles (`Tag::style` in
+/// `src/derive.rs`); the two lists must name the same tags.
 pub fn html_is_read<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
     use comrak::nodes::NodeValue;
     let tag = |n: &'a comrak::nodes::AstNode<'a>| match &n.data.borrow().value {
@@ -292,7 +296,7 @@ pub fn html_is_read<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
     let Some(parent) = node.parent() else {
         return false;
     };
-    let style = ["u", "em", "strong", "del", "mark", "sup", "a"];
+    let style = ["u", "em", "strong", "del", "mark", "sup", "sub", "a"];
     let mut open: Vec<(String, *const comrak::nodes::AstNode<'a>)> = Vec::new();
     for sibling in parent.children() {
         let Some((name, closing, href)) = tag(sibling) else {
