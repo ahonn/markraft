@@ -137,10 +137,22 @@ fn move_selection(
     if target == head {
         return None;
     }
-    let next = if extend {
-        Selection::text(selection.anchor(doc), target)
+    let next = if projection.is_caret_position(target) {
+        if extend {
+            Selection::text(selection.anchor(doc), target)
+        } else {
+            Selection::cursor(target)
+        }
+    } else if !extend && Selection::is_selectable(state.schema(), doc, target) {
+        // Stepping onto a leaf block's line, a divider's, selects the leaf, as
+        // arriving there by line does; no caret can sit beside it.
+        Selection::node(target)
+    } else if extend {
+        // A selection grows over the leaf to the text beyond it.
+        let beyond = step(&projection, target).filter(|&at| projection.is_caret_position(at))?;
+        Selection::text(selection.anchor(doc), beyond)
     } else {
-        Selection::cursor(target)
+        return None;
     };
     if next.check(doc, state.schema()).is_err() {
         return None;

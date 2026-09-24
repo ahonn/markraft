@@ -2177,6 +2177,35 @@ mod tests {
         }
     }
 
+    /// ← from the start of the line after a divider and → from the end of the
+    /// line before it select the divider, as ↑ and ↓ do; with Shift, the
+    /// selection grows over it to the text beyond. No caret is left beside it,
+    /// where there is no line to type in.
+    #[test]
+    fn arrows_onto_a_divider_select_it() {
+        let state = state_of("one\n\n---\n\ntwo");
+        let rule = projection_of(&state).lines()[1].from();
+        let end_of_one = caret_in(&state, "one") + 3;
+        let start_of_two = caret_in(&state, "two");
+        for (from, dir) in [
+            (start_of_two, Direction::Backward),
+            (end_of_one, Direction::Forward),
+        ] {
+            let moved =
+                applied(&at(&state, from), &move_grapheme(dir, false)).expect("the arrow moves");
+            assert_eq!(moved.selection(), &Selection::node(rule), "{dir:?}");
+        }
+        let grown = applied(
+            &at(&state, end_of_one),
+            &move_grapheme(Direction::Forward, true),
+        )
+        .expect("Shift-→ extends");
+        assert_eq!(
+            grown.selection(),
+            &Selection::text(end_of_one, start_of_two)
+        );
+    }
+
     /// Backspace at the start of a paragraph right after a table carries its
     /// text into the table's last cell, as Typora does.
     #[test]
