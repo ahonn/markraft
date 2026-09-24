@@ -80,6 +80,53 @@ fn delete_range_drops_a_block_it_would_empty() {
 }
 
 #[test]
+fn delete_range_drops_a_list_item_whose_content_it_covers() {
+    let schema = shared_schema();
+    let item = |text| {
+        n(
+            &schema,
+            "list_item",
+            [n(&schema, "paragraph", [t(&schema, text)])],
+        )
+    };
+    let start = state(
+        doc(&schema, [n(&schema, "bullet_list", [item("a"), item("b")])]),
+        Extension::none(),
+    );
+    // 7..10 is all of the second item's content. An item cannot be empty, so
+    // the item goes rather than being refilled with an empty paragraph.
+    let after = run(&start, &delete_range(7, 10));
+    assert_eq!(
+        schema.describe(after.doc()),
+        r#"doc(bullet_list(list_item(paragraph("a"))))"#
+    );
+}
+
+#[test]
+fn delete_range_keeps_the_first_blocks_type_when_it_ends_at_a_block_end() {
+    let schema = shared_schema();
+    let start = state(
+        doc(
+            &schema,
+            [
+                n(&schema, "paragraph", [t(&schema, "zz")]),
+                n(&schema, "paragraph", [t(&schema, "ab")]),
+                n(&schema, "heading", [t(&schema, "cd")]),
+                n(&schema, "paragraph", [t(&schema, "ef")]),
+            ],
+        ),
+        Extension::none(),
+    );
+    // From the start of "ab" to the end of "cd": what is left is the
+    // paragraph, emptied, not the heading.
+    let after = run(&start, &delete_range(5, 11));
+    assert_eq!(
+        schema.describe(after.doc()),
+        r#"doc(paragraph("zz"), paragraph(), paragraph("ef"))"#
+    );
+}
+
+#[test]
 fn join_backward_merges_two_paragraphs() {
     let schema = shared_schema();
     let start = state(

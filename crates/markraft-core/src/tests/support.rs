@@ -210,9 +210,17 @@ impl Rng {
     }
 }
 
-/// Random inline content for a textblock.
+/// Words for generated text. Besides ASCII: a precomposed letter, CJK, an
+/// emoji outside the Basic Multilingual Plane, and a ZWJ sequence that is one
+/// grapheme over several scalars, so boundaries and offsets meet multi-byte text.
+const WORDS: &[&str] = &["alpha", "beta", "gamma", "delta", "é", "中文", "😀", "👩‍👩‍👧"];
+
+/// Random inline content for a textblock, empty one time in eight.
 pub fn random_inline(schema: &Schema, rng: &mut Rng, allow_marks: bool) -> Vec<Node> {
-    let words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
+    let words = WORDS;
+    if rng.one_in(8) {
+        return Vec::new();
+    }
     let count = rng.range(1, 4);
     let mut out = Vec::new();
     for _ in 0..count {
@@ -224,9 +232,14 @@ pub fn random_inline(schema: &Schema, rng: &mut Rng, allow_marks: bool) -> Vec<N
             out.push(n(schema, "hard_break", []));
             continue;
         }
-        let word = *rng.pick(&words);
+        let word = *rng.pick(words);
         if !allow_marks {
             out.push(t(schema, word));
+            continue;
+        }
+        // Code excludes every other mark, so it comes alone.
+        if rng.one_in(8) {
+            out.push(tm(schema, word, &["code"]));
             continue;
         }
         let mut marks = Vec::new();
@@ -258,6 +271,9 @@ pub fn random_inline(schema: &Schema, rng: &mut Rng, allow_marks: bool) -> Vec<N
 
 /// A random block node, nesting up to `depth` levels.
 pub fn random_block(schema: &Schema, rng: &mut Rng, depth: usize) -> Node {
+    if rng.one_in(10) {
+        return n(schema, "horizontal_rule", []);
+    }
     match rng.below(if depth == 0 { 3 } else { 6 }) {
         0 => n(schema, "paragraph", random_inline(schema, rng, true)),
         1 => na(
@@ -285,10 +301,20 @@ pub fn random_block(schema: &Schema, rng: &mut Rng, depth: usize) -> Node {
                 .map(|_| {
                     let mut content =
                         vec![n(schema, "paragraph", random_inline(schema, rng, true))];
+                    // `depth - 1`, not less, so a list can hold a list.
                     if depth > 1 && rng.one_in(3) {
-                        content.push(random_block(schema, rng, depth - 2));
+                        content.push(random_block(schema, rng, depth - 1));
                     }
-                    n(schema, "list_item", content)
+                    if rng.one_in(3) {
+                        na(
+                            schema,
+                            "task_item",
+                            crate::attrs! {"checked" => rng.one_in(2)},
+                            content,
+                        )
+                    } else {
+                        n(schema, "list_item", content)
+                    }
                 })
                 .collect();
             n(schema, kind, items)
@@ -301,6 +327,11 @@ pub fn random_doc(schema: &Schema, rng: &mut Rng) -> Node {
     let count = rng.range(1, 4);
     let blocks: Vec<Node> = (0..count).map(|_| random_block(schema, rng, 2)).collect();
     doc(schema, blocks)
+}
+
+/// One of `items`, or `None` when there are none.
+fn pick_some<'a, T>(rng: &mut Rng, items: &'a [T]) -> Option<&'a T> {
+    (!items.is_empty()).then(|| rng.pick(items))
 }
 
 /// Every position inside a textblock's inline content, as `(block start, pos)`.
@@ -351,9 +382,9 @@ fn random_structural_edit(schema: &Schema, rng: &mut Rng, d: &Node) -> Option<Ve
     match rng.below(4) {
         // Split: close the textblock and open a fresh one of the same type.
         0 => {
+            // Anywhere in a textblock, its edges included.
             let spots = textblock_positions(schema, d);
-            let (start, at) = *spots.iter().find(|(s, p)| p > s && *p < s + 64)?;
-            let _ = start;
+            let (_, at) = *pick_some(rng, &spots)?;
             let node = d.resolve(at).ok()?;
             let markup = Markup::with_attrs(node.parent().type_id(), node.parent().attrs().clone());
             Some(vec![Change::insert(
@@ -363,18 +394,21 @@ fn random_structural_edit(schema: &Schema, rng: &mut Rng, d: &Node) -> Option<Ve
         }
         // Join: delete the close and open tokens between two adjacent blocks.
         1 => {
-            let spans = block_spans(schema, d);
-            let (_, end) = *spans.iter().find(|(_, end)| {
-                d.resolve(*end)
-                    .map(|r| r.node_after().is_some())
-                    .unwrap_or(false)
-            })?;
+            let spans: Vec<(usize, usize)> = block_spans(schema, d)
+                .into_iter()
+                .filter(|(_, end)| {
+                    d.resolve(*end)
+                        .map(|r| r.node_after().is_some())
+                        .unwrap_or(false)
+                })
+                .collect();
+            let (_, end) = *pick_some(rng, &spans)?;
             Some(vec![Change::delete(end - 1, end + 1)])
         }
         // Wrap: an open token before a block and a close token after it.
         2 => {
             let spans = block_spans(schema, d);
-            let (before, after) = *rng.pick(&spans);
+            let (before, after) = *pick_some(rng, &spans)?;
             let quote = schema.node_id("blockquote")?;
             let markup = Markup::new(quote);
             Some(vec![
@@ -384,16 +418,16 @@ fn random_structural_edit(schema: &Schema, rng: &mut Rng, d: &Node) -> Option<Ve
         }
         // Lift: delete a container's own two tokens.
         _ => {
-            let spans = block_spans(schema, d);
-            let (before, after) = *spans
-                .iter()
-                .filter(|(before, after)| after - before > 2 && *before > 0 || *before == 0)
-                .find(|(before, after)| {
+            let spans: Vec<(usize, usize)> = block_spans(schema, d)
+                .into_iter()
+                .filter(|(before, after)| {
                     d.node_at(*before)
                         .map(|n| n.is_container() && n.content_size() > 0)
                         .unwrap_or(false)
                         && after - before > 2
-                })?;
+                })
+                .collect();
+            let (before, after) = *pick_some(rng, &spans)?;
             Some(vec![
                 Change::delete(before, before + 1),
                 Change::delete(after - 1, after),

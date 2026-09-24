@@ -5,7 +5,7 @@
 
 use super::support::*;
 use crate::change::apply::doc_token_run;
-use crate::change::{Change, ChangeSet, TrackMode};
+use crate::change::{Change, ChangeKind, ChangeSet, TrackMode};
 use crate::error::ChangeError;
 use crate::fit::Fit;
 use crate::fragment::Fragment;
@@ -212,9 +212,26 @@ fn transform_converges_for_inline_edits() {
             schema.describe(&left),
             schema.describe(&right)
         );
+        // Converging is not enough: a transform that dropped the other side's
+        // text would converge too. The generated words hold no `q`, so every `q`
+        // is inserted, and both sides' insertions must survive.
+        let inserted = |change: &Change| usize::from(matches!(change.kind, ChangeKind::Replace(_)));
+        assert_eq!(
+            q_count(&schema, &left),
+            q_count(&schema, &d) + inserted(&ca) + inserted(&cb),
+            "seed {seed}: {ca:?} and {cb:?} lost an insertion: {}",
+            schema.describe(&left)
+        );
         ran += 1;
     }
     assert!(ran > ROUNDS / 2, "only {ran} of {ROUNDS} rounds ran");
+}
+
+/// How many `q`s the document's text holds.
+fn q_count(schema: &Schema, d: &Node) -> usize {
+    d.text_between(schema, 0, d.content_size(), None, None)
+        .matches('q')
+        .count()
 }
 
 /// The span of the starting document a change set touches.
@@ -288,8 +305,10 @@ fn transform_always_produces_applicable_valid_change_sets() {
         ran += 1;
     }
     assert!(ran > ROUNDS / 2, "only {ran} of {ROUNDS} rounds ran");
+    // 72 of 2000 (3.6%) when this was set; a ceiling well above that would
+    // let the conflict rate grow unnoticed.
     assert!(
-        diverged * 10 < ran,
+        diverged * 20 < ran,
         "{diverged} of {ran} rounds diverged, which is more than the conflict \
          rate this property expects"
     );
@@ -909,5 +928,81 @@ fn a_fitted_replacement_that_reports_nothing_dropped_keeps_all_its_content() {
     assert!(
         kept > ROUNDS / 4 && dropped > 0,
         "{kept} kept, {dropped} dropped"
+    );
+}
+
+/// The generator reaches the structures edits go wrong in, so a property that
+/// passes has been tried on them: multi-byte and multi-scalar text, empty
+/// textblocks, dividers, task items, code, nesting, and structural edits at a
+/// textblock's edges as well as inside it.
+#[test]
+fn the_generator_reaches_what_edits_go_wrong_in() {
+    let schema = test_schema();
+    let mut rng = Rng::new(0xc0de_0001);
+    let mut seen = std::collections::BTreeMap::<&str, usize>::new();
+    let mut note = |what: &'static str, yes: bool| {
+        if yes {
+            *seen.entry(what).or_default() += 1;
+        }
+    };
+    for _ in 0..200 {
+        let d = random_doc(&schema, &mut rng);
+        d.descendants(&mut |node, _, parent, _| {
+            let name = schema.node_type(node.type_id()).name();
+            if let Some(text) = node.text() {
+                note("multi-byte text", text.len() != text.chars().count());
+                note("multi-scalar grapheme", text.contains('\u{200d}'));
+                let code = schema.mark_id("code").expect("known");
+                note("code", node.marks().contains_type(code));
+            }
+            note(
+                "empty textblock",
+                node.is_textblock(&schema) && node.content_size() == 0,
+            );
+            note("divider", name == "horizontal_rule");
+            note("task item", name == "task_item");
+            note(
+                "nested list",
+                name.ends_with("_list")
+                    && parent
+                        .is_some_and(|p| schema.node_type(p.type_id()).name().ends_with("_item")),
+            );
+            true
+        });
+        let spots = textblock_positions(&schema, &d);
+        if let Some(changes) = random_structural_change(&schema, &mut rng, &d)
+            && let [change] = changes.as_slice()
+            && change.from == change.to
+        {
+            // A split: where it falls in its textblock.
+            let at = change.from;
+            note(
+                "split at a start",
+                spots.iter().any(|&(start, _)| start == at),
+            );
+            note(
+                "split inside",
+                spots.iter().any(|&(start, pos)| pos == at && pos > start),
+            );
+        }
+    }
+    let wanted = [
+        "multi-byte text",
+        "multi-scalar grapheme",
+        "code",
+        "empty textblock",
+        "divider",
+        "task item",
+        "nested list",
+        "split at a start",
+        "split inside",
+    ];
+    let missing: Vec<_> = wanted
+        .iter()
+        .filter(|what| seen.get(*what).copied().unwrap_or(0) < 5)
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "rarely or never generated: {missing:?} in {seen:?}"
     );
 }

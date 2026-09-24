@@ -8,7 +8,7 @@ use crate::decorations::{RangeItem, RangeSet};
 use crate::fragment::Fragment;
 use crate::history::{HistoryConfig, history, redo, undo};
 use crate::node::Node;
-use crate::projection::Projection;
+use crate::projection::{LineKind, Projection};
 use crate::schema::Schema;
 use crate::selection::Selection;
 use crate::slice::Slice;
@@ -103,6 +103,13 @@ fn catalogue(schema: &Schema) -> Vec<(&'static str, Command)> {
 fn selections(schema: &Schema, rng: &mut Rng, document: &Node) -> Vec<Selection> {
     let spots = textblock_positions(schema, document);
     let mut out = vec![Selection::All];
+    // Any node that can be selected whole: a divider, an image, a container.
+    let selectable: Vec<usize> = (0..=document.content_size())
+        .filter(|&pos| Selection::is_selectable(schema, document, pos))
+        .collect();
+    if !selectable.is_empty() {
+        out.push(Selection::node(*rng.pick(&selectable)));
+    }
     if spots.is_empty() {
         return out;
     }
@@ -113,12 +120,6 @@ fn selections(schema: &Schema, rng: &mut Rng, document: &Node) -> Vec<Selection>
     let (_, a) = *rng.pick(&spots);
     let (_, b) = *rng.pick(&spots);
     out.push(Selection::text(a, b));
-    for (before, _) in block_spans(schema, document) {
-        if Selection::is_selectable(schema, document, before) {
-            out.push(Selection::node(before));
-            break;
-        }
-    }
     out
 }
 
@@ -170,6 +171,7 @@ fn every_command_undoes_to_where_it_started_and_redoes_to_what_it_made() {
     let commands = catalogue(&schema);
     let mut rng = Rng::new(0x5eed_4321);
     let mut checked = 0;
+    let mut changed = std::collections::BTreeSet::new();
     for _ in 0..40 {
         let document = random_doc(&schema, &mut rng);
         for selection in selections(&schema, &mut rng, &document) {
@@ -190,6 +192,7 @@ fn every_command_undoes_to_where_it_started_and_redoes_to_what_it_made() {
                     continue;
                 }
                 checked += 1;
+                changed.insert(*name);
                 let undone = next
                     .update(
                         [undo(&next).unwrap_or_else(|| panic!("`{name}` left nothing to undo"))],
@@ -228,13 +231,25 @@ fn every_command_undoes_to_where_it_started_and_redoes_to_what_it_made() {
         }
     }
     assert!(checked > 100, "only {checked} edits were checked");
+    // Every command that edits must have edited somewhere, or its undo went
+    // unchecked; the ones that only select or move are the exception.
+    let unexercised: Vec<_> = commands
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| {
+            !name.starts_with("select_") && !name.starts_with("move_by") && !changed.contains(name)
+        })
+        .collect();
+    assert!(unexercised.is_empty(), "never edited: {unexercised:?}");
 }
 
 #[test]
 fn delete_range_over_random_spans_stays_valid() {
     let schema = shared_schema();
     let mut rng = Rng::new(0xdeed_0001);
-    for _ in 0..40 {
+    let text = |d: &Node, from: usize, to: usize| d.text_between(&schema, from, to, None, None);
+    let mut ran = 0;
+    for round in 0..200 {
         let document = random_doc(&schema, &mut rng);
         let spots = textblock_positions(&schema, &document);
         if spots.is_empty() {
@@ -249,8 +264,21 @@ fn delete_range_over_random_spans_stays_valid() {
             continue;
         };
         let tr = result.expect("delete_range resolves");
-        tr.state().doc().check(&schema).expect("valid document");
+        let after = tr.state().doc();
+        after.check(&schema).expect("valid document");
+        // The text in the range goes and the text around it stays, whatever
+        // structure the deletion has to repair.
+        let size = document.content_size();
+        assert_eq!(
+            text(after, 0, after.content_size()),
+            text(&document, 0, from) + &text(&document, to, size),
+            "round {round}: deleting {from}..{to} from {}\nleft {}",
+            schema.describe(&document),
+            schema.describe(after)
+        );
+        ran += 1;
     }
+    assert!(ran > 100, "only {ran} deletions ran");
 }
 
 /// A change set that deletes `from..to` from `doc`.
@@ -262,6 +290,7 @@ fn deletion(schema: &Schema, doc: &Node, from: usize, to: usize) -> Option<Chang
 fn range_sets_stay_inside_the_mapped_document() {
     let schema = shared_schema();
     let mut rng = Rng::new(0xfeed_0002);
+    let mut ran = 0;
     for _ in 0..60 {
         let document = random_doc(&schema, &mut rng);
         let spots = textblock_positions(&schema, &document);
@@ -291,11 +320,23 @@ fn range_sets_stay_inside_the_mapped_document() {
             "a range whose content is deleted must be dropped"
         );
         assert!(kept.contains(&"empty"), "an empty range marks a position");
+        // A range that holds the deleted text and more keeps its start and loses
+        // the deleted length from its end.
+        let outside = mapped
+            .iter()
+            .find(|item| item.value == "outside")
+            .expect("a range with content left must be kept");
+        assert_eq!(
+            (outside.from, outside.to),
+            (start, document.content_size() - (to - from))
+        );
         for item in mapped.iter() {
             assert!(item.from <= item.to);
             assert!(item.to <= desc.length_after());
         }
+        ran += 1;
     }
+    assert!(ran > 10, "only {ran} rounds ran");
 }
 
 #[test]
@@ -336,7 +377,7 @@ fn a_random_insertion_never_moves_a_range_out_of_the_document() {
 fn projection_round_trips_for_random_documents() {
     let schema = shared_schema();
     let mut rng = Rng::new(0xfeed_0004);
-    for _ in 0..60 {
+    for round in 0..60 {
         let document = random_doc(&schema, &mut rng);
         let projection = Projection::of(&document, &schema);
 
@@ -360,12 +401,27 @@ fn projection_round_trips_for_random_documents() {
             );
 
             // Boundary helpers stay inside the document and on real boundaries.
+            // Crossing onto a leaf block's line lands on the leaf itself, where a
+            // node selection sits and no caret does.
+            let lands = |at: usize| {
+                projection.is_grapheme_boundary(at)
+                    || projection
+                        .line_at(at)
+                        .and_then(|line| projection.line(line))
+                        .is_some_and(|line| line.kind() == LineKind::LeafBlock)
+            };
             if let Some(next) = projection.next_grapheme_boundary(pos) {
                 assert!(next <= document.content_size());
-                assert!(projection.is_grapheme_boundary(next));
+                assert!(
+                    lands(next),
+                    "round {round}: next boundary {next} from {pos} is not one in {document:?}"
+                );
             }
             if let Some(previous) = projection.prev_grapheme_boundary(pos) {
-                assert!(projection.is_grapheme_boundary(previous));
+                assert!(
+                    lands(previous),
+                    "round {round}: previous boundary {previous} from {pos} is not one in {document:?}"
+                );
             }
             if let Some(word) = projection.next_word_boundary(pos) {
                 assert!(word <= document.content_size());
@@ -397,7 +453,7 @@ fn commands_keep_the_caret_on_a_grapheme_boundary() {
             continue;
         };
         let start = start.state().clone();
-        for command in &motions {
+        for (index, command) in motions.iter().enumerate() {
             let Some(result) = run_command(&start, command) else {
                 continue;
             };
@@ -406,7 +462,10 @@ fn commands_keep_the_caret_on_a_grapheme_boundary() {
             let head = next.selection().head(next.doc());
             assert!(
                 projection.is_grapheme_boundary(head) || projection.line_at(head).is_none(),
-                "the caret must not land inside a grapheme cluster"
+                "motion {index} from {pos} put the caret inside a grapheme cluster: \
+                 {:?} in {}",
+                next.selection(),
+                schema.describe(&document)
             );
         }
     }

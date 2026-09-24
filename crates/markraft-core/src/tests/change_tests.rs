@@ -119,6 +119,29 @@ fn map_pos_tracks_deletions() {
 }
 
 #[test]
+fn map_pos_inside_a_replacement_follows_its_association() {
+    let schema = test_schema();
+    let d = one_paragraph(&schema);
+    // Replace 2..5 ("bcd") with four characters, so the replacement's two ends
+    // map apart and a deletion alone could not tell them from each other.
+    let cs = set(
+        &schema,
+        &d,
+        vec![Change::replace(2, 5, text_slice(&schema, "WXYZ"))],
+    );
+    // A position inside what was replaced goes to the start of the new text
+    // when it looks back, and to its end when it looks forward.
+    assert_eq!(cs.map_pos(3, -1, TrackMode::Simple), Some(2));
+    assert_eq!(cs.map_pos(3, 1, TrackMode::Simple), Some(6));
+    // At the replacement's start, the tokens after are gone and the ones
+    // before are not.
+    assert_eq!(cs.map_pos(2, 1, TrackMode::After), None);
+    assert_eq!(cs.map_pos(2, 1, TrackMode::Before), Some(2));
+    // At its end only the tokens before are gone, so Around still maps it.
+    assert_eq!(cs.map_pos(5, 1, TrackMode::Around), Some(6));
+}
+
+#[test]
 fn map_range_and_touches() {
     let schema = test_schema();
     let d = one_paragraph(&schema);

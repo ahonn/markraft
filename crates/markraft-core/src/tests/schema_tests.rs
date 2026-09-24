@@ -477,3 +477,15 @@ fn check_rejects_content_a_choice_forbids() {
         "the choice forbids mixing the two branches"
     );
 }
+
+#[test]
+fn can_contain_answers_for_direct_children_only() {
+    let schema = test_schema();
+    let id = |name| schema.node_id(name).expect("known");
+    assert!(schema.can_contain(id("bullet_list"), id("list_item")));
+    assert!(schema.can_contain(id("bullet_list"), id("task_item")));
+    // A paragraph sits in a list only inside an item, and an item only inside
+    // a list.
+    assert!(!schema.can_contain(id("bullet_list"), id("paragraph")));
+    assert!(!schema.can_contain(id("doc"), id("list_item")));
+}

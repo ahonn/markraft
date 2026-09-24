@@ -193,16 +193,28 @@ fn selections_map_into_valid_positions() {
         };
         let desc = changes.desc();
 
+        // A dozen carets from anywhere in the document, not just its first
+        // blocks.
         let spots = textblock_positions(&schema, &document);
-        for (_, pos) in spots.iter().take(12) {
+        let carets: Vec<usize> = (0..12)
+            .filter(|_| !spots.is_empty())
+            .map(|_| rng.pick(&spots).1)
+            .collect();
+        for pos in &carets {
             let mapped = Selection::cursor(*pos).map(&schema, &after, desc);
             mapped
                 .check(&after, &schema)
                 .unwrap_or_else(|error| panic!("seed {seed}: invalid mapped selection: {error}"));
             let head = mapped.head(&after);
+            // A caret whose place was rewritten falls back to the nearest valid
+            // selection, which next to a leaf block can be the leaf itself.
             assert!(
-                matches!(mapped, Selection::All) || is_inline_position(&schema, &after, head),
-                "seed {seed}: a text selection left inline content at {head}"
+                matches!(mapped, Selection::All | Selection::Node { .. })
+                    || is_inline_position(&schema, &after, head),
+                "seed {seed}: a text selection at {pos} became {mapped:?}, off inline content \
+                 ({from}..{to} replaced)\nbefore: {}\nafter:  {}",
+                schema.describe(&document),
+                schema.describe(&after)
             );
         }
 

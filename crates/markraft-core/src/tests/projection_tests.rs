@@ -714,7 +714,11 @@ fn random_edit(
     match kind {
         EditKind::Structural => random_structural_change(schema, rng, d),
         EditKind::Text => {
+            // A document of dividers alone has no text to edit.
             let spots = textblock_positions(schema, d);
+            if spots.is_empty() {
+                return None;
+            }
             let (start, at) = *rng.pick(&spots);
             let size = d.resolve(at).ok()?.parent().content_size();
             let end = rng.range(at, start + size);
