@@ -1,0 +1,15 @@
+# Configuration for cargo-mutants (`cargo xtask mutants`).
+#
+# Mutants shown to be equivalent: no input tells them apart from the code, so
+# no test can catch them and listing them only hides real survivors. Each was
+# checked by hand; say why when adding one.
+exclude_re = [
+  # Without its node arm, `Selection::content` slices the selection's range,
+  # which for a node selection is exactly the node.
+  'delete match arm Selection::Node\{pos\} in Selection::content$',
+]
+
+# Also equivalent, but cargo-mutants 27 does not filter field deletions by name,
+# so they are reported and can be passed over: `HistoryState::isolate` clears
+# both `prev_time` and `prev_user_event`, and either one alone keeps the next
+# edit from merging, so deleting one leaves the other doing the work.

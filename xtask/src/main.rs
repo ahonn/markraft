@@ -1,6 +1,7 @@
 mod crypto;
 mod macos;
 mod mock;
+mod mutants;
 mod release;
 
 use anyhow::{Context, Result, bail};
@@ -34,6 +35,12 @@ enum Task {
     Mock {
         #[command(subcommand)]
         command: MockTask,
+    },
+    /// Mutation-test the code that differs from a base revision.
+    Mutants {
+        /// The revision to compare the working tree with.
+        #[arg(long, default_value = "origin/master")]
+        base: String,
     },
 }
 
@@ -150,6 +157,7 @@ fn main() -> Result<()> {
         Task::Mock {
             command: MockTask::Serve { port },
         } => mock::serve(&root, port),
+        Task::Mutants { base } => mutants::run(&root, &base),
     }
 }
 
