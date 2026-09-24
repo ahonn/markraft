@@ -1105,6 +1105,32 @@ impl MarkraftApp {
     pub(crate) fn test_focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_editor(window, cx);
     }
+    /// Reconcile `changes` as if the watcher had reported them, for the headless
+    /// tests, which cannot time a file system event.
+    #[cfg(test)]
+    pub(crate) fn test_apply_external(
+        &mut self,
+        changes: Vec<External>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_external(changes, window, cx);
+    }
+    /// The note the window shows, as the library holds it, for the headless tests.
+    #[cfg(test)]
+    pub(crate) fn test_active_note(&self) -> crate::storage::Note {
+        self.library.active_note().clone()
+    }
+    /// The note `id`, if the library still holds it, for the headless tests.
+    #[cfg(test)]
+    pub(crate) fn test_note(&self, id: &str) -> Option<crate::storage::Note> {
+        self.library.note(id).cloned()
+    }
+    /// The sentences waiting to be shown, for the headless tests.
+    #[cfg(test)]
+    pub(crate) fn test_queued_notices(&self) -> Vec<String> {
+        self.feedback.queued().map(str::to_owned).collect()
+    }
     /// The active note's editor and file, for the headless tests.
     #[cfg(test)]
     pub(crate) fn test_editor(&self) -> Entity<EditorView> {

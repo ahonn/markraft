@@ -121,6 +121,12 @@ impl Feedback {
         }
     }
 
+    /// The sentences waiting their turn, for the headless tests.
+    #[cfg(test)]
+    pub(super) fn queued(&self) -> impl Iterator<Item = &str> {
+        self.queued.iter().map(String::as_str)
+    }
+
     /// Dismiss a notice that carries an action, and say whether there was one.
     /// A notice with nothing to press is left alone: it goes by itself.
     pub(super) fn dismiss_action(&mut self) -> bool {

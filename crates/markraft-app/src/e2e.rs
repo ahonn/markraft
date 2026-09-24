@@ -167,12 +167,17 @@ impl Harness<'_> {
         names
     }
 
-    /// Let the vault's thread and its file watcher catch up, as the pause between
-    /// two keystrokes does on a real Mac.
-    pub(crate) fn settle(&mut self) {
-        for _ in 0..15 {
-            std::thread::sleep(Duration::from_millis(20));
+    /// Run the app until `ready` holds or five seconds pass: work the vault's
+    /// thread does lands outside GPUI's scheduler, so it is waited for rather
+    /// than given a fixed pause that a loaded machine could outlast.
+    pub(crate) fn wait_until(&mut self, ready: impl Fn(&mut Self) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
             self.cx.run_until_parked();
+            if ready(self) || Instant::now() > deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -243,11 +248,148 @@ impl Harness<'_> {
     pub(crate) fn error(&mut self) -> Option<String> {
         self.app.update(self.cx, |app, _| app.shown_error())
     }
+
+    /// Reconcile `changes` as the watcher would report them.
+    pub(crate) fn external(&mut self, changes: Vec<crate::vault::External>) {
+        let app = self.app.clone();
+        self.cx.update(|window, cx| {
+            app.update(cx, |app, cx| app.test_apply_external(changes, window, cx))
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// The active note as the library holds it.
+    pub(crate) fn active_note(&mut self) -> crate::storage::Note {
+        self.app.update(self.cx, |app, _| app.test_active_note())
+    }
+
+    /// The sentences waiting to be shown.
+    pub(crate) fn notices(&mut self) -> Vec<String> {
+        self.app.update(self.cx, |app, _| app.test_queued_notices())
+    }
+
+    /// The Markdown files in the notes folder other than `name`, with their text.
+    pub(crate) fn other_files(&self, name: &str) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = std::fs::read_dir(&self.notes)
+            .expect("the notes folder")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+            .filter(|path| path.file_name().is_some_and(|file| file != name))
+            .map(|path| {
+                let text = std::fs::read_to_string(&path).expect("a note file");
+                (
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    text,
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `note` as the file reads when it says `markdown`.
+    fn on_disk(note: &crate::storage::Note, markdown: &str) -> crate::storage::Note {
+        crate::storage::Note {
+            document: crate::doc::from_markdown(markdown),
+            ..note.clone()
+        }
+    }
+
+    // Another app rewrote the file while the note had edits of its own: the file
+    // wins, and the edits are kept beside it as a conflicted copy, said once.
+    #[gpui::test]
+    fn edits_meeting_a_rewritten_file_are_kept_as_a_conflicted_copy(cx: &mut TestAppContext) {
+        use crate::vault::External;
+        let mut h = open_with(cx, &[("n.md", "hello\n")], |_| {});
+        let before = h.active_note();
+        h.keys("cmd-down");
+        h.type_text(" mine");
+        h.external(vec![External::Updated {
+            previous: Some(before.clone()),
+            note: on_disk(&before, "theirs"),
+        }]);
+        assert_eq!(h.markdown(), "theirs");
+        let copies = h.other_files("n.md");
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        assert_eq!(copies[0].1, "hello mine\n");
+        assert_eq!(
+            h.notices(),
+            ["A note changed on disk; your edits were kept as a conflicted copy."]
+        );
+    }
+
+    // The file was rewritten while the note held what the file used to say: the
+    // new text is taken, with nothing to keep and nothing to say.
+    #[gpui::test]
+    fn an_untouched_note_takes_a_rewritten_file(cx: &mut TestAppContext) {
+        use crate::vault::External;
+        let mut h = open_with(cx, &[("n.md", "hello\n")], |_| {});
+        let before = h.active_note();
+        h.external(vec![External::Updated {
+            previous: Some(before.clone()),
+            note: on_disk(&before, "theirs"),
+        }]);
+        assert_eq!(h.markdown(), "theirs");
+        assert_eq!(h.other_files("n.md"), []);
+        assert_eq!(h.notices(), Vec::<String>::new());
+    }
+
+    // Only the file's permissions changed: the edits on screen stay, not a copy,
+    // and the note takes the new read-only state.
+    #[gpui::test]
+    fn a_permission_change_keeps_the_edits_on_screen(cx: &mut TestAppContext) {
+        use crate::vault::External;
+        let mut h = open_with(cx, &[("n.md", "hello\n")], |_| {});
+        let before = h.active_note();
+        h.keys("cmd-down");
+        h.type_text(" mine");
+        let locked = crate::storage::Note {
+            read_only: Some("locked".into()),
+            ..before.clone()
+        };
+        h.external(vec![External::Updated {
+            previous: Some(before),
+            note: locked,
+        }]);
+        assert_eq!(h.markdown(), "hello mine");
+        assert_eq!(h.active_note().read_only.as_deref(), Some("locked"));
+        assert_eq!(h.other_files("n.md"), []);
+        assert_eq!(h.notices(), Vec::<String>::new());
+    }
+
+    // The file was deleted: a note with nothing unsaved goes with it; one with
+    // edits keeps them as a copy where the file was. Either way it is said.
+    #[gpui::test]
+    fn a_deleted_file_takes_its_note_and_keeps_its_edits(cx: &mut TestAppContext) {
+        use crate::vault::External;
+        let mut h = open_with(cx, &[("n.md", "hello\n")], |_| {});
+        let note = h.active_note();
+        h.external(vec![External::Removed(note.clone())]);
+        let gone = h.app.update(h.cx, |app, _| app.test_note(&note.id));
+        assert!(gone.is_none(), "the note left with its file");
+        assert_eq!(h.other_files("n.md"), []);
+        assert_eq!(
+            h.notices(),
+            ["A note's file was deleted outside Markraft, so the note is gone too."]
+        );
+
+        let mut h = open_with(cx, &[("n.md", "hello\n")], |_| {});
+        let note = h.active_note();
+        h.keys("cmd-down");
+        h.type_text(" mine");
+        h.external(vec![External::Removed(note.clone())]);
+        let gone = h.app.update(h.cx, |app, _| app.test_note(&note.id));
+        assert!(gone.is_none(), "the note left with its file");
+        let copies = h.other_files("n.md");
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        assert_eq!(copies[0].1, "hello mine\n");
+    }
 
     #[gpui::test]
     fn a_note_typed_and_saved_reaches_its_file(cx: &mut TestAppContext) {
@@ -380,7 +522,7 @@ mod tests {
             png,
         )));
         h.keys("cmd-v");
-        h.settle();
+        h.wait_until(|h| h.markdown().ends_with(".png)"));
         let markdown = h.markdown();
         // At the caret, inline: `x![image](…)`, with nothing typed after it.
         assert!(markdown.starts_with("x![image](assets/"), "{markdown:?}");
@@ -817,6 +959,97 @@ mod tests {
         h.type_text("x");
         assert_eq!(h.markdown(), "bc");
         h.assert_round_trip("vim x");
+    }
+
+    // The input method sees the note in UTF-16 units, as macOS counts them: an
+    // emoji is two. A range that starts or ends inside one is taken back to its
+    // start; marked text and its caret are placed in those units; empty marked
+    // text cancels; a marked range can replace text; a commit writes it.
+    #[gpui::test]
+    fn the_input_method_sees_the_note_in_utf16_units(cx: &mut TestAppContext) {
+        use gpui::EntityInputHandler;
+        let mut h = open_with(cx, &[("i.md", "a\u{1F600}b\n")], |_| {});
+        h.keys("cmd-down");
+        let editor = h.app.update(h.cx, |app, _| app.test_editor());
+        let text = |h: &mut Harness, range: std::ops::Range<usize>| {
+            editor.update_in(h.cx, |view, window, cx| {
+                let mut actual = None;
+                let text = view.text_for_range(range, &mut actual, window, cx);
+                (text, actual)
+            })
+        };
+        assert_eq!(text(&mut h, 0..4), (Some("a\u{1F600}b".into()), Some(0..4)));
+        assert_eq!(text(&mut h, 1..3), (Some("\u{1F600}".into()), Some(1..3)));
+        assert_eq!(text(&mut h, 1..2), (Some(String::new()), Some(1..1)));
+        assert_eq!(text(&mut h, 2..4), (Some("\u{1F600}b".into()), Some(1..4)));
+        let state = |h: &mut Harness| {
+            editor.update_in(h.cx, |view, window, cx| {
+                (
+                    view.marked_text_range(window, cx),
+                    view.selected_text_range(false, window, cx).map(|s| s.range),
+                )
+            })
+        };
+        assert_eq!(state(&mut h), (None, Some(4..4)));
+
+        // A candidate whose caret is after its emoji: two units in.
+        editor.update_in(h.cx, |view, window, cx| {
+            view.replace_and_mark_text_in_range(None, "\u{1F600}x", Some(2..2), window, cx)
+        });
+        assert_eq!(state(&mut h), (Some(4..7), Some(6..6)));
+        // Empty marked text is how macOS says the candidate was cancelled.
+        editor.update_in(h.cx, |view, window, cx| {
+            view.replace_and_mark_text_in_range(None, "", None, window, cx)
+        });
+        assert_eq!(state(&mut h), (None, Some(4..4)));
+        assert_eq!(h.markdown(), "a\u{1F600}b");
+
+        // A candidate over `b`, then committed in its place.
+        editor.update_in(h.cx, |view, window, cx| {
+            view.replace_and_mark_text_in_range(Some(3..4), "x", None, window, cx)
+        });
+        assert_eq!(state(&mut h).0, Some(3..4));
+        editor.update_in(h.cx, |view, window, cx| {
+            view.replace_text_in_range(None, "\u{597d}", window, cx)
+        });
+        assert_eq!(state(&mut h), (None, Some(4..4)));
+        assert_eq!(h.markdown(), "a\u{1F600}\u{597d}");
+
+        // Where a candidate window goes: further along the line is further
+        // right. The test platform lays text out with a placeholder font, so
+        // only the order is judged.
+        let bounds = |h: &mut Harness, range: std::ops::Range<usize>| {
+            editor
+                .update_in(h.cx, |view, window, cx| {
+                    view.bounds_for_range(range, gpui::Bounds::default(), window, cx)
+                })
+                .expect("bounds for text on screen")
+        };
+        let first = bounds(&mut h, 0..1);
+        let last = bounds(&mut h, 3..4);
+        assert!(first.origin.x < last.origin.x, "{first:?} {last:?}");
+        assert!(first.size.height > gpui::px(0.));
+        h.assert_round_trip("a committed candidate");
+    }
+
+    // Vim's own tests drive a stand-in host with a keymap of their own; these keys
+    // go through the bindings a person presses and the editor the app hosts: an
+    // operator with a motion, undo and redo, a count, and a visual delete.
+    #[gpui::test]
+    fn vim_keys_reach_the_note_through_the_real_bindings(cx: &mut TestAppContext) {
+        let mut h = open_with(cx, &[("v.md", "one two three\n")], |p| p.vim_mode = true);
+        h.keys("cmd-up");
+        h.keys("d w");
+        assert_eq!(h.markdown(), "two three");
+        h.keys("u");
+        assert_eq!(h.markdown(), "one two three");
+        h.keys("ctrl-r");
+        assert_eq!(h.markdown(), "two three");
+        h.keys("2 x");
+        assert_eq!(h.markdown(), "o three");
+        h.keys("v l d");
+        assert_eq!(h.markdown(), "three");
+        h.assert_round_trip("vim operators");
     }
 
     // G6: the wiki-link and emoji menus open as the trigger is typed and write what

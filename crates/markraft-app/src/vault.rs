@@ -1712,6 +1712,11 @@ mod tests {
         let path = fixture(root.path(), "note.md", b"Original");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
         assert!(write_document(&path, b"Wrong", None).is_err());
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"Original",
+            "a refused write writes nothing"
+        );
         write_document(&path, b"Edited", Some(b"Original")).unwrap();
         assert_eq!(
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
@@ -1811,6 +1816,14 @@ mod tests {
         let cased = store.rename(&id, "one V1.2").unwrap();
         assert_eq!(cased.file_name().unwrap(), "one V1.2.md");
         assert_eq!(fs::read(&cased).unwrap(), b"one\n");
+        // Opening the file by its new name proves nothing on a file system that
+        // ignores case: the name the folder lists is what changed.
+        let listed: Vec<String> = fs::read_dir(cased.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.to_lowercase() == "one v1.2.md")
+            .collect();
+        assert_eq!(listed, ["one V1.2.md"]);
     }
     #[test]
     fn a_file_another_app_changed_is_not_renamed_under_it() {
