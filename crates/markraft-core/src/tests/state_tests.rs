@@ -27,6 +27,36 @@ fn sample_doc(schema: &crate::schema::Schema) -> crate::node::Node {
 }
 
 #[test]
+fn filter_ranges_are_sorted_and_merged_where_they_touch() {
+    use crate::state::filters::{normalise_ranges, union_ranges};
+    // Reversed ends are put in order; touching and overlapping ranges merge.
+    assert_eq!(
+        normalise_ranges(&[(5, 7), (4, 3), (1, 3), (10, 12)]),
+        [(1, 4), (5, 7), (10, 12)]
+    );
+    assert_eq!(union_ranges(&[(1, 2)], &[(8, 9), (2, 5)]), [(1, 5), (8, 9)]);
+}
+
+#[test]
+fn a_transaction_without_a_time_is_stamped_with_the_clock() {
+    let schema = shared_schema();
+    let start = state(sample_doc(&schema), Extension::none());
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let tr = start
+        .update([TransactionSpec::new().changes([insert_text(&schema, 1, "x")])])
+        .unwrap();
+    let stamped = *tr
+        .annotation(crate::state::protocol::time())
+        .expect("a time");
+    assert!(stamped >= before, "{stamped} is before {before}");
+    let given = start.update([TransactionSpec::new().time(7)]).unwrap();
+    assert_eq!(given.annotation(crate::state::protocol::time()), Some(&7));
+}
+
+#[test]
 fn create_fills_in_a_document_and_a_cursor() {
     let schema = shared_schema();
     let state = EditorState::create(EditorStateConfig::new(schema.clone())).unwrap();

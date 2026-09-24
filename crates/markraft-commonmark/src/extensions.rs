@@ -66,7 +66,7 @@ use markraft_core::commands::structure::markup_of;
 use markraft_core::commands::{InputRule, InputRuleMatch, input_rules};
 use markraft_core::{
     Attrs, Change, ChangeRange, Extension, Fragment, MarkSet, Markup, Node, NodeTypeId, Schema,
-    Slice, Token, attrs,
+    Slice, Token, TrackMode, attrs,
     corrections::{Correction, CorrectionContext, corrections, fill_required_content},
 };
 
@@ -132,6 +132,9 @@ pub fn commonmark_corrections(schema: &Schema) -> Vec<Correction> {
         out.push(fill_required_content(ty));
         out.push(Correction::on_child_list(ty, merge_adjacent_lists));
     }
+    if let Some(ordered) = schema.node_id(md::ORDERED_LIST) {
+        out.push(Correction::on_child_list(ordered, keep_numbers));
+    }
     for name in [md::PARAGRAPH, md::HEADING, md::TABLE_CELL] {
         if let Some(ty) = schema.node_id(name) {
             out.push(Correction::on_content(ty, canonicalise).when_selection_leaves());
@@ -168,6 +171,72 @@ fn merge_adjacent_lists(cx: &markraft_core::corrections::CorrectionContext<'_>) 
         previous = Some(child);
     }
     Vec::new()
+}
+
+/// Keep the numbers of an ordered list's items when typing or deleting over a
+/// range takes the items before them, as Typora does: selecting a paragraph
+/// and the first item of `1. a` / `2. b` and deleting leaves `2. b`. Lifting
+/// the first item out, which is not a deletion, numbers the rest from the
+/// list's start as before.
+///
+/// The list's first item is matched to the item of a list the transaction
+/// started with that it was, and the list starts at that item's number when
+/// every item before it went.
+fn keep_numbers(cx: &CorrectionContext<'_>) -> Vec<Change> {
+    if !(cx.tr.is_user_event("input") || cx.tr.is_user_event("delete")) {
+        return Vec::new();
+    }
+    let Some(before) = cx.before else {
+        return Vec::new();
+    };
+    let changes = cx.tr.changes();
+    let start = |node: &Node| {
+        node.attrs()
+            .get("start")
+            .and_then(|value| value.as_int())
+            .unwrap_or(1)
+    };
+    let ordered = cx.node.type_id();
+    let mut number = None;
+    cx.start_state.doc().descendants(&mut |old, pos, _, _| {
+        if number.is_some() {
+            return false;
+        }
+        if old.type_id() != ordered {
+            return true;
+        }
+        let mut item = pos + 1;
+        for (index, child) in old.children().enumerate() {
+            let gone = changes.map_pos(item, 1, TrackMode::After).is_none();
+            if !gone {
+                if changes.map_pos(item, 1, TrackMode::Simple) == Some(before + 1) {
+                    number = Some(start(old) + index as i64);
+                }
+                break;
+            }
+            item += child.node_size();
+        }
+        true
+    });
+    // Already numbered so, or not a list the transaction started with.
+    let Some(number) = number.filter(|&number| number != start(cx.node)) else {
+        return Vec::new();
+    };
+    let attrs = cx.node.attrs().with("start", number);
+    let markup = Markup::with_attrs(ordered, attrs);
+    let after = before + cx.node.node_size() - 1;
+    vec![
+        Change::replace(
+            before,
+            before + 1,
+            Slice::from_tokens(&[Token::Open(markup.clone())]),
+        ),
+        Change::replace(
+            after,
+            after + 1,
+            Slice::from_tokens(&[Token::Close(markup)]),
+        ),
+    ]
 }
 
 /// The conversions a Markdown writer expects while typing.

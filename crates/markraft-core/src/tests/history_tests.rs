@@ -393,6 +393,89 @@ fn history_entries_survive_an_interleaved_remote_change() {
     );
 }
 
+/// A remote change that deletes everything an entry did leaves nothing to
+/// undo in it: the entry goes, and undo reaches the one below.
+#[test]
+fn an_entry_a_remote_change_empties_is_dropped() {
+    let schema = shared_schema();
+    let start = history_state(doc(
+        &schema,
+        [
+            n(&schema, "paragraph", [t(&schema, "hello")]),
+            n(&schema, "paragraph", [t(&schema, "world")]),
+        ],
+    ));
+    let state = run(&start, typed(&schema, 3, "X", 0));
+    let state = run(&state, typed(&schema, 10, "Y", 10_000));
+    assert_eq!(undo_depth(&state), 2);
+    // The remote side deletes the second paragraph's text, "Y" with it.
+    let state = run(
+        &state,
+        TransactionSpec::new()
+            .changes([Change::delete(9, 15)])
+            .add_to_history(false)
+            .remote(true)
+            .time(20_000),
+    );
+    assert_eq!(
+        schema.describe(state.doc()),
+        r#"doc(paragraph("heXllo"), paragraph())"#
+    );
+    assert_eq!(undo_depth(&state), 1);
+    let undone = run(&state, undo(&state).expect("something to undo"));
+    assert_eq!(
+        schema.describe(undone.doc()),
+        r#"doc(paragraph("hello"), paragraph())"#
+    );
+}
+
+/// Moving the caret after an edit records where it went, for selection undo;
+/// a plain undo still takes the edit back.
+#[test]
+fn undo_after_moving_the_caret_undoes_the_edit() {
+    let schema = shared_schema();
+    let start = history_state(doc(
+        &schema,
+        [n(&schema, "paragraph", [t(&schema, "hello")])],
+    ));
+    let state = run(&start, typed(&schema, 3, "A", 0));
+    let state = run(
+        &state,
+        TransactionSpec::new()
+            .selection(Selection::cursor(6))
+            .user_event("select.pointer")
+            .time(10),
+    );
+    let undone = run(&state, undo(&state).expect("something to undo"));
+    assert_eq!(schema.describe(undone.doc()), r#"doc(paragraph("hello"))"#);
+}
+
+#[test]
+fn undo_and_redo_say_which_they_are() {
+    let schema = shared_schema();
+    let start = history_state(doc(
+        &schema,
+        [n(&schema, "paragraph", [t(&schema, "hello")])],
+    ));
+    let state = run(&start, typed(&schema, 3, "A", 0));
+    let event = |state: &EditorState, spec: TransactionSpec| {
+        state
+            .update([spec])
+            .unwrap()
+            .annotation(crate::state::protocol::user_event())
+            .cloned()
+    };
+    assert_eq!(
+        event(&state, undo(&state).unwrap()).as_deref(),
+        Some("undo")
+    );
+    let undone = run(&state, undo(&state).unwrap());
+    assert_eq!(
+        event(&undone, redo(&undone).unwrap()).as_deref(),
+        Some("redo")
+    );
+}
+
 #[test]
 fn min_depth_bounds_the_number_of_entries() {
     let schema = shared_schema();

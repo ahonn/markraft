@@ -99,6 +99,9 @@ fn a_node_selection_covers_its_node_and_an_all_selection_the_document() {
         schema.describe(node.content(&document).content().child(0)),
         "image[src=Str(\"x.png\")]"
     );
+    // A node selection of a block covers all of it, not just its first token.
+    let block = Selection::node(0);
+    assert_eq!(block.to(&document), document.child(0).node_size());
 
     let all = Selection::All;
     assert_eq!(all.from(&document), 0);

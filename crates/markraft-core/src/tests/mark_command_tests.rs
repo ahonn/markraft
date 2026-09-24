@@ -421,6 +421,26 @@ fn cursor_toggle_exits_the_inherited_mark_when_typing() {
 }
 
 #[test]
+fn adding_a_mark_at_the_cursor_keeps_typing_inside_the_scope() {
+    let schema = shared_schema();
+    let em = schema.mark_id("em").unwrap();
+    let marks = MarkSet::from_marks(&schema, [m(&schema, "strong")]);
+    let span = n(&schema, "inline_span", [t(&schema, "ab")]).mark(marks);
+    let start = state(
+        doc(&schema, [n(&schema, "paragraph", [span])]),
+        Extension::none(),
+    );
+    // Stored marks that still hold the scope's own mark give no reason to
+    // leave the scope.
+    let toggled = run(&at(&start, 3), &toggle_mark(em, Attrs::empty()));
+    let typed = run(&toggled, &insert_text("X"));
+    assert_eq!(
+        schema.describe(typed.doc()),
+        r#"doc(paragraph(inline_span{strong}("a", "X"{em}, "b")))"#
+    );
+}
+
+#[test]
 fn ordinary_typing_inherits_the_scope_without_duplicating_its_mark() {
     let schema = shared_schema();
     let marks = MarkSet::from_marks(&schema, [m(&schema, "strong")]);

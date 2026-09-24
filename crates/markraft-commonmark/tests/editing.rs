@@ -908,3 +908,93 @@ fn a_shortcode_reads_as_its_emoji_once_the_caret_leaves() {
         source
     );
 }
+
+/// The document position just after the `nth` character of `doc`'s text, or
+/// just before it when `after` is false.
+fn at_char(doc: &Node, nth: char, after: bool) -> usize {
+    let mut found = None;
+    doc.descendants(&mut |node, pos, _, _| {
+        if found.is_none()
+            && let Some(text) = node.text()
+            && let Some(index) = text.chars().position(|c| c == nth)
+        {
+            found = Some(pos + index + usize::from(after));
+        }
+        found.is_none()
+    });
+    found.expect("the character is in the document")
+}
+
+/// Typing or deleting over a range that runs from one block into another, as
+/// Typora 1.14.10 does it: the text after the range stays where it was, and so
+/// do the list, the quote or the list type it sits in, the items after it keep
+/// their numbers, and the caret stays after what was typed. A range from the
+/// start of a block takes that block whole and keeps the last one's type.
+#[test]
+fn editing_across_blocks_keeps_what_follows_as_it_was() {
+    let schema = commonmark_schema();
+    for (source, (from, from_after), (to, to_after), typed, expected) in [
+        (
+            "1\n\n1. 23\n2. 4",
+            ('1', false),
+            ('2', true),
+            "98",
+            "1. 983\n2. 4",
+        ),
+        (
+            "12\n\n1. 34\n2. 5",
+            ('1', true),
+            ('3', true),
+            "98",
+            "1984\n\n2. 5",
+        ),
+        (
+            "12\n\n> 34\n>\n> 5",
+            ('1', true),
+            ('3', true),
+            "98",
+            "1984\n\n> 5",
+        ),
+        (
+            "1\n\n> 23\n>\n> 4",
+            ('1', false),
+            ('2', true),
+            "98",
+            "> 983\n>\n> 4",
+        ),
+        (
+            "1. 23\n\n- 45\n- 6",
+            ('2', true),
+            ('4', true),
+            "98",
+            "1. 2985\n\n- 6",
+        ),
+        ("# 12\n\n34", ('1', true), ('3', true), "9", "# 194"),
+        ("# 1\n\n23", ('1', false), ('2', true), "9", "93"),
+        ("0\n\n1. 3\n2. 5", ('0', true), ('3', true), "", "0\n\n2. 5"),
+    ] {
+        let doc = markraft_commonmark::from_markdown(&schema, source).expect("parses");
+        let (anchor, head) = (at_char(&doc, from, from_after), at_char(&doc, to, to_after));
+        let state = start_from(doc, &schema, anchor)
+            .update(
+                [markraft_core::TransactionSpec::new().selection(Selection::text(anchor, head))],
+            )
+            .expect("the range is selected")
+            .state()
+            .clone();
+        let edited = if typed.is_empty() {
+            run_command(&state, &markraft_core::commands::delete_selection())
+                .expect("deleting applies")
+                .expect("the transaction resolves")
+                .state()
+                .clone()
+        } else {
+            type_all(&state, typed)
+        };
+        assert_eq!(
+            markraft_commonmark::to_markdown(&schema, edited.doc()),
+            expected,
+            "{source:?}"
+        );
+    }
+}

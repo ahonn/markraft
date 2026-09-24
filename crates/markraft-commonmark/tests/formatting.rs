@@ -102,6 +102,25 @@ fn block_source(state: &EditorState, index: usize) -> String {
 
 // -- toggling a style ---------------------------------------------------------
 
+/// A selection that stops just before an entity or an escape takes nothing of
+/// it, and one that starts just after takes nothing either.
+#[test]
+fn a_style_ends_where_the_selection_does_beside_an_entity() {
+    let codec = Codec::new();
+    let state = selecting(&codec, "ab&amp;cd", 0, 2);
+    assert_saves(
+        &codec,
+        &formatted(&state, &toggle(&codec, md::STRONG)),
+        "**ab**&amp;cd",
+    );
+    let state = selecting(&codec, "ab\\*cd", 4, 6);
+    assert_saves(
+        &codec,
+        &formatted(&state, &toggle(&codec, md::STRONG)),
+        "ab\\***cd**",
+    );
+}
+
 #[test]
 fn toggling_strong_on_a_word_and_off_again() {
     let codec = Codec::new();

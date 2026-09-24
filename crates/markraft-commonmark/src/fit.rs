@@ -7,9 +7,13 @@
 //! type's content automaton and, for a child that does not match, tries in
 //! order to
 //!
-//! 1. wrap it in whatever chain of containers the schema says would fit,
-//! 2. put the children the rule requires before it,
+//! 1. put the children the rule requires before it,
+//! 2. wrap it in whatever chain of containers the schema says would fit,
 //! 3. and only then drop it.
+//!
+//! Filling comes first because it adds nothing a reader sees: a task item's
+//! code block gets the empty paragraph its box is written in, where a
+//! wrapper that also fits there, a quote, would make the code a quotation.
 //!
 //! The result always passes [`Node::check`](markraft_core::Node::check), which
 //! is what lets the parsers promise a valid document.
@@ -37,6 +41,27 @@ pub(crate) fn fit(
             wrapped_with = None;
             continue;
         }
+        if let Some(before) = schema.fill_before(matched, &[child.type_id()], false) {
+            let mut fitted = true;
+            for filler in &before {
+                match create(schema, *filler) {
+                    Some(node) => match matched.match_type(node.type_id()) {
+                        Some(next) => {
+                            matched = next;
+                            out.push(node);
+                        }
+                        None => fitted = false,
+                    },
+                    None => fitted = false,
+                }
+            }
+            if fitted && let Some(next) = matched.match_type(child.type_id()) {
+                matched = next;
+                out.push(child);
+                wrapped_with = None;
+                continue;
+            }
+        }
         if let Some(chain) = schema.find_wrapping(matched, child.type_id()) {
             if !chain.is_empty()
                 && wrapped_with.as_deref() == Some(chain.as_slice())
@@ -58,26 +83,6 @@ pub(crate) fn fit(
             }
         }
         wrapped_with = None;
-        if let Some(before) = schema.fill_before(matched, &[child.type_id()], false) {
-            let mut fitted = true;
-            for filler in &before {
-                match create(schema, *filler) {
-                    Some(node) => match matched.match_type(node.type_id()) {
-                        Some(next) => {
-                            matched = next;
-                            out.push(node);
-                        }
-                        None => fitted = false,
-                    },
-                    None => fitted = false,
-                }
-            }
-            if fitted && let Some(next) = matched.match_type(child.type_id()) {
-                matched = next;
-                out.push(child);
-                continue;
-            }
-        }
         // Nothing the schema offers accepts this child. Dropping it is the last
         // resort; the presets in this crate never reach here.
     }

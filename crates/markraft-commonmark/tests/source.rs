@@ -343,6 +343,64 @@ fn structural_edits_preserve_outside_source() {
     }
 }
 
+/// Blocks deleted outright take their lines and one gap with them, at the start
+/// of the note, in its middle and at its end alike; the rest keeps its bytes.
+#[test]
+fn deleted_blocks_take_one_gap_with_them() {
+    for (original, expected) in [
+        ("First\n\n\nMiddle\n\nLast\n", "Middle\n\nLast\n"),
+        ("First\n\nMiddle\n\n\nLast\n", "First\n\n\nLast\n"),
+        ("First\n\n\nMiddle\n\nLast\n", "First\n\n\nMiddle\n"),
+        ("|a|\n|-|\n\nMiddle\n\nLast\n", "Middle\n\nLast\n"),
+    ] {
+        assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
+    }
+}
+
+/// Text changed on two lines of a block whose prefixes the writer would
+/// spell otherwise: each change is placed on its own line, and the prefixes
+/// between them stay as they were.
+#[test]
+fn changes_on_separate_lines_of_a_block_are_patched_apart() {
+    for (original, expected) in [
+        (">one two\n>three four\n", ">ONE two\n>three FOUR\n"),
+        ("-  one two\n   three four\n", "-  ONE two\n   three FOUR\n"),
+        (
+            ">one [x][r] two\n>three\n\n[r]: /u\n",
+            ">ONE [x][r] two\n>THREE\n\n[r]: /u\n",
+        ),
+    ] {
+        assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
+    }
+}
+
+/// The allowances a save makes for typing in progress — spaces ending a
+/// paragraph, an empty paragraph — excuse only that: the rest of the note
+/// still has to read back as it is. Here the first place tried for the new
+/// block would run it into the paragraph below.
+#[test]
+fn typing_in_progress_does_not_excuse_the_rest_of_the_note() {
+    use markraft_core::Fragment;
+    let schema = commonmark_schema();
+    let source = SourceDocument::parse(&schema, "# Title\npara\n").unwrap();
+    let typed = SourceDocument::parse(&schema, "# Title\n\nnew\n\npara\n").unwrap();
+    let spaced = edit_children(typed.document(), &[], &|children| {
+        let paragraph = children[1].clone();
+        children[1] = paragraph.copy(Fragment::from_node(paragraph.child(0).with_text("new ")));
+    });
+    assert_eq!(
+        source.render(&schema, &spaced).unwrap(),
+        "# Title\n\nnew \n\npara\n"
+    );
+    let opened = edit_children(typed.document(), &[], &|children| {
+        children.insert(2, empty_paragraph())
+    });
+    assert_eq!(
+        source.render(&schema, &opened).unwrap(),
+        "# Title\n\nnew\n\npara\n"
+    );
+}
+
 /// A block inserted between two untouched ones goes in with one blank line
 /// either side: the gap the source already had parts it from the block after,
 /// so it is not doubled. This is what lifting a list's empty first item and
@@ -783,6 +841,7 @@ fn toggling_a_task_box_changes_only_the_box() {
             "- [X] a\n-  [ ] b\n\ntext [X]\n",
         ),
         ("> 1.  [X] quoted\n", "> 1.  [ ] quoted\n"),
+        ("- [ ]  ## heading\n", "- [x]  ## heading\n"),
     ] {
         assert_eq!(
             edit(original, expected).unwrap_or_else(|error| panic!("{original:?}: {error}")),
@@ -1100,7 +1159,72 @@ fn a_hand_written_tables_rows_keep_their_spelling_through_several_edits() {
         ),
         // The paragraph after the table joined into its last cell.
         ("|a|b|\n|-|-|\n|1|2|\n\nb\n", "|a|b|\n|-|-|\n|1|2b|\n"),
+        // The same, with a block after the one it took in.
+        (
+            "|a|b|\n|-|-|\n|1|2|\n\nb\n\nlast\n",
+            "|a|b|\n|-|-|\n|1|2b|\n\nlast\n",
+        ),
+        // Rows edited in place stay the rows they were, spaced their own way,
+        // even when one of them now shares a cell with the other's old text.
+        (
+            "|a|b|\n|-|-|\n| 1 | x |\n|  2  |  y  |\n",
+            "|a|b|\n|-|-|\n| 3 | 4 |\n|  5  |  x  |\n",
+        ),
+        // A row removed and the one after it edited: the edit goes to the
+        // row that shares a cell with it, and keeps that row's spacing.
+        (
+            "|a|b|\n|-|-|\n| 1 | x |\n|  2  |  y  |\n",
+            "|a|b|\n|-|-|\n|  2  |  z  |\n",
+        ),
     ] {
         assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
+    }
+}
+
+/// The blank lines after an indented code block are the gap before the next
+/// block, not part of the code: a paragraph that took the code in keeps that
+/// gap from the block after it.
+#[test]
+fn indented_code_joined_into_a_paragraph_keeps_the_gap_after_it() {
+    for (original, expected) in [
+        ("one\n\n    code\n\nlast\n", "one code\n\nlast\n"),
+        ("one\n\n    code\n\n\nlast\n", "one code\n\n\nlast\n"),
+        ("one\n\n    code\n\nlast\n", "one\n\nlast\n"),
+    ] {
+        assert_eq!(edit(original, expected).unwrap(), expected, "{original:?}");
+    }
+}
+
+/// A paragraph split in two while the block after a list joined it: the note
+/// has as many blocks as before, but not the same ones at each index, so they
+/// are saved together rather than one index at a time.
+#[test]
+fn blocks_that_moved_without_changing_the_count_save() {
+    let original = "one\ntwo\n\n1. item\n\n<div>\nx\n</div>\n";
+    let expected = "one\n\ntwo\n\n1. item\n2. <div>\n   x\n   </div>\n";
+    assert_eq!(edit(original, expected).unwrap(), expected);
+}
+
+/// A patch that empties a line of the source takes the spaces left at the end
+/// of it too: the quote's blank line `> ` spelled with a space, once the
+/// quote's first paragraph moves out, is no line of the note's any more.
+/// Spaces the kept text still ends its line with — a hard break — stay.
+#[test]
+fn a_line_a_patch_empties_keeps_no_trailing_spaces() {
+    for (original, edited) in [
+        ("12\n\n> 34\n> \n> 5\n", "17\n\n84\n\n> 5\n"),
+        ("a b  \nc\n", "a  \nc\n"),
+        ("```\n  \nx\n```\n", "```\n  \ny\n```\n"),
+        // Two changes in one save, apart around an untouched link.
+        (
+            "x [l](u) y\n\n12\n\n> 34\n> \n> 5\n",
+            "z [l](u) y\n\n17\n\n84\n\n> 5\n",
+        ),
+    ] {
+        assert_eq!(
+            edit(original, edited).as_deref(),
+            Ok(edited),
+            "{original:?}"
+        );
     }
 }

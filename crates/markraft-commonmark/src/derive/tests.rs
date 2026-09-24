@@ -586,6 +586,10 @@ fn a_list_items_first_paragraph_escapes_what_its_marker_would_complete() {
     assert_eq!(lead("* ", "**"), Some(0));
     // A task item's own box is expected; a second one is only text.
     assert_eq!(lead("- [ ] ", "[ ] a"), None);
+    // After a box, what opens a heading or a quote is that block.
+    assert_eq!(lead("- [ ] ", "# a"), Some(0));
+    assert_eq!(lead("1. [x] ", "> a"), Some(0));
+    assert_eq!(lead("- [ ] ", "#a"), None);
     // What the marker leaves alone.
     for (marker, text) in [
         ("- ", "a"),

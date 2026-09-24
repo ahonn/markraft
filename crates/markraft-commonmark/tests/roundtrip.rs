@@ -404,12 +404,15 @@ impl Gen<'_> {
                 }
                 blocks
             };
-            // A task item's check box lives in its first paragraph, so only an
-            // item that starts with one can be a task.
-            let starts_with_paragraph = blocks
-                .first()
-                .is_some_and(|block| self.schema.node_id(md::PARAGRAPH) == Some(block.type_id()));
-            let item = if starts_with_paragraph && self.rng.one_in(3) {
+            // A task item's check box is written on its first block's line,
+            // so only an item that starts with a block that can follow it on
+            // that line can be a task.
+            let boxable = blocks.first().is_some_and(|block| {
+                [md::PARAGRAPH, md::HEADING, md::BLOCKQUOTE]
+                    .iter()
+                    .any(|name| self.schema.node_id(name) == Some(block.type_id()))
+            });
+            let item = if boxable && self.rng.one_in(3) {
                 let checked = self.rng.one_in(2);
                 self.schema
                     .node_with(md::TASK_ITEM, attrs! {"checked" => checked}, blocks)

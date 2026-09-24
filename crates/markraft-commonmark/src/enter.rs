@@ -17,9 +17,9 @@
 //! rather than into it.
 //!
 //! A block a line makes goes where the line was, unless the container holding
-//! the line needs a paragraph first. A task item is one: GFM writes its check
-//! box at the start of its first paragraph, so a fence ended on the check box
-//! line leaves that line an empty paragraph — `- [ ] ` on a line of its own —
+//! the line needs a paragraph first. A task item is one: its check box can
+//! only start a paragraph, a heading or a quote, so a fence ended on the check
+//! box line leaves that line an empty paragraph — `- [ ] ` on a line of its own —
 //! and puts the code block under it, still inside the item. The item stays a
 //! task, the block is where it was typed, and `- [ ] ` followed by an indented
 //! fence reads back as exactly that.
@@ -149,8 +149,8 @@ impl Line {
     /// textblock after `skip` others.
     ///
     /// Where the paragraph's container cannot hold `blocks` in its place — a
-    /// task item whose first block has to be the paragraph its check box is
-    /// written in — the paragraph stays, emptied, with `blocks` after it. Where
+    /// task item, whose check box cannot be written before a code block — the
+    /// paragraph stays, emptied, with `blocks` after it. Where
     /// even that does not fit, the line is left as it is.
     fn replace_with(
         &self,

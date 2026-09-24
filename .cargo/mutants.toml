@@ -7,9 +7,47 @@ exclude_re = [
   # Without its node arm, `Selection::content` slices the selection's range,
   # which for a node selection is exactly the node.
   'delete match arm Selection::Node\{pos\} in Selection::content$',
+  # With `>=`, an empty container gives two one-token runs with no mark
+  # changes instead of one two-token run; every caller turns a run with no
+  # changes into a kept stretch and merges neighbouring ones, so the change set
+  # is the same.
+  'replace > with >= in split_mark_node$',
+  'replace > with >= in set_marks_node$',
+  # `min_prefix_delta` is never positive, so `dip > 0` never holds and the
+  # mutant only skips narrowing the region to rebuild. A region too deep holds
+  # a run that closes a container the region never opened, which
+  # `fragment_from_tokens` reports as `Unbalanced`, and `apply` then widens the
+  # region one level at a time until it is the one the clamp would have chosen.
+  'replace < with > in ChangeSet::region_depth$',
+  # `Slice` derives `Default`, which is the empty slice.
+  'replace Slice::empty -> Slice with Default::default\(\)$',
+  # After the join, `cut` is the position just after the node before it, in a
+  # parent that holds blocks, so it is never inside inline content and a
+  # backward search from it goes on to `cut - 1` first.
+  'replace - with / in delete_emptied_block$',
 ]
 
 # Also equivalent, but cargo-mutants 27 does not filter field deletions by name,
 # so they are reported and can be passed over: `HistoryState::isolate` clears
 # both `prev_time` and `prev_user_event`, and either one alone keeps the next
 # edit from merging, so deleting one leaves the other doing the work.
+#
+# Equivalent too, but their names match mutants that are not, so they are not
+# excluded:
+#
+# * in `set_block_type`, `pos + size / 1` as the end of the marks to strip
+#   only adds the block's closing token, which carries no marks;
+# * in `SerializerState::inline_step`, `end <= text.len()` also takes text with
+#   no whitespace at either end through the branch that moves it out, which
+#   then keeps all of it and leaves nothing trailing, as skipping it does;
+# * in `SourceDocument::dropped_range`, `suffix >= 0` and `end + 1` or `end / 1`
+#   in the last arm only matter when no block is kept on either side of a
+#   deletion, which would leave a document with no blocks at all.
+# * in `fit_across`, `||` for `&&` joining its first two guards only lets a
+#   range that starts between blocks through, such as the one `delete_range`
+#   widens to a block's start: the text after it cannot join a block that is
+#   not a textblock, so the general repair takes it anyway, or the range
+#   started at its container's start and the last block keeps its type as the
+#   general repair also leaves it;
+# * in `fit_across`, `at <= until` only adds an empty replacement where
+#   nothing after the kept text changed.

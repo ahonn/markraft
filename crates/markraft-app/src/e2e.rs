@@ -855,14 +855,14 @@ mod tests {
     // G5: every block format applied to a task item's text.
     #[gpui::test]
     fn block_formats_inside_a_task_item(cx: &mut TestAppContext) {
-        // A task's box is spelled at the start of its first paragraph, so a heading or
-        // a quote there is refused: `- [ ] # t` reads back as a paragraph.
+        // As in Typora, a task's line may be a heading or a quote after its box,
+        // but not a fence, which goes under the box's line.
         let cases = [
-            ("cmd-1", "- [ ] t"),
-            ("cmd-2", "- [ ] t"),
-            ("cmd-6", "- [ ] t"),
+            ("cmd-1", "- [ ] # t"),
+            ("cmd-2", "- [ ] ## t"),
+            ("cmd-6", "- [ ] ###### t"),
             ("cmd-0", "- [ ] t"),
-            ("cmd-shift-b", "- [ ] t"),
+            ("cmd-shift-b", "- [ ] > t"),
             ("alt-cmd-c", "- [ ] t\n  ```\n  ```"),
             ("cmd-&", "1. t"),
             ("cmd-*", "- t"),

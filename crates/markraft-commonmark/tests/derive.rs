@@ -786,3 +786,25 @@ fn unjudged(kind: BlockKind, markdown: &str) -> Option<&'static str> {
 fn is_link<'a>(node: &'a AstNode<'a>) -> bool {
     matches!(node.data.borrow().value, NodeValue::Link(_))
 }
+
+// -- what the differential leaves out -----------------------------------------
+
+/// A cell's text that holds a line ending — which no table row can — is read a
+/// line at a time, each line a cell of its own, and every span keeps an id of
+/// its own across the lines.
+#[test]
+fn a_cells_lines_are_read_one_at_a_time() {
+    let derived = derive(BlockKind::TableCell, "**a**\nb *c*", &DeriveContext::new());
+    let styles: Vec<_> = derived
+        .styles
+        .iter()
+        .map(|span| (span.range.clone(), span.style.clone()))
+        .collect();
+    assert_eq!(styles, [(0..5, Style::Strong), (8..11, Style::Emphasis)]);
+    let conceals: Vec<_> = derived
+        .conceals
+        .iter()
+        .map(|conceal| (conceal.range.clone(), conceal.span))
+        .collect();
+    assert_eq!(conceals, [(0..2, 0), (3..5, 0), (8..9, 1), (10..11, 1)]);
+}

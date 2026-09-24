@@ -447,6 +447,9 @@ pub(crate) fn fit_replacement(
     if *fit == Fit::No {
         return Ok((vec![(from, to, slice.tokens())], 0));
     }
+    if let Some(fitted) = fit_across(schema, doc, from, to, slice, fit)? {
+        return Ok(fitted);
+    }
     let resolved_from = doc.resolve(from)?;
     let resolved_to = doc.resolve(to)?;
     // The repaired run has to balance inside the region, so the region must be
@@ -564,6 +567,149 @@ pub(crate) fn fit_replacement(
     Err(ChangeError::Unfittable(
         "the replacement cannot be made to fit the schema".into(),
     ))
+}
+
+/// A replacement from one textblock into another, repaired the way Typora
+/// repairs it: the text after the range stays where it is, and so do the
+/// containers it sits in. Returns `None` where that does not apply, for the
+/// general repair to take over.
+///
+/// Where the range starts inside its textblock, what is inserted and the text
+/// after the range join that textblock, and the containers the range reached
+/// into are opened again, with their own markup, around whatever else they
+/// hold: taking a paragraph into the second item of an ordered list leaves the
+/// rest of that list an ordered list, and a quote a quote. Where the range
+/// starts at the start of its textblock, that block goes, with every
+/// container it opens, and what is inserted starts the block the range ends
+/// in, which keeps its type.
+///
+/// Only the structure changes, in two replacements that leave the text after
+/// the range in place, so a position there maps exactly and a caret after
+/// the inserted text stays after it.
+fn fit_across(
+    schema: &Schema,
+    doc: &Node,
+    from: usize,
+    to: usize,
+    slice: &Slice,
+    fit: &Fit,
+) -> Result<Option<FittedReplacement>, ChangeError> {
+    let resolved_from = doc.resolve(from)?;
+    let resolved_to = doc.resolve(to)?;
+    let (depth_from, depth_to) = (resolved_from.depth(), resolved_to.depth());
+    let shared = resolved_from.shared_depth(to);
+    let textblock = |node: &Node| schema.node_type(node.type_id()).is_textblock();
+    let tokens = slice.tokens();
+    // Both ends in textblocks, and not the same one: a range that starts or
+    // ends between blocks is left to the general repair.
+    if !textblock(resolved_from.parent())
+        || !textblock(resolved_to.parent())
+        || shared >= depth_from.min(depth_to)
+    {
+        return Ok(None);
+    }
+    let base = resolved_from.start(shared);
+    let container = resolved_from.node(shared).clone();
+    let region_end = base + container.content_size();
+    let container_tokens = content_tokens(&container);
+    let cut = |a: usize, b: usize| tokens_cut(&container_tokens, a - base, b - base);
+    let fitter = || Fitter {
+        schema,
+        fit,
+        frames: vec![Frame {
+            markup: container.markup().clone(),
+            m: schema.content_match(container.type_id()),
+            open_at: None,
+            parent_match: None,
+            dropped: false,
+        }],
+        out: Vec::new(),
+        dropped: 0,
+    };
+    let chain = |upto: usize| -> Vec<Token> {
+        (shared + 1..=upto)
+            .map(|depth| Token::Open(resolved_to.node(depth).markup().clone()))
+            .collect()
+    };
+    let closes = |fitter: &mut Fitter<'_>| {
+        while fitter.frames.len() > 1 {
+            fitter.close();
+        }
+    };
+
+    if from == resolved_from.start(depth_from) {
+        // The outermost block the range starts at the start of goes whole.
+        let Some(first) = (shared + 1..=depth_from)
+            .find(|&depth| resolved_from.start(depth) + (depth_from - depth) == from)
+        else {
+            return Ok(None);
+        };
+        let start = resolved_from.before(first);
+        let left = cut(base, start);
+        let mut fitter = fitter();
+        if fitter.simulate(&left).is_err() {
+            return Ok(None);
+        }
+        closes(&mut fitter);
+        fitter.repair(&chain(depth_to));
+        fitter.repair(&tokens);
+        let middle = std::mem::take(&mut fitter.out);
+        let right = cut(to, region_end);
+        if !validates(schema, &container, &left, &middle, &right, to, to, &[]) {
+            return Ok(None);
+        }
+        return Ok(Some((vec![(start, to, middle)], fitter.dropped)));
+    }
+
+    let left = cut(base, from);
+    let mut fitter = fitter();
+    if fitter.simulate(&left).is_err() {
+        return Ok(None);
+    }
+    fitter.repair(&tokens);
+    let middle = std::mem::take(&mut fitter.out);
+    // The text after the range, which stays in place in whatever textblock
+    // the inserted content leaves open: the one the range started in, or the
+    // last one a pasted run of blocks opens.
+    let block_end = resolved_to.end(depth_to);
+    let kept = cut(to, block_end);
+    if fitter.simulate(&kept).is_err() {
+        return Ok(None);
+    }
+    closes(&mut fitter);
+    fitter.repair(&chain(depth_to - 1));
+    // Everything after the block the range ended in, whose own close is gone.
+    let rest = cut(block_end, region_end);
+    fitter.repair(&rest[1..]);
+    let after = std::mem::take(&mut fitter.out);
+    let mut full = left.clone();
+    full.extend(middle.iter().cloned());
+    full.extend(kept);
+    full.extend(after.iter().cloned());
+    let valid = fragment_from_tokens(&full)
+        .is_ok_and(|content| container.copy(content).check(schema).is_ok());
+    if !valid {
+        return Ok(None);
+    }
+    // Only the part of `after` that differs from what the document has there
+    // is a change.
+    let same = |(a, b): &(&Token, &Token)| a == b;
+    let same_start = after.iter().zip(&rest).take_while(same).count();
+    let same_end = after[same_start..]
+        .iter()
+        .rev()
+        .zip(rest[same_start..].iter().rev())
+        .take_while(same)
+        .count();
+    let size = |tokens: &[Token]| tokens.iter().map(Token::size).sum::<usize>();
+    let at = block_end + size(&rest[..same_start]);
+    let until = region_end - size(&rest[rest.len() - same_end..]);
+    let mut parts = vec![(from, to, middle)];
+    let changed = after[same_start..after.len() - same_end].to_vec();
+    if at < until || !changed.is_empty() {
+        parts.push((at, until, changed));
+    }
+    Ok(Some((parts, fitter.dropped)))
 }
 
 /// Whether the repaired stream produces a valid enclosing node.

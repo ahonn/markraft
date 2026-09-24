@@ -114,8 +114,8 @@ pub fn guard(kind: BlockKind, text: &str) -> Guarded {
 /// paragraph, or `None` when it already is or no escape would help.
 ///
 /// [`guard`] reads a paragraph on its own, and after a list marker some text
-/// reads differently: `[ ] a` after `- ` is a check box, and `--` after `- `
-/// completes a thematic break. `text` is the paragraph's guarded text and
+/// reads differently: `[ ] a` after `- ` is a check box, `--` after `- `
+/// completes a thematic break, and `# a` after `- [ ] ` is a heading. `text` is the paragraph's guarded text and
 /// `marker` everything the writer puts before its first line, a task item's
 /// check box included, so the check box a task item already has is expected
 /// and only a second one is not.
@@ -123,7 +123,7 @@ pub fn item_lead_insertion(marker: &str, text: &str) -> Option<usize> {
     let first = text.split('\n').next().unwrap_or_default();
     let reads = |line: &str| {
         let arena = Arena::new();
-        let root = parse_document(&arena, &format!("{marker}{line}\n"), &parse_options());
+        let root = crate::parse::parse_ast(&arena, &format!("{marker}{line}\n"), &parse_options());
         let list = root.first_child()?;
         if !matches!(list.data.borrow().value, NodeValue::List(_)) {
             return None;

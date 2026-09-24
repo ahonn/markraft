@@ -103,7 +103,7 @@ fn delete_range_drops_a_list_item_whose_content_it_covers() {
 }
 
 #[test]
-fn delete_range_keeps_the_first_blocks_type_when_it_ends_at_a_block_end() {
+fn delete_range_from_a_block_start_keeps_the_last_blocks_type() {
     let schema = shared_schema();
     let start = state(
         doc(
@@ -117,12 +117,18 @@ fn delete_range_keeps_the_first_blocks_type_when_it_ends_at_a_block_end() {
         ),
         Extension::none(),
     );
-    // From the start of "ab" to the end of "cd": what is left is the
-    // paragraph, emptied, not the heading.
+    // From the start of "ab" to the end of "cd": the paragraph goes whole and
+    // the heading is left, emptied, as Typora 1.14.10 leaves it.
     let after = run(&start, &delete_range(5, 11));
     assert_eq!(
         schema.describe(after.doc()),
-        r#"doc(paragraph("zz"), paragraph(), paragraph("ef"))"#
+        r#"doc(paragraph("zz"), heading[level=Int(1)](), paragraph("ef"))"#
+    );
+    // From inside "ab", the paragraph takes what is left of the heading.
+    let after = run(&start, &delete_range(6, 10));
+    assert_eq!(
+        schema.describe(after.doc()),
+        r#"doc(paragraph("zz"), paragraph("ad"), paragraph("ef"))"#
     );
 }
 
@@ -846,5 +852,361 @@ fn arrows_leave_a_selected_rule_the_way_they_point() {
         backward.selection(),
         &Selection::cursor(3),
         "the end of the line before"
+    );
+}
+
+/// Typing over a range from a paragraph into an ordered list: the list stays
+/// an ordered list around what is left of it, and the caret stays after the
+/// typed text. From the paragraph's start, the paragraph goes and the text
+/// starts the item, as Typora 1.14.10 does it.
+#[test]
+fn typing_across_into_a_list_keeps_the_list_and_the_caret() {
+    let schema = shared_schema();
+    let start = state(
+        doc(
+            &schema,
+            [
+                n(&schema, "paragraph", [t(&schema, "1")]),
+                n(
+                    &schema,
+                    "ordered_list",
+                    [
+                        n(
+                            &schema,
+                            "list_item",
+                            [n(&schema, "paragraph", [t(&schema, "23")])],
+                        ),
+                        n(
+                            &schema,
+                            "list_item",
+                            [n(&schema, "paragraph", [t(&schema, "4")])],
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        Extension::none(),
+    );
+    // 2 is after "1", 7 after "2".
+    let typed = run(
+        &text_selection(&start, 2, 7),
+        &crate::commands::insert_text("9"),
+    );
+    assert_eq!(
+        schema.describe(typed.doc()),
+        r#"doc(paragraph("193"), ordered_list(list_item(paragraph("4"))))"#
+    );
+    assert_eq!(typed.selection(), &Selection::cursor(3));
+    let typed = run(
+        &text_selection(&start, 1, 7),
+        &crate::commands::insert_text("9"),
+    );
+    assert_eq!(
+        schema.describe(typed.doc()),
+        r#"doc(ordered_list(list_item(paragraph("93")), list_item(paragraph("4"))))"#
+    );
+    assert_eq!(typed.selection(), &Selection::cursor(4));
+}
+
+/// Where the block after the range could sit inside the container the range
+/// started in — a list inside a quote, a quote inside an item — the range's
+/// containers still close first, so it stays beside them, not inside. And a
+/// range inside a quote reopens only what it reached into below the quote.
+#[test]
+fn typing_across_closes_the_containers_it_started_in() {
+    let schema = shared_schema();
+    let para = |text| n(&schema, "paragraph", [t(&schema, text)]);
+    let item = |text| n(&schema, "list_item", [para(text)]);
+    let cases = [
+        // From the start of "12" (5) to after "3" (13).
+        (
+            vec![
+                n(&schema, "blockquote", [para("0"), para("12")]),
+                n(&schema, "bullet_list", [item("34")]),
+            ],
+            (5, 13),
+            r#"doc(blockquote(paragraph("0")), bullet_list(list_item(paragraph("94"))))"#,
+        ),
+        // From after "1" (4) to after "3" (11).
+        (
+            vec![
+                n(&schema, "bullet_list", [item("12")]),
+                n(&schema, "blockquote", [para("34"), para("5")]),
+            ],
+            (4, 11),
+            r#"doc(bullet_list(list_item(paragraph("194"))), blockquote(paragraph("5")))"#,
+        ),
+        // From after "1" (3) to after "2" (8), all inside one quote.
+        (
+            vec![n(
+                &schema,
+                "blockquote",
+                [
+                    para("1"),
+                    n(&schema, "ordered_list", [item("23"), item("4")]),
+                ],
+            )],
+            (3, 8),
+            r#"doc(blockquote(paragraph("193"), ordered_list(list_item(paragraph("4")))))"#,
+        ),
+    ];
+    for (blocks, (from, to), expected) in cases {
+        let start = state(doc(&schema, blocks), Extension::none());
+        let typed = run(
+            &text_selection(&start, from, to),
+            &crate::commands::insert_text("9"),
+        );
+        assert_eq!(schema.describe(typed.doc()), expected);
+    }
+}
+
+/// A document that has to open with exactly one title, and a state over
+/// `title("t")` followed by `blocks`.
+fn titled(blocks: &[(&str, &str)]) -> (crate::schema::Schema, EditorState) {
+    use crate::schema::{NodeTypeSpec, SchemaSpec};
+    let schema = crate::schema::Schema::new(
+        SchemaSpec::new()
+            .node(NodeTypeSpec::new("doc", "title block+"))
+            .node(NodeTypeSpec::new("title", "text*"))
+            .node(NodeTypeSpec::new("paragraph", "text*").group("block"))
+            .node(NodeTypeSpec::new("heading", "text*").group("block"))
+            .node(NodeTypeSpec::text("text")),
+    )
+    .expect("a valid schema");
+    let mut children = vec![n(&schema, "title", [t(&schema, "t")])];
+    children.extend(
+        blocks
+            .iter()
+            .map(|(name, text)| n(&schema, name, [t(&schema, text)])),
+    );
+    let state = crate::state::EditorState::create(
+        crate::state::EditorStateConfig::new(schema.clone()).doc(doc(&schema, children)),
+    )
+    .expect("a valid state");
+    (schema, state)
+}
+
+/// Return at the start of a heading leaves a paragraph above it, when the
+/// heading's own parent can hold one there — whatever it requires before.
+#[test]
+fn split_block_at_a_blocks_start_asks_its_parent_about_that_place_only() {
+    let (schema, start) = titled(&[("heading", "ab")]);
+    let after = run(&at(&start, 4), &split_block());
+    assert_eq!(
+        schema.describe(after.doc()),
+        r#"doc(title("t"), paragraph(), heading("ab"))"#
+    );
+}
+
+#[test]
+fn delete_range_from_a_blocks_start_into_the_next_takes_the_first_block_whole() {
+    let schema = shared_schema();
+    let start = state(
+        doc(
+            &schema,
+            [
+                n(&schema, "heading", [t(&schema, "ab")]),
+                n(&schema, "paragraph", [t(&schema, "cd")]),
+            ],
+        ),
+        Extension::none(),
+    );
+    // From the start of "ab" into "cd": the heading goes whole, so what is
+    // left of the paragraph stays a paragraph rather than joining the heading.
+    let after = run(&start, &delete_range(1, 6));
+    assert_eq!(schema.describe(after.doc()), r#"doc(paragraph("d"))"#);
+
+    // The same inside an item, whose content has to keep opening with a
+    // paragraph: the heading can go whole because the paragraph before it
+    // stays.
+    let start = state(
+        doc(
+            &schema,
+            [n(
+                &schema,
+                "bullet_list",
+                [n(
+                    &schema,
+                    "list_item",
+                    [
+                        n(&schema, "paragraph", [t(&schema, "zz")]),
+                        n(&schema, "heading", [t(&schema, "ab")]),
+                        n(
+                            &schema,
+                            "blockquote",
+                            [n(&schema, "paragraph", [t(&schema, "cd")])],
+                        ),
+                    ],
+                )],
+            )],
+        ),
+        Extension::none(),
+    );
+    let after = run(&start, &delete_range(7, 13));
+    assert_eq!(
+        schema.describe(after.doc()),
+        r#"doc(bullet_list(list_item(paragraph("zz"), blockquote(paragraph("d")))))"#
+    );
+
+    // And after a title a document requires: only the heading's place is
+    // asked about, and the title stays.
+    let (schema, start) = titled(&[("heading", "ab"), ("paragraph", "cd")]);
+    let after = run(&start, &delete_range(4, 9));
+    assert_eq!(
+        schema.describe(after.doc()),
+        r#"doc(title("t"), paragraph("d"))"#
+    );
+}
+
+#[test]
+fn delete_range_over_the_only_items_content_empties_the_document() {
+    let schema = shared_schema();
+    let start = state(
+        doc(
+            &schema,
+            [n(
+                &schema,
+                "bullet_list",
+                [n(
+                    &schema,
+                    "list_item",
+                    [n(&schema, "paragraph", [t(&schema, "a")])],
+                )],
+            )],
+        ),
+        Extension::none(),
+    );
+    // 2..5 is all the item holds. Neither the item nor the list can be empty,
+    // and neither can be dropped from its parent, so the whole document's
+    // content goes.
+    let after = run(&start, &delete_range(2, 5));
+    assert_eq!(schema.describe(after.doc()), r#"doc(paragraph())"#);
+}
+
+#[test]
+fn join_textblock_forward_pulls_in_the_first_textblock_of_a_wrapper() {
+    let schema = shared_schema();
+    let start = state(
+        doc(
+            &schema,
+            [
+                n(&schema, "paragraph", [t(&schema, "ab")]),
+                n(
+                    &schema,
+                    "blockquote",
+                    [n(&schema, "paragraph", [t(&schema, "cd")])],
+                ),
+            ],
+        ),
+        Extension::none(),
+    );
+    let after = run(&at(&start, 3), &join_textblock_forward());
+    assert_eq!(schema.describe(after.doc()), r#"doc(paragraph("abcd"))"#);
+    assert_eq!(after.selection(), &Selection::cursor(3));
+}
+
+#[test]
+fn can_split_checks_every_level_it_splits() {
+    let schema = shared_schema();
+    let document = doc(
+        &schema,
+        [n(
+            &schema,
+            "bullet_list",
+            [n(
+                &schema,
+                "list_item",
+                [
+                    n(&schema, "paragraph", [t(&schema, "a")]),
+                    n(
+                        &schema,
+                        "blockquote",
+                        [n(&schema, "paragraph", [t(&schema, "bc")])],
+                    ),
+                ],
+            )],
+        )],
+    );
+    // 8 is between "b" and "c". Splitting the paragraph and the quote is fine;
+    // splitting the item too would give a second item that opens with a quote,
+    // which `paragraph block*` does not allow.
+    assert!(crate::commands::structure::can_split(
+        &schema,
+        &document,
+        8,
+        2,
+        &[]
+    ));
+    assert!(!crate::commands::structure::can_split(
+        &schema,
+        &document,
+        8,
+        3,
+        &[]
+    ));
+}
+
+#[test]
+fn can_join_needs_the_two_nodes_to_fit_together() {
+    let schema = shared_schema();
+    let document = doc(
+        &schema,
+        [
+            n(&schema, "paragraph", [t(&schema, "a")]),
+            n(&schema, "paragraph", [t(&schema, "b")]),
+            n(
+                &schema,
+                "bullet_list",
+                [n(
+                    &schema,
+                    "list_item",
+                    [n(&schema, "paragraph", [t(&schema, "c")])],
+                )],
+            ),
+        ],
+    );
+    assert!(crate::commands::structure::can_join(&schema, &document, 3));
+    // A paragraph cannot take a list's items.
+    assert!(!crate::commands::structure::can_join(&schema, &document, 6));
+    // A title could take a paragraph's text, but the document would lose the
+    // block it requires after its title.
+    let (schema, state) = titled(&[("paragraph", "ab")]);
+    assert!(!crate::commands::structure::can_join(
+        &schema,
+        state.doc(),
+        3
+    ));
+    let (schema, state) = titled(&[("paragraph", "ab"), ("paragraph", "cd")]);
+    assert!(crate::commands::structure::can_join(
+        &schema,
+        state.doc(),
+        7
+    ));
+}
+
+#[test]
+fn a_list_pasted_into_an_item_with_text_keeps_the_text() {
+    let schema = shared_schema();
+    let item = |text| {
+        n(
+            &schema,
+            "list_item",
+            [n(&schema, "paragraph", [t(&schema, text)])],
+        )
+    };
+    let start = state(
+        doc(&schema, [n(&schema, "bullet_list", [item("abc")])]),
+        Extension::none(),
+    );
+    let pasted = crate::slice::Slice::from_fragment(crate::fragment::Fragment::from_node(n(
+        &schema,
+        "bullet_list",
+        [item("x")],
+    )));
+    let after = run(&at(&start, 5), &replace_selection(pasted));
+    let described = schema.describe(after.doc());
+    assert!(
+        described.contains(r#""ab""#) && described.contains(r#""c""#),
+        "{described}"
     );
 }

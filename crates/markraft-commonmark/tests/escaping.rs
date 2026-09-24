@@ -152,6 +152,45 @@ fn spelled_text_keeps_highlight_superscript_and_math_delimiters_literal() {
     }
 }
 
+/// Plain text that a GFM reader would link gets the one backslash that stops
+/// it; text that only resembles a URL — no dot in the host, no `www` of its
+/// own — is left as written.
+#[test]
+fn only_text_a_reader_would_autolink_is_kept_from_linking() {
+    use markraft_commonmark::escape::escape_unlinked_text;
+    for (text, written) in [
+        ("visit www.example.com now", "visit www\\.example.com now"),
+        ("(www.example.com)", "(www\\.example.com)"),
+        ("see https://example.com", "see https\\://example.com"),
+        ("mail a@b.example", "mail a\\@b.example"),
+        ("abc.example.com", "abc.example.com"),
+        ("awww.example.com", "awww.example.com"),
+        ("see http://localhost", "see http://localhost"),
+        ("mail a@localhost", "mail a@localhost"),
+        ("www.example", "www.example"),
+    ] {
+        assert_eq!(escape_unlinked_text(text, false), written, "{text:?}");
+        assert!(!common::html(written).contains("<a "), "{written:?}");
+    }
+}
+
+/// A `#` opens a heading only as a run of one to six before a space or the
+/// end of the line.
+#[test]
+fn a_hash_is_guarded_only_where_it_opens_a_heading() {
+    use markraft_commonmark::escape::escape_text;
+    for (text, written) in [
+        ("# a", "\\# a"),
+        ("###### a", "\\###### a"),
+        ("#", "\\#"),
+        ("####### a", "####### a"),
+        ("#tag", "#tag"),
+    ] {
+        assert_eq!(escape_text(text, true), written, "{text:?}");
+        assert!(!common::html(written).contains("<h"), "{written:?}");
+    }
+}
+
 #[test]
 fn a_colon_is_escaped_only_where_it_opens_a_shortcode() {
     let cases = [

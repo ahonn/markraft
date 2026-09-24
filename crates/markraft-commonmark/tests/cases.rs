@@ -1027,6 +1027,8 @@ fn ordered_lists_keep_their_start_and_delimiter_and_line_up() {
     );
     // Wider ordinals pad on the right so nested blocks share one content column.
     assert_eq!(round("9. a\n10. b"), "9.  a\n10. b");
+    // A list that stops short of the next width pads nothing.
+    assert_eq!(round("8. a\n9. b"), "8. a\n9. b");
     assert_eq!(round("- x\n- y"), "- x\n- y");
     assert_eq!(round("* x"), "* x");
     assert_eq!(round("+ x"), "+ x");
@@ -1072,6 +1074,37 @@ fn task_items_carry_their_check_box_in_the_list_marker() {
         r#"doc(bullet_list[bullet_char=Str("-"),tight=Bool(true)](task_item[checked=Bool(true)](paragraph("done"))))"#
     );
     assert_eq!(round("1. [ ] todo"), "1. [ ] todo");
+}
+
+/// Typora reads a box before a heading or a quote as a task holding that
+/// block, and writes one so; GFM would read the rest of the line as text.
+#[test]
+fn a_task_item_may_start_with_a_heading_or_a_quote() {
+    for source in [
+        "- [ ] # title",
+        "- [x] ### title\n\n  more",
+        "1. [ ] > quoted\n   > on",
+        "- [ ] > # both",
+        "> - [x] # quoted task",
+        "- [ ] a\n- [ ] ## b",
+        "- [ ] > - [x] # nested",
+    ] {
+        assert_eq!(round(source), source);
+    }
+    assert_eq!(
+        shape("- [x] ## done"),
+        r#"doc(bullet_list[bullet_char=Str("-"),tight=Bool(true)](task_item[checked=Bool(true)](heading[level=Int(2)]("done"))))"#
+    );
+    assert!(shape("- [ ] > a").contains("task_item[checked=Bool(false)](blockquote["));
+    assert!(shape("- [ ]\t# tab").contains(r#"(heading[level=Int(1)]("tab"))"#));
+    // A box inside the quote a box opens is read the same way.
+    assert!(
+        shape("- [ ] > - [x] # nested")
+            .contains(r#"task_item[checked=Bool(true)](heading[level=Int(1)]("nested"))"#)
+    );
+    // What opens neither stays the paragraph's text.
+    assert!(shape("- [ ] #a").contains("paragraph(\"#a\")"));
+    assert!(shape("- [ ] \\# a").contains("task_item[checked=Bool(false)](paragraph("));
 }
 
 #[test]

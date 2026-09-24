@@ -55,7 +55,7 @@
 //! formula carries whatever styles surround it, `` *`code`* `` being
 //! `<em><code>code</code></em>`.
 //!
-//! # Why `block+` for list items but `paragraph block*` for task items
+//! # Why `block+` for list items but not for task items
 //!
 //! CommonMark lets a list item start with any block — `- > quote` and
 //! `- - nested` are both normal — so [`LIST_ITEM`] takes `block+` rather than
@@ -63,11 +63,15 @@
 //! leading empty paragraph for those items, which would then be an empty
 //! paragraph with no CommonMark spelling.
 //!
-//! A [`TASK_ITEM`] is the exception, because GFM puts its check box *inside*
-//! the item's first paragraph: an item whose first block is a nested list has
-//! nowhere to write `[x]` and is not a task item at all. Its content rule says
-//! `paragraph block*` so the tree cannot describe something the format cannot
-//! write.
+//! A [`TASK_ITEM`] is the exception, because its check box is written at the
+//! start of its first block's line: an item whose first block is a nested
+//! list or a fence has nowhere to write `[x]` and is not a task item at all.
+//! GFM only reads a box before a paragraph; Typora also reads one before a
+//! heading or a quote, `- [ ] # title` and `- [ ] > quote`, and writes those
+//! when a task's line is made one, so this editor reads and writes them the
+//! same way — [`parse_ast`](crate::parse::parse_ast) does the reading. Its
+//! content rule says `(paragraph | heading | blockquote) block*` so the tree
+//! cannot describe something the format cannot write.
 //!
 //! An emptied item of either kind is repaired by the
 //! [`fill_required_content`](markraft_core::corrections::fill_required_content) correction
@@ -161,9 +165,10 @@ pub const BULLET_LIST: &str = "bullet_list";
 pub const ORDERED_LIST: &str = "ordered_list";
 /// A plain list item: `block+`, group `item`.
 pub const LIST_ITEM: &str = "list_item";
-/// A GFM task list item: `paragraph block*`, group `item`, attribute `checked`
-/// (`Bool`, default `false`). The check box lives in the first paragraph, so
-/// unlike [`LIST_ITEM`] this one must begin with a paragraph.
+/// A GFM task list item: `(paragraph | heading | blockquote) block*`, group
+/// `item`, attribute `checked` (`Bool`, default `false`). The check box is
+/// written before the first block, so unlike [`LIST_ITEM`] this one must begin
+/// with a block that can follow it on its line.
 pub const TASK_ITEM: &str = "task_item";
 /// A thematic break. A selectable block leaf.
 pub const HORIZONTAL_RULE: &str = "horizontal_rule";
@@ -371,7 +376,7 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                 .defining(true),
         )
         .node(
-            NodeTypeSpec::new(TASK_ITEM, "paragraph block*")
+            NodeTypeSpec::new(TASK_ITEM, "(paragraph | heading | blockquote) block*")
                 .group(ITEM_GROUP)
                 .defining(true)
                 .attr(AttrSpec::new(

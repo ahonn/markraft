@@ -424,6 +424,10 @@ pub(crate) struct LayoutLine {
     /// How far a code block's panel reaches above and below its text; zero on
     /// any other line.
     code_inset: Pixels,
+    /// How far the text of an item's first line is indented by the blocks
+    /// inside the item it opens — a quote, a code panel — so the item's marker
+    /// stands left of them rather than on them.
+    marker_inset: Pixels,
     /// The picture a line spelling one out draws under its text, as Typora
     /// keeps a picture in view while the caret edits its source.
     preview: Option<(Arc<RenderImage>, Size<Pixels>)>,
@@ -678,6 +682,7 @@ impl LayoutLine {
             Marker::Bullet { .. } => (px(17.5), px(5.), px(5.)),
             Marker::Task { .. } => (px(22.), px(14.), px(14.)),
         };
+        let offset = offset + self.marker_inset;
         Some(Bounds::new(
             self.origin + point(-offset, (self.line_height - height) * 0.5),
             size(width, height),
@@ -1271,6 +1276,11 @@ fn shape_line(
         .map(|(_, width)| *width + NUMBER_GAP);
     let indent = indent_of(types, line, style, marker_reserve).min(max_indent);
     let quote_bars = quote_bar_distances(types, line, style, marker_reserve);
+    let marker_inset = if matches!(marker, Some(Marker::Footnote(_))) {
+        px(0.)
+    } else {
+        inside_item_indent(types, line, style)
+    };
 
     let wrap_width = match cell {
         Some(CellWidth::Column(content)) => content.max(px(16.)),
@@ -1405,6 +1415,7 @@ fn shape_line(
         decoration,
         code_language,
         code_inset,
+        marker_inset,
         preview,
         quote_bars,
         callout_header,
@@ -3079,6 +3090,21 @@ fn ancestor_indent(types: &DocTypes, line: &Line, index: usize, style: &EditorSt
     }
 }
 
+/// The indent the containers inside the line's innermost item add, which the
+/// item's marker is drawn to the left of.
+fn inside_item_indent(types: &DocTypes, line: &Line, style: &EditorStyle) -> Pixels {
+    let Some(item) = line
+        .ancestors()
+        .iter()
+        .rposition(|ancestor| types.is_item(ancestor.node_type))
+    else {
+        return px(0.);
+    };
+    (item + 1..line.ancestors().len())
+        .map(|index| ancestor_indent(types, line, index, style))
+        .fold(px(0.), |sum, step| sum + step)
+}
+
 /// How far left of the line's text each quote it sits in draws its bar,
 /// outermost first: the quote's own indent and all the indent nested inside
 /// it — a list's, a code panel's — so a bar stays at its
@@ -4536,6 +4562,7 @@ mod tests {
             code_language: None,
             callout_header: None,
             code_inset: px(0.),
+            marker_inset: px(0.),
             preview: None,
             quote_bars: Vec::new(),
             widenings: Vec::new(),
@@ -6251,6 +6278,41 @@ mod tests {
             rows[3].task_marker().is_none(),
             "plain ordered items never toggle tasks"
         );
+    }
+
+    /// An item that opens with a quote or a fence draws its marker where every
+    /// item of its list does, left of the quote's bar and the code panel.
+    #[test]
+    fn an_items_marker_stands_left_of_the_blocks_it_opens_with() {
+        let rows = shaped("- [ ] a\n- [x] > b\n- > c\n- ```\n  d\n  ```");
+        let plain = rows[0].task_marker().expect("a check box").1;
+        assert_eq!(
+            plain.left(),
+            rows[0].origin.x - px(22.),
+            "a plain item's box"
+        );
+        let quoted = rows[1].task_marker().expect("a check box").1;
+        assert_eq!(quoted.left(), plain.left());
+        let bar = rows[1].quote_bars[0];
+        assert!(
+            quoted.right() < rows[1].origin.x - bar,
+            "the box is left of the bar"
+        );
+        let bullet = rows[2].marker_bounds().expect("a bullet");
+        assert!(bullet.right() < rows[2].origin.x - rows[2].quote_bars[0]);
+        let code = rows[3].marker_bounds().expect("a bullet");
+        assert_eq!(code.left(), bullet.left());
+        // An ordered task's box has room of its own, which the quote after it
+        // does not move.
+        let rows = shaped("1. [ ] a\n2. [ ] > b");
+        let plain = rows[0].task_marker().expect("a check box").1;
+        assert_eq!(
+            plain.left(),
+            rows[0].origin.x - px(22.),
+            "a plain item's box"
+        );
+        let quoted = rows[1].task_marker().expect("a check box").1;
+        assert_eq!(quoted.left(), plain.left());
     }
 
     /// A cell's own height is zero except on the last of its row, so the quote

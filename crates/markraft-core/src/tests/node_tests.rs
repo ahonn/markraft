@@ -38,6 +38,27 @@ fn token_sizes_follow_the_coordinate_frame() {
 }
 
 #[test]
+fn removing_a_mark_type_keeps_the_other_marks() {
+    let schema = shared_schema();
+    let both = MarkSet::from_marks(&schema, [m(&schema, "strong"), m(&schema, "em")]);
+    let strong = schema.mark_id("strong").expect("known");
+    let rest = both.remove_type(strong);
+    assert!(!rest.contains(&m(&schema, "strong")));
+    assert!(rest.contains(&m(&schema, "em")));
+}
+
+#[test]
+fn has_markup_compares_type_attributes_and_marks() {
+    let schema = shared_schema();
+    let heading = na(&schema, "heading", attrs! {"level" => 2}, [t(&schema, "a")]);
+    let heading_type = schema.node_id("heading").expect("known");
+    let paragraph_type = schema.node_id("paragraph").expect("known");
+    assert!(heading.has_markup(heading_type, heading.attrs(), &MarkSet::empty()));
+    assert!(!heading.has_markup(paragraph_type, heading.attrs(), &MarkSet::empty()));
+    assert!(!heading.has_markup(heading_type, &attrs! {"level" => 3}, &MarkSet::empty()));
+}
+
+#[test]
 fn text_counts_unicode_scalar_values() {
     let schema = test_schema();
     let text = t(&schema, "aé漢🙂");

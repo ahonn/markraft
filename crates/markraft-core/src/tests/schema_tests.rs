@@ -40,6 +40,19 @@ fn compiles_the_test_schema() {
 }
 
 #[test]
+fn a_node_type_knows_its_groups_and_whether_it_is_an_atom() {
+    let schema = test_schema();
+    let paragraph = schema.node_type(schema.node_id("paragraph").expect("known"));
+    assert_eq!(paragraph.groups(), ["block".to_string()]);
+    assert!(paragraph.in_group("block"));
+    assert!(!paragraph.in_group("inline"));
+    assert!(!paragraph.is_atom());
+    // A leaf is opaque whether or not it says so.
+    let rule = schema.node_type(schema.node_id("horizontal_rule").expect("known"));
+    assert!(rule.is_atom());
+}
+
+#[test]
 fn a_declared_break_kind_is_compiled_into_the_type() {
     use crate::schema::BreakKind;
     let schema = Schema::new(

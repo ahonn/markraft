@@ -91,6 +91,23 @@ fn points_map_with_their_own_side() {
     let mapped = set.map(&changes);
     assert_eq!(mapped.as_slice()[0].pos, 3);
     assert_eq!(mapped.as_slice()[1].pos, 5);
+    assert!(!mapped.is_empty());
+    assert!(PointSet::<&str>::new().is_empty());
+}
+
+#[test]
+fn a_widget_sits_before_content_inserted_at_it_only_when_its_side_says_so() {
+    let schema = shared_schema();
+    let document = doc(&schema, [n(&schema, "paragraph", [t(&schema, "abcdef")])]);
+    let changes = edit(&document, 3, 3, "XY").desc().clone();
+    for (side, pos) in [(-2, 3), (-1, 3), (0, 5), (1, 5), (2, 5)] {
+        let set = DecorationSet::from_decorations([Decoration::widget(3, side, spec("caret"))]);
+        assert_eq!(
+            set.map(&changes).widgets().as_slice()[0].pos,
+            pos,
+            "side {side}"
+        );
+    }
 }
 
 #[test]

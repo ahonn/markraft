@@ -583,6 +583,10 @@ fn at_textblock_start(state: &EditorState) -> bool {
 
 /// At the start of a heading, Backspace turns it into a paragraph, whatever
 /// its level, as Typora does. Typing `#` there raises the level again.
+///
+/// A heading that opens a list item or a quote is left to the commands after
+/// this, as a paragraph there would be: Typora takes the item or the quote
+/// away and keeps the heading.
 fn clear_heading_at_start(types: &DocTypes) -> Command {
     let types = types.clone();
     command(move |state| {
@@ -593,6 +597,15 @@ fn clear_heading_at_start(types: &DocTypes) -> Command {
         let paragraph = types.paragraph?;
         let (ty, _) = types.block_at_cursor(state)?;
         if ty != heading {
+            return None;
+        }
+        let doc = state.doc();
+        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        let depth = resolved.depth();
+        let container = resolved.node(depth - 1).type_id();
+        let opens_container = resolved.index(depth - 1) == 0
+            && (types.is_item(container) || Some(container) == types.blockquote);
+        if opens_container {
             return None;
         }
         set_block_type(paragraph, Attrs::empty())(state)
@@ -1785,6 +1798,33 @@ mod tests {
         let start = projection_of(&state).lines()[0].from();
         let promoted = applied(&at(&state, start), &insert_plain(&types, "#")).expect("promotes");
         assert_eq!(to_markdown(state.schema(), promoted.doc()), "## title");
+    }
+
+    /// Typora 1.14.10: a heading that opens an item or a quote keeps its
+    /// level and loses the container, as a paragraph there would; anywhere
+    /// else it becomes a paragraph.
+    #[test]
+    fn backspace_at_a_heading_opening_a_container_takes_the_container() {
+        for (source, line, expected) in [
+            ("- # 1", 0, "# 1"),
+            ("> # 1", 0, "# 1"),
+            ("- [ ] # 1", 0, "# 1"),
+            // Typora leaves the list loose; a heading needs no blank line
+            // to stay apart, so the two read the same.
+            ("- [ ] 0\n- [ ] # 1", 1, "- [ ] 0\n  # 1"),
+            ("> 0\n>\n> # 1", 1, "> 0\n>\n> 1"),
+            ("- 0\n\n  # 1", 1, "- 0\n\n  1"),
+        ] {
+            let state = state_of(source);
+            let types = types_of(&state);
+            let start = projection_of(&state).lines()[line].from();
+            let after = applied(&at(&state, start), &backspace(&types)).expect("applies");
+            assert_eq!(
+                to_markdown(state.schema(), after.doc()),
+                expected,
+                "{source:?}"
+            );
+        }
     }
 
     #[test]

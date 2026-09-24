@@ -419,6 +419,97 @@ fn an_ancestor_is_told_which_nodes_a_round_reaches() {
     assert_eq!(*told_probe.lock().unwrap(), [vec![false, true]]);
 }
 
+/// A child-list correction runs for a change that crosses the boundary of one
+/// of the node's children, and not for one that stays inside a child or
+/// outside the node.
+#[test]
+fn a_child_list_correction_runs_only_when_the_children_change() {
+    use crate::node::Markup;
+    use crate::slice::Token;
+    let schema = shared_schema();
+    let quote = schema.node_id("blockquote").unwrap();
+    let paragraph = schema.node_id("paragraph").unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let probe = hits.clone();
+    // A quote of two paragraphs, 0..10, and a paragraph after it, 10..13.
+    let start = state(
+        doc(
+            &schema,
+            [
+                n(
+                    &schema,
+                    "blockquote",
+                    [
+                        n(&schema, "paragraph", [t(&schema, "ab")]),
+                        n(&schema, "paragraph", [t(&schema, "cd")]),
+                    ],
+                ),
+                n(&schema, "paragraph", [t(&schema, "x")]),
+            ],
+        ),
+        corrections([Correction::on_child_list(quote, move |_| {
+            hits.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        })]),
+    );
+    let fired = |change: Change| {
+        let before = probe.load(Ordering::SeqCst);
+        start
+            .update([TransactionSpec::new().changes([change])])
+            .unwrap();
+        probe.load(Ordering::SeqCst) > before
+    };
+    assert!(!fired(insert_text(&schema, 3, "X")), "inside a child");
+    assert!(!fired(insert_text(&schema, 12, "X")), "outside the quote");
+    let new_paragraph = n(&schema, "paragraph", [t(&schema, "new")]);
+    assert!(
+        !fired(Change::insert(
+            10,
+            Slice::from_fragment(Fragment::from_node(new_paragraph.clone()))
+        )),
+        "a sibling added right after the quote"
+    );
+    // The second paragraph made a heading, the way `set_block_type` does it:
+    // its opening and closing tokens replaced.
+    let heading = Markup::new(schema.node_id("heading").unwrap());
+    let retyped = Change::replace(5, 6, Slice::from_tokens(&[Token::Open(heading.clone())]));
+    let closed = Change::replace(8, 9, Slice::from_tokens(&[Token::Close(heading)]));
+    let before = probe.load(Ordering::SeqCst);
+    start
+        .update([TransactionSpec::new().changes([retyped, closed])])
+        .unwrap();
+    assert!(probe.load(Ordering::SeqCst) > before, "a child retyped");
+    // A change from a child's opening token into its text reaches the
+    // boundary too, though it ends inside the child.
+    let open = Token::Open(Markup::new(paragraph));
+    assert!(
+        fired(Change::replace(
+            5,
+            7,
+            Slice::from_tokens(&[open, Token::Node(schema.text("X"))])
+        )),
+        "a child's start rewritten"
+    );
+    assert!(
+        fired(Change::insert(
+            5,
+            Slice::from_fragment(Fragment::from_node(new_paragraph))
+        )),
+        "a child added"
+    );
+    // Rewriting the end of the first paragraph, its closing token included:
+    // the change reaches the child's boundary.
+    let close = Token::Close(Markup::new(paragraph));
+    assert!(
+        fired(Change::replace(
+            3,
+            5,
+            Slice::from_tokens(&[Token::Node(schema.text("X")), close])
+        )),
+        "a child's end rewritten"
+    );
+}
+
 #[test]
 fn corrections_whose_first_round_cannot_combine_still_report_divergence() {
     let schema = shared_schema();

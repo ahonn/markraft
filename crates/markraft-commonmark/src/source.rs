@@ -128,218 +128,242 @@ impl SourceDocument {
         }
         let old: Vec<_> = self.document.children().cloned().collect();
         let new: Vec<_> = document.children().cloned().collect();
-        let mut result = self.source.clone();
         if old.len() == new.len() {
-            let mut partial = old.clone();
-            for index in (0..old.len()).rev() {
-                if old[index] == new[index] {
-                    continue;
+            let patched = self
+                .patch_blocks(schema, document, &old, &new)
+                .and_then(|result| self.validate(schema, document, result));
+            if patched.is_ok() {
+                return patched;
+            }
+            // Blocks at the same index need not be the same block: a paragraph
+            // split in two while a block further on joined the list before it
+            // keeps the count, but the blocks between have moved. Taken one by
+            // one, each step leaves a note no file holds, so the blocks the
+            // edit touched are saved as one span, as when the count changed.
+        }
+        let mut result = self.source.clone();
+        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(new[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let end = old.len() - suffix;
+        let before = block_markdown(schema, &self.document, &old[prefix..end]);
+        let after = block_markdown(schema, document, &new[prefix..new.len() - suffix]);
+        if prefix == end {
+            return self.insert_blocks(schema, document, result, prefix, suffix, &after);
+        } else {
+            // Whole blocks went and nothing took their place — a divider
+            // deleted: their lines go with the gap before them. Patching
+            // them out would leave both gaps, a blank line too many, where
+            // they stood.
+            if prefix + suffix == new.len() {
+                let mut candidate = result.clone();
+                candidate.replace_range(self.dropped_range(prefix, end, suffix), "");
+                if let Ok(done) = self.validate(schema, document, candidate) {
+                    return Ok(done);
                 }
-                partial[index] = new[index].clone();
-                let target = document.copy(Fragment::from_nodes(partial.clone()));
-                // A table whose rows were added, removed or edited, its columns
-                // as they were: each row it kept keeps its line, an edited row
-                // keeps its own spacing around the text that changed, and a new
-                // row is spelled the way the table's header is — an emptied cell
-                // keeping room between its pipes. Tried before the text patches,
-                // which would close a cell up to `||`. See `table_rows`.
-                if let Some(patched) = table_rows(
+            }
+            // A table that took in the text of the blocks after it —
+            // Backspace after a table joins its last cell — keeps its
+            // rows' spelling, and the blocks go with the gap before them.
+            if new.len() - suffix == prefix + 1
+                && let Some(rows) = table_rows(
                     schema,
-                    &old[index],
-                    &new[index],
-                    &result[self.blocks[index].clone()],
+                    &old[prefix],
+                    &new[prefix],
+                    &result[self.blocks[prefix].clone()],
                     self.newline,
                 )
-                .and_then(|rows| {
-                    let mut candidate = result.clone();
-                    candidate.replace_range(self.blocks[index].clone(), &rows);
-                    self.validate(schema, &target, candidate).ok()
-                }) {
-                    result = patched;
-                    continue;
+            {
+                let mut candidate = result.clone();
+                candidate.replace_range(self.blocks[prefix].end..self.blocks[end - 1].end, "");
+                candidate.replace_range(self.blocks[prefix].clone(), &rows);
+                if let Ok(done) = self.validate(schema, document, candidate) {
+                    return Ok(done);
                 }
-                // Prefer semantic text deltas: a longer table cell changes the
-                // canonical table's padding, but existing column whitespace is
-                // unrelated to the user's text edit and must remain untouched.
-                let mut text = Vec::new();
-                if text_changes(&old[index], &new[index], &mut text)
-                    && let [(before, after)] = text.as_slice()
-                    && let Ok(patched) = self.patch(
-                        schema,
-                        &target,
-                        result.clone(),
-                        self.blocks[index].clone(),
-                        before,
-                        after,
-                    )
-                {
-                    result = patched;
-                    continue;
+            }
+            let range = self.blocks[prefix].start..self.blocks[end - 1].end;
+            result = match self.patch(schema, document, result.clone(), range, &before, &after) {
+                Ok(patched) => patched,
+                // Whole blocks went and nothing took their place, but their
+                // source is not spelled the way the writer would spell them —
+                // a table padded otherwise. Their spelling does not matter to
+                // a deletion: drop their lines and the gap before them.
+                Err(_) if prefix + suffix == new.len() => {
+                    result.replace_range(self.dropped_range(prefix, end, suffix), "");
+                    result
                 }
-                // The same, spelled as the writer spells the one textblock that
-                // changed: a character its guard escapes — a `|` in a table
-                // cell — goes in with its backslash.
-                if let Some((before, after)) = changed_textblock(schema, &old[index], &new[index])
-                    .and_then(|(before, after)| {
-                        Some((
-                            guarded_source(schema, before)?,
-                            guarded_source(schema, after)?,
-                        ))
-                    })
-                    && let Ok(patched) = self.patch(
-                        schema,
-                        &target,
-                        result.clone(),
-                        self.blocks[index].clone(),
-                        &before,
-                        &after,
-                    )
-                {
-                    result = patched;
-                    continue;
+                // Blocks were joined, split, wrapped or lifted out: the
+                // structure changed, so the blocks it touched are
+                // respelled whole.
+                Err(_) => {
+                    let range = self.blocks[prefix].start..self.blocks[end - 1].end;
+                    return self.respell(schema, document, result, range, &after);
                 }
-                // A task box ticked or unticked: its one character changes,
-                // however the rest of the item is spelled — `[X]`, a `+`
-                // marker, extra spaces — none of which the writer keeps.
-                if let Some((nth, checked)) = toggled_box(schema, &old[index], &new[index])
-                    && let Ok(patched) = self.flip_box(
-                        schema,
-                        &target,
-                        result.clone(),
-                        self.blocks[index].clone(),
-                        nth,
-                        checked,
-                    )
-                {
-                    result = patched;
-                    continue;
-                }
-                let before = block_markdown(schema, &self.document, &old[index..=index]);
-                let after = block_markdown(schema, document, &new[index..=index]);
-                let range = self.blocks[index].clone();
-                // A table's body row added goes in as a line of its own. A diff of
-                // the two tables' canonical spellings could place it anywhere their
-                // padding happens to agree, inside a hand-written row, and the
-                // table would still read the same.
-                if let Some(patched) = added_row(schema, &old[index], &new[index]).and_then(|row| {
-                    let line = after.split('\n').nth(row + 1)?;
-                    let raw = &result[range.clone()];
-                    let at = match row_line(raw, self.newline, row + 1) {
-                        Some(existing) => existing.start + self.newline.len(),
-                        None => raw.len(),
-                    };
-                    let text = if at == raw.len() {
-                        format!("{}{line}", self.newline)
-                    } else {
-                        format!("{line}{}", self.newline)
-                    };
-                    let mut candidate = result.clone();
-                    candidate.insert_str(range.start + at, &text);
-                    self.validate(schema, &target, candidate).ok()
-                }) {
-                    result = patched;
-                    continue;
-                }
-                result = match self.patch(
+            };
+        }
+        self.validate(schema, document, result)
+    }
+
+    /// Patch each top-level block that differs from the one at its index in
+    /// the source, last first, so each earlier block's source range still
+    /// holds. Each step must read back as the note with the blocks so far
+    /// changed.
+    fn patch_blocks(
+        &self,
+        schema: &Schema,
+        document: &Node,
+        old: &[Node],
+        new: &[Node],
+    ) -> Result<String, SourceError> {
+        let mut result = self.source.clone();
+        let mut partial = old.to_vec();
+        for index in (0..old.len()).rev() {
+            if old[index] == new[index] {
+                continue;
+            }
+            partial[index] = new[index].clone();
+            let target = document.copy(Fragment::from_nodes(partial.clone()));
+            // A table whose rows were added, removed or edited, its columns
+            // as they were: each row it kept keeps its line, an edited row
+            // keeps its own spacing around the text that changed, and a new
+            // row is spelled the way the table's header is — an emptied cell
+            // keeping room between its pipes. Tried before the text patches,
+            // which would close a cell up to `||`. See `table_rows`.
+            if let Some(patched) = table_rows(
+                schema,
+                &old[index],
+                &new[index],
+                &result[self.blocks[index].clone()],
+                self.newline,
+            )
+            .and_then(|rows| {
+                let mut candidate = result.clone();
+                candidate.replace_range(self.blocks[index].clone(), &rows);
+                self.validate(schema, &target, candidate).ok()
+            }) {
+                result = patched;
+                continue;
+            }
+            // Prefer semantic text deltas: a longer table cell changes the
+            // canonical table's padding, but existing column whitespace is
+            // unrelated to the user's text edit and must remain untouched.
+            let mut text = Vec::new();
+            if text_changes(&old[index], &new[index], &mut text)
+                && let [(before, after)] = text.as_slice()
+                && let Ok(patched) = self.patch(
                     schema,
                     &target,
                     result.clone(),
-                    range.clone(),
+                    self.blocks[index].clone(),
+                    before,
+                    after,
+                )
+            {
+                result = patched;
+                continue;
+            }
+            // The same, spelled as the writer spells the one textblock that
+            // changed: a character its guard escapes — a `|` in a table
+            // cell — goes in with its backslash.
+            if let Some((before, after)) = changed_textblock(schema, &old[index], &new[index])
+                .and_then(|(before, after)| {
+                    Some((
+                        guarded_source(schema, before)?,
+                        guarded_source(schema, after)?,
+                    ))
+                })
+                && let Ok(patched) = self.patch(
+                    schema,
+                    &target,
+                    result.clone(),
+                    self.blocks[index].clone(),
                     &before,
                     &after,
-                ) {
-                    Ok(patched) => patched,
-                    // The block's hand-written spelling cannot take the
-                    // change in place — a heading's level, a list's type, a
-                    // table's columns, or text its spelling cannot hold — so
-                    // it is respelled; see `respell`. A table's body row
-                    // deleted takes just its line with it rather than the
-                    // whole table.
-                    Err(_) => {
-                        let dropped = removed_row(schema, &old[index], &new[index])
-                            .and_then(|row| row_line(&result[range.clone()], self.newline, row + 1))
-                            .and_then(|line| {
-                                let mut candidate = result.clone();
-                                candidate.replace_range(
-                                    range.start + line.start..range.start + line.end,
-                                    "",
-                                );
-                                self.validate(schema, &target, candidate).ok()
-                            });
-                        match dropped {
-                            Some(patched) => patched,
-                            None => self.respell(schema, &target, result, range, &after)?,
-                        }
-                    }
-                };
+                )
+            {
+                result = patched;
+                continue;
             }
-        } else {
-            let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-            let suffix = old[prefix..]
-                .iter()
-                .rev()
-                .zip(new[prefix..].iter().rev())
-                .take_while(|(a, b)| a == b)
-                .count();
-            let end = old.len() - suffix;
-            let before = block_markdown(schema, &self.document, &old[prefix..end]);
-            let after = block_markdown(schema, document, &new[prefix..new.len() - suffix]);
-            if prefix == end {
-                return self.insert_blocks(schema, document, result, prefix, suffix, &after);
-            } else {
-                // Whole blocks went and nothing took their place — a divider
-                // deleted: their lines go with the gap before them. Patching
-                // them out would leave both gaps, a blank line too many, where
-                // they stood.
-                if prefix + suffix == new.len() {
-                    let mut candidate = result.clone();
-                    candidate.replace_range(self.dropped_range(prefix, end, suffix), "");
-                    if let Ok(done) = self.validate(schema, document, candidate) {
-                        return Ok(done);
+            // A task box ticked or unticked: its one character changes,
+            // however the rest of the item is spelled — `[X]`, a `+`
+            // marker, extra spaces — none of which the writer keeps.
+            if let Some((nth, checked)) = toggled_box(schema, &old[index], &new[index])
+                && let Ok(patched) = self.flip_box(
+                    schema,
+                    &target,
+                    result.clone(),
+                    self.blocks[index].clone(),
+                    nth,
+                    checked,
+                )
+            {
+                result = patched;
+                continue;
+            }
+            let before = block_markdown(schema, &self.document, &old[index..=index]);
+            let after = block_markdown(schema, document, &new[index..=index]);
+            let range = self.blocks[index].clone();
+            // A table's body row added goes in as a line of its own. A diff of
+            // the two tables' canonical spellings could place it anywhere their
+            // padding happens to agree, inside a hand-written row, and the
+            // table would still read the same.
+            if let Some(patched) = added_row(schema, &old[index], &new[index]).and_then(|row| {
+                let line = after.split('\n').nth(row + 1)?;
+                let raw = &result[range.clone()];
+                let at = match row_line(raw, self.newline, row + 1) {
+                    Some(existing) => existing.start + self.newline.len(),
+                    None => raw.len(),
+                };
+                let text = if at == raw.len() {
+                    format!("{}{line}", self.newline)
+                } else {
+                    format!("{line}{}", self.newline)
+                };
+                let mut candidate = result.clone();
+                candidate.insert_str(range.start + at, &text);
+                self.validate(schema, &target, candidate).ok()
+            }) {
+                result = patched;
+                continue;
+            }
+            result = match self.patch(
+                schema,
+                &target,
+                result.clone(),
+                range.clone(),
+                &before,
+                &after,
+            ) {
+                Ok(patched) => patched,
+                // The block's hand-written spelling cannot take the
+                // change in place — a heading's level, a list's type, a
+                // table's columns, or text its spelling cannot hold — so
+                // it is respelled; see `respell`. A table's body row
+                // deleted takes just its line with it rather than the
+                // whole table.
+                Err(_) => {
+                    let dropped = removed_row(schema, &old[index], &new[index])
+                        .and_then(|row| row_line(&result[range.clone()], self.newline, row + 1))
+                        .and_then(|line| {
+                            let mut candidate = result.clone();
+                            candidate.replace_range(
+                                range.start + line.start..range.start + line.end,
+                                "",
+                            );
+                            self.validate(schema, &target, candidate).ok()
+                        });
+                    match dropped {
+                        Some(patched) => patched,
+                        None => self.respell(schema, &target, result, range, &after)?,
                     }
                 }
-                // A table that took in the text of the blocks after it —
-                // Backspace after a table joins its last cell — keeps its
-                // rows' spelling, and the blocks go with the gap before them.
-                if new.len() - suffix == prefix + 1
-                    && let Some(rows) = table_rows(
-                        schema,
-                        &old[prefix],
-                        &new[prefix],
-                        &result[self.blocks[prefix].clone()],
-                        self.newline,
-                    )
-                {
-                    let mut candidate = result.clone();
-                    candidate.replace_range(self.blocks[prefix].end..self.blocks[end - 1].end, "");
-                    candidate.replace_range(self.blocks[prefix].clone(), &rows);
-                    if let Ok(done) = self.validate(schema, document, candidate) {
-                        return Ok(done);
-                    }
-                }
-                let range = self.blocks[prefix].start..self.blocks[end - 1].end;
-                result = match self.patch(schema, document, result.clone(), range, &before, &after)
-                {
-                    Ok(patched) => patched,
-                    // Whole blocks went and nothing took their place, but their
-                    // source is not spelled the way the writer would spell them —
-                    // a table padded otherwise. Their spelling does not matter to
-                    // a deletion: drop their lines and the gap before them.
-                    Err(_) if prefix + suffix == new.len() => {
-                        result.replace_range(self.dropped_range(prefix, end, suffix), "");
-                        result
-                    }
-                    // Blocks were joined, split, wrapped or lifted out: the
-                    // structure changed, so the blocks it touched are
-                    // respelled whole.
-                    Err(_) => {
-                        let range = self.blocks[prefix].start..self.blocks[end - 1].end;
-                        return self.respell(schema, document, result, range, &after);
-                    }
-                };
-            }
+            };
         }
-        self.validate(schema, document, result)
+        Ok(result)
     }
 
     /// The source top-level blocks `prefix..end` take, with the gap that parts
@@ -496,14 +520,16 @@ impl SourceDocument {
         // matching local context, then prove the chosen location by parsing
         // the entire resulting document.
         for offset in candidate_offsets(raw, &removed, &prefix, &suffix) {
-            let changed = offset..offset + removed.len();
-            let mut candidate = source.clone();
-            candidate.replace_range(
-                range.start + changed.start..range.start + changed.end,
-                &inserted,
-            );
-            if let Ok(valid) = self.validate(schema, target, candidate) {
-                return Ok(valid);
+            let changed = range.start + offset..range.start + offset + removed.len();
+            let trimmed = emptied_line_end(&source, &changed, &inserted);
+            let ends =
+                std::iter::once(trimmed).chain((trimmed != changed.end).then_some(changed.end));
+            for end in ends {
+                let mut candidate = source.clone();
+                candidate.replace_range(changed.start..end, &inserted);
+                if let Ok(valid) = self.validate(schema, target, candidate) {
+                    return Ok(valid);
+                }
             }
         }
         // A save can cover several keystrokes separated by an untouched link
@@ -535,15 +561,27 @@ impl SourceDocument {
                     pair[0].0.end <= pair[1].0.start && pair[0].0.start != pair[1].0.start
                 })
             {
-                let mut candidate = source.clone();
-                for (changed, inserted) in patches.into_iter().rev() {
-                    candidate.replace_range(
-                        range.start + changed.start..range.start + changed.end,
-                        &inserted,
-                    );
-                }
-                if let Ok(valid) = self.validate(schema, target, candidate) {
-                    return Ok(valid);
+                let spans: Vec<_> = patches
+                    .iter()
+                    .map(|(changed, _)| range.start + changed.start..range.start + changed.end)
+                    .collect();
+                let trimmed: Vec<_> = spans
+                    .iter()
+                    .zip(&patches)
+                    .map(|(span, (_, inserted))| {
+                        span.start..emptied_line_end(&source, span, inserted)
+                    })
+                    .collect();
+                let variants =
+                    std::iter::once(&trimmed).chain((trimmed != spans).then_some(&spans));
+                for spans in variants {
+                    let mut candidate = source.clone();
+                    for (span, (_, inserted)) in spans.iter().zip(&patches).rev() {
+                        candidate.replace_range(span.clone(), inserted);
+                    }
+                    if let Ok(valid) = self.validate(schema, target, candidate) {
+                        return Ok(valid);
+                    }
                 }
             }
         }
@@ -610,6 +648,28 @@ impl SourceDocument {
             }
         }
         Err(SourceError::UnsupportedEdit)
+    }
+}
+
+/// Where replacing `changed` in `source` with `inserted` should stop so that
+/// it leaves no line of nothing but spaces: past the spaces and tabs that end
+/// the line when the replacement leaves nothing else on it. A reader takes
+/// such a line for a blank one, so it only survives as trailing spaces in
+/// the file. Where anything is left before them on the line, they may be a
+/// hard break and stay; `changed.end` is returned then.
+fn emptied_line_end(source: &str, changed: &Range<usize>, inserted: &str) -> usize {
+    let rest = &source[changed.end..];
+    let spaces = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+    let ends_line = matches!(rest[spaces..].chars().next(), None | Some('\n' | '\r'));
+    let starts_line = if inserted.is_empty() {
+        source[..changed.start].is_empty() || source[..changed.start].ends_with('\n')
+    } else {
+        inserted.ends_with('\n')
+    };
+    if ends_line && starts_line {
+        changed.end + spaces
+    } else {
+        changed.end
     }
 }
 
@@ -1007,8 +1067,20 @@ fn block_lines<'a>(
             break;
         };
         let pos = node.data.borrow().sourcepos;
-        out.push((pos.start.line.max(next), pos.end.line));
-        next = pos.end.line + 1;
+        let start = pos.start.line.max(next);
+        // comrak ends an indented code block after the blank lines that follow
+        // it, which belong to the gap before the next block: a block respelled
+        // over them would lose that gap and run into its neighbour.
+        let mut end = pos.end.line;
+        while end > start
+            && lines
+                .get(end - 1)
+                .is_some_and(|line| line.trim().is_empty())
+        {
+            end -= 1;
+        }
+        out.push((start, end));
+        next = end + 1;
     }
     out
 }

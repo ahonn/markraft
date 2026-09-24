@@ -347,6 +347,41 @@ fn one_edit_settles_every_mark_and_block_it_changes() {
     assert_saves(&codec, tr.state(), &expected);
 }
 
+/// A heading of level three or more holds no line break: one put there
+/// becomes a space, and the backslash that spelled it goes with it — but not a
+/// backslash that only escapes the one before it.
+#[test]
+fn a_break_a_heading_cannot_hold_takes_only_its_own_backslash() {
+    let codec = Codec::new();
+    let line_break = codec
+        .schema
+        .node_id(md::LINE_BREAK)
+        .expect("the break type");
+    for (before, expected) in [("a\\", "### xa b"), ("a\\\\", "### xa\\\\ b")] {
+        let state = editor(&codec, "### x", Selection::cursor(at(1)));
+        let nodes = [
+            codec.schema.text(before),
+            codec
+                .schema
+                .create(
+                    line_break,
+                    Attrs::empty(),
+                    markraft_core::MarkSet::empty(),
+                    markraft_core::Fragment::empty(),
+                )
+                .expect("a break"),
+            codec.schema.text("b"),
+        ];
+        let tr = state
+            .update([TransactionSpec::new().changes([Change::insert(
+                at(1),
+                Slice::from_fragment(markraft_core::Fragment::from_nodes(nodes)),
+            )])])
+            .expect("the insertion applies");
+        assert_saves(&codec, tr.state(), expected);
+    }
+}
+
 // -- escapes ------------------------------------------------------------------
 
 /// An escaped delimiter is two characters of text, and a file keeps them —

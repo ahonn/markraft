@@ -188,6 +188,34 @@ fn tab_in_the_last_cell_appends_a_row() {
 }
 
 #[test]
+fn insert_row_below_puts_an_empty_row_under_the_cursor_and_moves_into_it() {
+    let empty_row = "table_row(table_cell(), table_cell())";
+    for (from, rows, caret) in [
+        (
+            6,
+            [empty_row, "table_row(table_cell(\"c\"), table_cell(\"d\"))"],
+            11,
+        ),
+        (
+            11,
+            ["table_row(table_cell(\"c\"), table_cell(\"d\"))", empty_row],
+            19,
+        ),
+    ] {
+        let after = run(&at(&grid(), from), &insert_row_below(types()));
+        assert_eq!(
+            shape(&after),
+            format!(
+                r#"doc(table[alignments=Str("none,none")](table_row(table_cell("a"), table_cell("b")), {}, {}))"#,
+                rows[0], rows[1]
+            ),
+            "from {from}"
+        );
+        assert_eq!(cursor(&after), caret, "from {from}");
+    }
+}
+
+#[test]
 fn shift_tab_walks_back_and_stops_at_the_first_cell() {
     let state = grid();
     assert_eq!(cursor(&run(&at(&state, 14), &goto_prev_cell(types()))), 11);
