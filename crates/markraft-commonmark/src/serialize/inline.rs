@@ -6,10 +6,9 @@
 //!
 //! [`SerializerState::spell_inline`] spells *semantic* inline content — text
 //! with style marks and nothing else — as Markdown, which is how pasted HTML
-//! becomes source. Its algorithm is ProseMirror's. It keeps a stack of the
-//! marks that are currently open, and for each inline node works out the
-//! longest prefix of that stack it can keep, closing the rest and opening
-//! whatever the node adds. Two marks that may be written in either order are
+//! becomes source. It keeps a stack of the marks that are currently open, and
+//! for each inline node works out the longest prefix of that stack it can
+//! keep, closing the rest and opening whatever the node adds. Two marks that may be written in either order are
 //! reordered rather than closed and reopened, and whitespace at the edges of a
 //! run moves out from under the marks that could not carry it.
 

@@ -312,11 +312,8 @@ impl MarkraftApp {
 
     /// Move the open surface's list to `row`, keeping it in view. Every path that
     /// changes a selection goes through here — the ring, the arrow keys and the
-    /// pointer — so a question standing on the row being left is taken back with it.
+    /// pointer.
     pub(super) fn select_row(&mut self, row: usize) {
-        // Whatever list this lands in, the ring has moved: a question standing
-        // on a Browse row is answered for that row alone, so it goes with it.
-        self.picker.forget_question();
         match self.surface() {
             Surface::Format => self.format.select(row),
             Surface::CodeLanguage => self.code_language.select(row),

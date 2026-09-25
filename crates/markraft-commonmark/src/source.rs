@@ -20,7 +20,7 @@
 //!
 //! Top-level blocks are paired by shape across the edit. A block whose shape
 //! changed — a paragraph split in two, a list converted — is respelled the way
-//! the writer spells it, as Typora does, and only that block. Every candidate
+//! the writer spells it, and only that block. Every candidate
 //! has to read back as the block it stands for, and the whole file as the
 //! edited document; unmapped source is never silently replaced.
 
@@ -126,7 +126,7 @@ impl SourceDocument {
     }
 
     /// `rendered` with the ordinals of each ordered list the edit touched
-    /// counted again, as Typora writes them: a patch that adds an item leaves
+    /// counted again: a patch that adds an item leaves
     /// the lines after it with the numbers they had, `1.` `1.` `2.`, which a
     /// reader counts the same but a person reads as a mistake. A list written
     /// with one number throughout keeps it. Lists the edit did not reach keep

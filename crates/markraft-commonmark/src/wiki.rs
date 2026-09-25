@@ -1,4 +1,4 @@
-//! Reading and writing Obsidian-style wiki links, byte for byte.
+//! Reading and writing wiki links, byte for byte.
 //!
 //! comrak recognises `[[…]]`, but what it hands back is *interpreted*: its
 //! `url` is trimmed, its HTML entities are resolved and its backslash escapes
@@ -14,7 +14,7 @@
 //! * An *empty* alias — `[[a|]]` — is refused, because `[[a]]` and `[[a|]]`
 //!   would otherwise be the same atom and only one of them could be written
 //!   back.
-//! * A line ending inside one is refused too. Obsidian has no such link, and
+//! * A line ending inside one is refused too. No wiki link spans lines, and
 //!   the atom's own source must be one line to be written where a paragraph's
 //!   line breaks are nodes rather than characters.
 //!

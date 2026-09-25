@@ -1,6 +1,6 @@
 //! The delimiter pair a cursor toggle writes, until something is typed in it.
 //!
-//! [`toggle_style`](crate::toggle_style) at a caret writes delimiters and puts
+//! [`Formatter::toggle_style`](crate::Formatter::toggle_style) at a caret writes delimiters and puts
 //! the caret between them: a style's empty pair — `**|**` — so that what is
 //! typed next is styled, or a span's closing and opening runs — `**ab**|**c**`
 //! — so that it is not. Until something is typed there, those runs spell

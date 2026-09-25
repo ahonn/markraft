@@ -19,7 +19,7 @@
 //! of the last shaping at the same width and the same inputs are handed to it
 //! through [`Shaping::previous`], and it keeps each line whose body and
 //! surroundings it can show are unchanged; see
-//! [`crate::surface::shape_reusing`].
+//! `surface::shape::shape_reusing`.
 
 use crate::WikiResolver;
 use crate::images::Images;
@@ -39,7 +39,7 @@ struct Shaped {
     width: Pixels,
     revision: u64,
     /// Which delimiter runs stood open when the rows were shaped; see
-    /// [`crate::surface::reveal_key`].
+    /// `surface::atoms::reveal_key`.
     reveal: u64,
     lines: Vec<LayoutLine>,
 }

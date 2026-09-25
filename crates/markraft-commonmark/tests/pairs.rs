@@ -169,7 +169,7 @@ fn an_opener_writes_its_closer_after_the_caret() {
         assert_eq!(shown(&typed(&state, opener)), pair, "{opener}");
     }
     // Before whitespace or a closing bracket it pairs; before punctuation or
-    // a letter it does not, as in Typora 1.14.10.
+    // a letter it does not.
     for (source, shown_after) in [
         ("see | then", "see (a|) then"),
         ("see |) then", "see (a|)) then"),
@@ -233,7 +233,7 @@ fn an_opener_over_a_selection_wraps_it() {
         let (state, _) = editor("a ‹bc› d");
         assert_eq!(shown(&typed(&state, opener)), wrapped, "{opener}");
     }
-    // Any other character replaces the selection, as it always did.
+    // Any other character replaces the selection.
     let (state, _) = editor("a ‹bc› d");
     assert_eq!(shown(&typed(&state, "x")), "a x| d");
 }
@@ -358,7 +358,8 @@ fn a_wiki_link_opens_as_typed_for_its_menu() {
     assert_eq!(shown(&typed(&state, "[a[")), "[a[|]]");
 }
 
-/// The input rules that open with `[` still see what they always did.
+/// Pairing `[` does not hide the typed `[` from the input rules that open
+/// with it.
 #[test]
 fn a_footnote_and_a_task_type_through() {
     let (state, _) = editor("");

@@ -1,9 +1,8 @@
 //! HTML parse rules: which element becomes which schema type.
 //!
-//! The table is ProseMirror's `parseDOM` in this crate's shape — a list of
-//! (tag, optional predicate, rule) tried in order, so a narrow rule can sit in
-//! front of a general one: a `<li>` holding its own check box is a task item,
-//! and every other `<li>` is a plain one.
+//! The table is a list of (tag, optional predicate, rule) tried in order, so a
+//! narrow rule can sit in front of a general one: a `<li>` holding its own
+//! check box is a task item, and every other `<li>` is a plain one.
 //!
 //! A custom empty table passes unknown elements' children through. The preset
 //! additionally preserves unknown inline boundaries as raw primitives, and keeps

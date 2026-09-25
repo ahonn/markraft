@@ -1,21 +1,19 @@
-//! The old flat-model codec's corpus, judged the same way as the spec.
+//! A corpus of hard inputs, judged the same way as the spec.
 //!
-//! These are the inputs `markraft-core` was hardened against. Its *expectations*
-//! were written for a model where one source line was one block and do not
-//! carry over, but the inputs still exercise everything that was hard-won:
-//! escaping, entities, link destinations, code fences, emphasis flanking, the
-//! underline HTML import, CJK and emoji.
+//! The inputs exercise escaping, entities, link destinations, code fences,
+//! emphasis flanking, the underline HTML import, CJK and emoji. Only the inputs
+//! are kept: their original expectations assumed one block per source line,
+//! which this model does not.
 
 mod common;
 
 use common::{CORPUS, Codec, judge};
 
-/// Corpus entries whose HTML this codec deliberately does not reproduce, for
-/// the same reasons the spec suite lists.
+/// Corpus entries whose HTML this codec deliberately does not reproduce, each
+/// with its reason.
 const ALLOWED: &[(&str, &str)] = &[
-    // A lone `<br>` HTML block still *reads* as an empty paragraph (older
-    // Markraft files), but an empty document writes as nothing — which is how
-    // CommonMark spells an empty document.
+    // A lone `<br>` block reads as an empty paragraph (see `parse`), and an
+    // empty document writes as nothing.
     ("<br>", "an empty document writes as nothing"),
 ];
 
@@ -52,9 +50,8 @@ fn the_old_corpus_normalises_to_a_fixed_point() {
     }
 }
 
-/// The destinations the old codec round-tripped three times, to catch escapes
-/// that grow on every pass: spelled once from a link mark, then read and
-/// written again.
+/// Destinations round-tripped three times, to catch escapes that grow on
+/// every pass: spelled once from a link mark, then read and written again.
 #[test]
 fn link_destinations_survive_repeated_round_trips() {
     let codec = Codec::new();

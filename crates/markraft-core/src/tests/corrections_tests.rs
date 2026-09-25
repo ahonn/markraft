@@ -419,9 +419,6 @@ fn an_ancestor_is_told_which_nodes_a_round_reaches() {
     assert_eq!(*told_probe.lock().unwrap(), [vec![false, true]]);
 }
 
-/// A child-list correction runs for a change that crosses the boundary of one
-/// of the node's children, and not for one that stays inside a child or
-/// outside the node.
 #[test]
 fn a_child_list_correction_runs_only_when_the_children_change() {
     use crate::node::Markup;

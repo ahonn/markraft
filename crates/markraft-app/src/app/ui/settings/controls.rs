@@ -12,9 +12,9 @@ pub(super) mod metrics {
     /// The band the traffic lights sit in, with the page's name centred in it.
     pub const TITLE_HEIGHT: f32 = 30.;
     pub const TITLE_SIZE: f32 = 13.;
-    /// The row of pages under the title, the way a macOS settings window has it.
-    /// Finder's: tabs as wide as their labels, a little apart, 49pt tall, and the hairline
-    /// 88pt from the window's top.
+    /// The row of pages under the title, the way a macOS settings window has it:
+    /// tabs as wide as their labels, a little apart, 49pt tall, and the hairline 88pt
+    /// from the window's top.
     pub const TOOLBAR_PAD_BOTTOM: f32 = 9.;
     pub const TOOLBAR_GAP: f32 = 4.;
     pub const TOOLBAR_ITEM_MIN_WIDTH: f32 = 56.;
@@ -67,7 +67,7 @@ pub(super) mod metrics {
     pub const RECORDER_CLEAR: f32 = 13.;
     pub const STEPPER_VALUE_WIDTH: f32 = 44.;
 
-    /// The pop-up button and the menu it opens, measured off Finder's: a 24pt button,
+    /// The pop-up button and the menu it opens, as macOS draws them: a 24pt button,
     /// menu rows of 24pt and the labels 31pt in from the menu's edge, past the
     /// checkmark column.
     pub const SELECT_WIDTH: f32 = 180.;
@@ -88,7 +88,7 @@ pub(super) mod metrics {
 use metrics::*;
 
 /// The window's colours: AppKit's own for a settings window rather than the note's
-/// paper, read off Finder's Settings window — a white ground, one hairline under the
+/// paper, as a macOS Settings window has them — a white ground, one hairline under the
 /// toolbar, controls in a light grey fill and the system blue for what is chosen.
 #[derive(Clone, Copy)]
 pub(super) struct Palette {
@@ -105,7 +105,6 @@ pub(super) struct Palette {
     /// A keycap's fill, and a button's.
     pub fill: Hsla,
     pub pressed: Hsla,
-    /// An unticked checkbox.
     pub unchecked: Hsla,
     pub accent: Hsla,
     pub danger: Hsla,

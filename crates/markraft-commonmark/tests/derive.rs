@@ -7,7 +7,7 @@
 //! walked element by element, not the AST `derive` itself was built from.
 //!
 //! The inputs are the CommonMark 0.31.2 spec examples, the GFM table examples,
-//! the old codec's corpus, and random edits to all of them.
+//! the shared corpus of hard inputs, and random edits to all of them.
 //!
 //! # Which examples are judged
 //!
@@ -18,7 +18,7 @@
 //! block of the result is a paragraph, a heading or a table, whose inline
 //! source can be cut out of the document without knowing any container's
 //! prefixes. Everything else — lists, block quotes, code and HTML blocks,
-//! thematic breaks — holds no inline source of its own or needs the P2 parser
+//! thematic breaks — holds no inline source of its own or needs the parser
 //! to strip container prefixes, and is counted, not judged. The counts are
 //! asserted, so a change in comrak or in the rule shows up here.
 //!
@@ -49,7 +49,7 @@ struct Example {
     example: usize,
 }
 
-/// The old codec's corpus as examples, numbered from 10 000 so the numbers
+/// The shared corpus as examples, numbered from 10 000 so the numbers
 /// never meet the spec's.
 fn corpus_examples() -> Vec<Example> {
     common::CORPUS
@@ -282,7 +282,7 @@ fn derived_meaning(text: &str, derived: &Derived) -> Meaning {
     let mut line_start = true;
     for (index, character) in text.chars().enumerate() {
         // A reader removes the indentation of a paragraph's lines before it
-        // reads them, code spans included. The tree never holds it (P2's
+        // reads them, code spans included. The tree never holds it (the
         // parser strips it as comrak does), so derive leaves it as typed.
         let indentation = line_start && matches!(character, ' ' | '\t');
         line_start = character == '\n' || indentation;
@@ -768,7 +768,7 @@ fn unjudged(kind: BlockKind, markdown: &str) -> Option<&'static str> {
         let value = node.data.borrow().value.clone();
         match value {
             // In the tree these are atoms, never text; typed as text they are
-            // P2's to turn into atoms, not derive's to read.
+            // the parser's to turn into atoms, not derive's to read.
             NodeValue::Image(_) | NodeValue::WikiLink(_) => return Some("atom"),
             NodeValue::HtmlInline(_) if !html_is_read(node) => return Some("atom"),
             // comrak nests an autolink in a link's text, and an HTML reader

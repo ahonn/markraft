@@ -176,8 +176,8 @@ fn insert_node_spec(state: &EditorState, node: Node, event: &str) -> Option<Tran
 
 /// Delete `from..to`, removing containers the deletion would empty.
 ///
-/// Mirrors ProseMirror's `deleteRange`: the range is widened to whole nodes
-/// where deleting their content alone would leave a node the schema rejects.
+/// The range is widened to whole nodes where deleting their content alone
+/// would leave a node the schema rejects.
 pub fn delete_range(from: usize, to: usize) -> Command {
     command(move |state| {
         let changes = delete_range_changes(state.schema(), state.doc(), from, to);

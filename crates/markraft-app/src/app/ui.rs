@@ -74,7 +74,6 @@ enum Intent {
     Table(TableEdit),
 }
 
-/// Shared ordering and separators for the command menu, including filtered results.
 /// The shortcut shown beside an intent, wherever it is offered: the ⌘K panel,
 /// the toolbar's menus and the `/` menu all read it here, so a rebinding is
 /// one edit and the three cannot disagree. Empty for an intent without one.
@@ -117,6 +116,7 @@ fn shortcut_label(intent: &Intent) -> &'static str {
     }
 }
 
+/// Shared ordering and separators for the command menu, including filtered results.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ActionGroup {
     Notes,
@@ -2154,7 +2154,7 @@ mod shortcut_tests {
 
     #[test]
     fn the_table_gives_every_surface_the_same_labels() {
-        // The bindings the toolbar menus and the `/` menu used to spell by hand.
+        // The bindings the toolbar menus and the `/` menu show.
         assert_eq!(shortcut_label(&Intent::Block(doc::Block::Paragraph)), "⌘0");
         for level in 1..=6 {
             assert_eq!(

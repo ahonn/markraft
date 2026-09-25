@@ -123,8 +123,8 @@ fn edits_inside_syntax_the_codec_gives_no_meaning_save_exactly() {
     }
 }
 
-/// Typing a character right against the syntax, where the old guard drew its
-/// boundary, is no different from typing anywhere else.
+/// Typing a character right against the syntax is no different from typing
+/// anywhere else.
 #[test]
 fn typing_at_the_edge_of_math_anchors_and_comments_saves() {
     for (original, expected) in [
@@ -157,7 +157,7 @@ fn unchanged_callouts_of_every_form_are_byte_identical() {
         "> [!tip] Custom title\n> Body with **marks**\n",
         "> [!faq]- Folded by default\n> Body\n",
         "> [!warning]+ Expanded by default\n> Body\n",
-        "> [!custom-type] Any type is legal in Obsidian\n> Body\n",
+        "> [!custom-type] Any type is legal\n> Body\n",
         "> [!note]\n",
         ">[!note]\n>Body\n",
         "> [!note]\r\n> Body\r\n",
@@ -188,7 +188,7 @@ fn editing_a_callouts_body_leaves_its_marker_line_and_prefixes_alone() {
         "> [!note]\n>\n> old text\n",
         "> [!note]\n> - old item\n> - two\n",
         "> [!note]\n> > [!tip] Inner\n> > old body\n",
-        // Callout-looking text that is not a marker is ordinary content now.
+        // Callout-looking text that is not a marker is ordinary content.
         "> text [!note] and old\n",
         "paragraph with [!note] and old\n",
     ] {
@@ -852,8 +852,8 @@ fn toggling_a_task_box_changes_only_the_box() {
 
 /// A table edit the user asks for by shape — a column added or deleted, an
 /// alignment changed — respells the table the way the writer writes tables
-/// when its hand-written spelling cannot take the change in place, as Typora
-/// does. Only that table is rewritten.
+/// when its hand-written spelling cannot take the change in place.
+/// Only that table is rewritten.
 #[test]
 fn a_structural_edit_respells_a_hand_written_table() {
     let before = "Intro  \nwith a break\n\n|a|b|\n|-|-|\n|1|2|\n\n*  after\n";
@@ -889,7 +889,6 @@ fn a_text_edit_keeps_a_hand_written_table_spelling() {
     }
 }
 
-/// Deleting a body row of a hand-written table drops just that row's line.
 #[test]
 fn deleting_a_row_of_a_hand_written_table_drops_its_line() {
     for (original, expected) in [
@@ -1001,7 +1000,7 @@ fn an_empty_paragraph_saves_as_nothing() {
 
 /// A list item that starts with an empty paragraph and goes on — its first
 /// line emptied, or Return at the end of an item's first paragraph splitting
-/// it as Typora does — is written with its marker alone on its line and the
+/// it — is written with its marker alone on its line and the
 /// rest of the item on the lines after it, which reads back as the same item
 /// without the empty paragraph.
 #[test]
@@ -1246,8 +1245,8 @@ fn lines_added_inside_a_block_take_the_prefixes_around_them() {
     }
 }
 
-/// An item added to an ordered list numbers the items after it again, as
-/// Typora writes them, rather than leaving `1.` `1.` `2.`. A list written
+/// An item added to an ordered list numbers the items after it again,
+/// rather than leaving `1.` `1.` `2.`. A list written
 /// with one number keeps it, and a list the edit did not reach keeps the
 /// numbers the file gave it.
 #[test]

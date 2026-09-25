@@ -20,7 +20,7 @@ const EMOJI: &str = "emoji";
 /// reads from.
 ///
 /// A callout is a block quote carrying a type and a title in attributes — the
-/// shape Obsidian gave it — rather than a node type of its own, so the view
+/// shape the convention gave it — rather than a node type of its own, so the view
 /// cannot find one by node type the way it finds every other role. A host that
 /// wants callouts drawn names those two attributes here; one that leaves
 /// [`DocTypes::callout`] unset gets ordinary block quotes, whatever its
@@ -255,7 +255,7 @@ impl DocTypes {
     }
 
     /// Whether `node`, sitting in a textblock of type `parent`, is a `<br>` in
-    /// a table cell: the cell's line break, drawn as one, as Typora does,
+    /// a table cell: the cell's line break, drawn as one,
     /// rather than inline HTML shown as its source.
     pub fn is_cell_break(&self, parent: NodeTypeId, node: &Node) -> bool {
         Some(parent) == self.table_cell

@@ -212,8 +212,7 @@ pub(crate) fn callout_marker(target: ParseTarget<'_>) -> Option<crate::callout::
     let quote = target.sourcepos();
     let line = target.cx.line(quote.start.line);
     // Where the quote's content begins: past the `>` and the one space after it
-    // a reader strips. A first line indented further does not open a callout,
-    // which is what Obsidian says too.
+    // a reader strips. A first line indented further does not open a callout.
     let marker = line.as_bytes().get(quote.start.column)?;
     let content = quote.start.column + 1 + usize::from(*marker == b' ');
     let first = target.node.first_child()?;

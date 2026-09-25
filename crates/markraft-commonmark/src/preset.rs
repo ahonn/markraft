@@ -16,9 +16,8 @@
 //!   `- ---` is a run of four dashes and so a thematic break in its own right.
 //!   `***` is used in both of those places.
 //! * An empty paragraph has no CommonMark spelling: consecutive blanks are only
-//!   separators, so empty paragraphs write as nothing (like Obsidian / Typora)
-//!   and may collapse on the next read. A lone `<br>` HTML block still *reads*
-//!   as an empty paragraph so older Markraft files open cleanly.
+//!   separators, so empty paragraphs write as nothing and may collapse on the
+//!   next read. A lone `<br>` HTML block *reads* as an empty paragraph.
 //! * A code block is always fenced, with a fence longer than any run of the
 //!   fence character inside it.
 //! * A table is a pipe table whose columns are padded to a uniform display
@@ -85,7 +84,7 @@ fn text_content(node: &Node) -> String {
 }
 
 /// The CommonMark/GFM node rules, keyed by schema type name. A hard break is
-/// spelled in `house`'s [`HardBreak`](crate::HardBreak) as it is written.
+/// spelled in `house`'s [`HardBreak`] as it is written.
 pub fn commonmark_node_rules(house: &HouseStyleHandle) -> NodeRules {
     let mut rules = NodeRules::new();
     rules.insert(
@@ -96,16 +95,16 @@ pub fn commonmark_node_rules(house: &HouseStyleHandle) -> NodeRules {
         md::PARAGRAPH.to_string(),
         rule(|state, node, parent, index| {
             // Empty paragraphs have no CommonMark spelling. Writing a `<br>` HTML
-            // block would be a Markraft-only encoding; leave them blank like
-            // Obsidian and Typora. A sole empty container (empty list item, empty
-            // quote, empty document) already writes as nothing via close_block.
+            // block would be a Markraft-only encoding; leave them blank. A sole
+            // empty container (empty list item, empty quote, empty document)
+            // already writes as nothing via close_block.
             if node.content_size() > 0 {
                 state.render_inline(node);
                 state.close_block(node);
                 return;
             }
             // One opening an item that goes on — Return at the end of an item's
-            // first paragraph, which splits the item as Typora does — leaves the
+            // first paragraph, which splits the item — leaves the
             // marker alone on its line and the item's next block on the line
             // after it: an item may open on an empty line, but a marker and a
             // blank line end it.
@@ -212,7 +211,7 @@ pub fn commonmark_node_rules(house: &HouseStyleHandle) -> NodeRules {
 
 /// The spelling of a thematic break that reads as one where it sits.
 ///
-/// A break keeps the character it was written with, as Typora does: `___`
+/// A break keeps the character it was written with: `___`
 /// reads as a break anywhere, and `***` does except after a `*` list marker,
 /// where the line is four stars — a break of its own — and `---` is written.
 /// For a break of dashes `---` is the usual spelling, and the one already in

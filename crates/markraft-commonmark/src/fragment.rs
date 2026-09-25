@@ -25,7 +25,7 @@ use crate::fit::{fit, fit_document};
 /// A fragment that is a single textblock is open on both sides: it has no
 /// block of its own to contribute, so its inline content merges into the one
 /// the caret sits in. Of several blocks, a plain paragraph at either end is
-/// open on its side, as it is in Typora: two paragraphs pasted in the middle
+/// open on its side: two paragraphs pasted in the middle
 /// of a third carry on the text before the caret and the text after it,
 /// rather than standing between them as paragraphs of their own. Every other
 /// end is closed, because its block *is* the content — a heading pasted in
@@ -87,8 +87,8 @@ pub(crate) fn close(schema: &Schema, slice: &Slice) -> Option<Node> {
 /// is a paragraph.
 ///
 /// A reader strips a paragraph's leading whitespace too, and pasting
-/// ` and more` after `this` has to keep the space between them, as Typora
-/// does. Before any other block the whitespace was indentation, not text.
+/// ` and more` after `this` has to keep the space between them. Before any
+/// other block the whitespace was indentation, not text.
 pub(crate) fn prepend_leading(schema: &Schema, node: &Node, whitespace: &str) -> Node {
     let paragraph = schema.node_id(crate::schema::PARAGRAPH);
     let Some(first) = node.maybe_child(0) else {

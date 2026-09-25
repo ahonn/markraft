@@ -4,7 +4,7 @@
 //! Vertical motion and "to the start of the visual line" are deliberately
 //! absent: where a line wraps is a layout decision, and this crate has no
 //! layout. A view implements those on top of
-//! [`Projection`](crate::projection::Projection).
+//! [`Projection`].
 
 use crate::projection::{Projection, projection_of};
 use crate::selection::Selection;

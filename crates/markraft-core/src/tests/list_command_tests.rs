@@ -1,4 +1,4 @@
-//! The list commands, and the key bindings the old core's behaviour describes.
+//! The list commands, and the key bindings built on them.
 
 use crate::attr::Attrs;
 use crate::commands::*;

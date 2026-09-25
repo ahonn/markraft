@@ -423,7 +423,6 @@ fn deleting_an_escape_backslash_makes_the_style() {
     assert_saves(&codec, &state, "*a*");
 }
 
-/// An edit elsewhere in the block leaves an escaped span alone.
 #[test]
 fn an_escaped_span_survives_an_edit_beside_it() {
     let codec = Codec::new();

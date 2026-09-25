@@ -102,7 +102,6 @@ pub fn na(
     schema.node_with(name, attrs, content).expect("valid node")
 }
 
-/// Build a document.
 pub fn doc(schema: &Schema, content: impl IntoIterator<Item = Node>) -> Node {
     schema.doc(content).expect("valid document")
 }
@@ -123,14 +122,12 @@ pub fn m(schema: &Schema, name: &str) -> Mark {
     schema.mark(name, Attrs::empty()).expect("known mark")
 }
 
-/// A link mark.
 pub fn link(schema: &Schema, href: &str) -> Mark {
     schema
         .mark("link", crate::attrs! {"href" => href})
         .expect("known mark")
 }
 
-/// An image leaf.
 pub fn img(schema: &Schema, src: &str) -> Node {
     na(schema, "image", crate::attrs! {"src" => src}, [])
 }
@@ -204,7 +201,6 @@ impl Rng {
         self.below(n) == 0
     }
 
-    /// Pick one element.
     pub fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
         &items[self.below(items.len())]
     }

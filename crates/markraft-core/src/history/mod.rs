@@ -45,29 +45,19 @@
 //!
 //! A transaction carrying [`restore_fields_from`] puts the history back to the
 //! value it had in the carried state, open groups and composition grouping
-//! included, instead of recording anything. Cancelling a composition uses it to
-//! forget the entries the composition's own transactions grew.
+//! included, instead of recording anything; see
+//! [`cancel_composition`](crate::composition::cancel_composition).
 //!
 //! # Transactions the history should not record
 //!
 //! A transaction annotated
-//! [`add_to_history(false)`](crate::protocol::add_to_history) is not recorded. When it changes the document, every stored entry is rebased
-//! over it instead, so an undo after a remote edit still applies. Only the top
+//! [`add_to_history(false)`](crate::protocol::add_to_history) is not recorded.
+//! When it changes the document, every stored entry is rebased over it
+//! instead, so an undo after a remote edit still applies. Only the top
 //! entry of each branch is rebased eagerly; what the rest still owe is carried
 //! with that entry and paid when it is popped. An entry that cannot be rebased
 //! empties both branches, and [`history_lost`] reports it for the state that
 //! transaction produced.
-//!
-//! # Relation to the old core
-//!
-//! The previous implementation tagged edits with an `Origin` enum and grouped
-//! by an explicit token plus "the selection and typing marks are unchanged".
-//! That maps onto user events and adjacency: `Typed` is `input.type`,
-//! `Composition` is `input.type.compose`, `Paste` is `input.paste`, `History`
-//! is `undo`/`redo` with `add_to_history: false`, `Command` is no user event at
-//! all, and `Extension(name)` is the [`origin`](crate::protocol::origin)
-//! annotation. The old "a block kind changed, so start a new entry" guard
-//! becomes [`isolate_history`] at the site that performs the conversion.
 
 mod json;
 mod state;

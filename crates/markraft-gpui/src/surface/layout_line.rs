@@ -305,8 +305,8 @@ pub(crate) struct LayoutLine {
     /// inside the item it opens — a quote, a code panel — so the item's marker
     /// stands left of them rather than on them.
     pub(super) marker_inset: Pixels,
-    /// The picture a line spelling one out draws under its text, as Typora
-    /// keeps a picture in view while the caret edits its source.
+    /// The picture a line spelling one out draws under its text, keeping
+    /// the picture in view while the caret edits its source.
     pub(super) preview: Option<(Arc<RenderImage>, Size<Pixels>)>,
     /// How far left of the text each quote the line sits in draws its bar,
     /// outermost first. See [`quote_bar_distances`].
@@ -627,7 +627,7 @@ impl LayoutLine {
 
     /// [`LayoutLine::to_source`], except at the very end of the line's text: a
     /// point there — a click past the last word, ⌘→ — goes past the markup
-    /// that closes the line too, as Typora puts it, so what is typed next
+    /// that closes the line too, so what is typed next
     /// carries on after a bold or a code span rather than inside it.
     pub(super) fn source_at(&self, display: usize) -> usize {
         if display >= self.to_display(self.char_len) {

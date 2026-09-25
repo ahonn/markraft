@@ -14,9 +14,8 @@
 //! # Inline content is source
 //!
 //! A [`PARAGRAPH`]'s, a [`HEADING`]'s and a [`TABLE_CELL`]'s text *is* its
-//! Markdown inline source — delimiters, backslash escapes, entities and HTML
-//! tags included — exactly as a reader sees it once the block's own prefixes
-//! are stripped. Each line ending is one [`LINE_BREAK`] atom; a hard break's
+//! Markdown inline source (see the [crate docs](crate)), as a reader sees it
+//! once the block's own prefixes are stripped. Each line ending is one [`LINE_BREAK`] atom; a hard break's
 //! spelling (`\`, trailing spaces or `<br>`) is ordinary text before it.
 //! What the tree holds as an atom rather than as text is what a reader never
 //! shows as its characters: an [`IMAGE`], a [`WIKI_LINK`], a [`RAW_INLINE`]
@@ -66,10 +65,10 @@
 //! A [`TASK_ITEM`] is the exception, because its check box is written at the
 //! start of its first block's line: an item whose first block is a nested
 //! list or a fence has nowhere to write `[x]` and is not a task item at all.
-//! GFM only reads a box before a paragraph; Typora also reads one before a
-//! heading or a quote, `- [ ] # title` and `- [ ] > quote`, and writes those
-//! when a task's line is made one, so this editor reads and writes them the
-//! same way — [`parse_ast`](crate::parse::parse_ast) does the reading. Its
+//! GFM only reads a box before a paragraph; this editor also reads one before
+//! a heading or a quote, `- [ ] # title` and `- [ ] > quote`, and writes those
+//! when a task's line is made one — `parse_ast`
+//! does the reading. Its
 //! content rule says `(paragraph | heading | blockquote) block*` so the tree
 //! cannot describe something the format cannot write.
 //!
@@ -86,9 +85,9 @@
 //! table's `alignments` attribute for the same reason: one place to read it,
 //! and no row can disagree with it.
 //!
-//! [`TABLE`] and [`TABLE_CELL`] are `isolating`, as they are in ProseMirror: a
-//! deletion at a cell boundary must not merge two cells, and a table's
-//! structure is not something the text around it may dissolve.
+//! [`TABLE`] and [`TABLE_CELL`] are `isolating`: a deletion at a cell boundary
+//! must not merge two cells, and a table's structure is not something the text
+//! around it may dissolve.
 
 use markraft_core::kind::{
     CODE_BLOCK_LANGUAGE_ATTR, HEADING_LEVEL_ATTR, LINK_HREF_ATTR, SYNTAX_DISPLAY_ATTR,
@@ -102,8 +101,8 @@ use markraft_core::{
 pub const DOC: &str = "doc";
 /// A paragraph: `(inline | line_break)*`. A paragraph with no content is an *empty
 /// paragraph*. CommonMark has no spelling for those; they write as blank
-/// separators (and may collapse on re-read). A lone `<br>` HTML block still
-/// imports as an empty paragraph for older files.
+/// separators (and may collapse on re-read). A lone `<br>` HTML block reads as
+/// one.
 pub const PARAGRAPH: &str = "paragraph";
 /// An ATX or setext heading: `(inline | line_break)*`, attribute `level`
 /// (`Int`, 1..=6, default 1). Written ATX, or setext when a level 1 or 2
@@ -112,7 +111,7 @@ pub const HEADING: &str = "heading";
 /// A block quote: `block+`.
 ///
 /// Attributes, all empty on an ordinary quote:
-/// * `callout` (`Str`, default `""`) — an Obsidian callout's type, exactly as
+/// * `callout` (`Str`, default `""`) — a callout's type, exactly as
 ///   written. A non-empty value is what makes the quote a callout.
 /// * `fold` (`Str`, default `""`) — `"-"` or `"+"`, the fold marker after the
 ///   type. Kept as a byte; this codec always shows the content.
@@ -127,7 +126,7 @@ pub const BLOCKQUOTE: &str = "blockquote";
 /// the label as written between `[^` and `]`. Written `[^label]: ` before its
 /// first line, with its other lines indented four columns, where the source
 /// had it: comrak moves every definition to the end of the document, and
-/// [`parse_ast`](crate::parse::parse_ast) puts each back.
+/// `parse_ast` puts each back.
 ///
 /// A reference is text, `[^label]`, read as [`FOOTNOTE_REFERENCE`] against
 /// the definitions the document holds.
@@ -220,7 +219,7 @@ pub const LINE_BREAK: &str = "line_break";
 /// One CommonMark inline HTML primitive, retained in the `source` attribute.
 /// It is an editable/selectable atom; its source is never interpreted as text.
 pub const RAW_INLINE: &str = "raw_inline";
-/// An Obsidian-style wiki link: an inline atom with `target` (`Str`,
+/// A wiki link: an inline atom with `target` (`Str`,
 /// required), `alias` (`Str`, default `""`) and `embed` (`Bool`, default
 /// `false`).
 ///
@@ -232,10 +231,10 @@ pub const RAW_INLINE: &str = "raw_inline";
 /// It is an *atom* rather than a mark for three reasons: the source has to
 /// round-trip verbatim, `[[Note]]` has no display text apart from its target to
 /// edit, and what stands inside the brackets — a heading, a block id, an image
-/// size — is Obsidian's sub-syntax, which this codec never interprets.
+/// size — is the link's own sub-syntax, which this codec never interprets.
 /// [`crate::wiki`] says which spellings are read as one.
 pub const WIKI_LINK: &str = "wiki_link";
-/// A GitHub emoji shortcode, `:smile:`: an inline atom with `code` (`Str`,
+/// An emoji shortcode, `:smile:`: an inline atom with `code` (`Str`,
 /// required), the name between the colons, written back as `:code:`.
 /// [`crate::shortcode`] says which spellings are read as one.
 pub const EMOJI: &str = "emoji";
@@ -256,7 +255,7 @@ pub const HIGHLIGHT: &str = "highlight";
 /// Superscript: `^…^`, or a paired `<sup>`…`</sup>`.
 pub const SUPERSCRIPT: &str = "superscript";
 /// Subscript: `~…~`, or a paired `<sub>`…`</sub>`. A single tilde is
-/// subscript and a double one strikethrough, as Typora reads them.
+/// subscript and a double one strikethrough.
 pub const SUBSCRIPT: &str = "subscript";
 /// A code span.
 pub const CODE: &str = "code";

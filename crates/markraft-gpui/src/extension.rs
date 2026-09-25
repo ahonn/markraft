@@ -256,7 +256,7 @@ impl<'a> EditorCx<'a> {
         self.view.projection()
     }
     /// Which of the schema's types play the roles the editor knows about, as
-    /// the host configured them. The [`commands`](crate::commands) take it.
+    /// the host configured them. The [`commands`](markraft_core::commands) take it.
     pub fn types(&self) -> &crate::DocTypes {
         &self.view.types
     }
@@ -351,7 +351,7 @@ impl<'a> EditorCx<'a> {
     }
     /// Move the caret `rows` visual rows, negative for up, keeping the column it started
     /// from the way ↑ and ↓ do — and doing what they do at a block's lower edge, see
-    /// [`EditorView::vertical_target`]. `false` before the first paint, when no layout
+    /// `EditorView::vertical_target`. `false` before the first paint, when no layout
     /// exists, and while composing.
     pub fn move_visual_rows(&mut self, rows: isize, extend: bool) -> bool {
         if self.view.is_composing() {

@@ -203,13 +203,11 @@ impl MarkraftApp {
     pub(super) fn set_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
         self.leave_input(cx);
         self.interaction.switch_panel(panel);
-        self.picker.forget_question();
     }
 
     pub(super) fn show_popover(&mut self, popover: Popover, cx: &mut Context<Self>) {
         self.leave_input(cx);
         self.interaction.open(&self.library.active_id, popover);
-        self.picker.forget_question();
     }
 
     pub(super) fn close_popover(&mut self, cx: &mut Context<Self>) -> bool {

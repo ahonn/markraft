@@ -198,8 +198,8 @@ fn nested_styles_come_off_one_at_a_time() {
     assert_eq!(selected_text(&codec, &outer), "a b c");
 }
 
-/// Emphasis taken off the middle of a span goes from the whole span, as in
-/// Typora 1.14.10, and only that style: an inner span leaves the outer one.
+/// Emphasis taken off the middle of a span goes from the whole span,
+/// and only that style: an inner span leaves the outer one.
 #[test]
 fn toggling_off_the_middle_of_a_span_takes_the_whole_span() {
     let codec = Codec::new();
@@ -237,7 +237,7 @@ fn code_around_a_backtick_takes_a_longer_fence() {
     assert_eq!(html(&written(&codec, &plain)), html("x a\\`b y"));
 }
 
-/// Strong over part of a code span does nothing, as in Typora 1.14.10:
+/// Strong over part of a code span does nothing:
 /// putting it there would cut the literal text in two.
 #[test]
 fn strong_over_part_of_a_code_span_does_nothing() {
@@ -327,7 +327,7 @@ fn a_cursor_toggle_leaves_a_pair_to_type_into() {
 }
 
 /// A cursor toggle in a word — at its start, inside it or at its end — puts
-/// the style on the whole word, as Typora does, and the caret stays where it
+/// the style on the whole word, and the caret stays where it
 /// was in it. A word is a run of letters and digits, a `.` between digits
 /// included, or a run of CJK characters; the word before the caret wins.
 #[test]
@@ -389,8 +389,7 @@ fn undone(state: &EditorState) -> EditorState {
     state.update([spec]).expect("undo applies").state().clone()
 }
 
-/// The paragraph the device report started from, after one above it, with
-/// the caret at its end.
+/// A paragraph after one above it, with the caret at its end.
 fn two_paragraphs(codec: &Codec) -> EditorState {
     editor(codec, "one\n\nPara four echo.", Selection::cursor(21))
 }
@@ -476,7 +475,7 @@ fn typing_in_the_pair_keeps_it() {
     assert_saves(&codec, &up, "one\n\nPara four echo.**7**");
 }
 
-/// The sequence from the device report — ⌘B, `7`, ⌘B, `8`, ↑ — writes a bold
+/// The sequence ⌘B, `7`, ⌘B, `8`, ↑ writes a bold
 /// `7` and a plain `8`, and no pair after them.
 #[test]
 fn a_second_toggle_after_typing_steps_out_of_the_span() {
@@ -834,7 +833,7 @@ fn every_delimited_style_pairs_at_a_caret() {
 
 /// Anywhere inside a span — at either edge of its content, strictly inside it,
 /// or right after its closing run — the toggle takes the style off the whole
-/// span, as Typora does, the caret staying where it was in the text.
+/// span, the caret staying where it was in the text.
 #[test]
 fn inside_a_span_the_toggle_takes_its_style_off_the_whole_span() {
     let codec = Codec::new();
@@ -849,7 +848,7 @@ fn inside_a_span_the_toggle_takes_its_style_off_the_whole_span() {
 
 /// ⌘B, text, ⌘B types the text bold and goes on plain: at the end of what was
 /// typed in the pair the toggle wrote, the toggle steps out of it rather than
-/// taking the style off. The device report's sequence, kept over Typora's.
+/// taking the style off as it does elsewhere in a span.
 #[test]
 fn at_the_end_of_a_pair_just_typed_in_the_toggle_steps_out() {
     let codec = Codec::new();
@@ -1148,7 +1147,6 @@ fn enter_at_the_start_of_a_span_moves_it_whole() {
     assert_eq!(block_source(&split, 1), "**bc**");
 }
 
-/// Outside any style Enter is a plain split.
 #[test]
 fn enter_outside_a_style_is_a_plain_split() {
     let codec = Codec::new();

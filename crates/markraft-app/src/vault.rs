@@ -1362,7 +1362,6 @@ mod tests {
     #[test]
     fn a_removal_the_window_reported_is_not_repeated_at_launch() {
         let root = tempfile::tempdir().unwrap();
-        // Stem matches the title so a pin-only save does not rename the file.
         let _path = fixture(root.path(), "text.md", b"text");
         let (mut store, mut library) = open(root.path());
         let id = library.active_id.clone();
@@ -1398,7 +1397,6 @@ mod tests {
     #[test]
     fn opening_and_pinning_do_not_touch_user_files() {
         let root = tempfile::tempdir().unwrap();
-        // Filename already matches the title so pinning alone does not rename.
         let path = fixture(
             root.path(),
             "nested/Title.md",
@@ -1429,9 +1427,8 @@ mod tests {
         );
         let (mut store, mut library) = open(root.path());
         let id = library.active_id.clone();
-        // Keep the title line so the stem stays put; only a word of the body
-        // changes. The reference link and its definition are text and a block
-        // of the document, and are written back as they were.
+        // Only a word of the body changes. The reference link and its definition
+        // are text and a block of the document, and are written back as they were.
         library.set_document(
             &id,
             doc::from_markdown("Keep This Name\n\nchanged [site][s]\n\n[s]: https://example.com"),
@@ -1706,7 +1703,6 @@ mod tests {
     #[test]
     fn undo_after_save_restores_original_source() {
         let root = tempfile::tempdir().unwrap();
-        // Stem matches the title so undoing does not fight an automatic rename.
         let path = fixture(root.path(), "Title.md", b"Title\n=====\n\noriginal\n\n");
         let (mut store, mut library) = open(root.path());
         let id = library.active_id.clone();

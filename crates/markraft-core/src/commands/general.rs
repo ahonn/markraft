@@ -1,9 +1,9 @@
 //! Deleting, joining and selecting.
 //!
-//! These are the commands a backspace, delete or navigation key binds to. They
-//! follow `prosemirror-commands`, with one deliberate difference: everything is
-//! expressed as token-level changes in one change set, so a command that both
-//! deletes and re-shapes the tree stays a single, invertible edit.
+//! These are the commands a backspace, delete or navigation key binds to.
+//! Everything is expressed as token-level changes in one change set, so a
+//! command that both deletes and re-shapes the tree stays a single, invertible
+//! edit.
 
 use crate::change::Change;
 use crate::fit::Fit;
@@ -194,7 +194,7 @@ fn join_textblocks_around(state: &EditorState, cut: usize, event: &str) -> Optio
 
 /// The heart of [`join_backward`]/[`join_forward`]: remove the boundary at
 /// `cut`, choosing between joining, unwrapping, lifting and merging
-/// textblocks — in that order, as ProseMirror's `deleteBarrier` does.
+/// textblocks, trying them in that order.
 fn delete_barrier(
     state: &EditorState,
     cut: usize,

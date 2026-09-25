@@ -99,8 +99,6 @@ fn relative_url(parent: &Path, path: &Path) -> Result<String, String> {
     Ok(encoded)
 }
 
-/// Write assets before returning their references. A partial failure leaves files
-/// intact: another application may already have discovered or referenced them.
 /// The Markdown to insert, and where each image ended up relative to the note. A
 /// caller that can no longer insert the Markdown still has to be able to say what
 /// is now on disk.
@@ -151,6 +149,8 @@ fn time_stamp(local_milliseconds: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}.{minute:02}.{second:02}")
 }
 
+/// Write assets before returning their references. A partial failure leaves files
+/// intact: another application may already have discovered or referenced them.
 pub(super) fn insert(
     assets: Vec<Asset>,
     document: &Path,
@@ -238,8 +238,9 @@ pub(super) fn insert(
     })
 }
 
-/// Read the supported scalar form of Typora's image-preview root from actual
-/// front matter. Never use body text or nested metadata as application settings.
+/// Read the supported scalar form of the `typora-root-url` image-preview root
+/// from actual front matter. Never use body text or nested metadata as
+/// application settings.
 /// This intentionally is not a general YAML parser: unsupported values are
 /// explicit diagnostics, so the caller can disable ambiguous image previews.
 pub(super) fn image_root(source: &str, document: &Path) -> Result<Option<PathBuf>, String> {

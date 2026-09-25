@@ -18,8 +18,8 @@ pub(crate) struct ShapeInput<'a> {
     /// How the host's kind spells the parts of itself a focused line shows as
     /// source. Without it a line is drawn the same focused or not.
     pub spelling: Option<&'a dyn markraft_core::kind::SourceSpelling>,
-    /// Document selection range, which is what reveals a syntax run. Inclusive
-    /// of both ends in the ProseMirror sense (`from`..`to`).
+    /// Document selection range, which is what reveals a syntax run: a caret
+    /// reveals a run it touches at either edge, a range one it overlaps.
     pub selection: Range<usize>,
     /// An input method's marked range, which reveals delimiters the way the
     /// selection does.
@@ -398,7 +398,7 @@ pub(super) fn shape_line(
     } else {
         px(0.)
     };
-    // Typora's language box, as a tag: the block's language as written, or
+    // The language box, as a tag: the block's language as written, or
     // what the language picker calls none.
     let code_language = (code && focused).then(|| {
         let language = line

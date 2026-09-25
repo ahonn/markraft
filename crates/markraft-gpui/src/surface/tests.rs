@@ -90,7 +90,7 @@ fn popovers_anchor_all_selection_at_the_first_content_row() {
     assert!(super::selection_anchor_row(&rows, outside, outside + 2).is_none());
 }
 
-/// The document the live session ended with: every shape that makes a row
+/// A fixture holding every shape that makes a row
 /// stand for something other than one plain paragraph — a multi-row code
 /// block, a leaf block with no text, an empty paragraph — followed by the
 /// line holding the caret.
@@ -155,9 +155,8 @@ fn exactly_one_row_holds_any_caret_position() {
     }
 }
 
-/// The bug the live smoke test found: the caret on the document's last line
-/// was painted five rows above it. The row that draws it is the one whose
-/// own range holds the caret, so it can only ever be the right one.
+/// The row that draws the caret on the document's last line is the one whose
+/// own range holds it, never a row further up.
 #[test]
 fn the_caret_on_the_last_line_belongs_to_the_last_row() {
     let rows = rows_of(SHAPE);
@@ -254,9 +253,8 @@ fn decorations_of(source: &str, style: &EditorStyle) -> Vec<Option<Decoration>> 
     })
 }
 
-/// The tight list gap belongs between a list's own lines. The block that
-/// closes one used to inherit it, which left a quote or paragraph sitting
-/// against the last item.
+/// Whatever kind of block follows a list, it is spaced off the last item by
+/// the ordinary gap.
 #[test]
 fn a_list_closes_with_the_ordinary_block_gap() {
     let style = spaced_style();
@@ -627,7 +625,7 @@ fn emphasis_in_the_rounded_face_is_set_in_one_with_an_italic() {
     assert_eq!(emphasis.font.style, gpui::FontStyle::Italic);
 }
 
-/// Link definitions are drawn as Typora draws them: in the prose face, the
+/// Link definitions are drawn in the prose face, the
 /// label bold and the destination underlined. Other raw source stays
 /// monospaced.
 #[test]
@@ -937,7 +935,7 @@ fn a_local_file_is_decoded_and_fitted_to_the_column() {
 }
 
 /// A caret let into a picture's source finds it spelled out as the line's
-/// text, with the picture still drawn under it — as in Typora — and the
+/// text, with the picture still drawn under it, and the
 /// line tall enough for both.
 #[test]
 fn a_picture_stays_in_view_under_its_spelled_out_source() {
@@ -1152,7 +1150,7 @@ fn a_point_inside_source_shown_as_text_finds_how_far_in_it_is() {
     assert_eq!(line.source_text_in(14), Some((8, "</kbd>".to_owned(), 2)));
 }
 
-/// A `<br>` in a table cell is the cell's line break, as Typora draws it:
+/// A `<br>` in a table cell is the cell's line break:
 /// the cell's text goes on in a row of its own. Anywhere else the tag is
 /// source like any other inline HTML.
 #[test]
@@ -1666,9 +1664,7 @@ fn the_cells_of_one_row_offer_the_arrow_keys_a_single_visual_row() {
     assert_eq!(merge_row_centers(Vec::new()), Vec::<Pixels>::new());
 }
 
-/// A table is one block: only the cell that closes the grid is spaced off
-/// what follows it, and the block before it opens the gap any pair of
-/// blocks gets plus the row the table keeps for its toolbar.
+/// The gap above a table also holds the row the table keeps for its toolbar.
 #[test]
 fn a_table_is_one_block_whose_cells_sit_tight() {
     let style = spaced_style();
@@ -1702,10 +1698,8 @@ fn markers_of(source: &str) -> Vec<Option<&'static str>> {
         .collect()
 }
 
-/// A container inside a list item is not a second start of that item. The
-/// marker used to be attached to the first block of whatever held the line,
-/// which drew a check box beside a nested quote and one beside every row of
-/// a nested table.
+/// A container inside a list item is not a second start of that item: neither
+/// a nested quote nor the rows of a nested table draw the item's marker.
 #[test]
 fn only_an_items_very_first_line_carries_its_marker() {
     assert_eq!(
@@ -1716,7 +1710,7 @@ fn only_an_items_very_first_line_carries_its_marker() {
     assert_eq!(
         markers_of("- item\n\n  | a | b |\n  | - | - |\n  | c | d |\n"),
         vec![Some("bullet"), None, None, None, None],
-        "every cell of the nested table used to start the item again"
+        "no cell of the nested table starts the item again"
     );
     // Two items still get one marker each, and a nested list its own.
     assert_eq!(
@@ -1996,7 +1990,7 @@ fn the_caret_never_swaps_a_marker_for_its_spelling() {
     let rows = shape(&input, px(400.), &text);
     assert!(
         rows[0].marker.is_none(),
-        "a focused heading shows no hashes, as in Typora"
+        "a focused heading shows no hashes"
     );
     // Caret in the bullet item.
     let bullet_pos = projection.lines()[1].from();
@@ -2007,7 +2001,7 @@ fn the_caret_never_swaps_a_marker_for_its_spelling() {
     let rows = shape(&input, px(400.), &text);
     assert!(
         matches!(rows[1].marker, Some(Marker::Bullet { .. })),
-        "a focused bullet stays a drawn marker, as in Typora"
+        "a focused bullet stays a drawn marker"
     );
     let ordered_pos = projection.lines()[2].from();
     let rows = shape(
@@ -2141,7 +2135,7 @@ fn a_focused_code_block_tags_its_language_inside_its_panel() {
 }
 
 /// A quote draws its bar and nothing else wherever the caret is: no `>`
-/// beside it, as in Typora.
+/// beside it.
 #[test]
 fn a_focused_quote_draws_as_it_does_unfocused() {
     let text = text_system();

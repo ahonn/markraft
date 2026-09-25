@@ -214,9 +214,11 @@ pub fn from_markdown(source: &str) -> Node {
     markraft_commonmark::from_markdown(schema(), source).unwrap_or_else(|_| empty())
 }
 
-/// `doc` as Markdown in the default house style: what the file path and the
-/// tests, which have no preference to follow, write. A hard break not yet in
-/// the text is the one thing the style decides here.
+/// `doc` as Markdown in the default house style, for the tests, which have no
+/// preference to follow. The app spells with its own style through
+/// [`to_markdown_in`]. A hard break not yet in the text is the one thing the
+/// style decides here.
+#[cfg(test)]
 pub fn to_markdown(doc: &Node) -> String {
     markraft_commonmark::to_markdown(schema(), doc)
 }
@@ -383,7 +385,7 @@ pub enum Block {
     Paragraph,
     Heading(u8),
     Quote,
-    /// An Obsidian callout, which is a quote carrying a type. The interface
+    /// A callout, which is a quote carrying a type. The interface
     /// offers the default `note`; changing an existing one's type, fold or
     /// title is not something v1 does.
     Callout,

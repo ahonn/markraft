@@ -411,7 +411,6 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let notes = root.path().join("notes");
         std::fs::create_dir_all(&notes).unwrap();
-        // Title line matches the stem so respelling links does not rename the file.
         let source = "---\r\ntags: [a]\r\n---\r\n\r\nIndex\r\n\r\nSee   [[Old#H|the old one]] and *this*.\r\n\r\n* item ![[Old]]\r\n";
         std::fs::write(notes.join("Index.md"), source).unwrap();
         let (mut store, mut library) =

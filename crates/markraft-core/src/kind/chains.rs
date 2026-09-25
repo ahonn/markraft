@@ -5,15 +5,14 @@
 //! [`commands`](crate::commands) catalogue below it never does; the chains
 //! are built on that catalogue and pick from it by the roles a kind fills.
 //!
-//! The chains mirror ProseMirror's base and list keymaps, with the departures
-//! the editor's own tests describe, each of them what Typora does: Backspace
-//! at the start of a list item joins it to the item before — or, first in a
-//! nested list, to the item the list is in — and in a top-level list's first
-//! item outdents before it lifts; Backspace at the start of a block after a
-//! list or a quote, and Delete at the end of any textblock, join the two
-//! textblocks' text wherever they sit; Enter in an empty list item leaves the
-//! list; and Backspace in an empty verbatim block turns it into a paragraph —
-//! or, for a raw block after another block, deletes it.
+//! Besides the usual base and list bindings, the chains settle these cases:
+//! Backspace at the start of a list item joins it to the item before — or,
+//! first in a nested list, to the item the list is in — and in a top-level
+//! list's first item outdents before it lifts; Backspace at the start of a
+//! block after a list or a quote, and Delete at the end of any textblock, join
+//! the two textblocks' text wherever they sit; Enter in an empty list item
+//! leaves the list; and Backspace in an empty verbatim block turns it into a
+//! paragraph — or, for a raw block after another block, deletes it.
 
 use std::ops::Range;
 
@@ -240,7 +239,7 @@ pub fn line_break(types: &DocTypes, kind: &dyn DocumentKind) -> Command {
 }
 
 /// Shift-Return in a table cell: a GFM row is one line, so the cell's line
-/// break is the HTML `<br />`, as Typora writes it, drawn as a break.
+/// break is the HTML `<br />`, drawn as a break.
 fn cell_break(types: &DocTypes) -> Option<Command> {
     let raw = types.raw_inline?;
     let types = types.clone();
@@ -267,7 +266,7 @@ fn cell_break(types: &DocTypes) -> Option<Command> {
 /// A new line in a verbatim block, starting with the spaces and tabs the line
 /// it splits starts with — no more than lie before the caret — so code goes on
 /// at the depth it was at. The spaces and tabs right after a caret go, as a
-/// code editor and Typora drop them: split inside an indent, the new line
+/// code editor drops them: split inside an indent, the new line
 /// starts at its text.
 fn new_line_keeping_indent() -> Command {
     command(|state| {
@@ -343,7 +342,7 @@ fn clear_empty_verbatim(types: &DocTypes) -> Command {
 }
 
 /// Backspace at the start of a list item that has an item before it: join the
-/// item to that one, its blocks carrying on the item before as Typora does,
+/// item to that one, its blocks carrying on the item before,
 /// rather than lifting it out of the list. An empty item joins the same way,
 /// leaving an empty paragraph in the item before for what is typed next. The
 /// first item of a list nested in an item joins that item, the rest of the
@@ -392,7 +391,7 @@ fn prose_textblock_near(types: &DocTypes, state: &EditorState, pos: usize, dir: 
 }
 
 /// Backspace at the start of a textblock right after a list or a quote: its
-/// text carries on the last textblock inside them, as Typora does, rather
+/// text carries on the last textblock inside them, rather
 /// than the block moving into the list as an item or into the quote.
 fn join_text_after_wrapper(types: &DocTypes) -> Command {
     let types = types.clone();
@@ -415,7 +414,7 @@ fn join_text_after_wrapper(types: &DocTypes) -> Command {
 }
 
 /// `command`, unless the caret ends a textblock that a code block or a table
-/// follows. Delete there does nothing, as in Typora: joining would pull the
+/// follows. Delete there does nothing: joining would pull the
 /// block's text into the paragraph, or the paragraph's into a cell.
 fn stop_before_kept_text(types: &DocTypes, command: Command) -> Command {
     let types = types.clone();
@@ -431,8 +430,8 @@ fn stop_before_kept_text(types: &DocTypes, command: Command) -> Command {
 
 /// Delete at the end of a textblock: the text of the next textblock carries
 /// on this one wherever it sits — the next item, a nested list's first item,
-/// the first item of a list after a paragraph, a paragraph after a list — as
-/// Typora does. A verbatim block on either side keeps its text to itself.
+/// the first item of a list after a paragraph, a paragraph after a list.
+/// A verbatim block on either side keeps its text to itself.
 fn join_text_forward(types: &DocTypes) -> Command {
     let types = types.clone();
     let join = join_textblock_forward();
@@ -449,9 +448,9 @@ fn join_text_forward(types: &DocTypes) -> Command {
 }
 
 /// Backspace at the start of a textblock right after a leaf block — a divider
-/// — or Delete at the end of one right before it: take the leaf at once, as
-/// Typora does, rather than selecting it for a second press. Delete then
-/// carries the next textblock's text on this one, as it does in Typora.
+/// — or Delete at the end of one right before it: take the leaf at once,
+/// rather than selecting it for a second press. Delete then carries the next
+/// textblock's text on this one.
 fn take_leaf_block(types: &DocTypes, dir: Direction) -> Command {
     let types = types.clone();
     command(move |state| {
@@ -482,7 +481,7 @@ fn take_leaf_block(types: &DocTypes, dir: Direction) -> Command {
 }
 
 /// Backspace at the start of a paragraph right after a table: its text carries
-/// on the table's last cell, as Typora does, and the caret stays at the seam.
+/// on the table's last cell, and the caret stays at the seam.
 /// A paragraph holding a line break stays where it is, since a cell's row holds
 /// one line.
 fn join_into_table_after(types: &DocTypes) -> Command {
@@ -539,7 +538,7 @@ pub fn backspace(types: &DocTypes) -> Command {
         // A shortcut inside the text — an emoji code, a link — is taken back to
         // what was typed. One that made the block — `- `, `# `, `> ` — leaves
         // the caret at the block's start, where Backspace takes the format off
-        // as Typora does, rather than giving the characters back.
+        // rather than giving the characters back.
         Some(when(|state| !at_textblock_start(state), undo_input_rule())),
         Some(delete_selection()),
         // At a block's start, the container it opens goes before the block's
@@ -584,7 +583,7 @@ fn at_textblock_start(state: &EditorState) -> bool {
 }
 
 /// At the start of a heading, Backspace turns it into a paragraph, whatever
-/// its level, as Typora does. Typing `#` there raises the level again.
+/// its level. Typing `#` there raises the level again.
 ///
 /// This runs after the steps that take a container the block opens — a quote
 /// lifted, an item joined or outdented — so a heading that opens one keeps
@@ -607,7 +606,7 @@ fn clear_heading_at_start(types: &DocTypes) -> Command {
 
 /// At the start of a quoted block, Backspace lifts one quote level. A block
 /// with another before it in the same quote is left to the joins after this,
-/// so its text carries on the block before, as Typora does.
+/// so its text carries on the block before.
 fn lift_quote_at_start(types: &DocTypes) -> Command {
     let types = types.clone();
     command(move |state| {
@@ -885,12 +884,12 @@ pub fn history(undo: bool) -> Command {
     })
 }
 
-/// ⌥⌘C, as Typora does it: with the caret in a paragraph that has text, a new
+/// ⌥⌘C: with the caret in a paragraph that has text, a new
 /// empty code block of `ty` with `attrs` at the caret — after the paragraph at
 /// its end, before it at its start, and splitting it anywhere else — with the
 /// caret in the block. On an empty line, over a selection, or in a code block
 /// already, the block type toggles as any other's does; a selection then
-/// collapses to its start, as in Typora, so typing does not replace the code.
+/// collapses to its start, so typing does not replace the code.
 pub fn code_block(types: &DocTypes, ty: NodeTypeId, attrs: Attrs) -> Command {
     let types = types.clone();
     let toggle = toggle_block(&types, ty, attrs.clone());
@@ -1015,7 +1014,7 @@ pub fn toggle_wrap_in(ty: NodeTypeId, attrs: Attrs) -> Command {
 ///
 /// In a list of another kind — ordered where `ty` is a bullet list, or holding
 /// the other kind of item — the whole list the cursor is in becomes the kind
-/// asked for, as Typora converts it, rather than a new list nesting in its item.
+/// asked for, rather than a new list nesting in its item.
 pub fn toggle_list(
     types: &DocTypes,
     ty: NodeTypeId,

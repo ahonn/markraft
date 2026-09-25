@@ -118,7 +118,7 @@ fn delete_range_from_a_block_start_keeps_the_last_blocks_type() {
         Extension::none(),
     );
     // From the start of "ab" to the end of "cd": the paragraph goes whole and
-    // the heading is left, emptied, as Typora 1.14.10 leaves it.
+    // the heading is left, emptied.
     let after = run(&start, &delete_range(5, 11));
     assert_eq!(
         schema.describe(after.doc()),
@@ -911,7 +911,7 @@ fn deleting_everything_leaves_a_caret() {
 /// Typing over a range from a paragraph into an ordered list: the list stays
 /// an ordered list around what is left of it, and the caret stays after the
 /// typed text. From the paragraph's start, the paragraph goes and the text
-/// starts the item, as Typora 1.14.10 does it.
+/// starts the item.
 #[test]
 fn typing_across_into_a_list_keeps_the_list_and_the_caret() {
     let schema = shared_schema();

@@ -5,14 +5,14 @@
 //! table's header row, which only becomes a table once a delimiter row follows
 //! it. Neither can be an input rule on a character — ```` ```r ```` may still
 //! be becoming ```` ```rust ```` — so [`block_from_line`] makes them when Enter
-//! ends the line, the way Typora does. The input rule that opens a fence on a
+//! ends the line. The input rule that opens a fence on a
 //! space stays as it is.
 //!
 //! A thematic break of stars or underscores is the same: `***` may still be
 //! opening `***bold italic***`, so only Enter makes it a divider. Three dashes
 //! have an input rule of their own.
 //!
-//! A footnote definition, too, ends on Enter the way Typora ends it: at the
+//! A footnote definition, too, ends on Enter: at the
 //! end of its last paragraph, the next paragraph goes after the definition
 //! rather than into it.
 //!

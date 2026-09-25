@@ -1,8 +1,9 @@
 //! Structural predicates and token-level edits shared by the commands.
 //!
 //! Everything here is a pure function of a document and a schema. The
-//! predicates mirror ProseMirror's `canReplace`/`canSplit`/`liftTarget`
-//! family, and the edit builders return [`Change`]s in the coordinates of the
+//! predicates ([`can_replace`], [`can_split`], [`lift_target`] and their
+//! relatives) answer whether an edit keeps the document valid, and the edit
+//! builders return [`Change`]s in the coordinates of the
 //! document they were computed from — a set of them can therefore be handed to
 //! [`ChangeSet::create`](crate::ChangeSet::create) unchanged.
 //!
@@ -131,7 +132,7 @@ pub fn default_block_type(schema: &Schema, parent: &Node, index: usize) -> Optio
 /// split there.
 ///
 /// `types_after` optionally overrides the type the node on each level *after*
-/// the split gets, innermost last, mirroring ProseMirror's `canSplit`.
+/// the split gets, innermost last.
 pub fn can_split(
     schema: &Schema,
     doc: &Node,
@@ -401,8 +402,7 @@ pub fn can_join(schema: &Schema, doc: &Node, pos: usize) -> bool {
 /// The nearest position at or outside `pos`, in direction `dir`, at which two
 /// containers can be joined.
 ///
-/// Mirrors ProseMirror's `joinPoint`: textblocks are deliberately skipped, so
-/// this finds structural joins only.
+/// Textblocks are deliberately skipped, so this finds structural joins only.
 pub fn join_point(schema: &Schema, doc: &Node, pos: usize, dir: i32) -> Option<usize> {
     let resolved = doc.resolve(pos).ok()?;
     let mut pos = pos;

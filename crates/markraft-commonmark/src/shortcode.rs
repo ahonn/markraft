@@ -1,7 +1,7 @@
-//! Reading GitHub emoji shortcodes, `:smile:`.
+//! Reading emoji shortcodes, `:smile:`.
 //!
 //! A shortcode is a colon, a name of ASCII letters, digits, `+`, `_` and `-`,
-//! and a colon, where the name is one of the [`emojis`] table's GitHub
+//! and a colon, where the name is one of the [`emojis`] table's
 //! shortcodes exactly as written — the grammar comrak's own `shortcodes`
 //! extension reads. comrak's extension is not used: it resolves names against
 //! an older table than the editor's `:` menu offers, and a name the menu
@@ -11,7 +11,7 @@
 //! back as the `:name:` it was read from. What is not a shortcode — an unknown
 //! name, `10:30:`, a colon a backslash escapes — stays the text it is.
 
-/// The emoji `name` names, when it is a GitHub shortcode as written.
+/// The emoji `name` names, when it is a shortcode as written.
 pub fn emoji(name: &str) -> Option<&'static str> {
     emojis::get_by_shortcode(name).map(|emoji| emoji.as_str())
 }

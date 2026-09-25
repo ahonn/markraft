@@ -324,7 +324,6 @@ mod tests {
         assert!(!gone.contains("/somewhere"), "{gone}");
         let other = describe(path, &io::Error::other("boom")).to_string();
         assert_eq!(other, "Markraft could not use “todo.md” (boom).");
-        // Several failures read as before: one sentence per line.
         let several = StoreError::several(vec!["one".into(), "two".into()]);
         assert_eq!(several.to_string(), "one\ntwo");
         assert_eq!(StoreError::several(vec!["one".into()]), "one".into());

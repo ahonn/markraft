@@ -12,11 +12,9 @@
 //! * [`finish_composition`] clears the mark, which also closes the history's
 //!   composition grouping.
 //!
-//! [`cancel_composition`] restores the document and selection from before the
-//! composition, and asks every field that honours
-//! [`restore_fields_from`] — the undo history among them — to return to its
-//! value from then. [`committed_document`] excludes uncommitted text
-//! for persistence. A document edit without the composition user event commits
+//! [`cancel_composition`] restores the document, selection and undo history
+//! from before the composition. [`committed_document`] excludes uncommitted
+//! text for persistence. A document edit without the composition user event commits
 //! the current candidate and ends the composition before that edit takes over.
 //!
 //! Nothing here knows about a platform: `marked_text_range` is

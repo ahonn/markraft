@@ -1059,8 +1059,7 @@ fn escape_at_a_line_end_leaves_the_caret_on_the_last_grapheme() {
 
 // ---------------------------------------------------------------- input method
 
-/// The live repro: `o`, a composed candidate the input method commits, then
-/// Escape. The caret has to end up on the committed character, inside the line.
+/// `o`, a composed candidate the input method commits, then Escape. The caret has to end up on the committed character, inside the line.
 #[test]
 fn escape_after_an_input_method_commit_lands_on_the_committed_character() {
     let mut keys = Keys::new("end").at(0, 0);
@@ -1243,7 +1242,7 @@ fn charwise_yanks_preserve_nested_inline_scopes_when_pasted_into_plain_text() {
     for (source, outer) in [("*a **word** c*", "em"), ("**a **word** c**", "strong")] {
         for yank in ["yw", "v3ly"] {
             let keys = Keys::new(&format!("{source}\n\nx")).at(0, 0);
-            // Method-B puts the delimiter characters in the line, so the word
+            // The delimiter characters are in the line, so the word
             // starts wherever they leave it.
             let column = keys
                 .host

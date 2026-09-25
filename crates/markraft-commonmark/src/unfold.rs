@@ -3,15 +3,13 @@
 //! A picture, a wiki link, a raw HTML tag and an emoji shortcode are atoms:
 //! the canonicalising correction folds the text that spells one into a single
 //! node, which is one position wide, so a caret could only stand before or
-//! after it. As in
-//! Typora, a caret that reaches one — an arrow key onto it, a click beside it
-//! — now finds its source instead: a transaction that moves the selection,
-//! and changes nothing else, and puts an end of it against an atom replaces
-//! the atom with its spelling, and the
-//! caret can walk into `![alt](src)` and edit it like any other text. The
-//! correction leaves a spelling alone while a caret touches it — when the
-//! caret was let into it, moves about in it or types it — and folds it again
-//! once the caret has gone. An edit that only happens to leave the caret
+//! after it. A caret that reaches one — an arrow key onto it, a click beside
+//! it — finds its source instead: a transaction that moves the selection, and
+//! changes nothing else, and puts an end of it against an atom replaces the
+//! atom with its spelling, and the caret can walk into `![alt](src)` and edit
+//! it like any other text. The correction leaves a spelling alone while a
+//! caret touches it — when the caret was let into it, moves about in it or
+//! types it — and folds it again once the caret has gone. An edit that only happens to leave the caret
 //! against an atom — a paste ending in a picture, a document replaced — does
 //! neither: what it brings in is folded, and what was an atom stays one.
 //!
@@ -133,7 +131,7 @@ fn unfold(tr: &Transaction) -> Option<Vec<TransactionSpec>> {
 /// them, when `pos` stands in a textblock of inline source.
 ///
 /// A `<br>` in a table cell is left folded: it is the line break the cell is
-/// drawn with, as Typora draws it, not markup to walk into.
+/// drawn with, not markup to walk into.
 fn atoms_against(schema: &Schema, doc: &Node, pos: usize) -> Vec<(usize, Node)> {
     let Ok(resolved) = doc.resolve(pos) else {
         return Vec::new();

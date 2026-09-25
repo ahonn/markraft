@@ -374,7 +374,7 @@ pub(super) fn atom_of(
         };
         touches(&input.selection) || input.composition.as_ref().is_some_and(touches)
     };
-    // A `<br>` in a table cell is the cell's line break, as in Typora.
+    // A `<br>` in a table cell is the cell's line break.
     if line
         .node_type()
         .is_some_and(|parent| types.is_cell_break(parent, node))
@@ -525,7 +525,7 @@ pub(super) fn atom_of(
 }
 
 /// A decoded image and the size it is drawn at: its own, or the column's width
-/// where it is wider, as Typora draws it. A tall picture is drawn tall rather
+/// where it is wider. A tall picture is drawn tall rather
 /// than shrunk into a thumbnail no one can read.
 pub(super) fn drawn_image(
     images: &crate::images::Images,

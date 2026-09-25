@@ -139,7 +139,7 @@ fn enter_with_a_kinds_split_keeps_the_style_open_at_the_caret() {
 }
 
 /// Backspace at the start of a nested list's first item joins it to the
-/// item the list is in, as a paragraph of that item, as Typora does; in a
+/// item the list is in, as a paragraph of that item; in a
 /// top-level list's first item it leaves the list altogether.
 #[test]
 fn backspace_at_a_first_items_start_joins_the_item_above_or_leaves_the_list() {
@@ -286,7 +286,7 @@ fn return_in_a_code_block_keeps_the_lines_indent() {
 }
 
 /// Return at the end of a paragraph that more blocks of its item follow
-/// splits the item, as Typora does: the new item takes those blocks. Until
+/// splits the item: the new item takes those blocks. Until
 /// something is typed it opens on an empty line, which the source holds as
 /// the marker alone on its line.
 #[test]
@@ -350,7 +350,7 @@ fn return_before_more_blocks_of_an_item_splits_it() {
 }
 
 /// A list shortcut in a list of another kind turns the whole list into the
-/// kind asked for, as Typora does, rather than nesting a new list in the
+/// kind asked for, rather than nesting a new list in the
 /// item. The new list is marked with the attributes the shortcut gives.
 #[test]
 fn a_list_shortcut_converts_the_whole_list_it_is_in() {
@@ -402,7 +402,7 @@ fn a_list_shortcut_converts_the_whole_list_it_is_in() {
 }
 
 /// Tab walks a table in row-major order and grows it rather than falling
-/// out of it, which is what it does in Typora and Bear.
+/// out of it.
 #[test]
 fn tab_walks_the_cells_and_appends_a_row_past_the_last_one() {
     let (state, markdown) = table_state();
@@ -443,7 +443,7 @@ fn enter_moves_down_a_row_and_never_splits_a_cell() {
     assert_eq!(projection_of(&grown).lines().len(), 6, "a row was appended");
     assert_eq!(cell_of(&grown), Some((2, 1)));
     // ⌘⏎ adds a row under the caret's own row rather than at the bottom,
-    // and moves into its first cell to fill it in, as Typora does.
+    // and moves into its first cell to fill it in.
     let added = applied(&at(&state, inside), &toggle_task(&types)).expect("⌘⏎ adds a row");
     assert_eq!(projection_of(&added).lines().len(), 6);
     assert_eq!(cell_of(&added), Some((1, 0)));
@@ -540,16 +540,16 @@ fn backspace_at_heading_start_makes_a_paragraph_and_hash_promotes() {
     assert_eq!(to_markdown(state.schema(), promoted.doc()), "## title");
 }
 
-/// Typora 1.14.10: a heading that opens an item or a quote keeps its
-/// level and loses the container, as a paragraph there would; anywhere
-/// else it becomes a paragraph.
+/// Backspace at the start of a heading that opens an item or a quote: the
+/// heading keeps its level and loses the container, as a paragraph there
+/// would; anywhere else it becomes a paragraph.
 #[test]
 fn backspace_at_a_heading_opening_a_container_takes_the_container() {
     for (source, line, expected) in [
         ("- # 1", 0, "# 1"),
         ("> # 1", 0, "# 1"),
         ("- [ ] # 1", 0, "# 1"),
-        // Typora leaves the list loose; a heading needs no blank line
+        // The list is left loose; a heading needs no blank line
         // to stay apart, so the two read the same.
         ("- [ ] 0\n- [ ] # 1", 1, "- [ ] 0\n  # 1"),
         ("> 0\n>\n> # 1", 1, "> 0\n>\n> 1"),
@@ -761,9 +761,9 @@ fn literal_text_splits_into_blocks_but_stays_literal_in_code() {
 }
 
 /// Return in the last item of a list, then Backspace twice: the first
-/// joins the empty item to the one before as an empty paragraph, as Typora
-/// does, the second joins that paragraph back and leaves the caret where it
-/// started — not in the list that follows.
+/// joins the empty item to the one before as an empty paragraph, the second
+/// joins that paragraph back and leaves the caret where it started — not in
+/// the list that follows.
 #[test]
 fn backspace_twice_from_a_new_last_item_returns_to_the_item_before() {
     let state = state_of("1. eight\n9. nine\n\n- bullet a");
@@ -788,7 +788,7 @@ fn backspace_twice_from_a_new_last_item_returns_to_the_item_before() {
 
 /// Return at the end of `eight` in the middle of an ordered list, then
 /// Backspace: the new empty item joins `eight` as an empty paragraph, and
-/// what is typed next is a paragraph of that item, as Typora does. The
+/// what is typed next is a paragraph of that item. The
 /// empty paragraph writes nothing, so the list is saved as it was until then.
 #[test]
 fn backspace_in_an_empty_middle_item_joins_the_item_before() {
@@ -845,8 +845,8 @@ fn backspace_in_an_empty_middle_bullet_or_task_item_joins_the_item_before() {
 }
 
 /// Delete at the end of a textblock and Backspace at the start of one right
-/// after a list or a quote join the two textblocks' text wherever they sit,
-/// as Typora does. A code block keeps its text to itself.
+/// after a list or a quote join the two textblocks' text wherever they sit.
+/// A code block keeps its text to itself.
 #[test]
 fn delete_and_backspace_join_text_across_lists_and_quotes() {
     let forward = [
@@ -885,7 +885,7 @@ fn delete_and_backspace_join_text_across_lists_and_quotes() {
     }
 }
 
-/// Around a divider, Backspace and Delete take it at once, as Typora does,
+/// Around a divider, Backspace and Delete take it at once,
 /// rather than first selecting it: Backspace leaves the caret where it was,
 /// and Delete carries the text after the divider on the line it ends.
 #[test]
@@ -984,7 +984,7 @@ fn arrows_onto_a_divider_select_it() {
 }
 
 /// Backspace at the start of a paragraph right after a table carries its
-/// text into the table's last cell, as Typora does.
+/// text into the table's last cell.
 #[test]
 fn backspace_after_a_table_joins_its_last_cell() {
     let state = state_of("| a | b |\n| - | - |\n| c | d |\n\ntwo");
@@ -1001,7 +1001,7 @@ fn backspace_after_a_table_joins_its_last_cell() {
 }
 
 /// Backspace at the start of a quote's later paragraph joins the paragraph
-/// before it in the same quote, as Typora does; only the quote's first
+/// before it in the same quote; only the quote's first
 /// block lifts out of it.
 #[test]
 fn backspace_in_a_quotes_later_paragraph_joins_the_one_before() {
@@ -1032,7 +1032,7 @@ fn backspace_in_an_empty_first_item_still_leaves_the_list() {
 /// leaves, Backspace to lift it out, then type: the file saved from the
 /// original source has one blank line either side of the new paragraph,
 /// for an ordered list and a bullet list alike. The last item, which has an
-/// item before it, joins that one instead, as Typora does: what is typed is
+/// item before it, joins that one instead: what is typed is
 /// a paragraph of the item before, and the list is written loose.
 #[test]
 fn typing_into_a_lifted_first_item_saves_one_blank_line_either_side() {
@@ -1121,7 +1121,7 @@ fn word_motion_steps_over_hidden_delimiters() {
 fn word_motion_reaches_a_span_that_fills_its_line() {
     let typed = markraft_core::commands::insert_text("X");
     // The caret at the span's edge shows its markup, so the word it reaches
-    // is inside the span, as Typora 1.14.10 has it.
+    // is inside the span.
     for (source, expected) in [
         ("**abc**", "**Xabc**"),
         ("`abc`", "`Xabc`"),
@@ -1214,8 +1214,7 @@ fn shift_return_breaks_the_line_inside_the_block() {
     .expect("Shift-Return applies in code");
     assert_eq!(after(&broken, &typed).as_deref(), Some("```\nx\nb\n```"));
 
-    // A GFM row is one line: in a table cell the break is `<br />`, as
-    // Typora writes it.
+    // A GFM row is one line: in a table cell the break is `<br />`.
     let (state, _) = table_state();
     let caret = caret_in(&state, "c") + 1;
     let broken = applied(&at(&state, caret), &line_break(&types, &PlainKind))

@@ -104,8 +104,8 @@ pub struct MarkraftApp {
     input: Option<InputSession>,
     /// Where Tab has walked the chrome, and the handle its controls share.
     ring: FocusRing,
-    /// Browse and the command list: one selected row between them, a scroll
-    /// each, and the delete question that stands on a row.
+    /// Browse and the command list: one selected row between them, and a scroll
+    /// each.
     picker: Picker,
     /// The code block's language list.
     code_language: Cursor,
@@ -824,12 +824,6 @@ impl MarkraftApp {
             cx.notify();
             return;
         }
-        // A question standing on a row takes the first Escape, so nothing behind it
-        // closes while the answer is still pending.
-        if self.picker.forget_question() {
-            cx.notify();
-            return;
-        }
         self.ring.release();
         let had_popover = self.close_popover(cx);
         if had_popover {
@@ -1082,15 +1076,11 @@ impl MarkraftApp {
         self.style_input(cx);
         cx.notify();
     }
-    /// The note editors' style: the theme's, in the typeface, size and line height the
-    /// preferences ask for.
-    /// The failure the note is showing — the one "Not saved" stands for — for the
-    /// headless tests.
+    /// The failure the note is showing — the one "Not saved" stands for.
     #[cfg(test)]
     pub(crate) fn shown_error(&self) -> Option<String> {
         self.feedback.error().cloned()
     }
-    /// Name new notes and images as `notes` and `images` say, for the headless tests.
     #[cfg(test)]
     pub(crate) fn set_workspace_naming(
         &mut self,
@@ -1100,8 +1090,8 @@ impl MarkraftApp {
         self.library.workspace.new_note_name = notes;
         self.library.workspace.image_name = images;
     }
-    /// A new note holding `markdown`, not yet saved, for the headless tests: what a
-    /// note is before its first save, with no file for the guard to hold it to.
+    /// A new note holding `markdown`, not yet saved: what a note is before its first
+    /// save, with no file for the guard to hold it to.
     #[cfg(test)]
     pub(crate) fn test_new_note(
         &mut self,
@@ -1115,14 +1105,13 @@ impl MarkraftApp {
         self.set_panel(Panel::Editor, cx);
         self.focus_editor(window, cx);
     }
-    /// Give the keyboard back to the note, as clicking into it does, for the
-    /// headless tests.
+    /// Give the keyboard back to the note, as clicking into it does.
     #[cfg(test)]
     pub(crate) fn test_focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_editor(window, cx);
     }
-    /// Reconcile `changes` as if the watcher had reported them, for the headless
-    /// tests, which cannot time a file system event.
+    /// Reconcile `changes` as if the watcher had reported them; the headless tests
+    /// cannot time a file system event.
     #[cfg(test)]
     pub(crate) fn test_apply_external(
         &mut self,
@@ -1132,22 +1121,19 @@ impl MarkraftApp {
     ) {
         self.apply_external(changes, window, cx);
     }
-    /// The note the window shows, as the library holds it, for the headless tests.
     #[cfg(test)]
     pub(crate) fn test_active_note(&self) -> crate::storage::Note {
         self.library.active_note().clone()
     }
-    /// The note `id`, if the library still holds it, for the headless tests.
     #[cfg(test)]
     pub(crate) fn test_note(&self, id: &str) -> Option<crate::storage::Note> {
         self.library.note(id).cloned()
     }
-    /// The sentences waiting to be shown, for the headless tests.
+    /// The notices waiting to be shown.
     #[cfg(test)]
     pub(crate) fn test_queued_notices(&self) -> Vec<String> {
         self.feedback.queued().map(str::to_owned).collect()
     }
-    /// The active note's editor and file, for the headless tests.
     #[cfg(test)]
     pub(crate) fn test_editor(&self) -> Entity<EditorView> {
         self.editor().clone()
@@ -1156,11 +1142,13 @@ impl MarkraftApp {
     pub(crate) fn active_path(&self) -> Option<PathBuf> {
         self.library.active_note().path.clone()
     }
-    /// The active note's document as its editor holds it, for the headless tests.
+    /// The active note's document as its editor holds it.
     #[cfg(test)]
     pub(crate) fn active_document(&self, cx: &App) -> markraft_core::Node {
         self.editor().read(cx).committed_document().clone()
     }
+    /// The note editors' style: the theme's, in the typeface, size and line height the
+    /// preferences ask for.
     fn editor_style(&self) -> EditorStyle {
         let preferences = &self.preferences;
         let mut style = scaled(notes_style(self.dark), preferences.text_size);
@@ -1181,8 +1169,6 @@ impl MarkraftApp {
                 .update(cx, |e, cx| e.set_style(style.clone(), cx));
         }
     }
-    /// ⌘+, ⌘− and ⌘⇧0, and the Settings window's stepper. The size stays in the range
-    /// the stepper offers, so the two never disagree.
     /// ⌘L: a link under the caret shows its actions, anything else asks for an address.
     fn open_link_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.persistence.is_none() || self.interaction.panel() != Panel::Editor {
@@ -1877,19 +1863,6 @@ fn without_markdown(name: &str) -> &str {
     }
 }
 
-/// Which note a wiki link target names, resolved the way Obsidian does.
-///
-/// A target holding a `/` is a path relative to the notes folder, with or
-/// without its `.md` extension; one without is a file stem, matched against
-/// every note the folder holds. Both are matched without regard to case,
-/// because the file systems these files live on do not keep it either.
-///
-/// Where more than one note answers, the one nearest `from` wins: a note in the
-/// same directory first, then the shortest path relative to `root`, then that
-/// path itself — so the answer never depends on the order the notes arrived in.
-///
-/// When there is no notes folder yet, every target is matched by stem alone —
-/// a path relative to nothing names nothing.
 /// The file a wiki link names, where the folder really holds one. A target is written
 /// relative to the note or to the folder, the two places an image source is looked up,
 /// and it may not climb out of either.
@@ -1909,6 +1882,19 @@ fn linked_file(
         .find(|path| path.is_file())
 }
 
+/// Which note a wiki link target names, by path or by file stem.
+///
+/// A target holding a `/` is a path relative to the notes folder, with or
+/// without its `.md` extension; one without is a file stem, matched against
+/// every note the folder holds. Both are matched without regard to case,
+/// because the file systems these files live on do not keep it either.
+///
+/// Where more than one note answers, the one nearest `from` wins: a note in the
+/// same directory first, then the shortest path relative to `root`, then that
+/// path itself — so the answer never depends on the order the notes arrived in.
+///
+/// When there is no notes folder yet, every target is matched by stem alone —
+/// a path relative to nothing names nothing.
 fn resolve_wiki_link<'a>(
     target: &str,
     from: Option<&std::path::Path>,
@@ -2168,7 +2154,7 @@ pub fn bind_app_keys(cx: &mut App) {
         KeyBinding::new("cmd-=", IncreaseTextSize, Some("MarkraftApp")),
         KeyBinding::new("cmd-shift-=", IncreaseTextSize, Some("MarkraftApp")),
         KeyBinding::new("cmd--", DecreaseTextSize, Some("MarkraftApp")),
-        // ⌘0 makes a paragraph, as in Typora. GPUI folds Shift into a digit on
+        // ⌘0 makes a paragraph. GPUI folds Shift into a digit on
         // macOS, so ⌘⇧0 arrives as ⌘).
         KeyBinding::new("cmd-)", ResetTextSize, Some("MarkraftApp")),
         KeyBinding::new("cmd-shift-0", ResetTextSize, Some("MarkraftApp")),
@@ -2463,7 +2449,6 @@ mod tests {
 
     #[test]
     fn a_narrow_row_keeps_the_file_name_and_the_folder_around_it() {
-        // Short enough already: nothing is elided.
         assert_eq!(shorten_location("Inbox/Meeting.md", 24), "Inbox/Meeting.md");
         // The folders above the last one give way first, one at a time.
         assert_eq!(
@@ -2539,7 +2524,6 @@ mod tests {
         assert_eq!(large.heading_sizes[0], gpui::px(39.));
         assert_eq!(large.paragraph_gap, gpui::px(15.));
         assert_eq!(large.list_indent, gpui::px(33.));
-        // Colours are the theme's whatever the size.
         assert_eq!(large.text, base.text);
     }
 }

@@ -384,9 +384,10 @@ fn attr_specs_are_validated() {
 
 #[test]
 fn a_star_branch_does_not_leak_into_its_alternatives() {
-    // Regression: compiling `*` used to loop back to the state the expression
-    // started from. Because every option of a choice compiles from that same
-    // state, an iteration of the star re-enabled the other options.
+    // A `*` must loop back to its own entry state, not to the state the
+    // expression started from: every option of a choice compiles from that
+    // shared state, so looping there would let an iteration of the star
+    // re-enable the other options.
     let schema = Schema::new(
         SchemaSpec::new()
             .node(NodeTypeSpec::new("doc", "a*|b"))

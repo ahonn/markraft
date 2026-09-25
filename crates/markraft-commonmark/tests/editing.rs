@@ -764,7 +764,7 @@ fn enter_at_the_end_of_a_footnote_goes_on_after_the_definition() {
 #[test]
 fn enter_after_a_thematic_break_of_stars_or_underscores_makes_a_divider() {
     let schema = commonmark_schema();
-    // The divider keeps the character it was typed with, as Typora does.
+    // The divider keeps the character it was typed with.
     for (line, mark, written) in [
         ("***", "*", "***"),
         ("___", "_", "___"),
@@ -798,7 +798,7 @@ fn moved(state: &EditorState, pos: usize) -> EditorState {
         .clone()
 }
 
-/// A caret that reaches a picture finds its source, as in Typora: it can walk
+/// A caret that reaches a picture finds its source: it can walk
 /// into `![alt](logo.png)` and edit it, and the picture comes back once the
 /// caret has gone. The file never sees the difference.
 #[test]
@@ -873,7 +873,7 @@ fn a_spelling_folds_when_the_caret_leaves_along_its_line() {
 }
 
 /// A shortcode is an emoji once the caret has left it, and its spelling while
-/// the caret is in it — typed or reached — as in Typora. The file keeps the
+/// the caret is in it — typed or reached. The file keeps the
 /// shortcode either way.
 #[test]
 fn a_shortcode_reads_as_its_emoji_once_the_caret_leaves() {
@@ -925,8 +925,8 @@ fn at_char(doc: &Node, nth: char, after: bool) -> usize {
     found.expect("the character is in the document")
 }
 
-/// Typing or deleting over a range that runs from one block into another, as
-/// Typora 1.14.10 does it: the text after the range stays where it was, and so
+/// Typing or deleting over a range that runs from one block into another:
+/// the text after the range stays where it was, and so
 /// do the list, the quote or the list type it sits in, the items after it keep
 /// their numbers, and the caret stays after what was typed. A range from the
 /// start of a block takes that block whole and keeps the last one's type.
@@ -1000,7 +1000,7 @@ fn editing_across_blocks_keeps_what_follows_as_it_was() {
 }
 
 /// A line typed as a link reference definition is one once the caret leaves
-/// it, as Typora makes it: the link before it then goes where it says.
+/// it: the link before it then goes where it says.
 #[test]
 fn a_definition_typed_on_its_own_line_defines_once_left() {
     let schema = commonmark_schema();

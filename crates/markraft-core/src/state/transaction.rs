@@ -516,10 +516,8 @@ fn merge(
     let stored_marks = b.stored_marks.or(a.stored_marks);
     let mut effects = StateEffect::map_all(&a.effects, &map_for_a);
     effects.extend(StateEffect::map_all(&b.effects, &map_for_b));
-    // A later spec has the last word on any annotation it sets, so a spec can
-    // amend what an earlier one said rather than being shadowed by it. This is
-    // what keeps `add_to_history(false)` on a spec that only establishes a
-    // selection from deciding the whole transaction.
+    // A later spec's annotation replaces an earlier one of the same type; see
+    // the module docs.
     let mut annotations = a.annotations;
     annotations.retain(|earlier| {
         !b.annotations
@@ -645,8 +643,8 @@ fn apply_change_filters(tr: Transaction) -> Result<Transaction, StateError> {
 /// Extenders run in reverse configuration order, each seeing the *original*
 /// transaction, and what they return is merged sequentially: their positions
 /// refer to the document produced so far, and the changes they add are composed
-/// exactly. Wordgard's extenders may only add effects and annotations; allowing
-/// changes is what lets [`Correction`](crate::corrections::Correction) be one.
+/// exactly. Extenders may add changes, not only effects and annotations, which
+/// is what lets [`Correction`](crate::corrections::Correction) be one.
 fn extend_transaction(tr: Transaction) -> Result<Transaction, StateError> {
     let state = tr.start_state().clone();
     let extenders = state.facet(filters::transaction_extender()).clone();

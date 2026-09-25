@@ -138,7 +138,6 @@ impl std::fmt::Debug for HistoryState {
 }
 
 impl HistoryState {
-    /// An empty history.
     pub(crate) fn empty() -> HistoryState {
         HistoryState {
             done: Vec::new(),

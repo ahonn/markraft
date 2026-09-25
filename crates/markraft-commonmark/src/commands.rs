@@ -13,7 +13,7 @@
 //!    Spans around that stretch stay as written and keep their styles.
 //! 3. Spell that stretch from the wanted styles with
 //!    [`spell`](crate::serialize::spell) and read the whole block back with
-//!    [`derive`]. If a reader would not see the wanted styles — CommonMark
+//!    [`derive`](fn@derive). If a reader would not see the wanted styles — CommonMark
 //!    reads `**"a"**b` as no strong at all — try once more with the
 //!    selection shrunk past the whitespace and punctuation at its ends, so the
 //!    delimiters land inside them: `"**a**"b`. If nothing is left once they
@@ -21,7 +21,7 @@
 //!    with a [`CommandRefusal`] the host can show; it never writes something
 //!    a reader would read differently.
 //!
-//! Emphasis and strong are written in the [`HouseStyle`](crate::HouseStyle)'s
+//! Emphasis and strong are written in the [`HouseStyle`]'s
 //! delimiter. Where that is `_`, which a reader does not take inside a word —
 //! `foo_bar_baz` is plain text —, the steps above are tried again in `*`
 //! before the command refuses, and a cursor toggle likewise writes the `*`
@@ -31,8 +31,8 @@
 //! and carets elsewhere in the block stay where they were. The selected
 //! characters stay selected.
 //!
-//! A cursor has nothing to style, so [`toggle_style`] works on the delimiters
-//! around it, reading the block with [`derive`] to find the spans the caret
+//! A cursor has nothing to style, so [`Formatter::toggle_style`] works on the delimiters
+//! around it, reading the block with [`derive`](fn@derive) to find the spans the caret
 //! is in:
 //!
 //! * Outside every span of the style, it writes the style's empty pair and
@@ -61,7 +61,7 @@
 //! something is typed in it, and goes when the caret leaves it empty; see the
 //! `pending` module.
 //!
-//! [`keeping_styles`] wraps a command that splits a block — Enter — so that a
+//! [`Formatter::keeping_styles`] wraps a command that splits a block — Enter — so that a
 //! split inside a style closes every span open at the cut and opens it again
 //! after, instead of leaving `**ab` and `cd**`.
 
@@ -590,8 +590,7 @@ fn format(state: &EditorState, op: Op, event: &str, house: HouseStyle) -> Format
     };
 
     // A style put on part of a code span or a formula would have to cut it
-    // in two, which changes the literal text it holds. Typora does nothing
-    // then, and so does this.
+    // in two, which changes the literal text it holds, so nothing is done.
     if let Op::Add(style) = &op
         && !matches!(style, Style::Code | Style::Math { .. })
         && shares.iter().any(cuts_a_literal)
@@ -602,8 +601,8 @@ fn format(state: &EditorState, op: Op, event: &str, house: HouseStyle) -> Format
     let mut changes = Vec::new();
     let mut edits = Vec::new();
     for share in &shares {
-        // A style taken off part of a span goes from the whole span, as in
-        // Typora: `b` in `**abc**` leaves `abc`, not `**a**b**c**`.
+        // A style taken off part of a span goes from the whole span:
+        // `b` in `**abc**` leaves `abc`, not `**a**b**c**`.
         let range = match &op {
             Op::Remove(style) => {
                 let units = &share.block.units;
@@ -1143,9 +1142,8 @@ fn toggle_at_cursor(state: &EditorState, style: &Style, house: HouseStyle) -> Fo
     }
 
     // Inside a span of this style, the innermost one — right after its closing
-    // run counts, as the caret there is in the span to Typora — take the
-    // style off the whole span, as Typora does, the caret staying where it
-    // was in the text.
+    // run counts, as the caret there reads as in the span — take the style off
+    // the whole span, the caret staying where it was in the text.
     let span = block.derived.styles.iter().rfind(|span| {
         let (open, close) = delimiters(&block.derived, span);
         span.style == *style && !open.is_empty() && open.end <= offset && offset <= close.end
@@ -1173,8 +1171,8 @@ fn toggle_at_cursor(state: &EditorState, style: &Style, house: HouseStyle) -> Fo
         return Err(refusal());
     }
 
-    // In a word: put the style on the whole word, as Typora does, the caret
-    // staying where it was in it.
+    // In a word: put the style on the whole word, the caret staying
+    // where it was in it.
     if let Some(word) = word_around(&block.items.text(), offset) {
         return format_around(
             state,
@@ -1222,7 +1220,7 @@ fn toggle_at_cursor(state: &EditorState, style: &Style, house: HouseStyle) -> Fo
     }
 }
 
-/// [`format`] over `range` rather than the selection, with the caret left
+/// [`format`](fn@format) over `range` rather than the selection, with the caret left
 /// where it was in the text: `format` rewrites the range whole, and selects
 /// the text it put the delimiters around, so the caret goes that far into it.
 /// At the start of `range` it lands inside the new delimiters; past its end —
@@ -1250,8 +1248,8 @@ fn format_around(
     Ok(Some(spec.selection(Selection::cursor(caret))))
 }
 
-/// The word the caret at `offset` in `text` stands in or at an end of, as
-/// Typora takes it for a style toggled at a caret: a run of letters and
+/// The word the caret at `offset` in `text` stands in or at an end of, the
+/// word a style toggled at a caret goes on: a run of letters and
 /// digits — a `.` between two digits included, as in `12.34` — or a run of
 /// CJK characters. Anything else ends a word. The word before the caret wins
 /// over the one after it.

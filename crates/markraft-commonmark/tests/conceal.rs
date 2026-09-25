@@ -109,7 +109,6 @@ fn an_escape_next_to_a_span_is_its_own_span() {
     assert_eq!(showing(r"\***a**", caret(5)), "***a**");
 }
 
-/// An entity shows what it stands for until the caret reaches it.
 #[test]
 fn an_entity_shows_its_character_until_revealed() {
     assert_eq!(showing("a &amp; b", caret(0)), "a & b");

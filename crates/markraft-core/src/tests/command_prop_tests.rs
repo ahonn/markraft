@@ -163,8 +163,6 @@ fn every_command_leaves_a_valid_document_and_selection() {
     }
 }
 
-/// Every command that changes the document is one undo step: undo gives back the
-/// document and selection it started from, and redo gives back what it made.
 #[test]
 fn every_command_undoes_to_where_it_started_and_redoes_to_what_it_made() {
     let schema = shared_schema();

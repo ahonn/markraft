@@ -12,7 +12,7 @@
 //! it holds, in the code font, and an inline HTML primitive as its source in
 //! the prose around it, so a note shows exactly what it will be written back
 //! as. The one tag drawn as what it means is a `<br>` in a table cell, which
-//! is the cell's line break there, as Typora draws it.
+//! is the cell's line break there.
 
 use crate::style::EditorStyle;
 use crate::{CaretShape, EditorView};
@@ -102,7 +102,7 @@ const UI_FONT: &str = ".SystemUIFont";
 const ROUNDED_FONT: &str = ".AppleSystemUIFontRounded";
 const CODE_PADDING: Pixels = px(12.);
 /// How far a code block's panel reaches above and below its text. It spells no
-/// fences, focused or not — as in Typora — so this is padding and nothing else,
+/// fences, focused or not, so this is padding and nothing else,
 /// and the caret coming or going never changes the block's height.
 const CODE_INSET: Pixels = px(12.);
 /// The language tag a focused code block shows in its panel's top-right

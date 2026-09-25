@@ -9,7 +9,7 @@
 //!   Only where the closer cannot be mistaken for part of what follows: at
 //!   the end of the block, or before whitespace or a closing bracket. Before
 //!   a letter or punctuation — `(` typed in `see |, then` — it does not
-//!   pair, as Typora 1.14.10 does not. `"` pairs only where the character before the caret is not
+//!   pair. `"` pairs only where the character before the caret is not
 //!   a letter or a digit, so `5"` stays an inch and `say"` a typo rather than
 //!   a quotation. An opener escaped by a backslash, `\(`, is a literal and
 //!   pairs nothing.
@@ -21,9 +21,8 @@
 //!   keeps it selected.
 //!
 //! A closer is followed only while the caret stays in its block and the
-//! character is still there; after that it is text like any other, which is
-//! what CodeMirror and Typora do too. Undo takes an opener back with its
-//! closer, since both are one edit.
+//! character is still there; after that it is text like any other. Undo takes
+//! an opener back with its closer, since both are one edit.
 //!
 //! # What does not pair
 //!

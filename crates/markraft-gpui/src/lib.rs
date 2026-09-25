@@ -987,7 +987,7 @@ impl EditorView {
             .unwrap_or(false)
     }
 
-    /// Fold every undo entry made until [`EditorView::end_undo_group`] into one.
+    /// The view's side of [`EditorCx::begin_undo_group`].
     pub fn begin_undo_group(&mut self) {
         let _ = self.apply([TransactionSpec::new()
             .effect(markraft_core::history::begin_undo_group().of(()))
@@ -1204,7 +1204,7 @@ impl EditorView {
     /// Run one of the catalogue's table commands.
     ///
     /// `false` where the schema declares no table types, and where the command
-    /// does not apply — which, for all but [`EditorView::insert_table`], means
+    /// does not apply — which, for all but [`TableOp::Insert`], means
     /// the caret is not in a table.
     fn table_command(
         &mut self,
@@ -1220,7 +1220,6 @@ impl EditorView {
         self.run_command(&build(types), cx)
     }
 
-    /// Insert a `rows` by `columns` table of empty cells, caret in the first.
     /// One edit of the table the caret is in, or a new table where there is
     /// none: what every table control resolves to. `false` where it does not
     /// apply — outside a table for every shape but [`TableOp::Insert`], and
@@ -1541,7 +1540,7 @@ impl EditorView {
     /// table's last visual row with nothing after the table it leaves the
     /// table ([`exit_table_below`](markraft_core::commands::exit_table_below));
     /// on a selected divider with nothing after it, likewise
-    /// ([`chains::exit_leaf_below`]) — each as Typora does. With no row above
+    /// ([`chains::exit_leaf_below`]). With no row above
     /// the first or below the last, the caret goes to the start or the end of
     /// the document, as in every macOS text view, and a shifted arrow takes
     /// the selection there ([`chains::move_document_edge`]). Otherwise the
@@ -1751,7 +1750,7 @@ impl EditorView {
         {
             // A GFM row is one line: each line pasted goes into the cell as its
             // inline content, with a `<br/>` between them — one for each line
-            // ending, a blank line's included — as Typora writes them.
+            // ending, a blank line's included.
             let text = text.strip_suffix('\n').unwrap_or(text);
             let lines = text.split('\n').map(|line| {
                 let line = line.trim_end_matches('\r');
@@ -2383,7 +2382,7 @@ fn block(types: &DocTypes, ty: Option<NodeTypeId>, attrs: Attrs) -> Command {
 ///
 /// A new list takes the schema's default attributes: the view has no list
 /// preference of its own, so a host that wants another marker binds the
-/// action itself and calls [`commands::toggle_list`] with its attributes.
+/// action itself and calls [`chains::toggle_list`] with its attributes.
 fn list(types: &DocTypes, ty: Option<NodeTypeId>, item: Option<NodeTypeId>) -> Command {
     match (ty, item) {
         (Some(ty), Some(item)) => chains::toggle_list(types, ty, Attrs::empty(), item),

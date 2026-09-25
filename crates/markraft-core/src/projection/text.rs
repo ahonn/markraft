@@ -2,7 +2,7 @@
 //!
 //! Every conversion goes through a line and its visible-character mapping;
 //! and the line's text is a real `str` that
-//! [`unicode_segmentation`](unicode_segmentation) can be asked about directly.
+//! [`unicode_segmentation`] can be asked about directly.
 //!
 //! This is where the whole editor's answers about graphemes and words live, in
 //! document positions, so nothing above has to hold a line's text and convert

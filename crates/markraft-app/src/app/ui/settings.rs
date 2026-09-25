@@ -755,7 +755,7 @@ impl SettingsView {
                     .py(px(TOOLBAR_ITEM_PAD_Y))
                     .rounded(px(TOOLBAR_ITEM_RADIUS))
                     .text_size(px(TOOLBAR_LABEL_SIZE))
-                    // The chosen page's tab is marked by its ground alone: Finder raises
+                    // The chosen page's tab is marked by its ground alone: the system raises
                     // it on glass, which a flat window has nothing to draw with.
                     .text_color(if selected { p.text } else { p.subtitle })
                     .when(selected, |item| item.bg(p.selected))
@@ -1528,12 +1528,10 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn the_window_opens_beside_the_note_rather_than_under_it() {
-        // Room on the right.
         assert_eq!(
             placement(SCREEN, note(100., 200.), EXTENT),
             point(px(596.), px(200.))
         );
-        // Only room on the left.
         assert_eq!(
             placement(SCREEN, note(900., 200.), EXTENT),
             point(px(244.), px(200.))

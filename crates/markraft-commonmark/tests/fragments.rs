@@ -175,8 +175,8 @@ fn a_multi_block_fragment_keeps_its_blocks() {
 fn a_cut_inside_one_paragraph_copies_as_bare_text() {
     let codec = Codec::new();
     let doc = codec.parse("hello **world**");
-    // Method-B: cutting mid-span keeps the opening delimiter characters that
-    // fall inside the slice; the mark rule does not invent a closing pair.
+    // Delimiters are text, so cutting mid-span keeps the opening characters
+    // that fall inside the slice; the mark rule does not invent a closing pair.
     let slice = doc.slice(1, 13).expect("a slice");
     assert_eq!(codec.serializer.serialize_fragment(&slice), "hello **worl");
 }

@@ -176,7 +176,7 @@ fn selected(state: &EditorState) -> (usize, usize) {
     (range.from, range.to)
 }
 
-/// Moving into a cell selects what it holds, as Typora does, so typing
+/// Moving into a cell selects what it holds, so typing
 /// replaces it.
 #[test]
 fn tab_walks_the_cells_in_row_major_order() {

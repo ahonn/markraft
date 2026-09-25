@@ -515,15 +515,15 @@ impl MarkraftApp {
             })
     }
 
+    pub(in crate::app) fn has_file_status(&self) -> bool {
+        !self.file_states().is_empty()
+    }
+
     /// Everything about the open note and its folder the user has to deal with,
     /// most pressing first.
     ///
     /// A save failure comes first because it is the only one losing work for as long
     /// as it holds. The rest are true but not urgent.
-    pub(in crate::app) fn has_file_status(&self) -> bool {
-        !self.file_states().is_empty()
-    }
-
     pub(super) fn file_states(&self) -> Vec<FileState> {
         let mut states = Vec::new();
         if self.persistence.is_none() {

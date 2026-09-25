@@ -17,12 +17,12 @@
 //! touched ragged. A caller that wants to know before it builds an edit asks
 //! [`spans_cells`].
 //!
-//! # Relation to other editors
+//! # Growing the table
 //!
-//! [`goto_next_cell`] grows the table when it runs out of cells, which is what
-//! Tab does in Typora and Bear; [`goto_cell_below`] does the same for Enter, as
-//! Obsidian's tables do. [`goto_prev_cell`] and [`goto_cell_above`] never
-//! create anything, so a key chain can fall through them at the table's edge.
+//! [`goto_next_cell`] grows the table when it runs out of cells, so Tab past
+//! the last cell adds a row; [`goto_cell_below`] does the same for Enter.
+//! [`goto_prev_cell`] and [`goto_cell_above`] never create anything, so a key
+//! chain can fall through them at the table's edge.
 
 use std::sync::Arc;
 
@@ -410,7 +410,7 @@ fn node_slice(node: Node) -> Slice {
 }
 
 /// Move into the cell at `row` and `column`: with `select`, taking what it
-/// holds, so typing replaces it — as Tab, Shift-Tab and Enter do in Typora —
+/// holds, so typing replaces it — the way Tab, Shift-Tab and Enter move —
 /// and otherwise with a caret at its start.
 fn move_to_cell(
     state: &EditorState,
@@ -466,7 +466,7 @@ fn append_row(
 }
 
 /// Insert an empty row below the cursor's and move the cursor into its first
-/// cell, ready to fill it in — what ⌘Enter does in a table in Typora. Unlike
+/// cell, ready to fill it in — what ⌘Enter does in a table. Unlike
 /// [`add_row_after`], which a toolbar runs, the cursor does not stay behind.
 pub fn insert_row_below(types: TableTypes) -> Command {
     command(move |state| {
@@ -536,7 +536,7 @@ pub fn goto_cell_below(types: TableTypes) -> Command {
 
 /// Leave the table downwards from its last row, when nothing follows it to
 /// move to: an empty block of the default type is added after the table and
-/// the cursor goes into it, as ↓ does in Typora.
+/// the cursor goes into it — what ↓ does there.
 ///
 /// Does not apply above the last row, nor when a textblock follows the table
 /// anywhere below — moving there is ordinary vertical motion.

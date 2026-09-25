@@ -122,15 +122,10 @@
 //!   spelling, the reading of the conceal contract ([`kind::conceal`]), the
 //!   key chains a view binds ([`kind::chains`]) and the hooks a kind fills in.
 //!
-//! The extensions depend on the three layers and on [`protocol`], never on
-//! one another. Where one has to affect another, it does so through the
-//! protocol: cancelling a composition has to put back the undo history the
-//! composition's own transactions grew, so a composition snapshot keeps the
-//! whole [`EditorState`] from before it started, and
-//! [`composition::cancel_composition`] carries that state in a
-//! [`protocol::restore_fields_from`] effect. The history — like any field that
-//! honours the effect — reads its old value back out of it. Neither module
-//! names the other, so either can be configured, or replaced, alone.
+//! The extensions ([`history`], [`composition`], [`corrections`]) depend on
+//! the three layers, on [`protocol`] and on the [`commands`] catalogue, never
+//! on one another; where one has to affect another, it does so through the
+//! protocol (see [`protocol`] for how).
 //!
 //! # A document kind, as an editing surface sees it
 //!

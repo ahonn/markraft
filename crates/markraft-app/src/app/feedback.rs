@@ -9,8 +9,8 @@
 //!
 //! Notices take turns. A sentence the user has to *read* waits for whatever is
 //! on screen instead of replacing it, and the same sentence twice in a row is
-//! one sentence: both are rules the callers used to keep by hand, and both are
-//! easy to lose in a `VecDeque` anyone can push to.
+//! one sentence. Both rules live here rather than with the callers, since both
+//! are easy to lose in a `VecDeque` anyone can push to.
 
 use gpui::SharedString;
 use std::{
@@ -122,7 +122,7 @@ impl Feedback {
         }
     }
 
-    /// The sentences waiting their turn, for the headless tests.
+    /// The sentences waiting their turn.
     #[cfg(test)]
     pub(super) fn queued(&self) -> impl Iterator<Item = &str> {
         self.queued.iter().map(String::as_str)

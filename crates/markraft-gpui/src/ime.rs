@@ -448,9 +448,8 @@ mod tests {
         assert_eq!(text_of(&back), "a", "the committed text survived the undo");
     }
 
-    /// The bug the live smoke test found: a commit inside an explicit group has
-    /// to belong to that group, not bypass the history and leave its text
-    /// behind when the group is undone.
+    /// A commit inside an explicit group has to belong to that group, not
+    /// bypass the history and leave its text behind when the group is undone.
     #[test]
     fn a_commit_inside_an_undo_group_undoes_with_the_rest_of_the_session() {
         let state = state_of("end");

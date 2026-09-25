@@ -1,17 +1,6 @@
-//! The immutable document tree.
-//!
-//! A [`Node`] is a value: it has no identity and no parent pointer, and editing
-//! produces a new tree that shares every untouched subtree with the old one.
-//!
-//! # Coordinate frame
-//!
-//! Positions are integer token offsets. A container contributes an open and a
-//! close token, a text leaf one token per Unicode scalar value (`char`), and a
-//! non-text leaf one token. [`Node::node_size`] is the number of tokens the
-//! node occupies including its own open and close tokens;
-//! [`Node::content_size`] excludes them. Document positions run from `0` to
-//! `doc.content_size()`: the top node's own tokens sit outside the coordinate
-//! frame.
+//! The immutable document tree. The crate documentation describes its value
+//! semantics and the coordinate frame; [`Node::node_size`] counts a node's own
+//! open and close tokens, [`Node::content_size`] excludes them.
 
 use std::ops::Range;
 use std::sync::Arc;

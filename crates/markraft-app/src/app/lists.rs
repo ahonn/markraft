@@ -54,7 +54,6 @@ impl Cursor {
         self.focus_pending = true;
     }
 
-    /// Reopen at the top.
     pub(super) fn reopen(&mut self) {
         self.select(0);
     }
@@ -120,18 +119,11 @@ impl Picker {
         self.browse_scroll.scroll_to_item(self.row);
     }
 
-    /// Open Browse at the top.
     pub(super) fn reopen_browse(&mut self) {
         self.select_in_browse(0);
     }
 
-    /// Open the command list at the top.
     pub(super) fn reopen_actions(&mut self) {
         self.select_in_actions(0);
-    }
-
-    /// No confirmation questions remain; kept so Escape's cascade stays uniform.
-    pub(super) fn forget_question(&mut self) -> bool {
-        false
     }
 }

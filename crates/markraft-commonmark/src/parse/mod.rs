@@ -10,12 +10,11 @@
 //!   source**: the text a reader sees once the block's own syntax is stripped,
 //!   one `line_break` atom per line ending, and an atom for each image, wiki
 //!   link and raw HTML tag. Every style mark is derived from that text; see
-//!   [`crate::textblock`] and [`crate::derive`]. comrak's inline tree is not
+//!   `textblock` and [`derive`](mod@crate::derive). comrak's inline tree is not
 //!   consulted for it, so the inline rules of a [`ParseRules`] table only
 //!   apply where an inline construct turns up in block position.
-//! * An **HTML block holding only `<br>`** becomes an empty paragraph, so older
-//!   Markraft files that used that spelling still open. Empty paragraphs have
-//!   no CommonMark write-back; they become blank separators. Runs of blank
+//! * An **HTML block holding only `<br>`** becomes an empty paragraph. Empty
+//!   paragraphs have no CommonMark write-back; they become blank separators. Runs of blank
 //!   lines in the source are separators, as CommonMark says, and produce
 //!   nothing.
 //! * **Inline HTML** is a `raw_inline` atom holding the tag as written, except
@@ -24,7 +23,7 @@
 //!   spelled in the text, a `<br>` ending a line spells that line's hard break,
 //!   an `<img>` is an `image` atom that writes its tag back, and a `<u>` or
 //!   `</u>` without its partner stays text.
-//! * An **Obsidian wiki link** — `[[target]]`, `[[target|alias]]` or the embed
+//! * A **wiki link** — `[[target]]`, `[[target|alias]]` or the embed
 //!   `![[target]]` — becomes a `wiki_link` atom holding the bytes the source
 //!   spelled. A spelling [`crate::wiki`] refuses stays the text a reader sees.
 //! * An **indented code block** becomes an ordinary `code_block` and is written
@@ -109,12 +108,12 @@ impl From<NodeError> for ParseError {
 /// link back as the bare URL. `relaxed_autolinks` stays off: it reads a URL
 /// inside brackets as a link too, which is not what GFM does.
 ///
-/// `footnotes` is on, and every whole document is read through [`parse_ast`],
+/// `footnotes` is on, and every whole document is read through `parse_ast`,
 /// which undoes the two things comrak does to footnote definitions that would
 /// lose or move text: it drops a definition nothing refers to, and it moves
 /// every definition to the end of the document.
 ///
-/// `wikilinks_title_after_pipe` is on for Obsidian's `[[target|alias]]` order,
+/// `wikilinks_title_after_pipe` is on for the `[[target|alias]]` order,
 /// which is what the files this editor shares are written in. comrak only
 /// *finds* the construct: what it reads is normalised — the destination is
 /// trimmed, unescaped and entity-resolved — so the [`WIKI_LINK`] atom takes its
@@ -127,9 +126,8 @@ impl From<NodeError> for ParseError {
 /// the spellings the notes this editor shares use. Math content is literal, so
 /// a `^` or a `*` inside a formula is never read as a style. `subscript` takes
 /// the single `~` GFM reads as strikethrough, leaving strikethrough to `~~`:
-/// that is how Typora reads them, and the notes come from there more often
-/// than they are written for GitHub. `underline` stays off, since it would
-/// take `__` from strong emphasis.
+/// the notes this editor opens mean subscript by it far more often.
+/// `underline` stays off, since it would take `__` from strong emphasis.
 ///
 /// `cjk_friendly_emphasis` is on because CommonMark's flanking rules refuse a
 /// delimiter run between CJK punctuation and a letter, so `**注意：**这里` would
@@ -175,7 +173,7 @@ pub fn commonmark_options() -> Options<'static> {
 /// plain CommonMark reader sees, which loses nothing.
 ///
 /// A task's check box before a heading or a quote, `- [ ] # title` or
-/// `- [ ] > quote`, is read as Typora reads it: the box, and the block after
+/// `- [ ] > quote`, is read as two parts: the box, and the block after
 /// it on its line. comrak only knows a box before a paragraph and reads the
 /// rest of that line as the paragraph's text, so the source is read again
 /// once with every such box taken out — the item's content column does not
@@ -501,7 +499,7 @@ impl MarkdownParser {
     /// before it.
     ///
     /// Text indented four spaces at the top level reads as prose, not as an
-    /// indented code block, as Typora pastes it: what another application puts
+    /// indented code block: what another application puts
     /// on the clipboard is indented for a reader — a log, a terminal's output,
     /// a quoted mail — far more often than it is Markdown's older code syntax,
     /// and a fenced block still says code unmistakably.

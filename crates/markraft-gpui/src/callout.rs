@@ -6,8 +6,8 @@
 //! here finds a callout, whatever a quote's attributes are called. The view
 //! reads three things off a quote that is one: whether it has a header at all,
 //! what the header says, and which accent it and the quote's bar are drawn in.
-//! The tone table below is Obsidian's, which is where the convention comes
-//! from; it only ever runs for a host that opted in by naming the attributes.
+//! The tone table below is the conventional grouping of callout types; it
+//! only ever runs for a host that opted in by naming the attributes.
 //!
 //! The fold marker is deliberately *not* acted on: the content is always drawn.
 //! A note whose body an editor hid would be a note whose body could not be
@@ -16,7 +16,7 @@
 use markraft_core::kind::DocTypes;
 use markraft_core::projection::{Ancestor, Line};
 
-/// The colour family a callout is drawn in, following Obsidian's own grouping.
+/// The colour family a callout is drawn in, following the conventional grouping.
 ///
 /// [`EditorStyle::callout_tones`](crate::EditorStyle::callout_tones) holds one
 /// accent per variant, in the order they are declared here.
@@ -53,9 +53,8 @@ impl Tone {
     }
 }
 
-/// The tone a callout type belongs to. Obsidian matches a type without regard
-/// to case and shows anything it does not know in the default style, so an
-/// unknown type is a [`Tone::Note`] here too.
+/// The tone a callout type belongs to. A type matches without regard to case,
+/// and one not known is drawn in the default style, a [`Tone::Note`].
 pub(crate) fn tone_of(kind: &str) -> Tone {
     match kind.to_lowercase().as_str() {
         "abstract" | "summary" | "tldr" | "tip" | "hint" | "important" => Tone::Summary,
@@ -177,7 +176,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_obsidian_type_family_maps_to_its_own_tone() {
+    fn every_callout_type_family_maps_to_its_own_tone() {
         for (kind, tone) in [
             ("note", Tone::Note),
             ("info", Tone::Note),
@@ -206,8 +205,8 @@ mod tests {
             ("example", Tone::Example),
             ("quote", Tone::Quote),
             ("cite", Tone::Quote),
-            // Case does not matter, and Obsidian draws what it does not know
-            // in the default style.
+            // Case does not matter, and an unknown type is drawn in the
+            // default style.
             ("WARNING", Tone::Caution),
             ("Tip", Tone::Summary),
             ("custom-type", Tone::Note),

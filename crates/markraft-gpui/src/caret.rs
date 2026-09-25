@@ -21,18 +21,14 @@ pub(crate) struct CaretView {
 }
 
 impl CaretView {
-    /// Whether a caret on a wrapped row's break is drawn at the end of the row
-    /// before it rather than the start of the row after.
     pub(crate) fn upstream(&self) -> bool {
         self.upstream
     }
 
-    /// The column a run of vertical moves keeps, once one has started.
     pub(crate) fn preferred_x(&self) -> Option<Pixels> {
         self.preferred_x
     }
 
-    /// Whether a reveal was asked for and not yet honoured.
     pub(crate) fn reveal_pending(&self) -> bool {
         self.reveal
     }

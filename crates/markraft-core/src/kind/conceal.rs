@@ -208,7 +208,7 @@ pub fn word_boundary(
     let line = &projection.lines()[index];
     let hidden = concealed_steps(syntax, line, caret);
     let spelled = spelling(syntax, line);
-    // Markup is no word to stop at, shown or not: as in Typora, ⌥← from the
+    // Markup is no word to stop at, shown or not: ⌥← from the
     // end of `**abc**` reaches `abc`, not the gap before the closing `**`.
     let markup: Vec<Range<usize>> = hidden.iter().chain(&spelled).cloned().collect();
     let mut at = caret;

@@ -1,8 +1,7 @@
 //! Reading the styles a textblock's inline source spells.
 //!
-//! In the inline source model a textblock's text *is* its Markdown inline
-//! source — delimiters, backslash escapes, entities and HTML tags included —
-//! and every style mark on it is a function of that text. [`derive()`] is that
+//! A textblock's text *is* its Markdown inline source (see the
+//! [crate docs](crate)), and every style mark on it is a function of that text. [`derive()`] is that
 //! function. It knows nothing about the document tree: it takes the block's
 //! kind, its text and the context the text is read in, and answers which
 //! characters carry which style and which characters are spelling a reader
@@ -833,7 +832,7 @@ impl Reader<'_> {
             NodeValue::Highlight => self.styled(node, whole, Style::Highlight),
             NodeValue::Superscript => self.styled(node, whole, Style::Superscript),
             // comrak lets a subscript run across spaces, so the tildes of
-            // `~5 to ~10` would make one. Typora and Pandoc need a space in one
+            // `~5 to ~10` would make one. A space in a subscript has to be
             // escaped, and a note's `~` means "about" far more often than it
             // opens a subscript, so such a run is plain text.
             NodeValue::Subscript if spans_whitespace(node) => self.inlines(node),
@@ -1429,7 +1428,6 @@ fn decode_entities(text: &str) -> String {
 /// The character an atom stands as in a textblock's text.
 const ATOM_PLACEHOLDER: char = '\u{fffc}';
 
-/// A wiki link atom's attributes.
 fn wiki_attrs(link: crate::wiki::WikiLink) -> Attrs {
     attrs! {
         "target" => link.target,

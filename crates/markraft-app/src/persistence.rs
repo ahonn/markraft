@@ -187,7 +187,8 @@ impl Persistence {
             .map_err(|_| stopped())?;
         rx.recv().map_err(|_| stopped())?
     }
-    /// Queue a snapshot.
+    /// Hand a snapshot to the worker. The write's outcome arrives later through
+    /// [`Self::poll`], tagged with `revision`.
     pub fn save(
         &self,
         revision: u64,

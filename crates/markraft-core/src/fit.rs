@@ -398,7 +398,6 @@ impl<'a> Fitter<'a> {
         });
     }
 
-    /// Handle a close token of the input.
     fn place_close(&mut self) {
         if self.frames.len() > 1 {
             if self.top().dropped {
@@ -569,10 +568,9 @@ pub(crate) fn fit_replacement(
     ))
 }
 
-/// A replacement from one textblock into another, repaired the way Typora
-/// repairs it: the text after the range stays where it is, and so do the
-/// containers it sits in. Returns `None` where that does not apply, for the
-/// general repair to take over.
+/// A replacement from one textblock into another, repaired so the text after
+/// the range stays where it is, and so do the containers it sits in. Returns
+/// `None` where that does not apply, for the general repair to take over.
 ///
 /// Where the range starts inside its textblock, what is inserted and the text
 /// after the range join that textblock, and the containers the range reached

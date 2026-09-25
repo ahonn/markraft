@@ -393,8 +393,6 @@ fn history_entries_survive_an_interleaved_remote_change() {
     );
 }
 
-/// A remote change that deletes everything an entry did leaves nothing to
-/// undo in it: the entry goes, and undo reaches the one below.
 #[test]
 fn an_entry_a_remote_change_empties_is_dropped() {
     let schema = shared_schema();
@@ -625,8 +623,6 @@ fn a_composition_committed_inside_an_explicit_group_undoes_with_it() {
     assert_eq!(undo_depth(&undone), 0);
 }
 
-/// A spec that only establishes the range a later one edits must not decide
-/// whether the transaction is recorded.
 #[test]
 fn a_later_spec_has_the_last_word_on_an_annotation() {
     let schema = shared_schema();

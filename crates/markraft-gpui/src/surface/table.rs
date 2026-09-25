@@ -138,8 +138,7 @@ pub(super) fn column_demands(
 ///
 /// A table is content-sized: where the preferred widths fit, they are used as
 /// they are rather than stretched to the editor's width — a two-word table
-/// stays two words wide, as it does in Bear, rather than being blown up to the
-/// column the way Typora does it. Only when they do not fit are the columns
+/// stays two words wide rather than being blown up to the column. Only when they do not fit are the columns
 /// shrunk, proportionally to what they asked for and never below their own
 /// entry in `minimum`, which is the widest unbreakable unit the column holds:
 /// shrinking may wrap a cell's text, never split a word. A grid that will not

@@ -16,10 +16,10 @@
 //!
 //! **Inline content is written as it was read; blocks are written
 //! canonically.** A paragraph's, a heading's or a table cell's text *is* its
-//! Markdown inline source — delimiters, escapes, entities and all — so it goes
-//! back out byte for byte, with only the backslashes that keep it the block it
+//! Markdown inline source — delimiters, backslash escapes, entities and HTML
+//! tags included — so it goes back out byte for byte, with only the backslashes that keep it the block it
 //! is. Every style mark is derived from that text; see [`schema`] and
-//! [`derive`]. The blocks around the text are written in one spelling each:
+//! [`derive`](mod@derive). The blocks around the text are written in one spelling each:
 //! code blocks become fenced, list markers and quote prefixes are re-spelled,
 //! and a document that survives a round trip renders the same HTML.
 //!
@@ -73,7 +73,7 @@
 //! privileged.
 //!
 //! Inline styles are not extended that way. A textblock's text is its inline
-//! source and its marks are what [`derive`] reads from that text — by comrak,
+//! source and its marks are what [`derive`](mod@derive) reads from that text — by comrak,
 //! against a fixed set of styles — so an inline [`ParseRule`] is never
 //! consulted for inline content: met in block position it keeps the source as
 //! a raw block rather than lose it. A new inline style is a row of the
@@ -83,7 +83,8 @@
 //! # Known losses
 //!
 //! Editor-created shapes and cosmetic normalizations follow these rules.
-//! Each has a test of its own in `tests/cases.rs`.
+//! Each has a test of its own in `tests/cases.rs`, or in `tests/html.rs` for
+//! HTML tables.
 //!
 //! * A line break at either end of a paragraph is dropped, and so is
 //!   whitespace starting a line: no reader can give either back. A heading of

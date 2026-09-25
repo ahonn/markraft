@@ -64,7 +64,7 @@ pub struct EditorStyle {
     /// Quote bars, horizontal rules and table grid lines.
     pub rule: Hsla,
     /// One accent per callout tone, in the order
-    /// [`Tone`](crate::callout::Tone) declares them: note, summary, success,
+    /// `callout::Tone` declares them: note, summary, success,
     /// caution, danger, example, quote. Each draws both the quote's own bar and
     /// its header label, so each answers to the text floor rather than the
     /// graphic one.
@@ -145,11 +145,11 @@ impl EditorStyle {
             max_line_width: None,
             font_family: DEFAULT_FONT_FAMILY.into(),
             body_size: px(14.),
-            // Typora's ratios (2.25, 1.75, 1.5, 1.25, 1, 1 em) held down at the
-            // top, so a floating note's title does not crowd its own window.
-            // Typora draws its last two levels at the body size and tells H6 apart
-            // by colour; here every level is a size step down from the one above
-            // it, ending at the body size in bold.
+            // Ratios of 2.25, 1.75, 1.5, 1.25, 1 and 1 em held down at the top,
+            // so a floating note's title does not crowd its own window. Rather
+            // than drawing the last two levels at the body size and telling H6
+            // apart by colour, every level is a size step down from the one
+            // above it, ending at the body size in bold.
             heading_sizes: [px(26.), px(21.), px(18.), px(16.), px(15.), px(14.)],
             line_height_ratio: 1.5,
             // Paragraphs part further than the items of a list, which are one
@@ -393,8 +393,6 @@ mod tests {
         assert_readable(&EditorStyle::notes_dark(), "notes_dark");
     }
 
-    /// A heading used to sit closer to the paragraph above it than to its own
-    /// body, which read as if it belonged to the wrong block.
     /// A table's grid is drawn in `rule`, over the background and over the
     /// header band alike, so the band may not cost the lines their 3:1 floor.
     /// Dark is the theme where a lighter band would: its `rule` sits only just

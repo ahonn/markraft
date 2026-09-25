@@ -33,7 +33,7 @@ Positional files open into the notes folder session. Use -- before filenames
 beginning with -.
 
 Notes default to ~/Documents/Markraft. Change the folder in Settings (for
-example to an Obsidian vault). The app stays in the menu bar while its window
+example to an existing notes folder). The app stays in the menu bar while its window
 is hidden. ⌥N toggles the window and ⌘K lists every action with its shortcut.
 ";
 

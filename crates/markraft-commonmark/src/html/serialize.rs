@@ -9,7 +9,7 @@
 //! Another application pastes this. It is therefore ordinary HTML — `<p>`,
 //! `<h1>`, `<ul>`, `<strong>` — and not a private encoding. The few things
 //! CommonMark records that HTML has no element for travel as `data-`
-//! attributes, which every other reader ignores and [`HtmlParser`] reads back,
+//! attributes, which every other reader ignores and [`HtmlParser`](crate::html::HtmlParser) reads back,
 //! so a copy from Markraft into Markraft loses nothing:
 //!
 //! | attribute | on | what it carries |
@@ -323,7 +323,6 @@ impl HtmlState<'_> {
     }
 }
 
-/// The indexes of `parent`'s children that are hard line breaks.
 fn hard_break_indexes(schema: &Schema, parent: &Node) -> Vec<usize> {
     let Some(kind) = crate::textblock::block_kind(schema, parent.type_id()) else {
         return Vec::new();

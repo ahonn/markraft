@@ -189,7 +189,7 @@ pub(super) fn text_runs(
         }
     }
     // A raw block the kind reads more in — a run of link definitions — is drawn
-    // as the prose it describes, as Typora draws it; every character stays.
+    // as the prose it describes; every character stays.
     if raw && let Some(spelling) = input.spelling {
         let highlights = spelling.source_highlights(line);
         let chars = text.text.chars().count();

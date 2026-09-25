@@ -40,16 +40,11 @@
 //! document [`Node::check`] rejects. Commands are therefore safe to chain
 //! blindly, at the cost of one application and one validation per attempt.
 //!
-//! # Relation to ProseMirror
+//! # Tables
 //!
-//! The catalogue follows `prosemirror-commands` and `prosemirror-schema-list`.
-//! Deviations are noted on the individual commands. `moveToLineBoundary` has no
-//! counterpart here: where a visual line ends is a layout question, and this
-//! crate has no layout.
-//!
-//! The table commands take after `prosemirror-tables` in shape only: there is
-//! no cell selection here, and Tab and Enter grow the table the way a Markdown
-//! editor's do.
+//! The table commands have no cell selection. Moving past the last cell grows
+//! the table: [`goto_next_cell`] (Tab) and [`goto_cell_below`] (Enter) add a
+//! row there.
 
 mod blocks;
 mod general;
@@ -259,7 +254,7 @@ fn block_boundary(state: &EditorState, end: bool) -> Option<ResolvedPos> {
 /// backspace would join sits.
 ///
 /// Walks out of every ancestor `pos` is at the start of, stopping at an
-/// isolating node. Mirrors ProseMirror's `findCutBefore`.
+/// isolating node.
 pub(crate) fn find_cut_before(schema: &Schema, resolved: &ResolvedPos) -> Option<usize> {
     if schema.node_type(resolved.parent().type_id()).is_isolating() {
         return None;

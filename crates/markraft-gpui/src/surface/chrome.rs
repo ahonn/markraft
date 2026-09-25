@@ -217,7 +217,7 @@ pub(super) fn starts_item(types: &DocTypes, line: &Line) -> bool {
 ///
 /// A code block does, showing its language tag, and a line spelling out a
 /// picture, drawing it under its source: every other block draws its marker,
-/// bar or heading the same wherever the caret is, as Typora does. So the
+/// bar or heading the same wherever the caret is. So the
 /// caret passing through any other line does not invalidate the shaped rows.
 pub(super) fn focus_chrome(input: &ShapeInput<'_>, line: &Line) -> bool {
     input.types.is_code_block(line)
@@ -269,7 +269,7 @@ pub(super) fn shape_source_label(
 /// The gutter marker a line draws: the bullet, ordinal or check box of the
 /// list item it opens.
 ///
-/// It is the same wherever the caret is. As in Typora, a list item never shows
+/// It is the same wherever the caret is. A list item never shows
 /// the `- `, `1. ` or `- [ ] ` it is spelled with, nor a heading its hashes:
 /// they are not text the caret can reach, so showing them would only suggest
 /// an edit that cannot be made, and swapping a drawn marker for its spelling

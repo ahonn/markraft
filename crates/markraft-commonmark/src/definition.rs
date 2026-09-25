@@ -1,7 +1,7 @@
 //! The parts of link reference definitions, for a view to draw them by.
 //!
 //! A run of definitions is kept verbatim in a raw block, so nothing about it is
-//! lost and every character stays editable. Typora draws one as the prose it
+//! lost and every character stays editable. A view draws one as the prose it
 //! describes rather than as source: the label bold, the destination
 //! underlined, the brackets, the colon and the title quiet. Every character
 //! stays on screen; only its face says what it is.

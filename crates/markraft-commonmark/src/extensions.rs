@@ -21,7 +21,7 @@
 //!   never reaches the file as literal `****`. See the `pending` module.
 //! * **The table invariant** — every row of a table as wide as the rest,
 //!   held by refusing any edit that would leave a table ragged; see
-//!   [`table_invariant`](markraft_core::commands::table_invariant). The key
+//!   [`markraft_core::commands::table_invariant`]. The key
 //!   chains a view binds need know nothing of cells.
 //!
 //! # The canonicalising correction
@@ -200,7 +200,7 @@ fn merge_adjacent_lists(cx: &markraft_core::corrections::CorrectionContext<'_>) 
 }
 
 /// Keep the numbers of an ordered list's items when an edit takes the items
-/// before them, text and all, as Typora does: selecting a paragraph and the
+/// before them, text and all: selecting a paragraph and the
 /// first item of `1. a` / `2. b` and deleting leaves `2. b`. Lifting the
 /// first item out takes the item but keeps its text, so the rest are
 /// numbered from the list's start as before.
@@ -571,7 +571,7 @@ fn spec(changes: Vec<Change>) -> markraft_core::TransactionSpec {
 }
 
 /// A paragraph typed as link reference definitions becomes the definitions
-/// once the caret leaves it, as Typora makes one: `[ref]: /url` on a line of
+/// once the caret leaves it: `[ref]: /url` on a line of
 /// its own tells `[a][ref]` where to go rather than standing as text. While
 /// the caret is in it the line is still being typed, and a definition only
 /// half written would read as something else.

@@ -1,16 +1,11 @@
-//! Changes in original-document coordinates.
+//! Changes in original-document coordinates; the crate documentation
+//! describes the model.
 //!
 //! A [`ChangeSet`] divides the starting document into consecutive sections that
-//! are kept, have marks modified, or are replaced by a run of tokens. Every
-//! position in a [`Change`] refers to the *starting* document: changes in one
-//! set never compensate for each other, so a caller can describe several edits
-//! without doing position arithmetic.
-//!
-//! Structural edits are token edits. Splitting a block inserts a close and an
-//! open token, joining deletes them, wrapping inserts an open token before and
-//! a close token after a range, and lifting deletes the wrapper's two tokens.
-//! When a caller cannot vouch for the result, [`Fit`] makes
-//! [`ChangeSet::create`] repair the replacement.
+//! are kept, have marks modified, or are replaced by a run of tokens. Because
+//! every position refers to the starting document, a caller can describe
+//! several edits without doing position arithmetic. When a caller cannot vouch
+//! for the result, [`Fit`] makes [`ChangeSet::create`] repair the replacement.
 
 pub(crate) mod apply;
 mod compose;

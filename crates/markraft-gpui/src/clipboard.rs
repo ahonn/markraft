@@ -19,7 +19,7 @@ use markraft_core::kind::DocTypes;
 use markraft_core::{EditorState, Fragment, Schema, Selection, Slice, kind::Codecs};
 
 /// A selection from the start of a list item's text into a later item of the
-/// same list, as whole items in their list, as Typora copies it: pasted, it is
+/// same list, as whole items in their list: pasted, it is
 /// the list it was, where the open slice the selection spells would make its
 /// first item a paragraph. `None` for every other selection.
 pub(crate) fn whole_items(state: &EditorState, types: &DocTypes) -> Option<Slice> {

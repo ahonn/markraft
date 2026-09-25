@@ -158,8 +158,8 @@ fn an_unknown_element_preserves_boundaries_and_editable_children() {
 
 #[test]
 fn every_styling_tag_has_a_mark() {
-    // A mark with a Markdown spelling is Method-B: the delimiter characters come
-    // in as syntax leaves beside the content. Underline has no spelling of its
+    // A mark with a Markdown spelling comes in with its delimiter characters
+    // as syntax leaves beside the content. Underline has no spelling of its
     // own, so it arrives as a bare mark.
     for (tag, mark) in [
         ("strong", "strong"),
@@ -350,8 +350,7 @@ fn a_document_writes_as_the_html_another_application_expects() {
         "<pre><code class=\"language-rust\">let x = 1;\n</code></pre>"
     );
     // Markdown empty paragraphs collapse; HTML still needs a break so an empty
-    // `<p>` stays clickable. A lone `<br>` line in Markdown still *reads* as an
-    // empty paragraph for older files.
+    // `<p>` stays clickable. A lone `<br>` line in Markdown reads as one.
     assert_eq!(html_of("a\n\n<br>\n\nb"), "<p>a</p>\n<p><br></p>\n<p>b</p>");
     assert_eq!(
         shape("<p>a</p><p><br></p><p>b</p>"),
@@ -420,7 +419,7 @@ fn text_and_attributes_are_escaped() {
         written,
         "<p><a href=\"a&quot;b\" title=\"c&quot;d\">x</a></p>"
     );
-    // HTML paste re-derives Method-B `[` / `](…)` leaves around the label.
+    // HTML paste re-derives the `[` / `](…)` syntax leaves around the label.
     let round = parser().parse(&written).expect("parses");
     assert_eq!(
         markraft_commonmark::to_markdown(&schema, &round),
@@ -507,7 +506,7 @@ fn a_copied_slice_writes_as_html_and_reads_back_as_the_same_fragment() {
 fn a_cut_inside_one_paragraph_writes_as_bare_inline_html() {
     let codec = Codec::new();
     let doc = codec.parse("hello **world**");
-    // Method-B: the opening `**` is two of the slice's own tokens, and HTML
+    // The opening `**` is two of the slice's own characters, and HTML
     // writes the mark rather than the characters that spell it.
     let slice = doc.slice(1, 13).expect("a slice");
     assert_eq!(
@@ -761,7 +760,7 @@ fn a_pasted_line_break_is_spelled_in_the_house_style() {
 }
 
 /// A style Markdown cannot say where it was pasted is given up and its text
-/// kept, as Typora pastes it, rather than written as delimiters that read as
+/// kept, rather than written as delimiters that read as
 /// text or a link that swallows them. Styles that can be said stay.
 #[test]
 fn a_style_markdown_cannot_say_is_given_up_and_its_text_kept() {

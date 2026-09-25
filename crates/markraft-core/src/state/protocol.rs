@@ -11,12 +11,19 @@
 //!
 //! Keeping the shared vocabulary in one place is what lets the extensions
 //! ([`history`](crate::history), [`composition`](crate::composition),
-//! [`corrections`](crate::corrections), the input rules in
-//! [`commands`](crate::commands)) depend only on the state layer and this
-//! module, never on one another. The composition, for example, closes the
-//! history's composition grouping with [`end_composition`] and puts the
-//! history back with [`restore_fields_from`] without either knowing the
-//! other exists.
+//! [`corrections`](crate::corrections)) never depend on one another: each
+//! relies only on the model and state layers, this module and the command
+//! catalogue in [`commands`](crate::commands). Where one has to affect
+//! another, it does so through this vocabulary. Cancelling a composition, for
+//! example, has to put back the undo history the composition's own
+//! transactions grew: a composition snapshot keeps the whole
+//! [`EditorState`] from before it started, and
+//! [`cancel_composition`](crate::composition::cancel_composition) carries that
+//! state in a [`restore_fields_from`] effect, from which the history — like
+//! any field that honours the effect — reads its old value back. The
+//! composition also closes the history's composition grouping with
+//! [`end_composition`]. Neither module names the other, so either can be
+//! configured, or replaced, alone.
 //!
 //! # What is here
 //!

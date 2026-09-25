@@ -18,9 +18,9 @@ use crate::protocol::event;
 /// A mark is a property of inline content, and which marks are allowed is
 /// declared by the node that *holds* that content, so this asks the parents.
 ///
-/// Unlike ProseMirror's `markApplies`, an empty range is answered from the node
-/// the position sits in rather than from a walk that visits nothing — which is
-/// what makes toggling a mark at a cursor work at document position 0.
+/// An empty range is answered from the node the position sits in rather than
+/// from a walk over its (absent) content — which is what makes toggling a mark
+/// at a cursor work at document position 0.
 pub fn mark_applies(
     schema: &Schema,
     doc: &Node,

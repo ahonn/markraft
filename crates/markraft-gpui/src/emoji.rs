@@ -2,7 +2,7 @@
 //!
 //! Both read the [`emojis`] table and nothing else, so they carry no host resources and
 //! a host only has to register them. What they write is the host's
-//! [`EmojiInsertion`]: the shortcode, as Typora writes it, which the document kind
+//! [`EmojiInsertion`]: the shortcode, which the document kind
 //! draws as its emoji, or the emoji character itself.
 
 use crate::{

@@ -18,8 +18,7 @@
 //!
 //! The combined transaction is annotated
 //! [`isolate_history(Both)`](crate::protocol::isolate_history), so an automatic
-//! conversion is always an undo step of its own — the behaviour the old core's
-//! block conversions relied on.
+//! conversion is always an undo step of its own.
 //!
 //! # Undoing a rule without undoing the text
 //!

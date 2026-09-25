@@ -90,7 +90,7 @@ pub struct Preferences {
     /// The global shortcut that opens a new note. Empty turns it off.
     pub new_note_hotkey: String,
     /// Whether the emoji menu and `:name:` write the emoji character rather than its
-    /// shortcode. Off by default, as Typora writes shortcodes.
+    /// shortcode. Off by default: shortcodes are written.
     pub emoji_characters: bool,
     /// What Tab inserts in a code block.
     pub tab_key: TabKey,
@@ -147,7 +147,7 @@ pub enum LineWidth {
 
 impl LineWidth {
     /// The longest a line may run, in multiples of the text size: 36 and 50 em are
-    /// about 504 and 700 points at 14 pt, Obsidian's readable length being the latter.
+    /// about 504 and 700 points at 14 pt, the latter a common readable length.
     pub fn ems(self) -> Option<f32> {
         match self {
             LineWidth::Narrow => Some(36.),
@@ -574,8 +574,8 @@ impl Library {
         true
     }
 
-    /// Notes matching `query`, by what they say or by where their file is. Names are
-    /// independent of titles now, so a search has to reach them; `root` is the notes
+    /// Notes matching `query`, by what they say or by where their file is. A file's name
+    /// can differ from its note's title, so a search has to reach both; `root` is the notes
     /// folder, which is what makes a match read like the path the Browse row shows.
     pub fn search(&self, query: &str, root: Option<&Path>) -> Vec<&Note> {
         let query = query.trim().to_lowercase();

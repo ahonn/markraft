@@ -77,7 +77,9 @@ pub enum NodeError {
         /// Human readable reason.
         message: String,
     },
-    /// A text node holds text that the model forbids (currently: empty text).
+    /// Text content is malformed: a text node is empty, is not of the schema's
+    /// text type, or a node of that type carries no text; or the text cannot
+    /// be inserted where it was asked to go.
     #[error("invalid text node: {0}")]
     InvalidText(String),
     /// A position was outside the range an operation accepts — for example

@@ -1,6 +1,6 @@
 //! Content expressions and the finite automaton they compile to.
 //!
-//! The grammar is the one used by ProseMirror and Wordgard:
+//! The grammar:
 //!
 //! ```text
 //! expr   = seq ("|" seq)*
@@ -289,10 +289,6 @@ fn fill_search(
     false
 }
 
-// ---------------------------------------------------------------------------
-// Parsing
-// ---------------------------------------------------------------------------
-
 fn tokenize(source: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let mut chars = source.chars().peekable();
@@ -465,10 +461,6 @@ impl Parser<'_, '_> {
         Ok(Expr::Types(types))
     }
 }
-
-// ---------------------------------------------------------------------------
-// NFA construction and determinisation
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
 struct Edge {

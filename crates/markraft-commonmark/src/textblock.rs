@@ -2,7 +2,7 @@
 //!
 //! In this document kind a paragraph's, a heading's or a table cell's text is
 //! its Markdown inline source, and every style mark on it is what
-//! [`derive`](crate::derive::derive) reads from that text. This module is where
+//! [`derive`](crate::derive::derive()) reads from that text. This module is where
 //! the two meet: it lays a textblock's content out as the text `derive` reads —
 //! each character, one U+FFFC per atom, one `\n` per line break — and builds
 //! content back from such a text with the marks derived for it.
@@ -112,7 +112,7 @@ impl Items {
         Items(out)
     }
 
-    /// The text [`derive`] reads: an atom is U+FFFC and a break is `\n`.
+    /// The text [`derive`](fn@derive) reads: an atom is U+FFFC and a break is `\n`.
     pub(crate) fn text(&self) -> String {
         self.0
             .iter()

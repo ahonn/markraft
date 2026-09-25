@@ -17,11 +17,10 @@
 //! whether the new output replaces the old one, so a facet value can be
 //! compared by identity to detect change.
 //!
-//! Wordgard tracks those dependencies automatically by observing what a
-//! `compute` function reads. This crate asks for them explicitly instead: doing
-//! it by observation needs interior mutability in a value that must stay
-//! `Send + Sync`, and the explicit list also documents the dependency at the
-//! definition site.
+//! The dependencies are declared rather than tracked by observing what a
+//! `compute` function reads: observing needs interior mutability in a value
+//! that must stay `Send + Sync`, and the explicit list also documents the
+//! dependency at the definition site.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -71,9 +70,7 @@ type CompareFn<T> = Option<Box<dyn Fn(&T, &T) -> bool + Send + Sync>>;
 
 /// How to define a [`Facet`].
 ///
-/// Only `combine` is required. The builder methods mirror Wordgard's
-/// `Facet.Spec` fields; `static` is spelled [`FacetConfig::static_only`]
-/// because it is a Rust keyword.
+/// Only `combine` is required.
 pub struct FacetConfig<I, O> {
     combine: CombineFn<I, O>,
     compare: CompareFn<O>,

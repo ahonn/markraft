@@ -1,8 +1,8 @@
 //! Writing a document tree back out as Markdown.
 //!
-//! The design is ProseMirror's: a rule per node type and a rule per mark type,
-//! driven by a [`SerializerState`] that owns the output string and knows how
-//! blocks are separated and how nested containers prefix their lines.
+//! There is a rule per node type and a rule per mark type, driven by a
+//! [`SerializerState`] that owns the output string and knows how blocks are
+//! separated and how nested containers prefix their lines.
 //!
 //! # Block separation
 //!
@@ -279,7 +279,7 @@ fn given_up() -> impl Iterator<Item = &'static str> {
 /// A style whose spelling does not read back — a subscript holding a space, a
 /// highlight around a bare link — is given up, one run at a time in
 /// [`given_up`] order, and the block spelled again. What is left is the text
-/// with the styles Markdown can say, as Typora pastes it, rather than
+/// with the styles Markdown can say, rather than
 /// delimiters that read as text or a link that swallows them. When the text
 /// still reads wrong and no single run helps — several styles on one character
 /// that each break its reading — the run nearest the first wrong character is

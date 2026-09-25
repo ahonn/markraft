@@ -17,8 +17,8 @@ const KEYCAP_WIDTH: Pixels = px(17.);
 const KEYCAP_HEIGHT: Pixels = px(18.);
 const KEYCAP_RADIUS: Pixels = px(5.);
 
-/// Secondary text. Dark enough on both surface colors to stay legible, which the
-/// lighter grey it replaced was not on the light panel.
+/// Secondary text. Dark enough to stay legible on both surface colors, the light
+/// panel included.
 pub(super) fn muted(dark: bool) -> Hsla {
     if dark { rgb(0x93959d) } else { rgb(0x66696f) }.into()
 }

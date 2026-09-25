@@ -568,9 +568,9 @@ fn structural_sharing_survives_a_change() {
 
 #[test]
 fn fitting_an_unplaceable_open_token_is_a_no_op() {
-    // Regression: a container the repair could not place still counted towards
-    // the open depth, so the fitter emitted a close token with nothing to match
-    // and fell back to rewriting the whole enclosing node.
+    // A container the repair cannot place must not count towards the open
+    // depth; otherwise the fitter emits a close token with nothing to match
+    // and falls back to rewriting the whole enclosing node.
     let schema = test_schema();
     let d = doc(&schema, [n(&schema, "paragraph", [t(&schema, "abcd")])]);
     let paragraph = schema.node_id("paragraph").expect("known");

@@ -1,4 +1,4 @@
-//! List editing, matching `prosemirror-schema-list`.
+//! List editing: wrapping in, splitting, lifting and sinking list items.
 //!
 //! Nothing here knows what a list *is* beyond what the schema says: a list type
 //! is any container whose content rule holds items, and an item type is any
@@ -123,8 +123,8 @@ fn closes(markups: &[Markup]) -> Vec<Token> {
     markups.iter().rev().cloned().map(Token::Close).collect()
 }
 
-/// Whether two container types can hold any of the same children — an
-/// approximation of ProseMirror's `compatibleContent`.
+/// Whether two container types can hold any of the same children, judged by
+/// whether their content expressions mention a common type.
 fn compatible_content(schema: &Schema, a: NodeTypeId, b: NodeTypeId) -> bool {
     if a == b {
         return true;
@@ -139,7 +139,7 @@ fn compatible_content(schema: &Schema, a: NodeTypeId, b: NodeTypeId) -> bool {
 /// Does not apply in an empty item, so a chain can fall through to
 /// [`lift_list_item`] or [`lift_empty_block`](super::lift_empty_block) and turn
 /// Enter in an empty item into "leave the list". The new item keeps the
-/// original item's attributes, as ProseMirror's `splitListItem` does.
+/// original item's attributes.
 pub fn split_list_item(item_type: NodeTypeId) -> Command {
     command(move |state| {
         let doc = state.doc();

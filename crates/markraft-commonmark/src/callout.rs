@@ -1,4 +1,4 @@
-//! Reading and writing Obsidian/GitHub callouts, byte for byte.
+//! Reading and writing callouts, byte for byte.
 //!
 //! A callout is a block quote whose first line is a marker — `[!note]`,
 //! `[!tip]- Folded`, `[!custom] Any title` — so it is the
@@ -8,8 +8,8 @@
 //! on a callout.
 //!
 //! comrak's `alerts` extension is deliberately **not** used. It knows the five
-//! GitHub types and nothing else, while Obsidian's type is any identifier at
-//! all, may carry a `-`/`+` fold marker and may be followed by a title; a
+//! GFM alert types and nothing else, while a callout's type is any identifier
+//! at all, may carry a `-`/`+` fold marker and may be followed by a title; a
 //! parser that recognises only the five would read the rest as body text and
 //! lose the marker.
 //!
@@ -17,7 +17,7 @@
 //!
 //! * `[!` immediately at the start of the quote's first line — after the `>`
 //!   and the one optional space a reader strips, and *not* after any further
-//!   indentation, which is what Obsidian requires too;
+//!   indentation;
 //! * a type of at least one character holding no bracket;
 //! * an optional `-` or `+` directly after the `]`;
 //! * either the end of the line, or one space and the title, which runs to the
@@ -33,8 +33,8 @@ pub struct Callout {
     /// The type between the brackets, in the case it was written in. Never
     /// empty: an empty type is what says a block quote is an ordinary one.
     pub kind: String,
-    /// `"-"`, `"+"` or empty. Obsidian folds on the first and expands on the
-    /// second; this codec keeps the byte and shows the content either way.
+    /// `"-"`, `"+"` or empty. The first marks a callout folded, the second one
+    /// expanded; this codec keeps the byte and shows the content either way.
     pub fold: String,
     /// The raw title after the marker, empty where the line ends at it.
     pub title: String,

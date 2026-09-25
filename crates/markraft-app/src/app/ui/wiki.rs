@@ -337,7 +337,6 @@ mod tests {
         assert!(super::reaches(&index, "Deep Dive.md"));
         // A heading in this very note names no other note, so it always reaches.
         assert!(super::reaches(&index, "#Structure"));
-        // What no note is called does not reach.
         assert!(!super::reaches(&index, "Nowhere"));
         assert!(!super::reaches(&index, "deep"));
     }

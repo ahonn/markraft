@@ -703,7 +703,7 @@ fn a_callout_marker_travels_in_the_quotes_attributes() {
         "> [!tip] Custom title\n> Body with **marks**",
         "> [!faq]- Folded by default\n> Body",
         "> [!warning]+ Expanded by default\n> Body",
-        "> [!custom-type] Any type is legal in Obsidian",
+        "> [!custom-type] Any type is legal",
         "> [!NOTE] Upper",
         "> [!note] Title  \n> Body",
         "> [!note] a|b `c` **d**\n> Body",
@@ -953,8 +953,8 @@ fn mark_combinations_on_a_code_span_are_spelled_with_delimiters() {
 #[test]
 fn a_mark_whose_delimiter_cannot_flank_is_given_up() {
     // Portable Markdown has no HTML fallback, and `a*!*` would not re-read as
-    // emphasis. The emphasis is given up and the text kept, as Typora pastes
-    // it — rather than `<em>` tags, or delimiters left to read as text.
+    // emphasis. The emphasis is given up and the text kept, rather than `<em>`
+    // tags, or delimiters left to read as text.
     let codec = Codec::new();
     let schema = &codec.schema;
     let em = schema.mark(md::EM, Attrs::empty()).expect("em");
@@ -1029,7 +1029,7 @@ fn ordered_lists_keep_their_start_and_delimiter_and_line_up() {
     assert_eq!(round("9. a\n10. b"), "9.  a\n10. b");
     // A list that stops short of the next width pads nothing.
     assert_eq!(round("8. a\n9. b"), "8. a\n9. b");
-    // Items all written with one number keep it, as Typora keeps them.
+    // Items all written with one number keep it.
     assert_eq!(round("1. a\n1. b\n1. c"), "1. a\n1. b\n1. c");
     assert_eq!(round("1) a\n01) b - [ ]"), "1) a\n1) b - [ ]");
     assert_eq!(round("1. [ ] a\n1. [x] b"), "1. [ ] a\n1. [x] b");
@@ -1082,8 +1082,8 @@ fn task_items_carry_their_check_box_in_the_list_marker() {
     assert_eq!(round("1. [ ] todo"), "1. [ ] todo");
 }
 
-/// Typora reads a box before a heading or a quote as a task holding that
-/// block, and writes one so; GFM would read the rest of the line as text.
+/// A box before a heading or a quote reads as a task holding that block,
+/// and one is written so; GFM would read the rest of the line as text.
 #[test]
 fn a_task_item_may_start_with_a_heading_or_a_quote() {
     for source in [
@@ -1592,7 +1592,7 @@ let x = 1;
     doc.check(&codec.schema).expect("a valid document");
 }
 
-/// A thematic break keeps the character it was written with, as Typora does,
+/// A thematic break keeps the character it was written with,
 /// unless that would read as something else.
 #[test]
 fn a_thematic_break_keeps_its_character_unless_that_would_read_as_something_else() {

@@ -14,7 +14,7 @@
 //!
 //! GFM normalises a ragged table the way a reader does: a cell past the last
 //! column is dropped, and a row that stops short is filled with empty cells.
-//! [`normalize_tables`] puts an imported tree in that shape, so no serialiser,
+//! `normalize_tables` puts an imported tree in that shape, so no serialiser,
 //! view or command has to cope with a ragged one.
 
 use markraft_core::commands::ColumnAlignment;

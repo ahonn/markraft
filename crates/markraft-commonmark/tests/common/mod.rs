@@ -418,7 +418,7 @@ impl Rng {
     }
 }
 
-/// Every Markdown source the old codec's tests fed to `from_markdown`.
+/// Hard Markdown inputs, kept without expectations; see `tests/corpus.rs`.
 pub const CORPUS: &[&str] = &[
     // Plain text.
     "",
