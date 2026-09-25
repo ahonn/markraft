@@ -7,7 +7,9 @@ use crate::attr::{AttrKind, AttrSpec, AttrValue};
 use crate::change::TrackMode;
 use crate::commands::*;
 use crate::history::{HistoryConfig, history, undo};
+use crate::fragment::Fragment;
 use crate::node::Node;
+use crate::slice::Slice;
 use crate::schema::{NodeTypeSpec, Schema, SchemaSpec};
 use crate::selection::Selection;
 use crate::state::{EditorState, EditorStateConfig, Extension, TransactionSpec};
@@ -717,6 +719,23 @@ fn the_guard_stops_an_edit_that_spans_two_cells() {
     assert_eq!(
         shape(&after),
         r#"doc(table[alignments=Str("none,none")](table_row(table_cell("c"), table_cell("d"))))"#
+    );
+}
+
+#[test]
+fn pasting_a_ragged_table_lands_it_as_it_is() {
+    // Pinned: nothing squares a pasted table whose rows differ in width. The
+    // parsers never produce one, so this is what a synthetic or imported slice
+    // does today; the table invariant is left to the commands' guards.
+    let state = state_of(document([paragraph("x")]), Extension::none());
+    let ragged = table("none,none", &[&["a", "b"], &["c"]]);
+    let pasted = run(
+        &at(&state, 2),
+        &replace_selection(Slice::new(Fragment::from_node(ragged), 0, 0)),
+    );
+    assert_eq!(
+        shape(&pasted),
+        r#"doc(paragraph("x"), table[alignments=Str("none,none")](table_row(table_cell("a"), table_cell("b")), table_row(table_cell("c"))))"#
     );
 }
 

@@ -1444,4 +1444,126 @@ mod tests {
             failures.join("\n")
         );
     }
+
+    // Typora 1.14.10 parity, found replaying the editing tests in both apps
+    // (A1-A9 of the comparison). Each expectation is what Typora saved.
+
+    // A1: ⌥← from the end of a line that ends in hidden markup reaches the
+    // start of the word inside it, as it does before plain text.
+    #[gpui::test]
+    fn word_motion_crosses_hidden_markup_at_a_line_edge(cx: &mut TestAppContext) {
+        for (source, keys, expected) in [
+            ("**abc**\n", "cmd-up cmd-right alt-left", "**Xabc**"),
+            ("`abc`\n", "cmd-up cmd-right alt-left", "`Xabc`"),
+            ("*a b c*\n", "cmd-up cmd-right alt-left", "*a b Xc*"),
+            ("**a** **b**\n", "cmd-up cmd-left alt-right", "**aX** **b**"),
+        ] {
+            let mut h = open_with(cx, &[("w.md", source)], |_| {});
+            h.keys(keys);
+            h.type_text("X");
+            assert_eq!(h.markdown(), expected, "{source:?}");
+        }
+    }
+
+    // A2: an opener typed into a note just emptied still writes its closer.
+    #[gpui::test]
+    fn an_emptied_note_pairs_the_first_opener(cx: &mut TestAppContext) {
+        for (opener, expected) in [("(", "()"), ("[", "[]"), ("{", "{}"), ("\"", "\"\"")] {
+            let mut h = open_with(cx, &[("p.md", "x\n")], |_| {});
+            h.keys("cmd-a backspace");
+            h.type_text(opener);
+            assert_eq!(h.markdown(), expected, "{opener}");
+        }
+    }
+
+    // A3: a word deletion over hidden markup keeps what is typed after it.
+    #[gpui::test]
+    fn typing_after_deleting_words_over_hidden_markup_reaches_the_note(cx: &mut TestAppContext) {
+        let mut h = open_with(cx, &[("w.md", "hello **world** end\n")], |_| {});
+        h.keys("cmd-up cmd-right alt-backspace alt-backspace");
+        h.type_text("X");
+        assert_eq!(h.markdown(), "hello X");
+    }
+
+    // A4: the first item of a list, made by Return and lifted out again, is a
+    // paragraph of its own that typing goes into, not the heading above.
+    #[gpui::test]
+    fn typing_into_a_new_first_item_lifted_out_stays_below_the_heading(cx: &mut TestAppContext) {
+        for (list, rest) in [
+            ("1. one\n2. two\n", "1. one\n2. two"),
+            ("- one\n- two\n", "- one\n- two"),
+        ] {
+            let source = format!("# Lists\n\n{list}");
+            let mut h = open_with(cx, &[("l.md", source.as_str())], |_| {});
+            h.keys("cmd-up cmd-right down cmd-left enter up backspace");
+            h.type_text("5");
+            assert_eq!(h.markdown(), format!("# Lists\n\n5\n\n{rest}"));
+        }
+    }
+
+    // A5: a paste keeps the space it starts with.
+    #[gpui::test]
+    fn a_paste_keeps_its_leading_space(cx: &mut TestAppContext) {
+        let mut h = open_with(cx, &[("p.md", "x\n")], |_| {});
+        h.keys("cmd-down cmd-right");
+        h.cx.write_to_clipboard(gpui::ClipboardItem::new_string(" ![a](b) and".into()));
+        h.keys("cmd-v");
+        assert_eq!(h.markdown(), "x ![a](b) and");
+    }
+
+    // A6: what is copied across two list items pastes back as two items.
+    #[gpui::test]
+    fn a_copy_across_two_items_pastes_as_items(cx: &mut TestAppContext) {
+        let mut h = open_with(cx, &[("c.md", "- one\n- two\n")], |_| {});
+        h.keys("cmd-up cmd-left right shift-down shift-right cmd-c cmd-down enter enter cmd-v");
+        let markdown = h.markdown();
+        let items: Vec<_> = markdown.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(items, ["- one", "- two", "- ne", "- tw"], "{markdown:?}");
+    }
+
+    // A7: moving into another cell with Tab, Shift-Tab or Return selects what it
+    // holds, so typing replaces it.
+    #[gpui::test]
+    fn moving_into_a_cell_selects_its_content(cx: &mut TestAppContext) {
+        let table = "| a | b |\n| - | - |\n| c | d |\n";
+        for (keys, cells) in [
+            ("cmd-up tab", ["a", "x", "c", "d"]),
+            ("cmd-up tab shift-tab", ["x", "b", "c", "d"]),
+            ("cmd-up enter", ["a", "b", "x", "d"]),
+        ] {
+            let mut h = open_with(cx, &[("t.md", table)], |_| {});
+            h.keys(keys);
+            h.type_text("x");
+            let markdown = h.markdown();
+            let found: Vec<_> = markdown
+                .lines()
+                .filter(|line| !line.contains('-'))
+                .flat_map(|line| {
+                    line.split('|')
+                        .map(str::trim)
+                        .filter(|cell| !cell.is_empty())
+                })
+                .collect();
+            assert_eq!(found, cells, "{keys}: {markdown:?}");
+        }
+    }
+
+    // A8: a reference definition typed on a line of its own is a definition.
+    #[gpui::test]
+    fn a_typed_reference_definition_defines(cx: &mut TestAppContext) {
+        let mut h = open_with(cx, &[("r.md", "[a][ref]\n")], |_| {});
+        h.keys("cmd-down cmd-right enter");
+        h.type_text("[ref]: /wx");
+        h.keys("cmd-up");
+        assert_eq!(h.markdown(), "[a][ref]\n\n[ref]: /wx");
+    }
+
+    // A9: Return inside a code line's indent drops the blanks after the caret.
+    #[gpui::test]
+    fn return_in_a_code_indent_drops_the_blanks_after_the_caret(cx: &mut TestAppContext) {
+        let mut h = open_with(cx, &[("c.md", "```\n    x\n```\n")], |_| {});
+        h.keys("cmd-up right right enter");
+        h.type_text("y");
+        assert_eq!(h.markdown(), "```\n  \n  yx\n```");
+    }
 }

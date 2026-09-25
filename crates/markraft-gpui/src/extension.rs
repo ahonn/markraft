@@ -761,3 +761,6 @@ impl Element for AnchoredOverlay {
         self.child.paint(window, cx);
     }
 }
+
+#[cfg(test)]
+mod tests;

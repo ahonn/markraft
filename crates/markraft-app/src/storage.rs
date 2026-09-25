@@ -901,6 +901,52 @@ mod tests {
     }
 
     #[test]
+    fn every_preference_survives_the_settings_file() {
+        // Each field is set to something other than its default, so a field
+        // that serialization drops or renames shows up as a difference here.
+        let preferences = Preferences {
+            dark_mode: Some(true),
+            auto_height: false,
+            hotkey: "Ctrl+Shift+M".into(),
+            window_bounds: Some([1., 2., 3., 4.]),
+            vim_mode: true,
+            remote_images: false,
+            text_size: Preferences::DEFAULT_TEXT_SIZE + 3.,
+            hide_on_deactivate: true,
+            always_on_top: false,
+            new_note_hotkey: "Alt+Shift+N".into(),
+            emoji_characters: true,
+            tab_key: TabKey::FourSpaces,
+            markdown_shortcuts: false,
+            font: EditorFont::Serif,
+            line_height: LineHeight::Relaxed,
+            bullet_marker: BulletMarker::Plus,
+            code_fence: CodeFence::Tildes,
+            emphasis_marker: EmphasisMarker::Underscore,
+            settings_page: "editor".into(),
+            summon: Summon::NewNote,
+            line_width: LineWidth::Full,
+            auto_pair: false,
+            confirm_delete: false,
+            all_spaces: true,
+            follow_pointer: true,
+            ordered_delimiter: OrderedDelimiter::Parenthesis,
+            hard_break: HardBreakStyle::Spaces,
+        };
+        assert_ne!(preferences, Preferences::default());
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        Settings {
+            preferences: preferences.clone(),
+            ..Settings::default()
+        }
+        .write(&path)
+        .unwrap();
+        assert_eq!(Settings::read(&path).unwrap().preferences, preferences);
+    }
+
+    #[test]
     fn notices_are_taken_once_and_never_repeat_themselves() {
         let notices = Notices::default();
         notices.raise("A note could not be read.".into());
