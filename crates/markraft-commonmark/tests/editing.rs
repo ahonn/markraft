@@ -132,11 +132,11 @@ fn bullet_markers_make_a_list_that_remembers_its_character() {
 fn ordered_markers_keep_their_start_and_delimiter() {
     assert_eq!(
         typed("1. "),
-        r#"doc(ordered_list[delimiter=Str("."),start=Int(1),tight=Bool(true)](list_item(paragraph())))"#
+        r#"doc(ordered_list[delimiter=Str("."),same_ordinal=Bool(false),start=Int(1),tight=Bool(true)](list_item(paragraph())))"#
     );
     assert_eq!(
         typed("7) "),
-        r#"doc(ordered_list[delimiter=Str(")"),start=Int(7),tight=Bool(true)](list_item(paragraph())))"#
+        r#"doc(ordered_list[delimiter=Str(")"),same_ordinal=Bool(false),start=Int(7),tight=Bool(true)](list_item(paragraph())))"#
     );
 }
 

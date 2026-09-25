@@ -16,6 +16,7 @@ use markraft_core::kind::TABLE_ALIGNMENTS_ATTR;
 use markraft_core::{Attrs, Schema, attrs};
 use scraper::ElementRef;
 
+use crate::house::HouseStyleHandle;
 use crate::schema as md;
 use crate::table::{Alignment, format_alignments};
 
@@ -314,7 +315,8 @@ fn is_tight(target: HtmlTarget<'_>) -> bool {
 }
 
 /// The rule table for the CommonMark/GFM preset.
-pub fn commonmark_html_rules() -> HtmlRules {
+pub fn commonmark_html_rules(house: &HouseStyleHandle) -> HtmlRules {
+    let ordered_house = house.clone();
     let mut rules = HtmlRules::new()
         .matching(
             "span",
@@ -452,7 +454,7 @@ pub fn commonmark_html_rules() -> HtmlRules {
             "ol",
             HtmlRule::block_with(
                 md::ORDERED_LIST,
-                html_attrs_fn(|target| {
+                html_attrs_fn(move |target| {
                     let start: i64 = target
                         .attr("start")
                         .and_then(|value| value.parse().ok())
@@ -460,13 +462,14 @@ pub fn commonmark_html_rules() -> HtmlRules {
                     // A list from outside Markraft names no delimiter, so it
                     // is one the editor makes, in the house style.
                     let delimiter = target.attr("data-delimiter").map_or_else(
-                        || crate::house_style().ordered_delimiter.to_string(),
+                        || ordered_house.get().ordered_delimiter.to_string(),
                         str::to_string,
                     );
                     attrs! {
                         "start" => start,
                         "delimiter" => delimiter,
                         "tight" => is_tight(target),
+                        "same_ordinal" => target.attr("data-same-ordinal") == Some("true"),
                     }
                 }),
             ),
@@ -512,13 +515,6 @@ pub fn commonmark_html_rules() -> HtmlRules {
                 }),
             ),
         )
-        .with_all(&["strong", "b"], HtmlRule::mark(md::STRONG))
-        .with_all(&["em", "i"], HtmlRule::mark(md::EM))
-        .with_all(&["s", "del", "strike"], HtmlRule::mark(md::STRIKETHROUGH))
-        .with_all(&["u", "ins"], HtmlRule::mark(md::UNDERLINE))
-        .with("mark", HtmlRule::mark(md::HIGHLIGHT))
-        .with("sup", HtmlRule::mark(md::SUPERSCRIPT))
-        .with("sub", HtmlRule::mark(md::SUBSCRIPT))
         // A formula as comrak renders one, `data-math-style` on a `<code>` or
         // a `<span>`; the serialiser writes it back the same way.
         .matching(
@@ -547,6 +543,9 @@ pub fn commonmark_html_rules() -> HtmlRules {
             ],
             HtmlRule::Boundary,
         );
+    for spec in crate::styles::STYLES {
+        rules = rules.with_all(&spec.html_names(), HtmlRule::mark(spec.mark));
+    }
     for level in 1..=6 {
         rules = rules.with(
             &format!("h{level}"),

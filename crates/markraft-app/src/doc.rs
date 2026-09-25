@@ -10,8 +10,9 @@
 //! the editor's catalogue.
 
 use markraft_commonmark::{
-    CommandRefusal, CommonMarkCodecs, CommonMarkSpelling, commonmark_doc_type_names,
-    commonmark_schema, holds_definitions, schema as md,
+    CommandRefusal, CommonMarkCodecs, CommonMarkSpelling, Formatter, HouseStyleHandle,
+    commonmark_doc_type_names, commonmark_schema, commonmark_serializer, holds_definitions,
+    schema as md,
 };
 use markraft_core::commands::{Command, command, replace_selection};
 use markraft_core::kind::Codecs;
@@ -35,8 +36,6 @@ static TYPES: LazyLock<DocTypes> = LazyLock::new(|| DocTypes {
     }),
     ..DocTypes::from_schema_names(schema(), &commonmark_doc_type_names())
 });
-static CODECS: LazyLock<Arc<dyn Codecs>> =
-    LazyLock::new(|| Arc::new(CommonMarkCodecs::new(schema().clone())));
 static SPELLING: LazyLock<Arc<dyn markraft_core::kind::SourceSpelling>> =
     LazyLock::new(|| Arc::new(CommonMarkSpelling::new(schema().clone())));
 
@@ -51,9 +50,16 @@ pub fn types() -> &'static DocTypes {
     &TYPES
 }
 
-/// How the editor's clipboard reads and writes this document kind.
-pub fn codecs() -> Arc<dyn Codecs> {
-    CODECS.clone()
+/// How the editor's clipboard reads and writes this document kind, spelling
+/// new syntax in `house`'s style as it stands at each write. The application
+/// owns the one handle its preferences set.
+pub fn codecs(house: &HouseStyleHandle) -> Arc<dyn Codecs> {
+    Arc::new(CommonMarkCodecs::new(schema().clone(), house.clone()))
+}
+
+/// The formatting commands, spelling in `house`'s style.
+fn formatter(house: &HouseStyleHandle) -> Formatter {
+    Formatter::new(house.clone())
 }
 
 /// The input rules and corrections a CommonMark editor wants. The input rules — `# `,
@@ -111,16 +117,18 @@ pub fn spelling() -> Arc<dyn markraft_core::kind::SourceSpelling> {
 /// edits those rather than the mark alone; the model's own `toggle_mark` would
 /// leave the two disagreeing. Where Markdown cannot spell the result, the
 /// editor is told why in the words `refusal` gives it.
-pub fn mark_toggle(refusal: fn(&CommandRefusal) -> String) -> MarkToggle {
-    Arc::new(move |ty, _| worded(markraft_commonmark::toggle_style(ty), refusal))
+pub fn mark_toggle(refusal: fn(&CommandRefusal) -> String, house: &HouseStyleHandle) -> MarkToggle {
+    let formatter = formatter(house);
+    Arc::new(move |ty, _| worded(formatter.toggle_style(ty), refusal))
 }
 
 /// How this document kind links and unlinks: by editing the link's source.
-pub fn link_setter(refusal: fn(&CommandRefusal) -> String) -> LinkSetter {
+pub fn link_setter(refusal: fn(&CommandRefusal) -> String, house: &HouseStyleHandle) -> LinkSetter {
+    let formatter = formatter(house);
     Arc::new(move |_, url| {
         let command = match url {
-            Some(url) => markraft_commonmark::set_link(url, ""),
-            None => markraft_commonmark::unlink(),
+            Some(url) => formatter.set_link(url, ""),
+            None => formatter.unlink(),
         };
         worded(command, refusal)
     })
@@ -128,8 +136,9 @@ pub fn link_setter(refusal: fn(&CommandRefusal) -> String) -> LinkSetter {
 
 /// How this document kind splits a block: every style open at the caret is
 /// closed before the cut and opened again after it.
-pub fn split_wrap() -> SplitWrap {
-    Arc::new(markraft_commonmark::keeping_styles)
+pub fn split_wrap(house: &HouseStyleHandle) -> SplitWrap {
+    let formatter = formatter(house);
+    Arc::new(move |split| formatter.keeping_styles(split))
 }
 
 /// What Enter makes of a line that spells a whole block's opening — a fence, a
@@ -170,8 +179,16 @@ pub fn from_markdown(source: &str) -> Node {
     markraft_commonmark::from_markdown(schema(), source).unwrap_or_else(|_| empty())
 }
 
+/// `doc` as Markdown in the default house style: what the file path and the
+/// tests, which have no preference to follow, write. A hard break not yet in
+/// the text is the one thing the style decides here.
 pub fn to_markdown(doc: &Node) -> String {
     markraft_commonmark::to_markdown(schema(), doc)
+}
+
+/// `doc` as Markdown, new syntax spelled in `house`'s style.
+pub fn to_markdown_in(doc: &Node, house: &HouseStyleHandle) -> String {
+    commonmark_serializer(schema(), house).serialize(doc)
 }
 
 pub fn plain_text(doc: &Node) -> String {
@@ -188,7 +205,8 @@ pub fn plain_text(doc: &Node) -> String {
 /// as the break between two blocks does. Link reference definitions are
 /// where links go rather than anything read, so their blocks count nothing.
 pub fn count(doc: &Node, projection: &Projection, words: bool) -> usize {
-    let codecs = codecs();
+    // Only the text flavour is read, which no house style touches.
+    let codecs = codecs(&HouseStyleHandle::default());
     let units = |text: &str| {
         if words {
             text.unicode_words().count()

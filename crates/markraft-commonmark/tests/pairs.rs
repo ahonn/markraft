@@ -168,8 +168,19 @@ fn an_opener_writes_its_closer_after_the_caret() {
         let (state, _) = editor("");
         assert_eq!(shown(&typed(&state, opener)), pair, "{opener}");
     }
-    let (state, _) = editor("see |, then");
-    assert_eq!(shown(&typed(&state, "(a")), "see (a|), then");
+    // Before whitespace or a closing bracket it pairs; before punctuation or
+    // a letter it does not, as in Typora 1.14.10.
+    for (source, shown_after) in [
+        ("see | then", "see (a|) then"),
+        ("see |) then", "see (a|)) then"),
+        ("see |] then", "see (a|)] then"),
+        ("see |, then", "see (a|, then"),
+        ("see |. then", "see (a|. then"),
+        ("see |d then", "see (a|d then"),
+    ] {
+        let (state, _) = editor(source);
+        assert_eq!(shown(&typed(&state, "(a")), shown_after, "{source}");
+    }
 }
 
 #[test]

@@ -11,8 +11,9 @@
 //! [`markraft_core::commands`], and the commands in `command.rs` run them.
 
 use crate::motion;
+use markraft_core::Node;
 use markraft_core::Slice;
-use markraft_core::commands::TableTypes;
+use markraft_core::commands::{TableTypes, spans_cells};
 use markraft_core::kind::TABLE_ALIGNMENTS_ATTR;
 use markraft_core::projection::{Line, Projection};
 use markraft_gpui::DocTypes;
@@ -266,19 +267,11 @@ pub(crate) fn line_of_cell(
 /// cell and the text outside its table.
 ///
 /// Replacing such a range would merge the cells it spans and leave those rows
-/// short, which is what core's `guard_cell_range` refuses; the operators refuse
-/// it here for the same reason.
-pub(crate) fn crosses_cells(
-    types: &DocTypes,
-    projection: &Projection,
-    range: &Range<usize>,
-) -> bool {
-    if range.is_empty() {
-        return false;
-    }
-    let id = |pos| cell_at(types, projection, pos).map(|cell| (cell.table, cell.row, cell.column));
-    let (from, to) = (id(range.start), id(range.end));
-    (from.is_some() || to.is_some()) && from != to
+/// short, which core's table invariant refuses; the operators ask first and
+/// refuse the whole operator, register and all, so that it can be narrowed
+/// and tried again.
+pub(crate) fn crosses_cells(types: &DocTypes, doc: &Node, range: &Range<usize>) -> bool {
+    self::types(types).is_some_and(|types| spans_cells(types, doc, range.start, range.end))
 }
 
 /// Which ancestor of the cursor's line a linewise paste of `slice` belongs

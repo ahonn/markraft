@@ -18,6 +18,7 @@
 //! | `data-tight` | `<ul>`, `<ol>` | whether the list renders without `<p>` |
 //! | `data-bullet` | `<ul>` | the bullet character |
 //! | `data-delimiter` | `<ol>` | `.` or `)`, where it is not the house style's |
+//! | `data-same-ordinal` | `<ol>` | every item written with the first one's number |
 //! | `data-fence`, `data-fence-length` | `<pre>` | the code fence's spelling |
 //! | `data-type="rawBlock"` | `<pre>` | source the model does not interpret |
 //!
@@ -45,6 +46,7 @@ use std::sync::Arc;
 use markraft_core::kind::SYNTAX_DISPLAY_ATTR;
 use markraft_core::{Mark, MarkTypeId, Node, NodeTypeId, Schema, Slice};
 
+use crate::house::HouseStyleHandle;
 use crate::schema as md;
 use crate::table::{Alignment, alignments_of};
 
@@ -123,11 +125,12 @@ impl HtmlSerializer {
         }
     }
 
-    /// A serialiser with the CommonMark/GFM rule tables.
-    pub fn commonmark(schema: &Schema) -> HtmlSerializer {
+    /// A serialiser with the CommonMark/GFM rule tables, writing in `house`'s
+    /// style where the HTML has to say which it is.
+    pub fn commonmark(schema: &Schema, house: &HouseStyleHandle) -> HtmlSerializer {
         HtmlSerializer::new(
             schema.clone(),
-            commonmark_html_node_rules(),
+            commonmark_html_node_rules(house),
             commonmark_html_mark_rules(),
         )
     }
@@ -384,8 +387,10 @@ fn preformatted(state: &mut HtmlState<'_>, text: &str) {
     state.write("\n");
 }
 
-/// The CommonMark/GFM HTML node rules, keyed by schema type name.
-pub fn commonmark_html_node_rules() -> HtmlNodeRules {
+/// The CommonMark/GFM HTML node rules, keyed by schema type name. An ordered
+/// list in `house`'s delimiter is written without naming it, as the reader
+/// takes one without a name for.
+pub fn commonmark_html_node_rules(house: &HouseStyleHandle) -> HtmlNodeRules {
     let mut rules = HtmlNodeRules::new();
     rules.insert(
         md::DOC.to_string(),
@@ -449,7 +454,13 @@ pub fn commonmark_html_node_rules() -> HtmlNodeRules {
     );
     rules.insert(md::CODE_BLOCK.to_string(), rule(code_block));
     rules.insert(md::BULLET_LIST.to_string(), rule(bullet_list));
-    rules.insert(md::ORDERED_LIST.to_string(), rule(ordered_list));
+    let ordered_house = house.clone();
+    rules.insert(
+        md::ORDERED_LIST.to_string(),
+        rule(move |state, node, _| {
+            ordered_list(state, node, ordered_house.get().ordered_delimiter)
+        }),
+    );
     rules.insert(
         md::LIST_ITEM.to_string(),
         rule(|state, node, _| {
@@ -603,7 +614,7 @@ fn bullet_list(state: &mut HtmlState<'_>, node: &Node, _: Option<&Node>) {
     state.write("\n</ul>");
 }
 
-fn ordered_list(state: &mut HtmlState<'_>, node: &Node, _: Option<&Node>) {
+fn ordered_list(state: &mut HtmlState<'_>, node: &Node, house_delimiter: char) {
     state.write("<ol");
     let start = attr_int(node, "start", 1);
     if start != 1 {
@@ -613,12 +624,14 @@ fn ordered_list(state: &mut HtmlState<'_>, node: &Node, _: Option<&Node>) {
     // delimiter, since a list pasted from anywhere else is one the editor
     // makes; see `commonmark_html_rules`.
     let delimiter = attr_str(node, "delimiter", ".");
-    let house = crate::house_style().ordered_delimiter.to_string();
-    if delimiter != house {
+    if delimiter != house_delimiter.to_string() {
         state.attr("data-delimiter", delimiter);
     }
     if !attr_bool(node, "tight", true) {
         state.attr("data-tight", "false");
+    }
+    if attr_bool(node, "same_ordinal", false) {
+        state.attr("data-same-ordinal", "true");
     }
     state.write(">\n");
     state.render_content(node);
@@ -720,13 +733,9 @@ pub fn commonmark_html_mark_rules() -> HtmlMarkRules {
             )
         }),
     );
-    rules.insert(md::UNDERLINE.to_string(), tags("<u>", "</u>"));
-    rules.insert(md::STRIKETHROUGH.to_string(), tags("<del>", "</del>"));
-    rules.insert(md::STRONG.to_string(), tags("<strong>", "</strong>"));
-    rules.insert(md::EM.to_string(), tags("<em>", "</em>"));
-    rules.insert(md::HIGHLIGHT.to_string(), tags("<mark>", "</mark>"));
-    rules.insert(md::SUPERSCRIPT.to_string(), tags("<sup>", "</sup>"));
-    rules.insert(md::SUBSCRIPT.to_string(), tags("<sub>", "</sub>"));
+    for spec in crate::styles::STYLES {
+        rules.insert(spec.mark.to_string(), tags(spec.tags.0, spec.tags.1));
+    }
     rules.insert(md::CODE.to_string(), tags("<code>", "</code>"));
     // TeX is shown as the source it is, in the attribute comrak renders math
     // with, so a reader that knows it can typeset it.
@@ -749,6 +758,6 @@ pub fn commonmark_html_mark_rules() -> HtmlMarkRules {
 }
 
 /// An HTML serialiser for `schema` with the CommonMark/GFM rules.
-pub fn commonmark_html_serializer(schema: &Schema) -> HtmlSerializer {
-    HtmlSerializer::commonmark(schema)
+pub fn commonmark_html_serializer(schema: &Schema, house: &HouseStyleHandle) -> HtmlSerializer {
+    HtmlSerializer::commonmark(schema, house)
 }

@@ -263,26 +263,22 @@ pub fn spell_document(serializer: &MarkdownSerializer, doc: &Node) -> Node {
 }
 
 /// Styles in the order they are given up when their spelling does not read
-/// back: the ones Markdown has least room for first.
-const GIVEN_UP: &[&str] = &[
-    crate::schema::HIGHLIGHT,
-    crate::schema::SUPERSCRIPT,
-    crate::schema::SUBSCRIPT,
-    crate::schema::UNDERLINE,
-    crate::schema::STRIKETHROUGH,
-    crate::schema::EM,
-    crate::schema::STRONG,
-    crate::schema::CODE,
-    crate::schema::MATH,
-    crate::schema::LINK,
-    crate::schema::FOOTNOTE_REFERENCE,
-];
+/// back: the ones Markdown has least room for first — the paired styles in
+/// the style table's order, then the ones with content of their own.
+fn given_up() -> impl Iterator<Item = &'static str> {
+    crate::styles::STYLES.iter().map(|spec| spec.mark).chain([
+        crate::schema::CODE,
+        crate::schema::MATH,
+        crate::schema::LINK,
+        crate::schema::FOOTNOTE_REFERENCE,
+    ])
+}
 
 /// `block` spelled and rebuilt with its marks derived.
 ///
 /// A style whose spelling does not read back — a subscript holding a space, a
 /// highlight around a bare link — is given up, one run at a time in
-/// [`GIVEN_UP`] order, and the block spelled again. What is left is the text
+/// [`given_up`] order, and the block spelled again. What is left is the text
 /// with the styles Markdown can say, as Typora pastes it, rather than
 /// delimiters that read as text or a link that swallows them. When the text
 /// still reads wrong and no single run helps — several styles on one character
@@ -431,11 +427,11 @@ fn mismatch(schema: &Schema, wanted: &Node, built: &Node) -> usize {
 }
 
 /// Every run of one style in `block`, as the unit indices it covers: the
-/// maximal stretches carrying the same mark, styles in [`GIVEN_UP`] order.
+/// maximal stretches carrying the same mark, styles in [`given_up`] order.
 fn style_runs(schema: &Schema, block: &Node) -> Vec<(Mark, Vec<usize>)> {
     let units = units(schema, block);
     let mut out = Vec::new();
-    for ty in GIVEN_UP.iter().filter_map(|name| schema.mark_id(name)) {
+    for ty in given_up().filter_map(|name| schema.mark_id(name)) {
         let mut current: Option<(Mark, Vec<usize>)> = None;
         for (index, unit) in units.iter().enumerate() {
             let mark = unit.marks.iter().find(|mark| mark.ty == ty);

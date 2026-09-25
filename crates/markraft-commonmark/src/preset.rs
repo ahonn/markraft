@@ -43,6 +43,7 @@ use std::sync::Arc;
 use markraft_core::{Mark, Node, Schema};
 
 use crate::escape::{code_span_delimiters, escape_text, link_destination, link_title};
+use crate::house::{HardBreak, HouseStyleHandle};
 use crate::schema as md;
 use crate::serialize::{
     MarkRule, MarkRules, MarkStringFn, MarkTarget, MarkdownSerializer, NodeRule, NodeRules,
@@ -83,8 +84,9 @@ fn text_content(node: &Node) -> String {
     node.children().filter_map(|child| child.text()).collect()
 }
 
-/// The CommonMark/GFM node rules, keyed by schema type name.
-pub fn commonmark_node_rules() -> NodeRules {
+/// The CommonMark/GFM node rules, keyed by schema type name. A hard break is
+/// spelled in `house`'s [`HardBreak`](crate::HardBreak) as it is written.
+pub fn commonmark_node_rules(house: &HouseStyleHandle) -> NodeRules {
     let mut rules = NodeRules::new();
     rules.insert(
         md::DOC.to_string(),
@@ -198,7 +200,13 @@ pub fn commonmark_node_rules() -> NodeRules {
             state.text(&link.source(), false);
         }),
     );
-    rules.insert(md::LINE_BREAK.to_string(), rule(hard_break));
+    let break_house = house.clone();
+    rules.insert(
+        md::LINE_BREAK.to_string(),
+        rule(move |state, node, parent, index| {
+            hard_break(state, node, parent, index, break_house.get().hard_break)
+        }),
+    );
     rules
 }
 
@@ -479,11 +487,16 @@ fn heading(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: us
     state.close_block(node);
 }
 
-/// A hard break in spelled content, spelled in the house style's
-/// [`HardBreak`](crate::HardBreak): by default a trailing `\\`, which
-/// survives an editor that strips trailing whitespace where the two-space
-/// spelling does not.
-fn hard_break(state: &mut SerializerState<'_>, node: &Node, parent: Option<&Node>, index: usize) {
+/// A hard break in spelled content, spelled as `spelling` says: by default a
+/// trailing `\\`, which survives an editor that strips trailing whitespace
+/// where the two-space spelling does not.
+fn hard_break(
+    state: &mut SerializerState<'_>,
+    node: &Node,
+    parent: Option<&Node>,
+    index: usize,
+    spelling: HardBreak,
+) {
     if state.is_single_line() {
         state.text(state.line_break(), false);
         return;
@@ -495,7 +508,7 @@ fn hard_break(state: &mut SerializerState<'_>, node: &Node, parent: Option<&Node
     {
         return;
     }
-    let marker = crate::house_style().hard_break.marker();
+    let marker = spelling.marker();
     state.text(&format!("{marker}\n"), false);
 }
 
@@ -535,15 +548,22 @@ fn bullet_list(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _
 fn ordered_list(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: usize) {
     let start = attr_int(node, "start", 1).max(0);
     let delimiter = list_marker_char(node, "delimiter", ".");
+    // A list written `1.` `1.` `1.` keeps that spelling.
+    let same = node
+        .attrs()
+        .get("same_ordinal")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let step = i64::from(!same);
     // Pad ordinals so every item shares one content column. Without that, a
     // list that crosses a digit boundary (`9.` → `10.`) under-indents later
     // items' nested blocks and CommonMark reads them as outside the list.
-    let last = start + node.child_count().max(1) as i64 - 1;
+    let last = start + (node.child_count().max(1) as i64 - 1) * step;
     let width = last.to_string().len();
     let delim = " ".repeat(width + delimiter.chars().count() + 1);
     let tight = written_tight(state.schema(), node);
     state.render_list(node, &delim, tight, &|index| {
-        let ordinal = (start + index as i64).to_string();
+        let ordinal = (start + index as i64 * step).to_string();
         let marker = format!(
             "{ordinal}{delimiter}{}",
             " ".repeat(1 + width.saturating_sub(ordinal.len()))
@@ -638,10 +658,11 @@ fn interrupts_paragraph(schema: &Schema, node: &Node) -> bool {
 /// The CommonMark/GFM mark rules, keyed by schema type name, which
 /// [`spell`](crate::serialize::spell) writes semantic content with.
 ///
-/// Emphasis and strong are written in the [`house_style`](crate::house_style)
-/// current when the rules are made.
-pub fn commonmark_mark_rules() -> MarkRules {
-    mark_rules_for(crate::house_style().emphasis)
+/// Emphasis and strong are written in the delimiter `house` holds when the
+/// rules are made; the codecs build a serialiser per write, so a style set
+/// later is followed by the next write.
+pub fn commonmark_mark_rules(house: &HouseStyleHandle) -> MarkRules {
+    mark_rules_for(house.get().emphasis)
 }
 
 /// [`commonmark_mark_rules`] with emphasis and strong written in `emphasis`.
@@ -652,18 +673,17 @@ pub(crate) fn mark_rules_for(emphasis: char) -> MarkRules {
         md::FOOTNOTE_REFERENCE.to_string(),
         MarkRule::fixed("[^", "]"),
     );
-    if emphasis == '_' {
-        rules.insert(md::STRONG.to_string(), underscore_rule("__", "**"));
-        rules.insert(md::EM.to_string(), underscore_rule("_", "*"));
-    } else {
-        rules.insert(md::STRONG.to_string(), emphasis_rule("**", '*'));
-        rules.insert(md::EM.to_string(), emphasis_rule("*", '*'));
+    for spec in crate::styles::STYLES {
+        let rule = match (spec.run, spec.underscore_run) {
+            (Some(run), Some(underscores)) if emphasis == '_' => underscore_rule(underscores, run),
+            (Some(run), _) => {
+                let delimiter = run.chars().next().expect("a run has a character");
+                emphasis_rule(run, delimiter)
+            }
+            (None, _) => MarkRule::fixed(spec.tags.0, spec.tags.1),
+        };
+        rules.insert(spec.mark.to_string(), rule);
     }
-    rules.insert(md::STRIKETHROUGH.to_string(), emphasis_rule("~~", '~'));
-    rules.insert(md::UNDERLINE.to_string(), MarkRule::fixed("<u>", "</u>"));
-    rules.insert(md::HIGHLIGHT.to_string(), emphasis_rule("==", '='));
-    rules.insert(md::SUPERSCRIPT.to_string(), emphasis_rule("^", '^'));
-    rules.insert(md::SUBSCRIPT.to_string(), emphasis_rule("~", '~'));
     rules.insert(md::CODE.to_string(), code_rule());
     rules.insert(md::MATH.to_string(), math_rule());
     // Text already spelled — a soft break, an empty link's `[](…)` — goes out
@@ -927,11 +947,12 @@ fn following_text(parent: &Node, from: usize) -> Option<String> {
     Some(out)
 }
 
-/// A serialiser for `schema` with the CommonMark/GFM rules.
-pub fn commonmark_serializer(schema: &Schema) -> MarkdownSerializer {
+/// A serialiser for `schema` with the CommonMark/GFM rules, spelling new
+/// syntax in `house`'s style.
+pub fn commonmark_serializer(schema: &Schema, house: &HouseStyleHandle) -> MarkdownSerializer {
     MarkdownSerializer::new(
         schema.clone(),
-        commonmark_node_rules(),
-        commonmark_mark_rules(),
+        commonmark_node_rules(house),
+        commonmark_mark_rules(house),
     )
 }

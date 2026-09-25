@@ -5,8 +5,8 @@
 #![allow(dead_code)]
 
 use markraft_commonmark::{
-    MarkdownParser, MarkdownSerializer, commonmark_options, commonmark_schema,
-    commonmark_serializer,
+    HouseStyle, HouseStyleHandle, MarkdownParser, MarkdownSerializer, commonmark_options,
+    commonmark_schema, commonmark_serializer,
 };
 use markraft_core::{Node, Schema};
 
@@ -15,15 +15,24 @@ pub struct Codec {
     pub schema: Schema,
     pub parser: MarkdownParser,
     pub serializer: MarkdownSerializer,
+    /// The house style the serializer writes new syntax in.
+    pub house: HouseStyleHandle,
 }
 
 impl Codec {
     pub fn new() -> Codec {
+        Codec::in_house(HouseStyle::default())
+    }
+
+    /// The codec, writing new syntax in `style`.
+    pub fn in_house(style: HouseStyle) -> Codec {
         let schema = commonmark_schema();
+        let house = HouseStyleHandle::new(style);
         Codec {
             parser: MarkdownParser::commonmark(schema.clone()),
-            serializer: commonmark_serializer(&schema),
+            serializer: commonmark_serializer(&schema, &house),
             schema,
+            house,
         }
     }
 

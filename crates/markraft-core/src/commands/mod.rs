@@ -83,8 +83,8 @@ pub use table::{
     CellPos, ColumnAlignment, TableTypes, add_column_after, add_column_before, add_row_after,
     add_row_before, cell_at, column_alignments, delete_column, delete_empty_table, delete_row,
     delete_table, exit_table_below, goto_cell_above, goto_cell_below, goto_next_cell,
-    goto_prev_cell, guard_cell_boundary, guard_cell_range, guard_cell_split, insert_row_below,
-    insert_table, set_column_alignment,
+    goto_prev_cell, insert_row_below, insert_table, set_column_alignment, spans_cells,
+    table_invariant,
 };
 pub use text::{
     delete_range, delete_range_changes, insert_hard_break, insert_node, insert_text,

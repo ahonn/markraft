@@ -1,17 +1,17 @@
 //! The table commands: moving between cells, growing and shrinking a table,
-//! and the guards that keep a cell whole.
+//! and the invariant that keeps a table a grid.
 
 use std::sync::OnceLock;
 
 use crate::attr::{AttrKind, AttrSpec, AttrValue};
 use crate::change::TrackMode;
 use crate::commands::*;
-use crate::history::{HistoryConfig, history, undo};
 use crate::fragment::Fragment;
+use crate::history::{HistoryConfig, history, undo};
 use crate::node::Node;
-use crate::slice::Slice;
 use crate::schema::{NodeTypeSpec, Schema, SchemaSpec};
 use crate::selection::Selection;
+use crate::slice::Slice;
 use crate::state::{EditorState, EditorStateConfig, Extension, TransactionSpec};
 
 /// A schema with the table shape the commands describe, plus the paragraphs a
@@ -523,11 +523,19 @@ fn delete_empty_table_only_applies_at_the_start_of_an_empty_table() {
     assert!(command(&at(&filled, 3)).is_none());
 }
 
+/// The grid fixture with the invariant configured.
+fn guarded() -> EditorState {
+    state_of(
+        document([table("none,none", &[&["a", "b"], &["c", "d"]])]),
+        table_invariant(types()),
+    )
+}
+
 #[test]
-fn without_a_guard_backspace_would_join_two_cells() {
-    // Pinned so the guard's reason for existing stays visible: at the start of
-    // a cell the general chain joins it with the cell before it, which leaves
-    // the row one cell short.
+fn without_the_invariant_backspace_would_join_two_cells() {
+    // Pinned so the invariant's reason for existing stays visible: at the
+    // start of a cell the general chain joins it with the cell before it,
+    // which leaves the row one cell short.
     let joined = run(
         &at(&grid(), 6),
         &chain([delete_selection(), join_backward(), select_node_backward()]),
@@ -539,34 +547,36 @@ fn without_a_guard_backspace_would_join_two_cells() {
 }
 
 #[test]
-fn the_guard_stops_backspace_and_delete_at_a_cell_edge() {
-    let state = grid();
+fn the_invariant_stops_backspace_and_delete_at_a_cell_edge() {
+    let state = guarded();
     let backspace = chain([
         delete_selection(),
         delete_by_grapheme(Direction::Backward),
-        guard_cell_boundary(types()),
         join_backward(),
         select_node_backward(),
     ]);
+    // The chain knows nothing of cells: the join applies, and its transaction
+    // is refused, leaving the grid and the caret where they were — and no
+    // undo step behind.
     let after = run(&at(&state, 6), &backspace);
     assert_eq!(shape(&after), GRID);
     assert_eq!(cursor(&after), 6);
+    assert_eq!(crate::history::undo_depth(&after), 0);
 
     let delete_forward = chain([
         delete_selection(),
         delete_by_grapheme(Direction::Forward),
-        guard_cell_boundary(types()),
         join_forward(),
         select_node_forward(),
     ]);
-    // The end of cell "a"; without the guard this joins "a" and "b".
+    // The end of cell "a"; without the invariant this joins "a" and "b".
     let after = run(&at(&state, 4), &delete_forward);
     assert_eq!(shape(&after), GRID);
 
     // In the middle of a cell the chain still deletes a character.
     let two = state_of(
         document([table("none,none", &[&["ab", "c"]])]),
-        Extension::none(),
+        table_invariant(types()),
     );
     let after = run(&at(&two, 4), &backspace);
     assert_eq!(
@@ -576,23 +586,24 @@ fn the_guard_stops_backspace_and_delete_at_a_cell_edge() {
 }
 
 #[test]
-fn the_guard_stops_enter_from_splitting_a_cell() {
-    let state = state_of(
+fn the_invariant_stops_enter_from_splitting_a_cell() {
+    let unguarded = state_of(
         document([table("none,none", &[&["ab", "c"]])]),
         Extension::none(),
     );
-    // Without a guard, splitting a block inside a cell makes a second cell.
-    let split = run(&at(&state, 4), &split_block());
+    // Without the invariant, splitting a block inside a cell makes a second cell.
+    let split = run(&at(&unguarded, 4), &split_block());
     assert_eq!(
         shape(&split),
         r#"doc(table[alignments=Str("none,none")](table_row(table_cell("a"), table_cell("b"), table_cell("c"))))"#
     );
-    let guarded = run(
-        &at(&state, 4),
-        &chain([guard_cell_split(types()), split_block()]),
+    let state = state_of(
+        document([table("none,none", &[&["ab", "c"]])]),
+        table_invariant(types()),
     );
+    let refused = run(&at(&state, 4), &split_block());
     assert_eq!(
-        shape(&guarded),
+        shape(&refused),
         r#"doc(table[alignments=Str("none,none")](table_row(table_cell("ab"), table_cell("c"))))"#
     );
     // Enter as a view binds it never reaches the split either.
@@ -682,40 +693,30 @@ fn a_position_elsewhere_in_the_table_maps_through_an_edit() {
 }
 
 #[test]
-fn the_guard_stops_an_edit_that_spans_two_cells() {
-    let state = grid();
+fn the_invariant_refuses_an_edit_that_spans_two_cells() {
+    let state = guarded();
     let across = state
         .update([TransactionSpec::new().selection(Selection::text(4, 6))])
         .expect("the selection is valid")
         .state()
         .clone();
-    // Pinned: without the guard, deleting a selection that spans two cells
-    // merges them and leaves the row one cell short.
-    let merged = run(&across, &delete_selection());
-    assert_eq!(
-        shape(&merged),
-        r#"doc(table[alignments=Str("none,none")](table_row(table_cell("ab")), table_row(table_cell("c"), table_cell("d"))))"#
-    );
-    let guarded = run(
-        &across,
-        &chain([guard_cell_range(types()), delete_selection()]),
-    );
-    assert_eq!(shape(&guarded), GRID);
+    // Deleting the selection would merge the two cells: refused, grid and
+    // selection standing.
+    let refused = run(&across, &delete_selection());
+    assert_eq!(shape(&refused), GRID);
+    assert_eq!(refused.selection(), across.selection());
 
     // A selection inside one cell is left alone.
     let inside = state_of(
         document([table("none,none", &[&["abc", "d"]])]),
-        Extension::none(),
+        table_invariant(types()),
     );
     let within = inside
         .update([TransactionSpec::new().selection(Selection::text(3, 5))])
         .expect("the selection is valid")
         .state()
         .clone();
-    let after = run(
-        &within,
-        &chain([guard_cell_range(types()), delete_selection()]),
-    );
+    let after = run(&within, &delete_selection());
     assert_eq!(
         shape(&after),
         r#"doc(table[alignments=Str("none,none")](table_row(table_cell("c"), table_cell("d"))))"#
@@ -723,10 +724,48 @@ fn the_guard_stops_an_edit_that_spans_two_cells() {
 }
 
 #[test]
+fn a_table_that_was_ragged_already_stays_editable() {
+    // Only an importer can make one; the edit did not cause it, so it is not
+    // held against the edit.
+    let state = state_of(
+        document([table("none,none", &[&["a", "b"], &["c"]])]),
+        table_invariant(types()),
+    );
+    let typed = run(&at(&state, 12), &insert_text("x"));
+    assert_eq!(
+        shape(&typed),
+        r#"doc(table[alignments=Str("none,none")](table_row(table_cell("a"), table_cell("b")), table_row(table_cell("cx"))))"#
+    );
+}
+
+#[test]
+fn spans_cells_tells_a_range_inside_one_cell_from_one_reaching_out() {
+    let state = grid();
+    let doc = state.doc();
+    assert!(!spans_cells(types(), doc, 3, 4), "inside a cell");
+    assert!(!spans_cells(types(), doc, 4, 4), "empty");
+    assert!(
+        spans_cells(types(), doc, 4, 6),
+        "from one cell into the next"
+    );
+    assert!(
+        spans_cells(types(), doc, 0, 4),
+        "from outside the table into a cell"
+    );
+    let around = state_of(
+        document([paragraph("p"), paragraph("q")]),
+        Extension::none(),
+    );
+    assert!(
+        !spans_cells(types(), around.doc(), 1, 4),
+        "no table involved"
+    );
+}
+
+#[test]
 fn pasting_a_ragged_table_lands_it_as_it_is() {
-    // Pinned: nothing squares a pasted table whose rows differ in width. The
-    // parsers never produce one, so this is what a synthetic or imported slice
-    // does today; the table invariant is left to the commands' guards.
+    // Nothing squares a pasted table whose rows differ in width: without the
+    // invariant configured it lands as it is.
     let state = state_of(document([paragraph("x")]), Extension::none());
     let ragged = table("none,none", &[&["a", "b"], &["c"]]);
     let pasted = run(
@@ -737,6 +776,17 @@ fn pasting_a_ragged_table_lands_it_as_it_is() {
         shape(&pasted),
         r#"doc(paragraph("x"), table[alignments=Str("none,none")](table_row(table_cell("a"), table_cell("b")), table_row(table_cell("c"))))"#
     );
+}
+
+#[test]
+fn pasting_a_ragged_table_is_refused_where_the_invariant_holds() {
+    let state = state_of(document([paragraph("x")]), table_invariant(types()));
+    let ragged = table("none,none", &[&["a", "b"], &["c"]]);
+    let refused = run(
+        &at(&state, 2),
+        &replace_selection(Slice::new(Fragment::from_node(ragged), 0, 0)),
+    );
+    assert_eq!(shape(&refused), r#"doc(paragraph("x"))"#);
 }
 
 /// A table whose alignments live under a name other than the kind default.

@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn a_slice_survives_the_metadata_round_trip() {
         let schema = commonmark_schema();
-        let codecs = CommonMarkCodecs::new(schema.clone());
+        let codecs = CommonMarkCodecs::new(schema.clone(), Default::default());
         let slice = codecs
             .from_markup("**bold** and `code`")
             .expect("a fragment");
@@ -194,7 +194,7 @@ mod tests {
         use markraft_core::commands::{replace_selection, run_command};
         let state = crate::typeahead::tests::state_of("x **bold** y\n\nz");
         let schema = state.schema().clone();
-        let codecs = CommonMarkCodecs::new(schema.clone());
+        let codecs = CommonMarkCodecs::new(schema.clone(), Default::default());
         // `bold`, without the `**` either side.
         let (from, to) = (1 + 4, 1 + 8);
         let slice = state.doc().slice(from, to).expect("a slice");
@@ -234,7 +234,7 @@ mod tests {
         let state = crate::typeahead::tests::state_of("x\n\n- a\n- bc\n- d");
         let schema = state.schema().clone();
         let types = crate::typeahead::tests::types_of(&state);
-        let codecs = CommonMarkCodecs::new(schema.clone());
+        let codecs = CommonMarkCodecs::new(schema.clone(), Default::default());
         let select = |from: usize, to: usize| {
             state
                 .update(
@@ -272,7 +272,7 @@ mod tests {
     /// A plain paste keeps every character literal.
     #[test]
     fn plain_text_stays_the_characters_it_is() {
-        let codecs = CommonMarkCodecs::new(commonmark_schema());
+        let codecs = CommonMarkCodecs::new(commonmark_schema(), Default::default());
         let slice = codecs.from_text("*a* _b_\n# c");
         assert_eq!(codecs.to_text(&slice), "*a* _b_\n# c");
         assert_eq!(
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn the_rich_flavour_is_html_another_application_can_read() {
         let schema = commonmark_schema();
-        let codecs = CommonMarkCodecs::new(schema.clone());
+        let codecs = CommonMarkCodecs::new(schema.clone(), Default::default());
         let slice = codecs
             .from_markup("**bold** and `code`")
             .expect("a fragment");

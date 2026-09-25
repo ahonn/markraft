@@ -1,6 +1,6 @@
 //! The editing behaviour that belongs to Markdown rather than to the model.
 //!
-//! [`commonmark_extensions`] bundles three things:
+//! [`commonmark_extensions`] bundles four things:
 //!
 //! * **Input rules** — the conversions a Markdown writer expects while typing:
 //!   `# ` through `###### `, `- `/`* `/`+ `, `1. `, `> `, `---`,
@@ -19,6 +19,10 @@
 //! * **Pending pairs** — the empty delimiter pair a cursor toggle writes is
 //!   deleted again when the caret leaves it with nothing typed in it, so it
 //!   never reaches the file as literal `****`. See the `pending` module.
+//! * **The table invariant** — every row of a table as wide as the rest,
+//!   held by refusing any edit that would leave a table ragged; see
+//!   [`table_invariant`](markraft_core::commands::table_invariant). The key
+//!   chains a view binds need know nothing of cells.
 //!
 //! # The canonicalising correction
 //!
@@ -63,7 +67,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use markraft_core::commands::structure::markup_of;
-use markraft_core::commands::{InputRule, InputRuleMatch, input_rules};
+use markraft_core::commands::{
+    InputRule, InputRuleMatch, TableTypes, input_rules, table_invariant,
+};
+use markraft_core::kind::TABLE_ALIGNMENTS_ATTR;
 use markraft_core::{
     Attrs, Change, ChangeRange, Extension, Fragment, MarkSet, Markup, Node, NodeTypeId, Schema,
     Slice, Token, TrackMode, attrs,
@@ -107,7 +114,23 @@ fn with_rules(schema: &Schema, rules: impl IntoIterator<Item = InputRule>) -> Ex
         corrections(commonmark_corrections(schema)),
         crate::pending::pending_pairs(),
         crate::unfold::unfold_atoms(),
+        table_invariant_for(schema),
     ])
+}
+
+/// [`table_invariant`] over this schema's table types, or nothing for a
+/// schema a consumer built without tables.
+fn table_invariant_for(schema: &Schema) -> Extension {
+    match (
+        schema.node_id(md::TABLE),
+        schema.node_id(md::TABLE_ROW),
+        schema.node_id(md::TABLE_CELL),
+    ) {
+        (Some(table), Some(row), Some(cell)) => {
+            table_invariant(TableTypes::new(table, row, cell, TABLE_ALIGNMENTS_ATTR))
+        }
+        _ => Extension::none(),
+    }
 }
 
 /// The corrections the preset needs: merge adjacent identical lists, fill in

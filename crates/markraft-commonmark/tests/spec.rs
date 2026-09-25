@@ -39,7 +39,7 @@ fn commonmark_spec_examples_render_the_same() {
     // HTML, since its ~~ delimiter belongs to the GFM extension, and spells
     // every link with brackets, since a bare URL is only text without the
     // autolink extension.
-    let mut marks = markraft_commonmark::commonmark_mark_rules();
+    let mut marks = markraft_commonmark::commonmark_mark_rules(&codec.house);
     marks.insert(
         markraft_commonmark::schema::STRIKETHROUGH.to_string(),
         markraft_commonmark::MarkRule::fixed("<del>", "</del>"),
@@ -50,7 +50,7 @@ fn commonmark_spec_examples_render_the_same() {
     );
     codec.serializer = markraft_commonmark::MarkdownSerializer::new(
         codec.schema.clone(),
-        markraft_commonmark::commonmark_node_rules(),
+        markraft_commonmark::commonmark_node_rules(&codec.house),
         marks,
     );
     let mut failed = Vec::new();

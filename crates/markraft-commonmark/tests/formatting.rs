@@ -9,9 +9,7 @@ mod common;
 use common::{Codec, html};
 use markraft_commonmark::schema as md;
 use markraft_commonmark::{
-    CommandRefusal, FormatCommand, HouseStyle, Inexpressible, clear_formatting,
-    commonmark_extensions, keeping_styles, set_house_style, set_link, split_block_keeping_styles,
-    to_markdown, toggle_style, unlink,
+    CommandRefusal, FormatCommand, Formatter, HouseStyle, Inexpressible, commonmark_extensions,
 };
 use markraft_core::commands::{Direction, delete_by_grapheme, insert_text, run_command};
 use markraft_core::{
@@ -54,12 +52,29 @@ fn formatted(state: &EditorState, command: &FormatCommand) -> EditorState {
         .clone()
 }
 
+/// The formatting commands, spelling in the codec's house style.
+fn formatter(codec: &Codec) -> Formatter {
+    Formatter::new(codec.house.clone())
+}
+
+/// The formatting commands in the default house style, for the tests that
+/// are not about it.
+trait DefaultStyle {
+    fn default_style() -> Formatter;
+}
+
+impl DefaultStyle for Formatter {
+    fn default_style() -> Formatter {
+        Formatter::new(Default::default())
+    }
+}
+
 fn toggle(codec: &Codec, mark: &str) -> FormatCommand {
-    toggle_style(codec.schema.mark_id(mark).expect("the mark type"))
+    formatter(codec).toggle_style(codec.schema.mark_id(mark).expect("the mark type"))
 }
 
 fn written(codec: &Codec, state: &EditorState) -> String {
-    to_markdown(&codec.schema, state.doc())
+    codec.write(state.doc())
 }
 
 /// The file is exactly `expected`, and reads as it does.
@@ -183,14 +198,18 @@ fn nested_styles_come_off_one_at_a_time() {
     assert_eq!(selected_text(&codec, &outer), "a b c");
 }
 
-/// Emphasis taken off the middle of a span leaves two spans.
+/// Emphasis taken off the middle of a span goes from the whole span, as in
+/// Typora 1.14.10, and only that style: an inner span leaves the outer one.
 #[test]
-fn toggling_off_the_middle_of_a_span_splits_it() {
+fn toggling_off_the_middle_of_a_span_takes_the_whole_span() {
     let codec = Codec::new();
     let state = selecting(&codec, "**abc**", 3, 4);
-    let split = formatted(&state, &toggle(&codec, md::STRONG));
-    assert_saves(&codec, &split, "**a**b**c**");
-    assert_eq!(selected_text(&codec, &split), "b");
+    let plain = formatted(&state, &toggle(&codec, md::STRONG));
+    assert_saves(&codec, &plain, "abc");
+    assert_eq!(selected_text(&codec, &plain), "b");
+    let state = selecting(&codec, "*a **b** c*", 5, 6);
+    let inner = formatted(&state, &toggle(&codec, md::STRONG));
+    assert_saves(&codec, &inner, "*a b c*");
 }
 
 /// A selection over two blocks styles each, as one edit.
@@ -218,26 +237,33 @@ fn code_around_a_backtick_takes_a_longer_fence() {
     assert_eq!(html(&written(&codec, &plain)), html("x a\\`b y"));
 }
 
-/// Strong over part of a code span keeps the code whole around it.
+/// Strong over part of a code span does nothing, as in Typora 1.14.10:
+/// putting it there would cut the literal text in two.
 #[test]
-fn strong_over_part_of_a_code_span() {
+fn strong_over_part_of_a_code_span_does_nothing() {
     let codec = Codec::new();
-    let state = selecting(&codec, "`ab`", 2, 3);
+    for (source, from, to) in [("`ab`", 2, 3), ("x `ab` y", 1, 4), ("x `ab` y", 4, 7)] {
+        let state = selecting(&codec, source, from, to);
+        let command = toggle(&codec, md::STRONG);
+        assert!(
+            matches!(command(&state), Ok(None)),
+            "{source:?} {from}..{to}"
+        );
+    }
+    // Over the whole span it wraps it.
+    let state = selecting(&codec, "x `ab` y", 0, 8);
     let bold = formatted(&state, &toggle(&codec, md::STRONG));
-    let file = written(&codec, &bold);
-    assert_eq!(html(&file), html("`a`**`b`**"), "wrote {file:?}");
-    assert_eq!(selected_text(&codec, &bold), "b");
+    assert_saves(&codec, &bold, "**x `ab` y**");
 }
 
-/// A formula is literal like a code span: strong over part of one keeps its
-/// TeX whole, and strong over all of it wraps the fences.
+/// A formula is literal like a code span: strong over part of one does
+/// nothing, and strong over all of it wraps the fences.
 #[test]
 fn strong_over_a_formula_keeps_it_whole() {
     let codec = Codec::new();
     let state = selecting(&codec, "$ab$", 2, 3);
-    let bold = formatted(&state, &toggle(&codec, md::STRONG));
-    let file = written(&codec, &bold);
-    assert_eq!(html(&file), html("$a$**$b$**"), "wrote {file:?}");
+    let command = toggle(&codec, md::STRONG);
+    assert!(matches!(command(&state), Ok(None)));
     let state = selecting(&codec, "x $$a^2$$ y", 0, 11);
     let bold = formatted(&state, &toggle(&codec, md::STRONG));
     assert_saves(&codec, &bold, "**x $$a^2$$ y**");
@@ -943,7 +969,7 @@ fn linking_a_selection_spells_the_destination_and_title() {
         ("https://e.com/?q=\"x\"&y=1", "it's (fine)"),
     ] {
         let state = selecting(&codec, "see word here", 4, 8);
-        let linked = formatted(&state, &set_link(href, title));
+        let linked = formatted(&state, &Formatter::default_style().set_link(href, title));
         assert_eq!(
             link_read_back(&codec, &linked),
             Some((href.to_string(), title.to_string())),
@@ -961,13 +987,13 @@ fn linking_a_selection_spells_the_destination_and_title() {
 fn a_caret_in_a_link_changes_its_destination() {
     let codec = Codec::new();
     let state = editor(&codec, "a [b **c**](u) d", Selection::cursor(at(4)));
-    let changed = formatted(&state, &set_link("v", ""));
+    let changed = formatted(&state, &Formatter::default_style().set_link("v", ""));
     assert_saves(&codec, &changed, "a [b **c**](v) d");
     assert_one_undo(&state, &changed);
     let state = selecting(&codec, "a [b **c**](u) d", 3, 4);
     assert_saves(
         &codec,
-        &formatted(&state, &set_link("v", "")),
+        &formatted(&state, &Formatter::default_style().set_link("v", "")),
         "a [b **c**](v) d",
     );
 }
@@ -976,7 +1002,10 @@ fn a_caret_in_a_link_changes_its_destination() {
 fn a_caret_outside_any_link_inserts_the_url_as_a_link() {
     let codec = Codec::new();
     let state = editor(&codec, "see x", Selection::cursor(at(4)));
-    let inserted = formatted(&state, &set_link("https://example.com", ""));
+    let inserted = formatted(
+        &state,
+        &Formatter::default_style().set_link("https://example.com", ""),
+    );
     assert_eq!(
         link_read_back(&codec, &inserted).map(|(href, _)| href),
         Some("https://example.com".to_string())
@@ -988,7 +1017,10 @@ fn a_caret_outside_any_link_inserts_the_url_as_a_link() {
     assert_eq!(inserted.selection(), &Selection::cursor(at(4 + link.len())));
     // Between spaces the URL stands bare.
     let state = editor(&codec, "see  x", Selection::cursor(at(4)));
-    let bare = formatted(&state, &set_link("https://example.com", ""));
+    let bare = formatted(
+        &state,
+        &Formatter::default_style().set_link("https://example.com", ""),
+    );
     assert_saves(&codec, &bare, "see https://example.com x");
 }
 
@@ -996,15 +1028,23 @@ fn a_caret_outside_any_link_inserts_the_url_as_a_link() {
 fn unlinking_keeps_the_text_and_its_other_styles() {
     let codec = Codec::new();
     let state = editor(&codec, "a [b **c**](u) d", Selection::cursor(at(4)));
-    let unlinked = formatted(&state, &unlink());
+    let unlinked = formatted(&state, &Formatter::default_style().unlink());
     assert_saves(&codec, &unlinked, "a b **c** d");
     assert_one_undo(&state, &unlinked);
     // A selection inside a link unlinks all of it.
     let state = selecting(&codec, "[abc](u)", 2, 3);
-    assert_saves(&codec, &formatted(&state, &unlink()), "abc");
+    assert_saves(
+        &codec,
+        &formatted(&state, &Formatter::default_style().unlink()),
+        "abc",
+    );
     // One across its edge unlinks what it covers.
     let state = selecting(&codec, "[abc](u) d", 3, 10);
-    assert_saves(&codec, &formatted(&state, &unlink()), "[ab](u)c d");
+    assert_saves(
+        &codec,
+        &formatted(&state, &Formatter::default_style().unlink()),
+        "[ab](u)c d",
+    );
 }
 
 #[test]
@@ -1012,7 +1052,7 @@ fn a_reference_link_is_a_link_to_the_commands() {
     let codec = Codec::new();
     // Unlinking one leaves its text and the definition.
     let state = editor(&codec, "a [b][r] c\n\n[r]: /u", Selection::cursor(at(4)));
-    let unlinked = formatted(&state, &unlink());
+    let unlinked = formatted(&state, &Formatter::default_style().unlink());
     assert_saves(&codec, &unlinked, "a b c\n\n[r]: /u");
     // Bold inside one keeps it the reference it is.
     let state = selecting(&codec, "[bc][r] d\n\n[r]: /u", 1, 3);
@@ -1027,7 +1067,7 @@ fn clearing_takes_every_style_off() {
     let codec = Codec::new();
     let source = "**a** *b* [c](u) `d` ~~e~~";
     let state = selecting(&codec, source, 0, source.chars().count());
-    let cleared = formatted(&state, &clear_formatting());
+    let cleared = formatted(&state, &Formatter::default_style().clear_formatting());
     assert_saves(&codec, &cleared, "a b c d e");
     assert_eq!(selected_text(&codec, &cleared), "a b c d e");
     assert_one_undo(&state, &cleared);
@@ -1036,11 +1076,14 @@ fn clearing_takes_every_style_off() {
 // -- Enter ------------------------------------------------------------------------
 
 fn entered(state: &EditorState) -> EditorState {
-    run_command(state, &split_block_keeping_styles())
-        .expect("Enter runs")
-        .expect("Enter applies")
-        .state()
-        .clone()
+    run_command(
+        state,
+        &Formatter::default_style().split_block_keeping_styles(),
+    )
+    .expect("Enter runs")
+    .expect("Enter applies")
+    .state()
+    .clone()
 }
 
 fn type_x(state: &EditorState) -> EditorState {
@@ -1118,7 +1161,8 @@ fn entered_in_list(state: &EditorState) -> EditorState {
         .schema()
         .node_id(md::LIST_ITEM)
         .expect("the item type");
-    let enter = keeping_styles(markraft_core::commands::split_list_item(item));
+    let enter =
+        Formatter::default_style().keeping_styles(markraft_core::commands::split_list_item(item));
     run_command(state, &enter)
         .expect("Enter runs")
         .expect("Enter applies")
@@ -1242,30 +1286,17 @@ fn undo_gives_back_a_spelling_the_caret_kept() {
 
 // -- the house style -------------------------------------------------------------
 
-/// The underscore house style for as long as it lives, and the default again
-/// after — even when the test fails.
-struct Underscores;
-
-impl Underscores {
-    fn on() -> Underscores {
-        set_house_style(HouseStyle {
-            emphasis: '_',
-            ..HouseStyle::default()
-        });
-        Underscores
-    }
-}
-
-impl Drop for Underscores {
-    fn drop(&mut self) {
-        set_house_style(HouseStyle::default());
-    }
+/// The codec in the underscore house style.
+fn underscores() -> Codec {
+    Codec::in_house(HouseStyle {
+        emphasis: '_',
+        ..HouseStyle::default()
+    })
 }
 
 #[test]
 fn the_underscore_house_style_spells_a_whole_word_with_underscores() {
-    let _style = Underscores::on();
-    let codec = Codec::new();
+    let codec = underscores();
     for (mark, expected) in [(md::EM, "a _b_ c"), (md::STRONG, "a __b__ c")] {
         let state = selecting(&codec, "a b c", 2, 3);
         let on = formatted(&state, &toggle(&codec, mark));
@@ -1280,8 +1311,7 @@ fn the_underscore_house_style_spells_a_whole_word_with_underscores() {
 /// asterisks instead of being refused.
 #[test]
 fn the_underscore_house_style_falls_back_to_asterisks_inside_a_word() {
-    let _style = Underscores::on();
-    let codec = Codec::new();
+    let codec = underscores();
     for (mark, expected) in [(md::EM, "foo*bar*baz"), (md::STRONG, "foo**bar**baz")] {
         let state = selecting(&codec, "foobarbaz", 3, 6);
         let on = formatted(&state, &toggle(&codec, mark));
@@ -1293,8 +1323,7 @@ fn the_underscore_house_style_falls_back_to_asterisks_inside_a_word() {
 
 #[test]
 fn the_underscore_house_style_leaves_a_pair_of_underscores_between_words() {
-    let _style = Underscores::on();
-    let codec = Codec::new();
+    let codec = underscores();
     let state = editor(&codec, "a  b", Selection::cursor(at(2)));
     let paired = toggled(&codec, &state, md::EM);
     assert_eq!(block_source(&paired, 0), "a __ b");
@@ -1308,8 +1337,7 @@ fn the_underscore_house_style_leaves_a_pair_of_underscores_between_words() {
 
 #[test]
 fn the_underscore_house_style_styles_a_whole_word_at_a_caret() {
-    let _style = Underscores::on();
-    let codec = Codec::new();
+    let codec = underscores();
     let state = editor(&codec, "ab", Selection::cursor(at(1)));
     let styled = toggled(&codec, &state, md::EM);
     assert_eq!(block_source(&styled, 0), "_ab_");

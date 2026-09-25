@@ -223,11 +223,11 @@ fn charwise(
     source: bool,
 ) {
     // A range reaching from one cell into another cannot be replaced: doing so would
-    // merge the two and leave their rows short. Core's `guard_cell_range` stops the
-    // editor's own keys there; here the whole operator is refused, selection and all,
-    // so that it can be narrowed and tried again. A yank changes nothing and is free
+    // merge the two and leave their rows short. Core's table invariant would refuse
+    // the edit; here the whole operator is refused up front, selection and all, so
+    // that it can be narrowed and tried again. A yank changes nothing and is free
     // to span as much of the table as it likes.
-    if operator != Operator::Yank && table::crosses_cells(cx.types(), &cx.projection(), &range) {
+    if operator != Operator::Yank && table::crosses_cells(cx.types(), cx.state().doc(), &range) {
         return;
     }
     // What is yanked keeps markup whole as a deletion does: a span the range

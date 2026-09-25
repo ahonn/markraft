@@ -6,7 +6,6 @@
 //! but no spelling; it becomes a textblock's source through
 //! [`spell`](crate::serialize::spell).
 
-use crate::schema as md;
 use markraft_core::{Mark, MarkSet, Node, Schema};
 
 pub(crate) struct InlineContent<'s> {
@@ -104,19 +103,7 @@ pub(crate) fn style_delimiters(
     mark_name: &str,
     emphasis: char,
 ) -> Option<(&'static str, &'static str)> {
-    let underscore = emphasis == '_';
-    match mark_name {
-        md::STRONG if underscore => Some(("__", "__")),
-        md::EM if underscore => Some(("_", "_")),
-        md::STRONG => Some(("**", "**")),
-        md::EM => Some(("*", "*")),
-        md::STRIKETHROUGH => Some(("~~", "~~")),
-        md::UNDERLINE => Some(("<u>", "</u>")),
-        md::HIGHLIGHT => Some(("==", "==")),
-        md::SUPERSCRIPT => Some(("^", "^")),
-        md::SUBSCRIPT => Some(("~", "~")),
-        _ => None,
-    }
+    crate::styles::by_mark(mark_name).map(|spec| spec.delimiters(emphasis))
 }
 
 /// The closing `](…)` spelling for a link mark's destination and title.

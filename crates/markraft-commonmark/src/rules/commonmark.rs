@@ -319,10 +319,27 @@ fn list_attrs(target: ParseTarget<'_>) -> Attrs {
             ListDelimType::Paren => ")",
             ListDelimType::Period => ".",
         };
+        // Two items or more all written with one number: `1.` `1.` `1.`.
+        // Read off each item's marker: a task item keeps no list data.
+        let ordinals: Vec<Option<u64>> = target
+            .node
+            .children()
+            .map(|item| {
+                let source = ParseTarget {
+                    node: item,
+                    cx: target.cx,
+                }
+                .source();
+                let digits: String = source.chars().take_while(char::is_ascii_digit).collect();
+                digits.parse().ok()
+            })
+            .collect();
+        let same_ordinal = ordinals.len() > 1 && ordinals.iter().all(|n| *n == ordinals[0]);
         attrs! {
             "tight" => list.tight,
             "start" => list.start as i64,
             "delimiter" => delimiter,
+            "same_ordinal" => same_ordinal,
         }
     } else {
         attrs! {

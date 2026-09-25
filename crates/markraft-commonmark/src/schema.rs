@@ -162,6 +162,9 @@ pub const BULLET_LIST: &str = "bullet_list";
 /// * `tight` (`Bool`, default `true`) — as for [`BULLET_LIST`].
 /// * `start` (`Int`, default 1) — the ordinal of the first item.
 /// * `delimiter` (`Str`, default `"."`) — cosmetic; `.` or `)`.
+/// * `same_ordinal` (`Bool`, default `false`) — cosmetic; every item is
+///   written with the first one's number, `1.` `1.` `1.`, as the source had
+///   it. A reader counts them either way.
 pub const ORDERED_LIST: &str = "ordered_list";
 /// A plain list item: `block+`, group `item`.
 pub const LIST_ITEM: &str = "list_item";
@@ -368,7 +371,12 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                     AttrValue::Bool(true),
                 ))
                 .attr(AttrSpec::new("start", AttrKind::Int, AttrValue::Int(1)))
-                .attr(str_attr("delimiter", ".")),
+                .attr(str_attr("delimiter", "."))
+                .attr(AttrSpec::new(
+                    "same_ordinal",
+                    AttrKind::Bool,
+                    AttrValue::Bool(false),
+                )),
         )
         .node(
             NodeTypeSpec::new(LIST_ITEM, "block+")

@@ -22,7 +22,7 @@ use comrak::nodes::{AstNode, NodeValue, Sourcepos};
 use comrak::{Arena, parse_document};
 use markraft_commonmark::derive::{BlockKind, guard};
 use markraft_commonmark::schema as md;
-use markraft_commonmark::{commonmark_extensions, to_markdown, toggle_style_mark};
+use markraft_commonmark::{Formatter, commonmark_extensions, to_markdown};
 use markraft_core::commands::{
     Command, Direction, delete_by_grapheme, delete_selection, insert_text, run_command, split_block,
 };
@@ -520,7 +520,10 @@ fn deleting_a_link_bracket_leaves_the_rest_as_text() {
 
 fn toggle(codec: &Codec, state: &EditorState, mark: &str) -> EditorState {
     let ty = codec.schema.mark_id(mark).expect("the mark type");
-    run(state, &toggle_style_mark(ty, Attrs::empty()))
+    run(
+        state,
+        &Formatter::new(Default::default()).toggle_style_mark(ty, Attrs::empty()),
+    )
 }
 
 /// Strong over a selection that is half strong already: one span covering

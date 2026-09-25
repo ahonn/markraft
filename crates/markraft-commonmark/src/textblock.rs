@@ -361,23 +361,18 @@ pub(crate) fn build(schema: &Schema, kind: BlockKind, source: &str) -> Vec<Node>
 /// The mark types this kind derives from the text. Every other mark type is
 /// left as it is found.
 pub(crate) fn derived_mark_types(schema: &Schema) -> Vec<MarkTypeId> {
-    [
-        md::LINK,
-        md::FOOTNOTE_REFERENCE,
-        md::UNDERLINE,
-        md::HIGHLIGHT,
-        md::STRIKETHROUGH,
-        md::STRONG,
-        md::EM,
-        md::SUPERSCRIPT,
-        md::SUBSCRIPT,
-        md::CODE,
-        md::MATH,
-        md::SYNTAX,
-    ]
-    .into_iter()
-    .filter_map(|name| schema.mark_id(name))
-    .collect()
+    crate::styles::STYLES
+        .iter()
+        .map(|spec| spec.mark)
+        .chain([
+            md::LINK,
+            md::FOOTNOTE_REFERENCE,
+            md::CODE,
+            md::MATH,
+            md::SYNTAX,
+        ])
+        .filter_map(|name| schema.mark_id(name))
+        .collect()
 }
 
 /// The mark a style is.

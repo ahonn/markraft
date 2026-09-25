@@ -10,7 +10,8 @@ use markraft_core::{EditorState, EditorStateConfig, Selection};
 #[test]
 fn html_mark_transitions_keep_the_ordered_common_prefix() {
     let codec = Codec::new();
-    let written = HtmlSerializer::commonmark(&codec.schema).serialize(&codec.parse("*a **b** c*"));
+    let written = HtmlSerializer::commonmark(&codec.schema, &codec.house)
+        .serialize(&codec.parse("*a **b** c*"));
     assert_eq!(written, "<p><em>a <strong>b</strong> c</em></p>");
     // Also exercise the flat set transition: membership is not a prefix.
     let em = codec
@@ -42,7 +43,7 @@ fn html_mark_transitions_keep_the_ordered_common_prefix() {
             .unwrap()])
         .unwrap();
     assert_eq!(
-        HtmlSerializer::commonmark(&codec.schema).serialize(&flat),
+        HtmlSerializer::commonmark(&codec.schema, &codec.house).serialize(&flat),
         "<p><em>a <strong>b</strong> c</em></p>"
     );
 }
@@ -84,8 +85,8 @@ fn nested_html_tags_are_written_as_they_were_read() {
 #[test]
 fn html_clipboard_keeps_nested_spans_empty_links_and_raw_primitives() {
     let codec = Codec::new();
-    let writer = HtmlSerializer::commonmark(&codec.schema);
-    let reader = HtmlParser::commonmark(codec.schema.clone());
+    let writer = HtmlSerializer::commonmark(&codec.schema, &codec.house);
+    let reader = HtmlParser::commonmark(codec.schema.clone(), &codec.house);
     for source in [
         "*a **b** c*",
         "[](url \"title\")",
@@ -192,7 +193,7 @@ fn copying_inside_a_span_keeps_style_in_the_rich_flavour() {
     );
     let markdown = codec.serializer.serialize_fragment(&slice);
     assert_eq!(markdown, "b");
-    let rich = HtmlSerializer::commonmark(&codec.schema).serialize_fragment(&slice);
+    let rich = HtmlSerializer::commonmark(&codec.schema, &codec.house).serialize_fragment(&slice);
     assert!(
         rich.contains("<strong>") && rich.contains("<em>") && rich.contains('b'),
         "{rich}"
@@ -218,7 +219,8 @@ fn toggling_a_style_off_deletes_its_delimiters() {
     let strong = codec.schema.mark_id(md::STRONG).unwrap();
     let changed = run_command(
         &state,
-        &markraft_commonmark::toggle_style_mark(strong, markraft_core::Attrs::empty()),
+        &markraft_commonmark::Formatter::new(Default::default())
+            .toggle_style_mark(strong, markraft_core::Attrs::empty()),
     )
     .unwrap()
     .unwrap()

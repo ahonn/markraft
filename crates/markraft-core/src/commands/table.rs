@@ -12,8 +12,10 @@
 //! command that cannot keep that true does not apply. This is why a cell is
 //! never split, joined or lifted on its own: doing so would give one row a
 //! different width than its siblings, and no content rule can express that.
-//! [`guard_cell_boundary`] and [`guard_cell_split`] are what stop the general
-//! commands from trying.
+//! The general commands know nothing of cells, so [`table_invariant`] holds
+//! it for them: an extension that refuses any transaction leaving a table it
+//! touched ragged. A caller that wants to know before it builds an edit asks
+//! [`spans_cells`].
 //!
 //! # Relation to other editors
 //!
@@ -22,8 +24,10 @@
 //! Obsidian's tables do. [`goto_prev_cell`] and [`goto_cell_above`] never
 //! create anything, so a key chain can fall through them at the table's edge.
 
+use std::sync::Arc;
+
 use crate::attr::{AttrValue, Attrs};
-use crate::change::{Change, ChangeSet};
+use crate::change::{Change, ChangeRange, ChangeSet, TrackMode};
 use crate::fragment::Fragment;
 use crate::mark::MarkSet;
 use crate::node::Node;
@@ -31,7 +35,7 @@ use crate::pos::ResolvedPos;
 use crate::schema::{NodeTypeId, Schema};
 use crate::selection::Selection;
 use crate::slice::{Slice, Token};
-use crate::state::{EditorState, TransactionSpec};
+use crate::state::{EditorState, Extension, Transaction, TransactionSpec, transaction_filter};
 
 use super::structure::{can_replace, default_block_type, markup_of};
 use super::{Command, changes_spec, command, resolve_changes};
@@ -157,6 +161,21 @@ fn cell_at_pos(types: TableTypes, doc: &Node, pos: usize) -> Option<CellPos> {
         column: resolved.index(depth - 1),
         cell: resolved.before(depth),
     })
+}
+
+/// Whether `from..to` reaches from one cell into another, or between a cell
+/// and the text outside its table.
+///
+/// Replacing such a range merges the cells it spans and leaves their rows
+/// short, which [`table_invariant`] refuses. A caller that has to know before
+/// it builds the edit — vim refuses the whole operator, register and all —
+/// asks here rather than working out where the cells are itself.
+pub fn spans_cells(types: TableTypes, doc: &Node, from: usize, to: usize) -> bool {
+    if from == to {
+        return false;
+    }
+    let (a, b) = (cell_at_pos(types, doc, from), cell_at_pos(types, doc, to));
+    (a.is_some() || b.is_some()) && a != b
 }
 
 /// The alignments `table` declares in its `attr` attribute, one per column.
@@ -867,75 +886,109 @@ fn insert_table_at_cursor(
 
 /// Stop a Backspace or Delete chain at a cell's edge.
 ///
-/// At the start or end of a cell the general commands would gladly join the two
-/// cells around the boundary, delete an empty neighbour or lift the cell out of
-/// its row — each of which leaves one row narrower than the rest. This command
-/// applies exactly there and does nothing, so a chain stops at it.
+/// Keep every table a grid, whatever produced the edit.
 ///
-/// Place it after the commands that should still run inside a cell —
-/// [`delete_selection`](super::delete_selection),
-/// [`delete_by_grapheme`](super::delete_by_grapheme) and [`delete_empty_table`]
-/// — and before [`join_backward`](super::join_backward),
-/// [`join_forward`](super::join_forward) and the `select_node_*` pair.
-pub fn guard_cell_boundary(types: TableTypes) -> Command {
-    command(move |state| {
-        let doc = state.doc();
-        if !state.selection().is_cursor() {
+/// The commands in this module never break the invariant, but the general
+/// ones would: `join_backward` at the start of a cell merges it with the cell
+/// before, `split_block` inside one makes its row wider, and replacing a
+/// selection that reaches from one cell into another merges the cells it
+/// spans. Rather than have every key chain know where a cell's edges are, this
+/// extension refuses any transaction that leaves a table it touched ragged:
+/// the transaction is replaced by one that changes nothing and stays out of
+/// the history. A host binds its keys without thinking about cells, and a
+/// table stays a grid under every input path — pastes and extensions included.
+///
+/// A table that was ragged before the transaction — only an importer could
+/// make one — stays editable: raggedness the edit did not cause is not held
+/// against it.
+pub fn table_invariant(types: TableTypes) -> Extension {
+    transaction_filter().of(Arc::new(move |tr: &Transaction| {
+        if !tr.doc_changed() {
             return None;
         }
-        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
-        let depth = cell_depth(types, &resolved)?;
-        let hidden = resolved.depth() - depth;
-        let at_edge = resolved.pos().checked_sub(hidden) == Some(resolved.start(depth))
-            || resolved.pos() + hidden == resolved.end(depth);
-        at_edge.then(no_op)
-    })
-}
-
-/// Stop an Enter chain from splitting a cell in two.
-///
-/// A row's content rule usually allows another cell, so
-/// [`split_block`](super::split_block) inside a cell would happily make one —
-/// and that row would then be one cell wider than its siblings. This command
-/// applies anywhere inside a cell and does nothing.
-///
-/// A chain that lists [`goto_cell_below`] first never reaches it, because that
-/// command always applies inside a table; it is here for a host that binds
-/// Enter differently.
-pub fn guard_cell_split(types: TableTypes) -> Command {
-    command(move |state| cell_at(types, state).map(|_| no_op()))
-}
-
-/// Stop an edit that reaches from one cell into another.
-///
-/// A selection whose two ends sit in different cells is allowed to exist — a
-/// drag across a table produces one — but *replacing* it merges the cells it
-/// spans and leaves those rows short. This command applies to exactly such a
-/// selection and does nothing.
-///
-/// It belongs at the very front of an editing chain, before
-/// [`delete_selection`](super::delete_selection) and the typing commands, which
-/// is the only place that can refuse the edit; the other two guards sit further
-/// down, where the cursor commands have already had their turn.
-pub fn guard_cell_range(types: TableTypes) -> Command {
-    command(move |state| {
-        let doc = state.doc();
-        let selection = state.selection();
-        if selection.is_empty(doc) {
+        let ragged = ragged_tables(types, tr.new_doc(), touched_ranges(tr));
+        if ragged.is_empty() {
             return None;
         }
-        let from = cell_at_pos(types, doc, selection.from(doc));
-        let to = cell_at_pos(types, doc, selection.to(doc));
-        if from.is_none() && to.is_none() {
-            return None;
-        }
-        (from != to).then(no_op)
-    })
+        let before = tr.start_state().doc();
+        let inherited: Vec<usize> = ragged_tables(types, before, [(0, before.content_size())])
+            .into_iter()
+            .filter_map(|pos| tr.changes().map_pos(pos, -1, TrackMode::Simple))
+            .collect();
+        let caused = ragged.iter().any(|pos| !inherited.contains(pos));
+        caused.then(|| vec![refusal()])
+    }))
 }
 
-/// A transaction that changes nothing, which is how a guard stops a chain
-/// without touching the document or the undo history.
-fn no_op() -> TransactionSpec {
+/// The ranges of the transaction's result its replacements touch, each widened
+/// by a token so that a deletion — an empty range in the result — still meets
+/// the table it took something out of.
+fn touched_ranges(tr: &Transaction) -> Vec<(usize, usize)> {
+    let end = tr.new_doc().content_size();
+    tr.changes()
+        .iter_changes()
+        .into_iter()
+        .filter_map(|range| match range {
+            ChangeRange::Replaced { from_b, to_b, .. } => {
+                Some((from_b.saturating_sub(1), (to_b + 1).min(end)))
+            }
+            ChangeRange::Marked { .. } => None,
+        })
+        .collect()
+}
+
+/// The positions of the tables in `doc` overlapping `ranges` that are not a
+/// grid.
+fn ragged_tables(
+    types: TableTypes,
+    doc: &Node,
+    ranges: impl IntoIterator<Item = (usize, usize)>,
+) -> Vec<usize> {
+    let mut found = Vec::new();
+    for (from, to) in ranges {
+        doc.nodes_between(from, to, &mut |node, pos, _, _| {
+            if node.type_id() != types.table {
+                return true;
+            }
+            if !is_grid(types, node) && !found.contains(&pos) {
+                found.push(pos);
+            }
+            false
+        });
+    }
+    found
+}
+
+/// Whether every row of `table` holds the same number of cells and its
+/// alignments — when it declares any — name that many columns.
+fn is_grid(types: TableTypes, table: &Node) -> bool {
+    let mut widths = table
+        .children()
+        .filter(|row| row.type_id() == types.row)
+        .map(|row| {
+            row.children()
+                .filter(|cell| cell.type_id() == types.cell)
+                .count()
+        });
+    let Some(width) = widths.next() else {
+        return true;
+    };
+    if !widths.all(|other| other == width) {
+        return false;
+    }
+    declared_columns(table, types.alignments_attr).is_none_or(|columns| columns == width)
+}
+
+/// How many columns `table`'s alignment attribute names, or `None` when it
+/// names none.
+fn declared_columns(table: &Node, attr: &str) -> Option<usize> {
+    let value = table.attrs().get(attr)?.as_str()?;
+    (!value.trim().is_empty()).then(|| value.split(',').count())
+}
+
+/// A transaction that changes nothing and stays out of the history: what a
+/// refused edit becomes.
+fn refusal() -> TransactionSpec {
     TransactionSpec::new()
         .user_event("guard")
         .add_to_history(false)

@@ -258,7 +258,7 @@ fn pasted_plain_text_stays_literal() {
     use markraft_commonmark::CommonMarkCodecs;
     use markraft_core::kind::Codecs;
     let codec = Codec::new();
-    let codecs = CommonMarkCodecs::new(codec.schema.clone());
+    let codecs = CommonMarkCodecs::new(codec.schema.clone(), codec.house.clone());
     let doc = codec.parse("x");
     let pasted = paste(&codec, &doc, 2, 2, &codecs.from_text("*a* _b_\n# c"));
     let file = codec.write(&pasted);
@@ -272,7 +272,7 @@ fn pasted_markdown_and_html_arrive_as_source() {
     use markraft_commonmark::CommonMarkCodecs;
     use markraft_core::kind::Codecs;
     let codec = Codec::new();
-    let codecs = CommonMarkCodecs::new(codec.schema.clone());
+    let codecs = CommonMarkCodecs::new(codec.schema.clone(), codec.house.clone());
     let doc = codec.parse("x");
     let markdown = codecs.from_markup("__a__ *b*").expect("a fragment");
     assert_eq!(
@@ -296,7 +296,7 @@ fn a_copy_of_a_spans_inside_carries_its_delimiters() {
     use markraft_commonmark::CommonMarkCodecs;
     use markraft_core::kind::Codecs;
     let codec = Codec::new();
-    let codecs = CommonMarkCodecs::new(codec.schema.clone());
+    let codecs = CommonMarkCodecs::new(codec.schema.clone(), codec.house.clone());
     let doc = codec.parse("a *b **c** d* e\n\nf");
     // `b **c** d`, inside the emphasis.
     let slice = doc.slice(4, 13).expect("a slice");

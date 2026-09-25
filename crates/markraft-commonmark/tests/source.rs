@@ -1245,3 +1245,23 @@ fn lines_added_inside_a_block_take_the_prefixes_around_them() {
         assert_eq!(edit(original, edited).unwrap(), edited, "{original:?}");
     }
 }
+
+/// An item added to an ordered list numbers the items after it again, as
+/// Typora writes them, rather than leaving `1.` `1.` `2.`. A list written
+/// with one number keeps it, and a list the edit did not reach keeps the
+/// numbers the file gave it.
+#[test]
+fn an_edited_ordered_list_counts_its_items_again() {
+    for (original, edited) in [
+        ("1. one\n2. two\n", "1. new\n2. one\n3. two\n"),
+        ("3. one\n4. two\n", "3. one\n4. new\n5. two\n"),
+        ("1. a\n1. b\n", "1. a\n1. x\n1. b\n"),
+        ("1. a\n3. b\n\npara\n", "1. a\n3. b\n\npara!\n"),
+    ] {
+        assert_eq!(
+            edit(original, edited).as_deref(),
+            Ok(edited),
+            "{original:?}"
+        );
+    }
+}

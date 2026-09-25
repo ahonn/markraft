@@ -414,12 +414,12 @@ impl MarkraftApp {
             }
             Change::OrderedDelimiter(delimiter) => {
                 self.library.preferences.ordered_delimiter = delimiter;
-                crate::app::apply_markdown_style(&self.library.preferences);
+                crate::app::apply_markdown_style(&self.house, &self.library.preferences);
                 self.schedule_save(cx);
             }
             Change::HardBreak(style) => {
                 self.library.preferences.hard_break = style;
-                crate::app::apply_markdown_style(&self.library.preferences);
+                crate::app::apply_markdown_style(&self.house, &self.library.preferences);
                 self.schedule_save(cx);
             }
             Change::ImageName(naming) => {

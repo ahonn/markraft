@@ -83,6 +83,9 @@ enum FormatMenu {
 }
 pub struct MarkraftApp {
     library: Library,
+    /// The house style every editor's codecs and formatting commands were
+    /// built over; the preferences set it, and they read it as they write.
+    house: markraft_commonmark::HouseStyleHandle,
     persistence: Option<Persistence>,
     /// The notes folder, once one has been chosen.
     path: Option<PathBuf>,
@@ -243,9 +246,11 @@ impl MarkraftApp {
         let emoji = markraft_gpui::EmojiInsertion::new(library.preferences.emoji_characters);
         let shortcuts = std::sync::Arc::new(library.preferences.markdown_shortcuts.into());
         let pairs = std::sync::Arc::new(library.preferences.auto_pair.into());
-        apply_markdown_style(&library.preferences);
+        let house = markraft_commonmark::HouseStyleHandle::default();
+        apply_markdown_style(&house, &library.preferences);
         let mut app = Self {
             library,
+            house,
             persistence: store.map(Persistence::new),
             path,
             settings_path,
@@ -1228,8 +1233,9 @@ impl MarkraftApp {
         cx.notify();
     }
     fn copy_markdown(&mut self, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(doc::to_markdown(
+        cx.write_to_clipboard(ClipboardItem::new_string(doc::to_markdown_in(
             self.editor().read(cx).committed_document(),
+            &self.house,
         )));
         self.inform("Copied as Markdown", cx);
     }
@@ -2069,14 +2075,18 @@ fn apply_platform_preferences(
 }
 
 /// Tell the Markdown writer which markers the preferences ask new syntax to be spelled
-/// with. Both halves keep them per thread, and the editors all run on this one.
-fn apply_markdown_style(preferences: &crate::storage::Preferences) {
+/// with: the block markers `doc` keeps, and `house`, the style every codec and
+/// formatting command of this application was built over and reads as it writes.
+fn apply_markdown_style(
+    house: &markraft_commonmark::HouseStyleHandle,
+    preferences: &crate::storage::Preferences,
+) {
     crate::doc::set_markers(crate::doc::Markers {
         bullet: preferences.bullet_marker.char(),
         ordered: preferences.ordered_delimiter.char(),
         fence: preferences.code_fence.char(),
     });
-    markraft_commonmark::set_house_style(markraft_commonmark::HouseStyle {
+    house.set(markraft_commonmark::HouseStyle {
         emphasis: preferences.emphasis_marker.char(),
         ordered_delimiter: preferences.ordered_delimiter.char(),
         hard_break: match preferences.hard_break {

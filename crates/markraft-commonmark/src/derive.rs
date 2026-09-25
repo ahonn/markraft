@@ -172,17 +172,15 @@ impl Style {
     /// The name of the schema mark this style is.
     pub fn mark_name(&self) -> &'static str {
         match self {
-            Style::Strong => md::STRONG,
-            Style::Emphasis => md::EM,
-            Style::Strikethrough => md::STRIKETHROUGH,
             Style::Code => md::CODE,
             Style::Link { .. } => md::LINK,
-            Style::Underline => md::UNDERLINE,
-            Style::Highlight => md::HIGHLIGHT,
-            Style::Superscript => md::SUPERSCRIPT,
-            Style::Subscript => md::SUBSCRIPT,
             Style::FootnoteReference { .. } => md::FOOTNOTE_REFERENCE,
             Style::Math { .. } => md::MATH,
+            paired => {
+                crate::styles::by_style(paired)
+                    .expect("every paired style has a row in the style table")
+                    .mark
+            }
         }
     }
 }
@@ -1341,20 +1339,13 @@ impl HtmlTag {
         if self.closing || self.empty {
             return None;
         }
-        Some(match self.name.as_str() {
-            "u" => Style::Underline,
-            "em" => Style::Emphasis,
-            "strong" => Style::Strong,
-            "del" => Style::Strikethrough,
-            "mark" => Style::Highlight,
-            "sup" => Style::Superscript,
-            "sub" => Style::Subscript,
-            "a" => Style::Link {
+        if self.name == "a" {
+            return Some(Style::Link {
                 href: self.attr("href")?.to_string(),
                 title: self.attr("title").unwrap_or_default().to_string(),
-            },
-            _ => return None,
-        })
+            });
+        }
+        crate::styles::by_tag(&self.name).map(|spec| spec.style.clone())
     }
 
     /// The image atom's attributes, when this is an `<img>` with a source.

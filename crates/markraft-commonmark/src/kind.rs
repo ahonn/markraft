@@ -16,11 +16,9 @@ use markraft_core::{
     kind::{Codecs, DocTypeNames, SourceHighlight, SourceSpelling},
 };
 
-pub use crate::commands::{
-    CommandRefusal, FormatCommand, Formatted, Inexpressible, clear_formatting, keeping_styles,
-    set_link, split_block_keeping_styles, toggle_style, toggle_style_mark, unlink,
-};
+pub use crate::commands::{CommandRefusal, FormatCommand, Formatted, Formatter, Inexpressible};
 use crate::derive::{BlockKind, DeriveContext, derive};
+use crate::house::HouseStyleHandle;
 use crate::html::{HtmlParser, HtmlSerializer};
 use crate::parse::MarkdownParser;
 use crate::preset::commonmark_serializer;
@@ -74,13 +72,15 @@ pub fn commonmark_doc_type_names() -> DocTypeNames {
 #[derive(Clone, Debug)]
 pub struct CommonMarkCodecs {
     schema: Schema,
+    house: HouseStyleHandle,
 }
 
 impl CommonMarkCodecs {
     /// Codecs over `schema`, which must be
-    /// [`commonmark_schema`](crate::commonmark_schema) or an extension of it.
-    pub fn new(schema: Schema) -> CommonMarkCodecs {
-        CommonMarkCodecs { schema }
+    /// [`commonmark_schema`](crate::commonmark_schema) or an extension of it,
+    /// spelling what they write in `house`'s style as it stands at each write.
+    pub fn new(schema: Schema, house: HouseStyleHandle) -> CommonMarkCodecs {
+        CommonMarkCodecs { schema, house }
     }
 
     /// The schema the codecs read and write.
@@ -95,15 +95,15 @@ impl Codecs for CommonMarkCodecs {
     }
 
     fn to_markup(&self, slice: &Slice) -> Option<String> {
-        Some(commonmark_serializer(&self.schema).serialize_fragment(slice))
+        Some(commonmark_serializer(&self.schema, &self.house).serialize_fragment(slice))
     }
 
     fn to_html(&self, slice: &Slice) -> Option<String> {
-        Some(HtmlSerializer::commonmark(&self.schema).serialize_fragment(slice))
+        Some(HtmlSerializer::commonmark(&self.schema, &self.house).serialize_fragment(slice))
     }
 
     fn from_html(&self, html: &str) -> Option<Slice> {
-        HtmlParser::commonmark(self.schema.clone())
+        HtmlParser::commonmark(self.schema.clone(), &self.house)
             .parse_fragment(html)
             .ok()
             .filter(|slice| !slice.is_empty())
@@ -126,7 +126,7 @@ impl Codecs for CommonMarkCodecs {
         let Some(paragraph) = self.schema.node_id(schema::PARAGRAPH) else {
             return Slice::empty();
         };
-        let serializer = commonmark_serializer(&self.schema);
+        let serializer = commonmark_serializer(&self.schema, &self.house);
         let attrs = self.schema.node_type(paragraph).default_attrs().clone();
         let nodes: Vec<_> = text
             .split('\n')
@@ -157,7 +157,7 @@ impl Codecs for CommonMarkCodecs {
     /// it shows, so the paste reads with the styles the copy had. Every other
     /// block travels as it is written.
     fn copied(&self, slice: &Slice) -> Slice {
-        let serializer = commonmark_serializer(&self.schema);
+        let serializer = commonmark_serializer(&self.schema, &self.house);
         let inline = slice
             .content()
             .iter()
@@ -270,7 +270,7 @@ mod tests {
     use crate::schema::commonmark_schema;
 
     fn codecs() -> CommonMarkCodecs {
-        CommonMarkCodecs::new(commonmark_schema())
+        CommonMarkCodecs::new(commonmark_schema(), HouseStyleHandle::default())
     }
 
     /// Text indented at the top level pastes as prose, with its indent gone;
@@ -278,7 +278,7 @@ mod tests {
     /// is still the item's.
     #[test]
     fn indented_text_pastes_as_prose() {
-        let codecs = CommonMarkCodecs::new(commonmark_schema());
+        let codecs = CommonMarkCodecs::new(commonmark_schema(), HouseStyleHandle::default());
         let markup = |source: &str| {
             let slice = codecs.from_markup(source).expect("a fragment");
             codecs.to_markup(&slice).expect("Markdown")

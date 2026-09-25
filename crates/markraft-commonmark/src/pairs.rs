@@ -7,8 +7,9 @@
 //! * An opener — `(`, `[`, `{`, `"`, or one of the CJK brackets `（`, `「`,
 //!   `《`, `【` — at a caret writes its closer after the caret too: `(|)`.
 //!   Only where the closer cannot be mistaken for part of what follows: at
-//!   the end of the block, or before whitespace, a closing bracket or
-//!   punctuation. `"` pairs only where the character before the caret is not
+//!   the end of the block, or before whitespace or a closing bracket. Before
+//!   a letter or punctuation — `(` typed in `see |, then` — it does not
+//!   pair, as Typora 1.14.10 does not. `"` pairs only where the character before the caret is not
 //!   a letter or a digit, so `5"` stays an inch and `say"` a typo rather than
 //!   a quotation. An opener escaped by a backslash, `\(`, is a literal and
 //!   pairs nothing.
@@ -83,7 +84,7 @@ const PAIRS: [(char, char); 8] = [
 /// What may follow the caret for an opener to pair there, besides whitespace
 /// and the end of the block: a closing bracket or punctuation, before which
 /// a closer cannot be read as the start of the next word.
-const BEFORE_PAIRING: &str = ")]}>）」》】,.;:!?，。；：！？、";
+const BEFORE_PAIRING: &str = ")]}>）」》】";
 
 fn closer_of(opener: char) -> Option<char> {
     PAIRS

@@ -158,9 +158,10 @@ mod tests {
 
     /// The document kind's own link command, as the host injects it.
     fn kind_link(state: &EditorState, url: Option<&str>) -> TransactionSpec {
+        let formatter = markraft_commonmark::Formatter::new(Default::default());
         let command = match url {
-            Some(url) => markraft_commonmark::set_link(url, ""),
-            None => markraft_commonmark::unlink(),
+            Some(url) => formatter.set_link(url, ""),
+            None => formatter.unlink(),
         };
         command(state)
             .expect("the kind can write it")
@@ -182,7 +183,8 @@ mod tests {
     fn changing_a_nested_links_destination_preserves_its_single_scope() {
         let state = crate::typeahead::tests::state_of("[a *b **c*** d](https://old.test)");
         let state = selecting(state, 3, 3);
-        let serializer = markraft_commonmark::HtmlSerializer::commonmark(state.schema());
+        let serializer =
+            markraft_commonmark::HtmlSerializer::commonmark(state.schema(), &Default::default());
         let expected = serializer
             .serialize(state.doc())
             .replace("https://old.test", "https://new.test");

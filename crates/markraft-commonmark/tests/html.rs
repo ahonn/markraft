@@ -7,10 +7,17 @@ mod common;
 
 use common::Codec;
 use markraft_commonmark::html::{HtmlParser, HtmlRule, HtmlRules, commonmark_html_rules};
-use markraft_commonmark::{commonmark_schema, slice_to_plain_text, to_plain_text};
+use markraft_commonmark::{
+    HouseStyle, HouseStyleHandle, commonmark_schema, slice_to_plain_text, to_plain_text,
+};
 
 fn parser() -> HtmlParser {
-    HtmlParser::commonmark(commonmark_schema())
+    parser_in(HouseStyle::default())
+}
+
+/// The importer, spelling what it has to in `style`.
+fn parser_in(style: HouseStyle) -> HtmlParser {
+    HtmlParser::commonmark(commonmark_schema(), &HouseStyleHandle::new(style))
 }
 
 /// The document an HTML source imports as, described.
@@ -278,10 +285,11 @@ fn a_fragment_opens_the_same_way_markdown_does() {
 fn the_rule_table_can_be_replaced() {
     // A consumer that wants `<kbd>` to mean something registers it, and one
     // that wants an element dropped says so.
-    let rules = commonmark_html_rules()
+    let house = HouseStyleHandle::default();
+    let rules = commonmark_html_rules(&house)
         .with("kbd", HtmlRule::mark("strong"))
         .with("aside", HtmlRule::Ignore);
-    let parser = HtmlParser::new(commonmark_schema(), rules);
+    let parser = HtmlParser::new(commonmark_schema(), rules, house);
     let codec = Codec::new();
     let doc = parser
         .parse("<p><kbd>hit</kbd></p><aside>gone</aside>")
@@ -291,7 +299,11 @@ fn the_rule_table_can_be_replaced() {
         r#"doc(paragraph("**"{strong,syntax}, "hit"{strong}, "**"{strong,syntax}))"#
     );
     // An empty table keeps the text and nothing else.
-    let bare = HtmlParser::new(commonmark_schema(), HtmlRules::new());
+    let bare = HtmlParser::new(
+        commonmark_schema(),
+        HtmlRules::new(),
+        HouseStyleHandle::default(),
+    );
     assert_eq!(
         codec.describe(&bare.parse("<p>a</p><p>b</p>").expect("parses")),
         r#"doc(paragraph("ab"))"#
@@ -301,7 +313,15 @@ fn the_rule_table_can_be_replaced() {
 // -- writing ----------------------------------------------------------------
 
 fn serializer() -> markraft_commonmark::HtmlSerializer {
-    markraft_commonmark::HtmlSerializer::commonmark(&commonmark_schema())
+    serializer_in(HouseStyle::default())
+}
+
+/// The writer, in `style`.
+fn serializer_in(style: HouseStyle) -> markraft_commonmark::HtmlSerializer {
+    markraft_commonmark::HtmlSerializer::commonmark(
+        &commonmark_schema(),
+        &HouseStyleHandle::new(style),
+    )
 }
 
 /// The HTML a Markdown source writes as.
@@ -317,7 +337,7 @@ fn a_document_writes_as_the_html_another_application_expects() {
          <a href=\"https://x.example\" title=\"t\"><em>link</em></a></p>"
     );
     assert_eq!(
-        html_of("- one\n  - two\n\n1. a\n1. b"),
+        html_of("- one\n  - two\n\n1. a\n2. b"),
         "<ul>\n<li><p>one</p>\n<ul>\n<li><p>two</p></li>\n</ul></li>\n</ul>\n\
          <ol>\n<li><p>a</p></li>\n<li><p>b</p></li>\n</ol>"
     );
@@ -595,7 +615,8 @@ fn a_foreign_html_table_keeps_cells_attributes_links_and_images() {
     assert!(written.contains("href=\"https://example.com\""));
     assert!(written.contains("src=\"photo.png\""));
     assert_eq!(codec.parse(&written), doc);
-    let rich = markraft_commonmark::HtmlSerializer::commonmark(&codec.schema).serialize(&doc);
+    let rich = markraft_commonmark::HtmlSerializer::commonmark(&codec.schema, &codec.house)
+        .serialize(&doc);
     assert_eq!(parser().parse(&rich).unwrap(), doc);
 }
 
@@ -624,8 +645,8 @@ fn a_foreign_span_keeps_unknown_attributes_around_editable_text() {
         codec.write(edited.doc()),
         "<span class=\"red\">hXello</span>"
     );
-    let rich =
-        markraft_commonmark::HtmlSerializer::commonmark(&codec.schema).serialize(edited.doc());
+    let rich = markraft_commonmark::HtmlSerializer::commonmark(&codec.schema, &codec.house)
+        .serialize(edited.doc());
     assert_eq!(parser().parse(&rich).unwrap(), *edited.doc());
 }
 
@@ -678,17 +699,15 @@ fn a_callout_travels_as_a_blockquote_carrying_its_marker() {
 
 // -- the house style ----------------------------------------------------------
 
-/// Run `each` under `style`, putting the default back whatever happens.
-fn in_house_style<T>(style: markraft_commonmark::HouseStyle, each: impl FnOnce() -> T) -> T {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            markraft_commonmark::set_house_style(markraft_commonmark::HouseStyle::default());
-        }
-    }
-    markraft_commonmark::set_house_style(style);
-    let _reset = Reset;
-    each()
+/// `html` imported and written in `style`.
+fn markdown_in(style: HouseStyle, html: &str) -> String {
+    let codec = Codec::in_house(style);
+    codec.write(&parser_in(style).parse(html).expect("HTML parses"))
+}
+
+/// The HTML a Markdown source writes as, in `style`.
+fn html_of_in(style: HouseStyle, source: &str) -> String {
+    serializer_in(style).serialize(&Codec::new().parse(source))
 }
 
 /// An `<ol>` from another application names no delimiter, so it is a list the
@@ -696,22 +715,23 @@ fn in_house_style<T>(style: markraft_commonmark::HouseStyle, each: impl FnOnce()
 /// it was, and keeps it.
 #[test]
 fn an_ordered_list_from_elsewhere_takes_the_house_delimiter() {
-    use markraft_commonmark::HouseStyle;
     let parens = HouseStyle {
         ordered_delimiter: ')',
         ..HouseStyle::default()
     };
-    in_house_style(parens, || {
-        assert_eq!(markdown("<ol><li>a</li></ol>"), "1) a");
-        assert_eq!(markdown("<ol data-delimiter='.'><li>a</li></ol>"), "1. a");
-        // Written for that reader, a `.` list has to say so; a `)` one need not.
-        assert_eq!(
-            html_of("1. a"),
-            "<ol data-delimiter=\".\">\n<li><p>a</p></li>\n</ol>"
-        );
-        assert_eq!(html_of("1) a"), "<ol>\n<li><p>a</p></li>\n</ol>");
-        assert_eq!(markdown(&html_of("1. a")), "1. a");
-    });
+    assert_eq!(markdown_in(parens, "<ol><li>a</li></ol>"), "1) a");
+    assert_eq!(
+        markdown_in(parens, "<ol data-delimiter='.'><li>a</li></ol>"),
+        "1. a"
+    );
+    // Written for that reader, a `.` list has to say so; a `)` one need not.
+    assert_eq!(
+        html_of_in(parens, "1. a"),
+        "<ol data-delimiter=\".\">\n<li><p>a</p></li>\n</ol>"
+    );
+    assert_eq!(html_of_in(parens, "1) a"), "<ol>\n<li><p>a</p></li>\n</ol>");
+    assert_eq!(markdown_in(parens, &html_of_in(parens, "1. a")), "1. a");
+
     assert_eq!(markdown("<ol><li>a</li></ol>"), "1. a");
     assert_eq!(
         html_of("1) a"),
@@ -722,19 +742,21 @@ fn an_ordered_list_from_elsewhere_takes_the_house_delimiter() {
 /// A pasted `<br>` is a new hard break, so it is spelled in the house style.
 #[test]
 fn a_pasted_line_break_is_spelled_in_the_house_style() {
-    use markraft_commonmark::{HardBreak, HouseStyle};
+    use markraft_commonmark::HardBreak;
     let spaces = HouseStyle {
         hard_break: HardBreak::Spaces,
         ..HouseStyle::default()
     };
-    in_house_style(spaces, || {
-        assert_eq!(markdown("<p>a<br>b</p>"), "a  \nb");
-        let codec = Codec::new();
-        assert_eq!(
-            codec.describe(&parser().parse("<p>a<br>b</p>").expect("HTML parses")),
-            codec.describe(&codec.parse("a  \nb")),
-        );
-    });
+    assert_eq!(markdown_in(spaces, "<p>a<br>b</p>"), "a  \nb");
+    let codec = Codec::in_house(spaces);
+    assert_eq!(
+        codec.describe(
+            &parser_in(spaces)
+                .parse("<p>a<br>b</p>")
+                .expect("HTML parses")
+        ),
+        codec.describe(&codec.parse("a  \nb")),
+    );
     assert_eq!(markdown("<p>a<br>b</p>"), "a\\\nb");
 }
 

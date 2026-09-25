@@ -148,20 +148,19 @@ impl MarkraftApp {
             })
         });
         let style = self.editor_style();
+        let house = self.house.clone();
         let editor = cx.new(|cx| {
             EditorView::new(
                 Setup::new(doc::schema().clone())
                     .types(doc::types().clone())
-                    .codecs(doc::codecs())
+                    .codecs(doc::codecs(&self.house))
                     .spelling(doc::spelling())
-                    .mark_toggle(doc::mark_toggle(refusal_message))
-                    .link_setter(doc::link_setter(refusal_message))
-                    .split_wrap(doc::split_wrap())
+                    .mark_toggle(doc::mark_toggle(refusal_message, &self.house))
+                    .link_setter(doc::link_setter(refusal_message, &self.house))
+                    .split_wrap(doc::split_wrap(&self.house))
                     .enter_rule(doc::enter_rule(self.shortcuts.clone()))
                     // Shift-Return writes the break the preferences ask for.
-                    .break_spelling(std::sync::Arc::new(|| {
-                        markraft_commonmark::house_style().hard_break.marker()
-                    }))
+                    .break_spelling(std::sync::Arc::new(move || house.get().hard_break.marker()))
                     .extensions(doc::extensions(self.shortcuts.clone(), self.pairs.clone()))
                     .doc(document),
                 cx,
@@ -423,7 +422,7 @@ impl MarkraftApp {
         preferences.bullet_marker = bullet;
         preferences.code_fence = fence;
         preferences.emphasis_marker = emphasis;
-        super::apply_markdown_style(preferences);
+        super::apply_markdown_style(&self.house, preferences);
         self.schedule_save(cx);
         cx.notify();
     }

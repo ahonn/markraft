@@ -15,11 +15,11 @@ use markraft_core::commands::structure::markup_of;
 use markraft_core::commands::{
     Command, Direction, chain, changes_spec, command, create_paragraph_near, delete_by,
     delete_by_grapheme, delete_empty_table, delete_selection, exit_code, goto_cell_below,
-    goto_next_cell, goto_prev_cell, guard_cell_boundary, guard_cell_range, guard_cell_split,
-    insert_hard_break, join_backward, join_forward, join_textblock_backward,
-    join_textblock_forward, lift, lift_empty_block, lift_list_item, move_by, move_by_grapheme,
-    new_line_in_code, select_node_backward, select_node_forward, set_block_type, sink_list_item,
-    split_block_keep_marks, split_list_item, undo_input_rule, wrap_in, wrap_in_list,
+    goto_next_cell, goto_prev_cell, insert_hard_break, join_backward, join_forward,
+    join_textblock_backward, join_textblock_forward, lift, lift_empty_block, lift_list_item,
+    move_by, move_by_grapheme, new_line_in_code, select_node_backward, select_node_forward,
+    set_block_type, sink_list_item, split_block_keep_marks, split_list_item, undo_input_rule,
+    wrap_in, wrap_in_list,
 };
 use markraft_core::projection::projection_of;
 use markraft_core::{
@@ -186,11 +186,9 @@ pub(crate) fn enter_with(
         None => command,
     };
     let mut list: Vec<Option<Command>> = vec![
-        // Inside a table Enter moves down a row and appends one at the bottom.
-        // The guard behind it is the invariant written down: a cell that split
-        // would leave its row one cell wider than the rest.
+        // Inside a table Enter moves down a row and appends one at the bottom;
+        // a cell is never split, which core's table invariant holds.
         types.table_types().map(goto_cell_below),
-        types.table_types().map(guard_cell_split),
         rule.cloned(),
         // A verbatim block keeps Return for its own newlines, in a list item
         // as anywhere: splitting the item there would cut the block in two.
@@ -541,9 +539,6 @@ pub(crate) fn backspace(types: &DocTypes) -> Command {
         when(move |state| types.at_item_start(state), inner)
     };
     some([
-        // An edit reaching from one cell into another is refused outright; the
-        // boundary guard then stops the chain before anything joins two cells.
-        types.table_types().map(guard_cell_range),
         // A shortcut inside the text — an emoji code, a link — is taken back to
         // what was typed. One that made the block — `- `, `# `, `> ` — leaves
         // the caret at the block's start, where Backspace takes the format off
@@ -556,7 +551,6 @@ pub(crate) fn backspace(types: &DocTypes) -> Command {
         Some(lift_quote_at_start(types)),
         Some(delete_by_grapheme(Direction::Backward)),
         types.table_types().map(delete_empty_table),
-        types.table_types().map(guard_cell_boundary),
         Some(join_item_backward(types)),
         Some(outdent),
         Some(clear_heading_at_start(types)),
@@ -642,10 +636,8 @@ fn lift_quote_at_start(types: &DocTypes) -> Command {
 /// Forward delete.
 pub(crate) fn delete_forward(types: &DocTypes) -> Command {
     some([
-        types.table_types().map(guard_cell_range),
         Some(delete_selection()),
         Some(delete_by_grapheme(Direction::Forward)),
-        types.table_types().map(guard_cell_boundary),
         Some(join_text_forward(types)),
         Some(take_leaf_block(types, Direction::Forward)),
         Some(stop_before_kept_text(types, join_forward())),
@@ -666,33 +658,26 @@ pub(crate) fn textblock_edge(end: bool) -> Command {
 /// ⌃K: delete to the end of the caret's textblock, or — at its end already —
 /// join the next one, as Delete does there.
 pub(crate) fn delete_to_textblock_end(types: &DocTypes) -> Command {
-    let within = {
-        let types = types.clone();
-        command(move |state| {
-            let doc = state.doc();
-            if !state.selection().is_cursor() {
-                return None;
-            }
-            let resolved = doc.resolve(state.selection().head(doc)).ok()?;
-            if !resolved.parent().is_textblock(state.schema()) {
-                return None;
-            }
-            let end = resolved.end(resolved.depth());
-            (resolved.pos() < end)
-                .then(|| delete_within_textblock(&types, resolved.pos(), end)(state))
-                .flatten()
-        })
-    };
+    let within = command(move |state| {
+        let doc = state.doc();
+        if !state.selection().is_cursor() {
+            return None;
+        }
+        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        if !resolved.parent().is_textblock(state.schema()) {
+            return None;
+        }
+        let end = resolved.end(resolved.depth());
+        (resolved.pos() < end)
+            .then(|| delete_within_textblock(resolved.pos(), end)(state))
+            .flatten()
+    });
     chain([within, delete_forward(types)])
 }
 
-/// Delete `from..to`, a stretch of one textblock, with the guards Backspace
-/// keeps: nothing in a table cell reaches past it.
-pub(crate) fn delete_within_textblock(types: &DocTypes, from: usize, to: usize) -> Command {
-    some([
-        types.table_types().map(guard_cell_range),
-        Some(markraft_core::commands::delete_range(from, to)),
-    ])
+/// Delete `from..to`, a stretch of one textblock.
+pub(crate) fn delete_within_textblock(from: usize, to: usize) -> Command {
+    markraft_core::commands::delete_range(from, to)
 }
 
 /// ⌥⌫ and ⌥⌦: delete to the word boundary a reader sees. See
@@ -700,12 +685,10 @@ pub(crate) fn delete_within_textblock(types: &DocTypes, from: usize, to: usize) 
 pub(crate) fn delete_word(types: &DocTypes, dir: Direction) -> Command {
     let syntax = types.syntax;
     some([
-        types.table_types().map(guard_cell_range),
         Some(delete_selection()),
         Some(delete_by(move |projection, pos| {
             crate::conceal::word_boundary(syntax, projection, pos, dir)
         })),
-        types.table_types().map(guard_cell_boundary),
         Some(match dir {
             Direction::Backward => join_backward(),
             Direction::Forward => join_forward(),
@@ -1235,10 +1218,9 @@ pub(crate) fn toggle_task(types: &DocTypes) -> Command {
 /// first and last paragraphs merge with the block the caret sits in exactly as
 /// a paste of the same shape would.
 pub(crate) fn insert_plain(types: &DocTypes, text: &str) -> Command {
-    let guard = types.table_types().map(guard_cell_range);
     let types = types.clone();
     let text = text.to_owned();
-    let insert = command(move |state| {
+    command(move |state| {
         if text == "#"
             && let Some(spec) = promote_heading_at_start(&types)(state)
         {
@@ -1270,10 +1252,7 @@ pub(crate) fn insert_plain(types: &DocTypes, text: &str) -> Command {
             .collect();
         let slice = markraft_core::Slice::new(markraft_core::Fragment::from_nodes(nodes?), 1, 1);
         markraft_core::commands::replace_selection(slice)(state)
-    });
-    // Typing over a selection that reaches out of one cell would merge the
-    // cells it spans, so that edit is refused before anything else is tried.
-    some([guard, Some(insert)])
+    })
 }
 
 /// At the start of a heading, typing `#` raises the level (up to 6).
@@ -1392,7 +1371,9 @@ mod tests {
     /// both sides — in a list item as in a paragraph.
     #[test]
     fn enter_with_a_kinds_split_keeps_the_style_open_at_the_caret() {
-        let wrap: crate::SplitWrap = std::sync::Arc::new(markraft_commonmark::keeping_styles);
+        let formatter = markraft_commonmark::Formatter::new(Default::default());
+        let wrap: crate::SplitWrap =
+            std::sync::Arc::new(move |split| formatter.keeping_styles(split));
         for (source, line, expected) in [
             ("**abcd**", "**abcd**", "**ab**\n\n**cd**"),
             ("- **abcd**", "**abcd**", "- **ab**\n- **cd**"),
@@ -1718,20 +1699,30 @@ mod tests {
     }
 
     /// Joining across a cell boundary would merge two cells and leave their
-    /// rows short, so a deletion that reaches one stops there.
+    /// rows short, so a deletion that reaches one stops there: the cell is
+    /// isolating, so nothing in the chain joins, and an edit that would is
+    /// refused by core's table invariant.
     #[test]
     fn backspace_stops_at_a_cell_boundary_but_still_deletes_inside_one() {
         let (state, markdown) = table_state();
         let types = types_of(&state);
         let lines = projection_of(&state);
         let (start, end) = (lines.lines()[1].from(), lines.lines()[1].to());
-        let stopped = applied(&at(&state, start), &backspace(&types)).expect("the guard applies");
-        assert_eq!(to_markdown(state.schema(), stopped.doc()), markdown);
-        assert_eq!(cell_of(&stopped), Some((0, 1)), "and the caret stays put");
+        let stopped = applied(&at(&state, start), &backspace(&types));
+        let unchanged = |after: &Option<EditorState>| {
+            after
+                .as_ref()
+                .is_none_or(|after| to_markdown(state.schema(), after.doc()) == markdown)
+        };
+        assert!(unchanged(&stopped), "nothing joins across the cell");
+        if let Some(stopped) = &stopped {
+            assert_eq!(cell_of(stopped), Some((0, 1)), "and the caret stays put");
+        }
         // Forward delete stops at the other edge of the same cell.
-        let stopped =
-            applied(&at(&state, end), &delete_forward(&types)).expect("the guard applies");
-        assert_eq!(to_markdown(state.schema(), stopped.doc()), markdown);
+        assert!(unchanged(&applied(
+            &at(&state, end),
+            &delete_forward(&types)
+        )));
         // Inside the cell both still take a character.
         let deleted = applied(&at(&state, end), &backspace(&types)).expect("a grapheme goes");
         assert_ne!(to_markdown(state.schema(), deleted.doc()), markdown);
@@ -1746,9 +1737,9 @@ mod tests {
             .expect("a selection")
             .state()
             .clone();
-        let refused = applied(&across, &backspace(&types)).expect("the guard applies");
+        let refused = applied(&across, &backspace(&types)).expect("the invariant refuses");
         assert_eq!(to_markdown(state.schema(), refused.doc()), markdown);
-        let typed = applied(&across, &insert_plain(&types, "x")).expect("the guard applies");
+        let typed = applied(&across, &insert_plain(&types, "x")).expect("the invariant refuses");
         assert_eq!(to_markdown(state.schema(), typed.doc()), markdown);
     }
 

@@ -6,7 +6,7 @@ mod common;
 use common::Codec;
 use markraft_commonmark::schema as md;
 use markraft_commonmark::serialize::spell_document;
-use markraft_commonmark::{commonmark_extensions, from_markdown, to_markdown, toggle_style_mark};
+use markraft_commonmark::{Formatter, commonmark_extensions, from_markdown, to_markdown};
 use markraft_core::commands::{Direction, delete_by_grapheme, insert_text, run_command};
 use markraft_core::{Attrs, EditorState, EditorStateConfig, Selection};
 
@@ -121,16 +121,14 @@ fn a_bare_style_mark_is_spelled_with_its_delimiters() {
 /// uses asterisks where a letter borders the run and `_` would not be read.
 #[test]
 fn spelling_marks_in_the_underscore_house_style() {
-    use markraft_commonmark::{HouseStyle, commonmark_serializer, set_house_style};
+    use markraft_commonmark::HouseStyle;
     use markraft_core::MarkSet;
 
-    set_house_style(HouseStyle {
+    let codec = Codec::in_house(HouseStyle {
         emphasis: '_',
         ..HouseStyle::default()
     });
-    let codec = Codec::new();
-    let serializer = commonmark_serializer(&codec.schema);
-    set_house_style(HouseStyle::default());
+    let serializer = &codec.serializer;
 
     let schema = &codec.schema;
     let spelled = |mark: &str, parts: [&str; 3]| {
@@ -147,7 +145,7 @@ fn spelling_marks_in_the_underscore_house_style() {
                 )
                 .unwrap()])
             .unwrap();
-        codec.write(&spell_document(&serializer, &doc))
+        codec.write(&spell_document(serializer, &doc))
     };
     assert_eq!(spelled(md::EM, ["a ", "b", " c"]), "a _b_ c");
     assert_eq!(spelled(md::STRONG, ["a ", "b", ", c"]), "a __b__, c");
@@ -194,11 +192,14 @@ fn toggle_style_mark_inserts_delimiters() {
     )
     .unwrap();
     let strong = codec.schema.mark_id(md::STRONG).unwrap();
-    let after = run_command(&state, &toggle_style_mark(strong, Attrs::empty()))
-        .unwrap()
-        .unwrap()
-        .state()
-        .clone();
+    let after = run_command(
+        &state,
+        &Formatter::new(Default::default()).toggle_style_mark(strong, Attrs::empty()),
+    )
+    .unwrap()
+    .unwrap()
+    .state()
+    .clone();
     assert_eq!(to_markdown(&codec.schema, after.doc()).trim(), "**hello**");
     let described = codec.schema.describe(after.doc());
     assert!(described.contains("syntax"), "{described}");
@@ -290,11 +291,14 @@ fn an_escaped_literal_survives_an_edit_to_its_paragraph() {
 
 fn toggled(codec: &Codec, state: &EditorState, mark: &str) -> EditorState {
     let ty = codec.schema.mark_id(mark).expect("the mark type");
-    run_command(state, &toggle_style_mark(ty, Attrs::empty()))
-        .expect("the command runs")
-        .expect("the command applies")
-        .state()
-        .clone()
+    run_command(
+        state,
+        &Formatter::new(Default::default()).toggle_style_mark(ty, Attrs::empty()),
+    )
+    .expect("the command runs")
+    .expect("the command applies")
+    .state()
+    .clone()
 }
 
 /// A cursor toggle where no word is at the caret leaves an empty pair to type

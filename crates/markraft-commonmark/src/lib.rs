@@ -2,11 +2,11 @@
 //! every codec for it — Markdown, HTML and plain text.
 //!
 //! ```
-//! use markraft_commonmark::{commonmark_schema, commonmark_serializer, MarkdownParser};
+//! use markraft_commonmark::{commonmark_schema, commonmark_serializer, HouseStyleHandle, MarkdownParser};
 //!
 //! let schema = commonmark_schema();
 //! let parser = MarkdownParser::commonmark(schema.clone());
-//! let serializer = commonmark_serializer(&schema);
+//! let serializer = commonmark_serializer(&schema, &HouseStyleHandle::default());
 //!
 //! let doc = parser.parse("# Title\n\n- one\n- two").unwrap();
 //! assert_eq!(serializer.serialize(&doc), "# Title\n\n- one\n- two");
@@ -37,7 +37,7 @@
 //! whose structure the model cannot describe stays a `raw_block` holding its
 //! markup.
 //!
-//! # The three pieces
+//! # The four pieces
 //!
 //! * [`commonmark_schema_spec`] / [`commonmark_schema`] — the document kind.
 //!   See [`schema`] for every type, attribute and mark rank.
@@ -65,11 +65,20 @@
 //!
 //! # Extending it
 //!
-//! A consumer adds its node types to [`commonmark_schema_spec`] before
-//! compiling, registers [`ParseRule`]s for the comrak kinds that produce them
-//! (enabling the comrak extension that emits those kinds through
-//! [`MarkdownParser::with_options`]) and adds [`NodeRule`]s and [`MarkRule`]s
-//! to the serialiser's tables. Nothing in the preset is privileged.
+//! Blocks are open: a consumer adds its node types to
+//! [`commonmark_schema_spec`] before compiling, registers [`ParseRule`]s for
+//! the comrak kinds that produce them (enabling the comrak extension that
+//! emits those kinds through [`MarkdownParser::with_options`]) and adds
+//! [`NodeRule`]s to the serialiser's table. No block in the preset is
+//! privileged.
+//!
+//! Inline styles are not extended that way. A textblock's text is its inline
+//! source and its marks are what [`derive`] reads from that text — by comrak,
+//! against a fixed set of styles — so an inline [`ParseRule`] is never
+//! consulted for inline content: met in block position it keeps the source as
+//! a raw block rather than lose it. A new inline style is a row of the
+//! crate's style table and a mark in the schema, not a rule a consumer
+//! registers.
 //!
 //! # Known losses
 //!
@@ -127,6 +136,7 @@ pub mod schema;
 pub mod serialize;
 pub mod shortcode;
 pub mod source;
+mod styles;
 pub mod table;
 mod text;
 mod textblock;
@@ -144,15 +154,14 @@ pub use extensions::{
     commonmark_input_rules,
 };
 pub use fragment::open_fragment;
-pub use house::{HardBreak, HouseStyle, house_style, set_house_style};
+pub use house::{HardBreak, HouseStyle, HouseStyleHandle};
 pub use html::{
     HtmlParser, HtmlRule, HtmlRules, HtmlSerializer, commonmark_html_rules,
     commonmark_html_serializer,
 };
 pub use kind::{
-    CommandRefusal, CommonMarkCodecs, CommonMarkSpelling, FormatCommand, Formatted, Inexpressible,
-    clear_formatting, commonmark_doc_type_names, keeping_styles, set_link,
-    split_block_keeping_styles, toggle_style, toggle_style_mark, unlink,
+    CommandRefusal, CommonMarkCodecs, CommonMarkSpelling, FormatCommand, Formatted, Formatter,
+    Inexpressible, commonmark_doc_type_names,
 };
 pub use pairs::commonmark_auto_pairs;
 pub use parse::{MarkdownParser, ParseError, commonmark_options};
@@ -182,9 +191,10 @@ pub fn from_markdown(
     MarkdownParser::commonmark(schema.clone()).parse(source)
 }
 
-/// Write `doc` back out as Markdown.
+/// Write `doc` back out as Markdown, in the default house style; a host with
+/// a style of its own builds [`commonmark_serializer`] over its handle.
 pub fn to_markdown(schema: &markraft_core::Schema, doc: &markraft_core::Node) -> String {
-    commonmark_serializer(schema).serialize(doc)
+    commonmark_serializer(schema, &HouseStyleHandle::default()).serialize(doc)
 }
 
 /// Read a pasted fragment into a [`Slice`](markraft_core::Slice).
@@ -198,10 +208,12 @@ pub fn from_markdown_fragment(
     MarkdownParser::commonmark(schema.clone()).parse_fragment(source)
 }
 
-/// Write a copied [`Slice`](markraft_core::Slice) as Markdown.
+/// Write a copied [`Slice`](markraft_core::Slice) as Markdown, in the default
+/// house style; a host with a style of its own builds
+/// [`commonmark_serializer`] over its handle.
 pub fn to_markdown_fragment(
     schema: &markraft_core::Schema,
     slice: &markraft_core::Slice,
 ) -> String {
-    commonmark_serializer(schema).serialize_fragment(slice)
+    commonmark_serializer(schema, &HouseStyleHandle::default()).serialize_fragment(slice)
 }

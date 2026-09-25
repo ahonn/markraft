@@ -15,7 +15,7 @@
 //! plain text — so wherever the `_` spelling would not be read as the style,
 //! the `*` spelling is written instead.
 
-use std::cell::Cell;
+use std::sync::{Arc, RwLock};
 
 /// The spelling choices Markraft makes for new syntax.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,55 +66,71 @@ impl HardBreak {
     }
 }
 
-// Thread-local rather than process-wide: the editor reads and writes
-// documents on one thread, so a thread-local reaches every command without
-// threading a setting through each call, while tests — which the harness runs
-// on threads of their own — can each set a style without racing the others.
-thread_local! {
-    static HOUSE_STYLE: Cell<HouseStyle> = Cell::new(HouseStyle::default());
+impl HouseStyle {
+    /// `self` with an emphasis delimiter other than `'*'` or `'_'` taken as
+    /// `'*'`, and an ordered-list delimiter other than `'.'` or `')'` as `'.'`.
+    fn normalised(self) -> HouseStyle {
+        debug_assert!(
+            matches!(self.emphasis, '*' | '_'),
+            "emphasis is written with `*` or `_`, not {:?}",
+            self.emphasis
+        );
+        debug_assert!(
+            matches!(self.ordered_delimiter, '.' | ')'),
+            "an ordered list is delimited with `.` or `)`, not {:?}",
+            self.ordered_delimiter
+        );
+        HouseStyle {
+            emphasis: if self.emphasis == '_' { '_' } else { '*' },
+            ordered_delimiter: if self.ordered_delimiter == ')' {
+                ')'
+            } else {
+                '.'
+            },
+            hard_break: self.hard_break,
+        }
+    }
+
+    /// The emphasis delimiters worth trying for new syntax, best first: the
+    /// house one, then `*` where the house one is `_` and cannot be read.
+    pub(crate) fn emphasis_candidates(&self) -> &'static [char] {
+        if self.emphasis == '_' {
+            &['_', '*']
+        } else {
+            &['*']
+        }
+    }
 }
 
-/// Make `style` the house style on this thread.
+/// The house style everything that spells new syntax shares.
 ///
-/// An emphasis delimiter other than `'*'` or `'_'` is taken as `'*'`, and an
-/// ordered-list delimiter other than `'.'` or `')'` as `'.'`.
-pub fn set_house_style(style: HouseStyle) {
-    debug_assert!(
-        matches!(style.emphasis, '*' | '_'),
-        "emphasis is written with `*` or `_`, not {:?}",
-        style.emphasis
-    );
-    debug_assert!(
-        matches!(style.ordered_delimiter, '.' | ')'),
-        "an ordered list is delimited with `.` or `)`, not {:?}",
-        style.ordered_delimiter
-    );
-    let emphasis = if style.emphasis == '_' { '_' } else { '*' };
-    let ordered_delimiter = if style.ordered_delimiter == ')' {
-        ')'
-    } else {
-        '.'
-    };
-    HOUSE_STYLE.with(|cell| {
-        cell.set(HouseStyle {
-            emphasis,
-            ordered_delimiter,
-            hard_break: style.hard_break,
-        })
-    });
-}
+/// A shared handle rather than a value: a host builds its codecs and
+/// formatting commands once and they read the style when they write, so a
+/// preference change reaches every editor without rebuilding them — and each
+/// test builds a handle of its own, so none can race another. The default
+/// handle holds the default style.
+#[derive(Clone, Debug, Default)]
+pub struct HouseStyleHandle(Arc<RwLock<HouseStyle>>);
 
-/// The house style on this thread.
-pub fn house_style() -> HouseStyle {
-    HOUSE_STYLE.with(Cell::get)
-}
+impl HouseStyleHandle {
+    /// A handle holding `style`.
+    pub fn new(style: HouseStyle) -> HouseStyleHandle {
+        HouseStyleHandle(Arc::new(RwLock::new(style.normalised())))
+    }
 
-/// The emphasis delimiters worth trying for new syntax, best first: the house
-/// one, then `*` where the house one is `_` and cannot be read.
-pub(crate) fn emphasis_candidates() -> &'static [char] {
-    if house_style().emphasis == '_' {
-        &['_', '*']
-    } else {
-        &['*']
+    /// The style as it stands.
+    pub fn get(&self) -> HouseStyle {
+        *self
+            .0
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Make `style` the house style for everything built over this handle.
+    pub fn set(&self, style: HouseStyle) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = style.normalised();
     }
 }

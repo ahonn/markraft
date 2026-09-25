@@ -863,7 +863,7 @@ fn a_br_tag_ending_a_line_spells_its_hard_break() {
     for source in ["a<br>\nb", "a<br/>\nb", "a <br />  \nb", "*a<br>\nb*"] {
         assert_eq!(round(source), source, "{source:?}");
         judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
-        let html = markraft_commonmark::HtmlSerializer::commonmark(&codec.schema)
+        let html = markraft_commonmark::HtmlSerializer::commonmark(&codec.schema, &codec.house)
             .serialize(&codec.parse(source));
         assert!(html.contains("<br>"), "{source:?} exports {html:?}");
     }
@@ -1023,12 +1023,18 @@ fn ordered_lists_keep_their_start_and_delimiter_and_line_up() {
     assert_eq!(round("3) a\n4) b"), "3) a\n4) b");
     assert_eq!(
         shape("3) a"),
-        r#"doc(ordered_list[delimiter=Str(")"),start=Int(3),tight=Bool(true)](list_item(paragraph("a"))))"#
+        r#"doc(ordered_list[delimiter=Str(")"),same_ordinal=Bool(false),start=Int(3),tight=Bool(true)](list_item(paragraph("a"))))"#
     );
     // Wider ordinals pad on the right so nested blocks share one content column.
     assert_eq!(round("9. a\n10. b"), "9.  a\n10. b");
     // A list that stops short of the next width pads nothing.
     assert_eq!(round("8. a\n9. b"), "8. a\n9. b");
+    // Items all written with one number keep it, as Typora keeps them.
+    assert_eq!(round("1. a\n1. b\n1. c"), "1. a\n1. b\n1. c");
+    assert_eq!(round("1) a\n01) b - [ ]"), "1) a\n1) b - [ ]");
+    assert_eq!(round("1. [ ] a\n1. [x] b"), "1. [ ] a\n1. [x] b");
+    // One item is no pattern.
+    assert!(shape("1. a").contains("same_ordinal=Bool(false)"));
     assert_eq!(round("- x\n- y"), "- x\n- y");
     assert_eq!(round("* x"), "* x");
     assert_eq!(round("+ x"), "+ x");

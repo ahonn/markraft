@@ -1566,4 +1566,51 @@ mod tests {
         h.type_text("y");
         assert_eq!(h.markdown(), "```\n  \n  yx\n```");
     }
+
+    // Decided to follow Typora 1.14.10 after the comparison (the E class).
+
+    // A bracket pairs before whitespace or a closer, not before punctuation.
+    #[gpui::test]
+    fn a_bracket_before_punctuation_does_not_pair(cx: &mut TestAppContext) {
+        let mut h = open_with(cx, &[("p.md", "see , then\n")], |_| {});
+        h.keys("cmd-up cmd-left right right right right");
+        h.type_text("(a");
+        assert_eq!(h.markdown(), "see (a, then");
+    }
+
+    // ⌘B over part of a bold span takes the bold off the whole span; over
+    // part of a code span it does nothing.
+    #[gpui::test]
+    fn strong_over_part_of_a_span_acts_on_the_whole_or_not_at_all(cx: &mut TestAppContext) {
+        for (source, expected) in [("**abc**\n", "abc"), ("`abc`\n", "`abc`")] {
+            let mut h = open_with(cx, &[("s.md", source)], |_| {});
+            h.keys("cmd-up cmd-right alt-left right shift-right cmd-b");
+            assert_eq!(h.markdown(), expected, "{source:?}");
+        }
+    }
+
+    // A new item numbers the ones after it again in the file, unless the list
+    // is written with one number throughout.
+    #[gpui::test]
+    fn an_item_added_to_an_ordered_list_renumbers_the_file(cx: &mut TestAppContext) {
+        for (source, keys, expected) in [
+            (
+                "1. one\n2. two\n",
+                "cmd-up cmd-left enter up",
+                "1. 5\n2. one\n3. two\n",
+            ),
+            (
+                "1. a\n1. b\n",
+                "cmd-down cmd-right enter",
+                "1. a\n1. b\n1. 5\n",
+            ),
+        ] {
+            let mut h = open_with(cx, &[("o.md", source)], |_| {});
+            h.keys(keys);
+            h.type_text("5");
+            h.save();
+            let text = h.wait_for_file("o.md", |text| text != source);
+            assert_eq!(text, expected, "{source:?}");
+        }
+    }
 }

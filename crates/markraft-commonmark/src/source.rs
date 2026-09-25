@@ -121,6 +121,113 @@ impl SourceDocument {
     /// exact bytes. Keep it for the lifetime of an editing session if undo must
     /// also restore the spelling that preceded an intervening save.
     pub fn render(&self, schema: &Schema, document: &Node) -> Result<String, SourceError> {
+        let rendered = self.render_patched(schema, document)?;
+        Ok(self.renumbered(schema, document, rendered))
+    }
+
+    /// `rendered` with the ordinals of each ordered list the edit touched
+    /// counted again, as Typora writes them: a patch that adds an item leaves
+    /// the lines after it with the numbers they had, `1.` `1.` `2.`, which a
+    /// reader counts the same but a person reads as a mistake. A list written
+    /// with one number throughout keeps it. Lists the edit did not reach keep
+    /// whatever numbers the file gave them, and so does everything when the
+    /// counted text would not read back as `document`.
+    fn renumbered(&self, schema: &Schema, document: &Node, rendered: String) -> String {
+        if rendered == self.source {
+            return rendered;
+        }
+        let ordered = schema.node_id(crate::schema::ORDERED_LIST);
+        let mut expected: Vec<Vec<i64>> = Vec::new();
+        document.descendants(&mut |node, _, _, _| {
+            if Some(node.type_id()) == ordered {
+                let attrs = node.attrs();
+                let start = attrs.get("start").and_then(|v| v.as_int()).unwrap_or(1);
+                let same = attrs
+                    .get("same_ordinal")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let step = i64::from(!same);
+                expected.push(
+                    (0..node.child_count() as i64)
+                        .map(|i| start + i * step)
+                        .collect(),
+                );
+            }
+            true
+        });
+        if expected.is_empty() {
+            return rendered;
+        }
+        // The lines of `rendered` the edit changed, between what it shares with
+        // the source at either end.
+        let old: Vec<&str> = self.source.split('\n').collect();
+        let new: Vec<&str> = rendered.split('\n').collect();
+        let same_start = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let same_end = old[same_start..]
+            .iter()
+            .rev()
+            .zip(new[same_start..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let changed = same_start..new.len() - same_end;
+        let body_line = self.source[..self.body_start].matches('\n').count();
+        let body = rendered[self.body_start..]
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
+        let arena = Arena::new();
+        let root = crate::parse::parse_ast(&arena, &body, &commonmark_options());
+        let mut lists = Vec::new();
+        for node in root.descendants() {
+            if let comrak::nodes::NodeValue::List(list) = &node.data.borrow().value
+                && list.list_type == comrak::nodes::ListType::Ordered
+            {
+                lists.push(node);
+            }
+        }
+        if lists.len() != expected.len() {
+            return rendered;
+        }
+        // (line, byte column, digits, wanted) for every ordinal to change.
+        let mut edits: Vec<(usize, usize, usize, i64)> = Vec::new();
+        for (list, wanted) in lists.iter().zip(&expected) {
+            let pos = list.data.borrow().sourcepos;
+            let (first, last) = (body_line + pos.start.line - 1, body_line + pos.end.line - 1);
+            if last < changed.start || first >= changed.end {
+                continue;
+            }
+            for (item, wanted) in list.children().zip(wanted) {
+                let at = item.data.borrow().sourcepos.start;
+                let line = body_line + at.line - 1;
+                let Some(text) = new.get(line) else {
+                    return rendered;
+                };
+                let column = at.column - 1;
+                let digits = text
+                    .get(column..)
+                    .unwrap_or_default()
+                    .bytes()
+                    .take_while(u8::is_ascii_digit)
+                    .count();
+                let written = text
+                    .get(column..column + digits)
+                    .and_then(|d| d.parse::<i64>().ok());
+                if written != Some(*wanted) {
+                    edits.push((line, column, digits, *wanted));
+                }
+            }
+        }
+        if edits.is_empty() {
+            return rendered;
+        }
+        let mut lines: Vec<String> = new.iter().map(|line| (*line).to_owned()).collect();
+        for (line, column, digits, wanted) in edits.into_iter().rev() {
+            lines[line].replace_range(column..column + digits, &wanted.to_string());
+        }
+        self.validate(schema, document, lines.join("\n"))
+            .unwrap_or(rendered)
+    }
+
+    fn render_patched(&self, schema: &Schema, document: &Node) -> Result<String, SourceError> {
         if document == &self.document {
             return Ok(self.source.clone());
         }

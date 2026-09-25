@@ -738,8 +738,8 @@ fn random_documents_survive_a_round_trip() {
 #[test]
 fn random_documents_survive_an_html_round_trip() {
     let codec = Codec::new();
-    let parser = HtmlParser::commonmark(codec.schema.clone());
-    let serializer = HtmlSerializer::commonmark(&codec.schema);
+    let parser = HtmlParser::commonmark(codec.schema.clone(), &codec.house);
+    let serializer = HtmlSerializer::commonmark(&codec.schema, &codec.house);
     for seed in 1..2000u64 {
         let mut generator = Gen {
             schema: &codec.schema,

@@ -65,6 +65,7 @@ use scraper::{ElementRef, Html, Node as HtmlNode};
 
 use crate::fit::{fit, fit_document};
 use crate::fragment::open_fragment;
+use crate::house::HouseStyleHandle;
 use crate::inline::InlineContent;
 use crate::parse::ParseError;
 use crate::schema as md;
@@ -75,17 +76,23 @@ use crate::serialize::MarkdownSerializer;
 pub struct HtmlParser {
     schema: Schema,
     rules: HtmlRules,
+    house: HouseStyleHandle,
 }
 
 impl HtmlParser {
-    /// A parser driving `rules` against `schema`.
-    pub fn new(schema: Schema, rules: HtmlRules) -> HtmlParser {
-        HtmlParser { schema, rules }
+    /// A parser driving `rules` against `schema`, spelling what it has to
+    /// spell — the source of a textblock it reads — in `house`'s style.
+    pub fn new(schema: Schema, rules: HtmlRules, house: HouseStyleHandle) -> HtmlParser {
+        HtmlParser {
+            schema,
+            rules,
+            house,
+        }
     }
 
     /// A parser with the CommonMark/GFM rule table.
-    pub fn commonmark(schema: Schema) -> HtmlParser {
-        HtmlParser::new(schema, commonmark_html_rules())
+    pub fn commonmark(schema: Schema, house: &HouseStyleHandle) -> HtmlParser {
+        HtmlParser::new(schema, commonmark_html_rules(house), house.clone())
     }
 
     /// The schema documents are built against.
@@ -119,7 +126,7 @@ impl HtmlParser {
 
     fn blocks(&self, source: &str) -> Result<Vec<Node>, ParseError> {
         let html = Html::parse_fragment(source);
-        let serializer = crate::commonmark_serializer(&self.schema);
+        let serializer = crate::commonmark_serializer(&self.schema, &self.house);
         let mut build = Build {
             schema: &self.schema,
             rules: &self.rules,

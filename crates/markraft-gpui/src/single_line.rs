@@ -128,7 +128,7 @@ mod tests {
     fn a_rich_document_flattens_to_one_unmarked_paragraph() {
         let rich = commonmark_schema();
         let doc = from_markdown(&rich, "# Title\n\n**bold**").expect("valid Markdown");
-        let codecs = markraft_commonmark::CommonMarkCodecs::new(rich.clone());
+        let codecs = markraft_commonmark::CommonMarkCodecs::new(rich.clone(), Default::default());
         let flattened = document(&doc, &rich, None, Some(&codecs));
         let projection = markraft_core::projection::Projection::of(&flattened, schema());
         assert_eq!(projection.plain_text(), "Title bold");

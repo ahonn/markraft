@@ -1707,7 +1707,7 @@ impl EditorView {
             .then(|| self.line_edge_range(head, end))
             .flatten();
         let command = match range {
-            Some((from, to)) if from < to => keymap::delete_within_textblock(&self.types, from, to),
+            Some((from, to)) if from < to => keymap::delete_within_textblock(from, to),
             _ => fallback(),
         };
         if !self.run_command(&command, cx) {
@@ -2699,7 +2699,7 @@ mod document_guard_tests {
         let slice = state
             .selection()
             .content_with_schema(state.doc(), state.schema());
-        let codecs = CommonMarkCodecs::new(state.schema().clone());
+        let codecs = CommonMarkCodecs::new(state.schema().clone(), Default::default());
         assert_eq!(clipboard::markup(&codecs, &slice), "copy **this**");
         assert_eq!(state.doc(), &before);
         assert_eq!(undo_depth(&state), 0);

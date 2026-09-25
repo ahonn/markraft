@@ -76,8 +76,7 @@ use markraft_core::{
 };
 
 use crate::derive::{BlockKind, Conceal, DeriveContext, Derived, Style, StyleSpan, derive};
-use crate::house::emphasis_candidates;
-use crate::house_style;
+use crate::house::{HouseStyle, HouseStyleHandle};
 use crate::inline::style_delimiters;
 use crate::pending::{Layer, pending, pending_after, runs};
 use crate::schema as md;
@@ -137,110 +136,133 @@ pub type Formatted = Result<Option<TransactionSpec>, CommandRefusal>;
 /// A formatting command over an editor state. See [`Formatted`].
 pub type FormatCommand = Arc<dyn Fn(&EditorState) -> Formatted + Send + Sync>;
 
-/// Toggle a style over the selection by editing its delimiters.
+/// The formatting commands of this document kind, spelling what they add in
+/// a house style.
 ///
-/// The selection's style is what its two ends carry: when the first and the
-/// last selected characters both have it, the toggle takes it off the whole
-/// selection, and otherwise puts it on the whole selection — so a selection
-/// starting in bold and running into plain text becomes one bold span, and one
-/// running from one bold span to another loses both.
-///
-/// With a cursor the command works on the delimiters around the caret: it
-/// writes the style's empty pair to type into, steps out of a span at the
-/// edge of its content, splits one around a caret strictly inside it, and
-/// takes back a pair it wrote. The pair stays until something is typed in it
-/// and goes when the caret leaves it empty.
-///
-/// Strong, emphasis, strikethrough, code and underline have delimiters; for
-/// any other mark type the command does not apply.
-pub fn toggle_style(mark_type: MarkTypeId) -> FormatCommand {
-    Arc::new(move |state| {
-        let schema = state.schema();
-        let name = schema.try_mark_type(mark_type).map(|ty| ty.name());
-        let Some(style) = name.and_then(style_of) else {
-            return Ok(None);
+/// Built over a [`HouseStyleHandle`] and reading it as each command runs, so
+/// one `Formatter` follows the host's preference for as long as it lives.
+#[derive(Clone, Debug)]
+pub struct Formatter {
+    house: HouseStyleHandle,
+}
+
+impl Formatter {
+    /// The commands, spelling in `house`'s style.
+    pub fn new(house: HouseStyleHandle) -> Formatter {
+        Formatter { house }
+    }
+
+    /// Toggle a style over the selection by editing its delimiters.
+    ///
+    /// The selection's style is what its two ends carry: when the first and the
+    /// last selected characters both have it, the toggle takes it off the whole
+    /// selection, and otherwise puts it on the whole selection — so a selection
+    /// starting in bold and running into plain text becomes one bold span, and one
+    /// running from one bold span to another loses both.
+    ///
+    /// With a cursor the command works on the delimiters around the caret: it
+    /// writes the style's empty pair to type into, steps out of a span at the
+    /// edge of its content, splits one around a caret strictly inside it, and
+    /// takes back a pair it wrote. The pair stays until something is typed in it
+    /// and goes when the caret leaves it empty.
+    ///
+    /// Strong, emphasis, strikethrough, code and underline have delimiters; for
+    /// any other mark type the command does not apply.
+    pub fn toggle_style(&self, mark_type: MarkTypeId) -> FormatCommand {
+        let house = self.house.clone();
+        Arc::new(move |state| {
+            let house = house.get();
+            let schema = state.schema();
+            let name = schema.try_mark_type(mark_type).map(|ty| ty.name());
+            let Some(style) = name.and_then(style_of) else {
+                return Ok(None);
+            };
+            let ranges = state.selection().ranges(state.doc());
+            if !mark_applies(schema, state.doc(), &ranges, mark_type) {
+                return Ok(None);
+            }
+            if state.selection().is_cursor() {
+                return toggle_at_cursor(state, &style, house);
+            }
+            format(state, Op::Toggle(style), "format.mark", house)
+        })
+    }
+
+    /// [`Formatter::toggle_style`] as a plain [`Command`], for a caller that
+    /// cannot show a refusal: a refused toggle does not apply. `attrs` is unused
+    /// — every mark this toggles is spelled without attributes — and kept for
+    /// the shape of the model's own `toggle_mark`.
+    pub fn toggle_style_mark(&self, mark_type: MarkTypeId, attrs: Attrs) -> Command {
+        let _ = attrs;
+        let toggle = self.toggle_style(mark_type);
+        command(move |state| toggle(state).ok().flatten())
+    }
+
+    /// Link the selection to `href`, with `title` (empty for none).
+    ///
+    /// A caret inside a link, or a selection inside one link, changes that whole
+    /// link's destination and keeps its text. A caret anywhere else inserts `href` as its own linked
+    /// text, which Markdown writes as a bare URL where a reader links it back.
+    pub fn set_link(&self, href: impl Into<String>, title: impl Into<String>) -> FormatCommand {
+        let link = Style::Link {
+            href: href.into(),
+            title: title.into(),
         };
-        let ranges = state.selection().ranges(state.doc());
-        if !mark_applies(schema, state.doc(), &ranges, mark_type) {
-            return Ok(None);
-        }
-        if state.selection().is_cursor() {
-            return toggle_at_cursor(state, &style);
-        }
-        format(state, Op::Toggle(style), "format.mark")
-    })
-}
+        let house = self.house.clone();
+        Arc::new(move |state| {
+            let house = house.get();
+            let Style::Link { href, .. } = &link else {
+                unreachable!("built as a link")
+            };
+            if state.selection().is_cursor() && link_around_cursor(state).is_none() {
+                return insert_linked(state, &link, href, house);
+            }
+            format(state, Op::SetLink(link.clone()), "format.link", house)
+        })
+    }
 
-/// [`toggle_style`] as a plain [`Command`], for a caller that cannot show a
-/// refusal: a refused toggle does not apply. `attrs` is unused — every mark
-/// this toggles is spelled without attributes — and kept for the shape of
-/// the model's own `toggle_mark`.
-pub fn toggle_style_mark(mark_type: MarkTypeId, attrs: Attrs) -> Command {
-    let _ = attrs;
-    let toggle = toggle_style(mark_type);
-    command(move |state| toggle(state).ok().flatten())
-}
+    /// Take the link off the selection, or off the whole link a caret or a
+    /// selection is inside.
+    pub fn unlink(&self) -> FormatCommand {
+        let house = self.house.clone();
+        Arc::new(move |state| {
+            if state.selection().is_cursor() && link_around_cursor(state).is_none() {
+                return Ok(None);
+            }
+            format(state, Op::Unlink, "format.link", house.get())
+        })
+    }
 
-/// Link the selection to `href`, with `title` (empty for none).
-///
-/// A caret inside a link, or a selection inside one link, changes that whole
-/// link's destination and keeps its text. A caret anywhere else inserts `href` as its own linked
-/// text, which Markdown writes as a bare URL where a reader links it back.
-pub fn set_link(href: impl Into<String>, title: impl Into<String>) -> FormatCommand {
-    let link = Style::Link {
-        href: href.into(),
-        title: title.into(),
-    };
-    Arc::new(move |state| {
-        let Style::Link { href, .. } = &link else {
-            unreachable!("built as a link")
-        };
-        if state.selection().is_cursor() && link_around_cursor(state).is_none() {
-            return insert_linked(state, &link, href);
-        }
-        format(state, Op::SetLink(link.clone()), "format.link")
-    })
-}
+    /// Take every style off the selection.
+    pub fn clear_formatting(&self) -> FormatCommand {
+        let house = self.house.clone();
+        Arc::new(move |state| {
+            if state.selection().is_cursor() {
+                return Ok(None);
+            }
+            format(state, Op::Clear, "format.clear", house.get())
+        })
+    }
 
-/// Take the link off the selection, or off the whole link a caret or a
-/// selection is inside.
-pub fn unlink() -> FormatCommand {
-    Arc::new(|state| {
-        if state.selection().is_cursor() && link_around_cursor(state).is_none() {
-            return Ok(None);
-        }
-        format(state, Op::Unlink, "format.link")
-    })
-}
+    /// Enter, keeping the styles open at the caret on both sides of the split.
+    pub fn split_block_keeping_styles(&self) -> Command {
+        self.keeping_styles(markraft_core::commands::split_block())
+    }
 
-/// Take every style off the selection.
-pub fn clear_formatting() -> FormatCommand {
-    Arc::new(|state| {
-        if state.selection().is_cursor() {
-            return Ok(None);
-        }
-        format(state, Op::Clear, "format.clear")
-    })
-}
-
-/// Enter, keeping the styles open at the caret on both sides of the split.
-pub fn split_block_keeping_styles() -> Command {
-    keeping_styles(markraft_core::commands::split_block())
-}
-
-/// `split`, with every span open at a cursor closed before the cut and opened
-/// again after it, so `**ab|cd**` splits into `**ab**` and `**cd**` with the
-/// caret inside the second.
-///
-/// The cut moves off any delimiter it falls on — a split right after `**`
-/// leaves the whole span to the second block. Where closing and reopening a
-/// span would be read differently, the spans are closed before the whitespace
-/// at the cut instead; where even that is not read back, `split` runs on its
-/// own, since Enter has to do something. `split` is any command that splits
-/// the textblock at a cursor — a list item's split as well as a plain one — and
-/// where it does something else at the cut, it runs on its own as well.
-pub fn keeping_styles(split: Command) -> Command {
-    command(move |state| split_keeping(state, &split).or_else(|| split(state)))
+    /// `split`, with every span open at a cursor closed before the cut and opened
+    /// again after it, so `**ab|cd**` splits into `**ab**` and `**cd**` with the
+    /// caret inside the second.
+    ///
+    /// The cut moves off any delimiter it falls on — a split right after `**`
+    /// leaves the whole span to the second block. Where closing and reopening a
+    /// span would be read differently, the spans are closed before the whitespace
+    /// at the cut instead; where even that is not read back, `split` runs on its
+    /// own, since Enter has to do something. `split` is any command that splits
+    /// the textblock at a cursor — a list item's split as well as a plain one — and
+    /// where it does something else at the cut, it runs on its own as well.
+    pub fn keeping_styles(&self, split: Command) -> Command {
+        command(move |state| split_keeping(state, &split).or_else(|| split(state)))
+    }
 }
 
 // -- reading a block ----------------------------------------------------------
@@ -431,17 +453,10 @@ impl Op {
 
 /// The style a delimited mark type is, by its schema name.
 fn style_of(name: &str) -> Option<Style> {
-    match name {
-        md::STRONG => Some(Style::Strong),
-        md::EM => Some(Style::Emphasis),
-        md::STRIKETHROUGH => Some(Style::Strikethrough),
-        md::CODE => Some(Style::Code),
-        md::UNDERLINE => Some(Style::Underline),
-        md::HIGHLIGHT => Some(Style::Highlight),
-        md::SUPERSCRIPT => Some(Style::Superscript),
-        md::SUBSCRIPT => Some(Style::Subscript),
-        _ => None,
+    if name == md::CODE {
+        return Some(Style::Code);
     }
+    crate::styles::by_mark(name).map(|spec| spec.style.clone())
 }
 
 /// Whether a style's content is literal — a code span, a formula — so that
@@ -530,7 +545,7 @@ fn link_around_cursor(state: &EditorState) -> Option<Share> {
     Some(Share { block, selected })
 }
 
-fn format(state: &EditorState, op: Op, event: &str) -> Formatted {
+fn format(state: &EditorState, op: Op, event: &str, house: HouseStyle) -> Formatted {
     // A link is edited whole from inside it: a new destination for half its
     // text is a second link nobody asked for.
     let whole_link = match op {
@@ -573,11 +588,37 @@ fn format(state: &EditorState, op: Op, event: &str) -> Formatted {
         op => op,
     };
 
+    // A style put on part of a code span or a formula would have to cut it
+    // in two, which changes the literal text it holds. Typora does nothing
+    // then, and so does this.
+    if let Op::Add(style) = &op
+        && !matches!(style, Style::Code | Style::Math { .. })
+        && shares.iter().any(cuts_a_literal)
+    {
+        return Ok(None);
+    }
     let schema = state.schema();
     let mut changes = Vec::new();
     let mut edits = Vec::new();
     for share in &shares {
-        let edit = rewrite(schema, &share.block, share.selected.clone(), &op)?;
+        // A style taken off part of a span goes from the whole span, as in
+        // Typora: `b` in `**abc**` leaves `abc`, not `**a**b**c**`.
+        let range = match &op {
+            Op::Remove(style) => {
+                let units = &share.block.units;
+                let mut start = share.selected.start;
+                while start > 0 && units[start - 1].styles.contains(style) {
+                    start -= 1;
+                }
+                let mut end = share.selected.end;
+                while end < units.len() && units[end].styles.contains(style) {
+                    end += 1;
+                }
+                start..end
+            }
+            _ => share.selected.clone(),
+        };
+        let edit = rewrite(schema, &share.block, range, &op, house)?;
         changes.extend(edit.change(schema, &share.block));
         edits.push(edit);
     }
@@ -601,6 +642,22 @@ fn format(state: &EditorState, op: Op, event: &str) -> Formatted {
         spec = spec.selection(Selection::text(from, to));
     }
     Ok(Some(spec))
+}
+
+/// Whether the share's selection starts or ends inside a code span or a
+/// formula, rather than around it.
+fn cuts_a_literal(share: &Share) -> bool {
+    let units = &share.block.units;
+    let literal = |at: usize| {
+        units.get(at).is_some_and(|unit| {
+            unit.styles
+                .iter()
+                .any(|style| matches!(style, Style::Code | Style::Math { .. }))
+        })
+    };
+    let (start, end) = (share.selected.start, share.selected.end);
+    (start > 0 && literal(start - 1) && literal(start))
+        || (end > 0 && literal(end - 1) && literal(end))
 }
 
 fn unreadable() -> CommandRefusal {
@@ -695,10 +752,12 @@ fn rewrite(
     block: &Block,
     selected: Range<usize>,
     op: &Op,
+    house: HouseStyle,
 ) -> Result<Rewrite, CommandRefusal> {
     let mut refusal = None;
-    for &emphasis in emphasis_candidates() {
-        match rewrite_in(schema, block, selected.clone(), op, emphasis) {
+    for &emphasis in house.emphasis_candidates() {
+        let house = HouseStyle { emphasis, ..house };
+        match rewrite_in(schema, block, selected.clone(), op, house) {
             Ok(rewrite) => return Ok(rewrite),
             Err(refused) => {
                 refusal.get_or_insert(refused);
@@ -717,9 +776,9 @@ fn rewrite_in(
     block: &Block,
     selected: Range<usize>,
     op: &Op,
-    emphasis: char,
+    house: HouseStyle,
 ) -> Result<Rewrite, CommandRefusal> {
-    let first = attempt(schema, block, selected.clone(), op, emphasis);
+    let first = attempt(schema, block, selected.clone(), op, house);
     let refusal = match first {
         Ok(rewrite) => return Ok(rewrite),
         Err(refusal) => refusal,
@@ -735,7 +794,7 @@ fn rewrite_in(
     if shrunk.is_empty() || shrunk == selected {
         return Err(refusal);
     }
-    attempt(schema, block, shrunk, op, emphasis).map_err(|_| refusal)
+    attempt(schema, block, shrunk, op, house).map_err(|_| refusal)
 }
 
 fn attempt(
@@ -743,7 +802,7 @@ fn attempt(
     block: &Block,
     selected: Range<usize>,
     op: &Op,
-    emphasis: char,
+    house: HouseStyle,
 ) -> Result<Rewrite, CommandRefusal> {
     let units = &block.units;
     let target: Vec<Vec<Style>> = units
@@ -828,7 +887,7 @@ fn attempt(
             &context,
             lo,
             bracketed,
-            emphasis,
+            house,
         )?;
         let new_items = spelled_items(&spelled, atoms)?;
 
@@ -925,7 +984,7 @@ fn spell_units<'u>(
     context: &[Style],
     at: usize,
     bracketed_links: bool,
-    emphasis: char,
+    house: HouseStyle,
 ) -> Result<(String, Vec<Node>), CommandRefusal> {
     let marks_of = |styles: &[Style]| {
         MarkSet::from_marks(
@@ -973,13 +1032,13 @@ fn spell_units<'u>(
         }
     }
     let temp = block.node.copy(Fragment::from_nodes(children));
-    let mut marks = crate::preset::mark_rules_for(emphasis);
+    let mut marks = crate::preset::mark_rules_for(house.emphasis);
     if bracketed_links {
         marks.insert(md::LINK.to_string(), crate::preset::inline_link_mark_rule());
     }
     let serializer = crate::serialize::MarkdownSerializer::new(
         schema.clone(),
-        crate::preset::commonmark_node_rules(),
+        crate::preset::commonmark_node_rules(&HouseStyleHandle::new(house)),
         marks,
     );
     let at_line_start = at == 0 || block.items.0.get(at - 1) == Some(&Item::Break);
@@ -991,8 +1050,9 @@ fn spell_units<'u>(
 /// The delimiter pairs a cursor toggle may write for `style`, best first:
 /// emphasis and strong in the house style's delimiter, then in `*` where
 /// that is `_`, which a reader does not take inside a word.
-fn pairs_of(style: &Style) -> Vec<(&'static str, &'static str)> {
-    let mut pairs: Vec<_> = emphasis_candidates()
+fn pairs_of(style: &Style, house: HouseStyle) -> Vec<(&'static str, &'static str)> {
+    let mut pairs: Vec<_> = house
+        .emphasis_candidates()
         .iter()
         .filter_map(|emphasis| style_delimiters(style.mark_name(), *emphasis))
         .collect();
@@ -1003,9 +1063,10 @@ fn pairs_of(style: &Style) -> Vec<(&'static str, &'static str)> {
     pairs
 }
 
-/// [`toggle_style`] at a cursor. See the module documentation for the cases.
-fn toggle_at_cursor(state: &EditorState, style: &Style) -> Formatted {
-    let pairs = pairs_of(style);
+/// [`Formatter::toggle_style`] at a cursor. See the module documentation for
+/// the cases.
+fn toggle_at_cursor(state: &EditorState, style: &Style, house: HouseStyle) -> Formatted {
+    let pairs = pairs_of(style, house);
     if pairs.is_empty() {
         return Ok(None);
     }
@@ -1096,6 +1157,7 @@ fn toggle_at_cursor(state: &EditorState, style: &Style) -> Formatted {
                 start + open.end..start + close.start,
                 caret,
                 Op::Remove(style.clone()),
+                house,
             );
         }
     }
@@ -1118,6 +1180,7 @@ fn toggle_at_cursor(state: &EditorState, style: &Style) -> Formatted {
             start + word.start..start + word.end,
             caret,
             Op::Add(style.clone()),
+            house,
         );
     }
 
@@ -1163,13 +1226,19 @@ fn toggle_at_cursor(state: &EditorState, style: &Style) -> Formatted {
 /// the text it put the delimiters around, so the caret goes that far into it.
 /// At the start of `range` it lands inside the new delimiters; past its end —
 /// right after a closing run — at the end of the text.
-fn format_around(state: &EditorState, range: Range<usize>, caret: usize, op: Op) -> Formatted {
+fn format_around(
+    state: &EditorState,
+    range: Range<usize>,
+    caret: usize,
+    op: Op,
+    house: HouseStyle,
+) -> Formatted {
     let over = state
         .update([TransactionSpec::new().selection(Selection::text(range.start, range.end))])
         .map_err(|_| unreadable())?
         .state()
         .clone();
-    let Some(spec) = format(&over, op, "format.mark")? else {
+    let Some(spec) = format(&over, op, "format.mark", house)? else {
         return Ok(None);
     };
     let applied = over.update([spec.clone()]).map_err(|_| unreadable())?;
@@ -1353,7 +1422,7 @@ fn pair_reads(
 
 /// `href` inserted at the cursor as its own linked text, inside whatever
 /// spans the cursor is in.
-fn insert_linked(state: &EditorState, link: &Style, href: &str) -> Formatted {
+fn insert_linked(state: &EditorState, link: &Style, href: &str, house: HouseStyle) -> Formatted {
     let schema = state.schema();
     let doc = state.doc();
     let pos = state.selection().head(doc);
@@ -1403,7 +1472,7 @@ fn insert_linked(state: &EditorState, link: &Style, href: &str) -> Formatted {
             offset,
             bracketed,
             // The link's text is spelled with no style of its own.
-            house_style().emphasis,
+            house,
         )?;
         let new_items: Vec<Item> = spelled.chars().map(Item::Char).collect();
         let mut all = block.items.0[..offset].to_vec();
