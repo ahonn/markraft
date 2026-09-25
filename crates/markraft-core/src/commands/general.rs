@@ -23,7 +23,11 @@ use super::{
     resolve_changes,
 };
 
-/// Delete everything the selection covers.
+/// Delete everything the selection covers, leaving a caret where it was.
+///
+/// The caret is set rather than mapped: a selection of the whole document
+/// maps to one again, and what is typed next would then replace a range
+/// instead of going in at a caret.
 pub fn delete_selection() -> Command {
     command(|state| {
         let doc = state.doc();
@@ -31,10 +35,19 @@ pub fn delete_selection() -> Command {
             return None;
         }
         let range = state.selection().replacement_range(doc);
-        changes_spec(
+        let (set, new_doc) = resolve_changes(
             state,
             vec![Change::delete(range.from, range.to).with_fit(Fit::Auto)],
-            "delete.selection",
+        )?;
+        let at = set
+            .map_pos(range.from, -1, crate::change::TrackMode::Simple)
+            .unwrap_or(0);
+        Some(
+            TransactionSpec::new()
+                .change_set(set)
+                .selection(Selection::near(state.schema(), &new_doc, at, 1))
+                .user_event("delete.selection")
+                .scroll_into_view(),
         )
     })
 }

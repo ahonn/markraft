@@ -494,9 +494,11 @@ impl MarkdownParser {
     /// one paragraph merges into the textblock the caret sits in, while a run
     /// of blocks lands as blocks.
     ///
-    /// Unlike [`MarkdownParser::parse`], the spaces and tabs at the end of the
-    /// source are kept: a reader strips a paragraph's trailing whitespace, but
-    /// a pasted `hello ` has to stay apart from the `tail` after the caret.
+    /// Unlike [`MarkdownParser::parse`], the spaces and tabs at either end of
+    /// the source are kept where they are text: a reader strips a paragraph's
+    /// leading and trailing whitespace, but a pasted `hello ` has to stay
+    /// apart from the `tail` after the caret, and ` more` from the word
+    /// before it.
     ///
     /// Text indented four spaces at the top level reads as prose, not as an
     /// indented code block, as Typora pastes it: what another application puts
@@ -509,6 +511,12 @@ impl MarkdownParser {
         let normalized = self.without_indented_code(&normalized);
         let doc = self.parse(&normalized)?;
         let doc = crate::fragment::append_trailing(&self.schema, &doc, &kept);
+        let leading = if normalized.trim().is_empty() {
+            ""
+        } else {
+            &normalized[..normalized.len() - normalized.trim_start_matches([' ', '\t']).len()]
+        };
+        let doc = crate::fragment::prepend_leading(&self.schema, &doc, leading);
         Ok(crate::fragment::open_fragment(
             &self.schema,
             doc.content().clone(),

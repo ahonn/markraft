@@ -998,3 +998,32 @@ fn editing_across_blocks_keeps_what_follows_as_it_was() {
         );
     }
 }
+
+/// A line typed as a link reference definition is one once the caret leaves
+/// it, as Typora makes it: the link before it then goes where it says.
+#[test]
+fn a_definition_typed_on_its_own_line_defines_once_left() {
+    let schema = commonmark_schema();
+    let doc = markraft_commonmark::from_markdown(&schema, "[a][ref]\n\nx").expect("parses");
+    let end = doc.content_size() - 1;
+    let state = start_from(doc, &schema, end);
+    let typed = type_all(
+        &state
+            .update(
+                [markraft_core::TransactionSpec::new().selection(Selection::text(end - 1, end))],
+            )
+            .expect("select x")
+            .state()
+            .clone(),
+        "[ref]: /wx",
+    );
+    let left = typed
+        .update([markraft_core::TransactionSpec::new().selection(Selection::cursor(1))])
+        .expect("the caret leaves")
+        .state()
+        .clone();
+    assert_eq!(
+        markraft_commonmark::to_markdown(&schema, left.doc()),
+        "[a][ref]\n\n[ref]: /wx"
+    );
+}

@@ -83,6 +83,33 @@ pub(crate) fn close(schema: &Schema, slice: &Slice) -> Option<Node> {
     fit_document(schema, as_blocks(schema, slice.content())).ok()
 }
 
+/// Put `whitespace` back at the start of the document's first block, when that
+/// is a paragraph.
+///
+/// A reader strips a paragraph's leading whitespace too, and pasting
+/// ` and more` after `this` has to keep the space between them, as Typora
+/// does. Before any other block the whitespace was indentation, not text.
+pub(crate) fn prepend_leading(schema: &Schema, node: &Node, whitespace: &str) -> Node {
+    let paragraph = schema.node_id(crate::schema::PARAGRAPH);
+    let Some(first) = node.maybe_child(0) else {
+        return node.clone();
+    };
+    if whitespace.is_empty() || Some(first.type_id()) != paragraph {
+        return node.clone();
+    }
+    let mut inline: Vec<Node> = first.children().cloned().collect();
+    match inline.first_mut() {
+        Some(text) if text.is_text() && text.marks().is_empty() => {
+            let joined = format!("{whitespace}{}", text.text().unwrap_or_default());
+            *text = text.with_text(&joined);
+        }
+        _ => inline.insert(0, schema.text(whitespace)),
+    }
+    let mut blocks: Vec<Node> = node.children().cloned().collect();
+    blocks[0] = first.copy(Fragment::from_nodes(inline));
+    node.copy(Fragment::from_nodes(blocks))
+}
+
 /// Put `whitespace` back on the end of the document's last textblock.
 ///
 /// A reader strips the trailing whitespace of a paragraph, but a *fragment*

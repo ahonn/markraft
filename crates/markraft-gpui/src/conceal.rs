@@ -210,6 +210,9 @@ pub(crate) fn word_boundary(
     let line = &projection.lines()[index];
     let hidden = concealed_steps(syntax, line, caret);
     let spelled = spelling(syntax, line);
+    // Markup is no word to stop at, shown or not: as in Typora, ⌥← from the
+    // end of `**abc**` reaches `abc`, not the gap before the closing `**`.
+    let markup: Vec<Range<usize>> = hidden.iter().chain(&spelled).cloned().collect();
     let mut at = caret;
     loop {
         let mut target = step(at)?;
@@ -232,7 +235,7 @@ pub(crate) fn word_boundary(
             target = if backward { run.start } else { run.end };
         }
         let edge = target == line.from() || target == line.to();
-        if target == at || edge || shows_something(projection, line, &hidden, at, target) {
+        if target == at || edge || shows_something(projection, line, &markup, at, target) {
             return Some(target);
         }
         at = target;

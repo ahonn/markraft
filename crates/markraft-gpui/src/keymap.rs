@@ -269,13 +269,16 @@ fn cell_break(types: &DocTypes) -> Option<Command> {
 
 /// A new line in a verbatim block, starting with the spaces and tabs the line
 /// it splits starts with — no more than lie before the caret — so code goes on
-/// at the depth it was at.
+/// at the depth it was at. The spaces and tabs right after a caret go, as a
+/// code editor and Typora drop them: split inside an indent, the new line
+/// starts at its text.
 fn new_line_keeping_indent() -> Command {
     command(|state| {
         let doc = state.doc();
+        let schema = state.schema();
         let from = doc.resolve(state.selection().from(doc)).ok()?;
         let block = from.parent();
-        let before = block.text_between(state.schema(), 0, from.parent_offset(), None, None);
+        let before = block.text_between(schema, 0, from.parent_offset(), None, None);
         let line = before.rsplit('\n').next().unwrap_or_default();
         let indent: String = line
             .chars()
@@ -284,10 +287,33 @@ fn new_line_keeping_indent() -> Command {
         // `new_line_in_code` decides where a newline is text rather than a block
         // break; the indent only follows where it applies.
         let newline = new_line_in_code()(state)?;
-        if indent.is_empty() {
+        let after = block.text_between(
+            schema,
+            from.parent_offset(),
+            block.content_size(),
+            None,
+            None,
+        );
+        let blanks = after
+            .chars()
+            .take_while(|c| matches!(c, ' ' | '\t'))
+            .count();
+        if indent.is_empty() && (blanks == 0 || !state.selection().is_cursor()) {
             return Some(newline);
         }
-        markraft_core::commands::insert_text(&format!("\n{indent}"))(state)
+        let over_blanks;
+        let target = if blanks > 0 && state.selection().is_cursor() {
+            let caret = from.pos();
+            over_blanks = state
+                .update([TransactionSpec::new().selection(Selection::text(caret, caret + blanks))])
+                .ok()?
+                .state()
+                .clone();
+            &over_blanks
+        } else {
+            state
+        };
+        markraft_core::commands::insert_text(&format!("\n{indent}"))(target)
     })
 }
 
@@ -1505,7 +1531,7 @@ mod tests {
             ),
             ("```\n\tx\n```", "\tx", 2, "```\n\tx\n\ty\n```"),
             ("```\n  \t x\n```", "  \t x", 5, "```\n  \t x\n  \t y\n```"),
-            ("```\n    x\n```", "    x", 2, "```\n  \n  y  x\n```"),
+            ("```\n    x\n```", "    x", 2, "```\n  \n  yx\n```"),
             ("```\nx\n```", "x", 1, "```\nx\ny\n```"),
         ] {
             let state = state_of(source);
@@ -2350,6 +2376,38 @@ mod tests {
         );
     }
 
+    /// A line that is one hidden span still has a word inside it: ⌥← from its
+    /// end reaches the word's start, ⌥→ from its start the word's end, as on a
+    /// line with plain text around the span.
+    #[test]
+    fn word_motion_reaches_a_span_that_fills_its_line() {
+        let typed = markraft_core::commands::insert_text("X");
+        // The caret at the span's edge shows its markup, so the word it reaches
+        // is inside the span, as Typora 1.14.10 has it.
+        for (source, expected) in [
+            ("**abc**", "**Xabc**"),
+            ("`abc`", "`Xabc`"),
+            ("**abc** d", "**abc** Xd"),
+        ] {
+            let state = state_of(source);
+            let types = types_of(&state);
+            let end = caret_in(&state, source) + source.len();
+            let back = move_word(&types, Direction::Backward, false);
+            let moved = applied(&at(&state, end), &back).expect("⌥← applies");
+            assert_eq!(
+                after(&moved, &typed).as_deref(),
+                Some(expected),
+                "{source:?}"
+            );
+        }
+        let state = state_of("**abc**");
+        let types = types_of(&state);
+        let start = caret_in(&state, "**abc**");
+        let forward = move_word(&types, Direction::Forward, false);
+        let moved = applied(&at(&state, start), &forward).expect("⌥→ applies");
+        assert_eq!(after(&moved, &typed).as_deref(), Some("**abcX**"));
+    }
+
     /// ⌥⌫ deletes a hidden span whole rather than one of its delimiter
     /// characters at a time.
     #[test]
@@ -2375,7 +2433,8 @@ mod tests {
         let forward = move_word(&types, Direction::Forward, false);
         let moved = applied(&at(&state, inside), &forward).expect("⌥→ applies");
         let typed = markraft_core::commands::insert_text("X");
-        assert_eq!(after(&moved, &typed).as_deref(), Some("a **bc**X d"));
+        // Nor at its end: the run is skipped to the next word's end.
+        assert_eq!(after(&moved, &typed).as_deref(), Some("a **bc** dX"));
     }
 
     /// Shift-Return breaks the line inside the block: a hard break, spelled

@@ -310,6 +310,27 @@ pub fn replace_selection_changes(
     let (Ok(resolved_from), Ok(resolved_to)) = (doc.resolve(from), doc.resolve(to)) else {
         return vec![Change::replace(from, to, slice.clone()).with_fit(Fit::Auto)];
     };
+    // An empty textblock has no text for a slice's open start to carry on: a
+    // cut from inside a list pasted there is the list again, its first item
+    // included, rather than that item's text in the empty block.
+    let empty_block = from == to
+        && resolved_from.depth() > 0
+        && resolved_from.parent().content_size() == 0
+        && schema
+            .node_type(resolved_from.parent().type_id())
+            .has_inline_content();
+    let opens_container = slice.open_start() > 0
+        && slice
+            .content()
+            .first_child()
+            .is_some_and(|node| !schema.node_type(node.type_id()).is_textblock());
+    let closed;
+    let slice = if empty_block && opens_container {
+        closed = Slice::new(slice.content().clone(), 0, slice.open_end());
+        &closed
+    } else {
+        slice
+    };
     let into_inline = schema
         .node_type(resolved_from.parent().type_id())
         .has_inline_content();

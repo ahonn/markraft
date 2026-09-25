@@ -168,13 +168,30 @@ fn cell_at_resolves_the_cursor_and_nothing_else() {
     assert_eq!(cell_at(types(), &at(&outside, 1)), None);
 }
 
+/// The range a state's selection covers.
+fn selected(state: &EditorState) -> (usize, usize) {
+    let range = state.selection().replacement_range(state.doc());
+    (range.from, range.to)
+}
+
+/// Moving into a cell selects what it holds, as Typora does, so typing
+/// replaces it.
 #[test]
 fn tab_walks_the_cells_in_row_major_order() {
     let state = grid();
-    assert_eq!(cursor(&run(&at(&state, 3), &goto_next_cell(types()))), 6);
+    assert_eq!(
+        selected(&run(&at(&state, 3), &goto_next_cell(types()))),
+        (6, 7)
+    );
     // The end of a row wraps into the first cell of the next one.
-    assert_eq!(cursor(&run(&at(&state, 7), &goto_next_cell(types()))), 11);
-    assert_eq!(cursor(&run(&at(&state, 11), &goto_next_cell(types()))), 14);
+    assert_eq!(
+        selected(&run(&at(&state, 7), &goto_next_cell(types()))),
+        (11, 12)
+    );
+    assert_eq!(
+        selected(&run(&at(&state, 11), &goto_next_cell(types()))),
+        (14, 15)
+    );
 }
 
 #[test]
@@ -218,10 +235,19 @@ fn insert_row_below_puts_an_empty_row_under_the_cursor_and_moves_into_it() {
 #[test]
 fn shift_tab_walks_back_and_stops_at_the_first_cell() {
     let state = grid();
-    assert_eq!(cursor(&run(&at(&state, 14), &goto_prev_cell(types()))), 11);
+    assert_eq!(
+        selected(&run(&at(&state, 14), &goto_prev_cell(types()))),
+        (11, 12)
+    );
     // The start of a row wraps into the last cell of the one above.
-    assert_eq!(cursor(&run(&at(&state, 11), &goto_prev_cell(types()))), 6);
-    assert_eq!(cursor(&run(&at(&state, 6), &goto_prev_cell(types()))), 3);
+    assert_eq!(
+        selected(&run(&at(&state, 11), &goto_prev_cell(types()))),
+        (6, 7)
+    );
+    assert_eq!(
+        selected(&run(&at(&state, 6), &goto_prev_cell(types()))),
+        (3, 4)
+    );
     let prev = goto_prev_cell(types());
     assert!(prev(&at(&state, 3)).is_none());
 }
@@ -229,7 +255,10 @@ fn shift_tab_walks_back_and_stops_at_the_first_cell() {
 #[test]
 fn enter_moves_down_the_column_and_appends_on_the_last_row() {
     let state = grid();
-    assert_eq!(cursor(&run(&at(&state, 6), &goto_cell_below(types()))), 14);
+    assert_eq!(
+        selected(&run(&at(&state, 6), &goto_cell_below(types()))),
+        (14, 15)
+    );
     let appended = run(&at(&state, 11), &goto_cell_below(types()));
     assert_eq!(
         shape(&appended),

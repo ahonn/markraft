@@ -390,13 +390,29 @@ fn node_slice(node: Node) -> Slice {
 }
 
 /// Move the cursor to the start of cell (`row`, `column`) of the current table.
+/// Move into the cell at `row` and `column`: with `select`, taking what it
+/// holds, so typing replaces it — as Tab, Shift-Tab and Enter do in Typora —
+/// and otherwise with a caret at its start.
 fn move_to_cell(
     state: &EditorState,
     ctx: &TableCtx,
     row: usize,
     column: usize,
+    select: bool,
 ) -> Option<TransactionSpec> {
-    let selection = cursor_in_cell(state.schema(), state.doc(), ctx.pos.table, row, column)?;
+    let schema = state.schema();
+    let doc = state.doc();
+    let caret = cursor_in_cell(schema, doc, ctx.pos.table, row, column)?;
+    let selection = if select {
+        let table = doc.node_at(ctx.pos.table)?;
+        let last = table.maybe_child(row)?.child_count().checked_sub(1)?;
+        let pos = cell_offset(&table, ctx.pos.table, row, column.min(last))?;
+        let cell = doc.node_at(pos)?;
+        let end = Selection::find_from(schema, doc, pos + cell.node_size() - 1, -1, true)?;
+        Selection::text(caret.head(doc), end.head(doc))
+    } else {
+        caret
+    };
     if selection == *state.selection() {
         return None;
     }
@@ -453,7 +469,7 @@ pub fn insert_row_below(types: TableTypes) -> Command {
     })
 }
 
-/// Move the cursor to the start of the next cell, in row-major order.
+/// Move into the next cell, in row-major order, selecting what it holds.
 ///
 /// In the last cell an empty row is appended and the cursor moves into its
 /// first cell, so Tab keeps filling a table in rather than falling out of it.
@@ -461,16 +477,16 @@ pub fn goto_next_cell(types: TableTypes) -> Command {
     command(move |state| {
         let ctx = context(types, state)?;
         if ctx.pos.column + 1 < ctx.columns {
-            return move_to_cell(state, &ctx, ctx.pos.row, ctx.pos.column + 1);
+            return move_to_cell(state, &ctx, ctx.pos.row, ctx.pos.column + 1, true);
         }
         if ctx.pos.row + 1 < ctx.rows() {
-            return move_to_cell(state, &ctx, ctx.pos.row + 1, 0);
+            return move_to_cell(state, &ctx, ctx.pos.row + 1, 0, true);
         }
         append_row(state, types, &ctx, 0)
     })
 }
 
-/// Move the cursor to the start of the previous cell, in row-major order.
+/// Move into the previous cell, in row-major order, selecting what it holds.
 ///
 /// Does not apply in the first cell, so ⇧Tab at the top left of a table falls
 /// through to whatever a chain lists after it.
@@ -478,14 +494,14 @@ pub fn goto_prev_cell(types: TableTypes) -> Command {
     command(move |state| {
         let ctx = context(types, state)?;
         if ctx.pos.column > 0 {
-            return move_to_cell(state, &ctx, ctx.pos.row, ctx.pos.column - 1);
+            return move_to_cell(state, &ctx, ctx.pos.row, ctx.pos.column - 1, true);
         }
         let row = ctx.pos.row.checked_sub(1)?;
-        move_to_cell(state, &ctx, row, ctx.columns.saturating_sub(1))
+        move_to_cell(state, &ctx, row, ctx.columns.saturating_sub(1), true)
     })
 }
 
-/// Move the cursor to the same column of the next row.
+/// Move into the same column of the next row, selecting what the cell holds.
 ///
 /// On the last row an empty row is appended and the cursor moves into it, which
 /// is the Enter behaviour a view binds inside a table.
@@ -493,7 +509,7 @@ pub fn goto_cell_below(types: TableTypes) -> Command {
     command(move |state| {
         let ctx = context(types, state)?;
         if ctx.pos.row + 1 < ctx.rows() {
-            return move_to_cell(state, &ctx, ctx.pos.row + 1, ctx.pos.column);
+            return move_to_cell(state, &ctx, ctx.pos.row + 1, ctx.pos.column, true);
         }
         append_row(state, types, &ctx, ctx.pos.column)
     })
@@ -551,7 +567,7 @@ pub fn goto_cell_above(types: TableTypes) -> Command {
     command(move |state| {
         let ctx = context(types, state)?;
         let row = ctx.pos.row.checked_sub(1)?;
-        move_to_cell(state, &ctx, row, ctx.pos.column)
+        move_to_cell(state, &ctx, row, ctx.pos.column, false)
     })
 }
 

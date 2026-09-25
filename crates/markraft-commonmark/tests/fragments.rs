@@ -117,6 +117,30 @@ fn trailing_whitespace_survives_in_every_shape_a_fragment_takes() {
     }
 }
 
+/// So does leading whitespace before a paragraph's text, which keeps a pasted
+/// word apart from the one before the caret. Before a list it is indentation.
+#[test]
+fn leading_whitespace_before_pasted_text_survives() {
+    let codec = Codec::new();
+    for (source, expected) in [
+        (" hello", "x hello"),
+        ("  **b** c", "x  b c"),
+        ("  - a", "x\na"),
+    ] {
+        let doc = codec.parse("x");
+        let fragment = codec
+            .parser
+            .parse_fragment(source)
+            .expect("a fragment parses");
+        let pasted = paste(&codec, &doc, 2, 2, &fragment);
+        assert_eq!(
+            to_plain_text(&codec.schema, &pasted),
+            expected,
+            "{source:?}"
+        );
+    }
+}
+
 #[test]
 fn a_single_paragraph_merges_into_the_block_the_caret_is_in() {
     let codec = Codec::new();

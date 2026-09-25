@@ -135,6 +135,9 @@ pub fn commonmark_corrections(schema: &Schema) -> Vec<Correction> {
     if let Some(ordered) = schema.node_id(md::ORDERED_LIST) {
         out.push(Correction::on_child_list(ordered, keep_numbers));
     }
+    if let Some(paragraph) = schema.node_id(md::PARAGRAPH) {
+        out.push(Correction::on_content(paragraph, define_on_leaving).when_selection_leaves());
+    }
     for name in [md::PARAGRAPH, md::HEADING, md::TABLE_CELL] {
         if let Some(ty) = schema.node_id(name) {
             out.push(Correction::on_content(ty, canonicalise).when_selection_leaves());
@@ -544,6 +547,44 @@ fn spec(changes: Vec<Change>) -> markraft_core::TransactionSpec {
     markraft_core::TransactionSpec::new().changes(changes)
 }
 
+/// A paragraph typed as link reference definitions becomes the definitions
+/// once the caret leaves it, as Typora makes one: `[ref]: /url` on a line of
+/// its own tells `[a][ref]` where to go rather than standing as text. While
+/// the caret is in it the line is still being typed, and a definition only
+/// half written would read as something else.
+///
+/// Registered before [`canonicalise`], whose guard would otherwise escape the
+/// `[` to keep the text reading as a paragraph.
+fn define_on_leaving(cx: &CorrectionContext<'_>) -> Vec<Change> {
+    let schema = cx.start_state.schema();
+    let (Some(before), Some(text)) = (cx.before, spelled_definitions(cx)) else {
+        return Vec::new();
+    };
+    let Ok(raw) = schema.node(md::RAW_BLOCK, [schema.text(&text)]) else {
+        return Vec::new();
+    };
+    vec![Change::replace(
+        before,
+        before + cx.node.node_size(),
+        Slice::from_fragment(Fragment::from_node(raw)),
+    )]
+}
+
+/// The text of a paragraph the caret has just left, when it reads as nothing
+/// but link reference definitions.
+fn spelled_definitions(cx: &CorrectionContext<'_>) -> Option<String> {
+    let schema = cx.start_state.schema();
+    if !cx.selection_left || Some(cx.node.type_id()) != schema.node_id(md::PARAGRAPH) {
+        return None;
+    }
+    let items = Items::from_nodes(schema, cx.node.children());
+    if items.0.iter().any(|item| matches!(item, Item::Atom(_))) {
+        return None;
+    }
+    let text = items.text();
+    crate::textblock::reads_as_definitions(&text).then_some(text)
+}
+
 // -- the canonicalising correction -------------------------------------------
 
 /// Bring one textblock back to what its source says. See the module
@@ -553,6 +594,11 @@ fn canonicalise(cx: &CorrectionContext<'_>) -> Vec<Change> {
     let Some(kind) = block_kind(schema, cx.node.type_id()) else {
         return Vec::new();
     };
+    // A paragraph becoming definitions is replaced whole by
+    // [`define_on_leaving`]; a change of its own here would overlap that.
+    if spelled_definitions(cx).is_some() {
+        return Vec::new();
+    }
     // In the first round only a change to this block's characters can have
     // made it wrong. In a later one the document is the corrections' own
     // output, and what touched this block was one of them.

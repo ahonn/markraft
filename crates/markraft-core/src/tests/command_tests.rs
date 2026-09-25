@@ -855,6 +855,59 @@ fn arrows_leave_a_selected_rule_the_way_they_point() {
     );
 }
 
+/// A slice cut from inside a list, pasted into an empty paragraph, is the
+/// list again: the empty block has no text for its first item to carry on.
+#[test]
+fn a_list_cut_pasted_into_an_empty_paragraph_stays_a_list() {
+    let schema = shared_schema();
+    let item = |text| {
+        n(
+            &schema,
+            "list_item",
+            [n(&schema, "paragraph", [t(&schema, text)])],
+        )
+    };
+    let slice = crate::slice::Slice::new(
+        crate::fragment::Fragment::from_node(n(&schema, "bullet_list", [item("ne"), item("tw")])),
+        3,
+        3,
+    );
+    let start = state(
+        doc(
+            &schema,
+            [
+                n(&schema, "paragraph", [t(&schema, "a")]),
+                n(&schema, "paragraph", []),
+            ],
+        ),
+        Extension::none(),
+    );
+    let pasted = run(&at(&start, 4), &replace_selection(slice));
+    assert_eq!(
+        schema.describe(pasted.doc()),
+        r#"doc(paragraph("a"), bullet_list(list_item(paragraph("ne")), list_item(paragraph("tw"))))"#
+    );
+}
+
+/// Deleting the whole document leaves a caret in what is left, not a
+/// selection of everything again, so the next keystroke types at it.
+#[test]
+fn deleting_everything_leaves_a_caret() {
+    let schema = shared_schema();
+    let start = state(
+        doc(&schema, [n(&schema, "paragraph", [t(&schema, "x")])]),
+        Extension::none(),
+    );
+    let all = start
+        .update([TransactionSpec::new().selection(Selection::All)])
+        .expect("select all")
+        .state()
+        .clone();
+    let after = run(&all, &delete_selection());
+    assert_eq!(schema.describe(after.doc()), "doc(paragraph())");
+    assert_eq!(after.selection(), &Selection::cursor(1));
+}
+
 /// Typing over a range from a paragraph into an ordered list: the list stays
 /// an ordered list around what is left of it, and the caret stays after the
 /// typed text. From the paragraph's start, the paragraph goes and the text
