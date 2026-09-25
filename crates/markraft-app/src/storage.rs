@@ -738,12 +738,13 @@ impl Settings {
 
     /// What to tell the user when their folder choice and hotkey were lost with
     /// the settings file, so the reset does not go unexplained.
-    pub fn recovery_notice(&self) -> Option<String> {
-        self.recovered_from.as_deref().map(|damaged| {
-            format!(
-                "Markraft could not read your settings, so your notes folder and shortcut \
-                 were reset. The unreadable file was kept as “{}”.",
-                crate::fs::file_label(damaged)
+    /// What to say about settings that could not be read, and the unreadable
+    /// file, kept aside, for the notice to show.
+    pub fn recovery_notice(&self) -> Option<(String, PathBuf)> {
+        self.recovered_from.clone().map(|damaged| {
+            (
+                "Settings were unreadable and have been reset.".to_owned(),
+                damaged,
             )
         })
     }
@@ -754,6 +755,18 @@ impl Settings {
             "Markraft could not prepare your settings for saving.".to_owned()
         })?;
         crate::fs::atomic_write(path, &bytes)
+    }
+}
+
+/// Said when disk won over edits that were then kept as a conflicted copy.
+pub const CONFLICT_KEPT: &str = "Changed on disk. Your edits were saved as a copy.";
+
+/// [`CONFLICT_KEPT`], for `count` notes.
+pub fn conflicts_kept(count: usize) -> String {
+    if count == 1 {
+        CONFLICT_KEPT.to_owned()
+    } else {
+        format!("{count} notes changed on disk. Your edits were saved as copies.")
     }
 }
 
@@ -965,9 +978,9 @@ mod tests {
         assert_eq!(settings.preferences, Preferences::default());
         let kept = settings.recovered_from.clone().expect("the file was kept");
         assert!(kept.exists());
-        let notice = settings.recovery_notice().expect("a notice");
-        let name = kept.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(notice.contains(&name), "{notice}");
+        let (notice, shown) = settings.recovery_notice().expect("a notice");
+        assert!(notice.contains("reset"), "{notice}");
+        assert_eq!(shown, kept);
 
         // The recovery belongs to this launch: it is not written back, and the
         // settings that replace the damaged file load without a notice.

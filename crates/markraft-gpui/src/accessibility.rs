@@ -156,6 +156,13 @@ fn character_offsets(text: &str) -> Vec<usize> {
 }
 
 impl AccessibleText {
+    /// Give back what the last update built, for an editor that is not being
+    /// drawn; the next update rebuilds it all anyway.
+    pub(crate) fn release(&mut self) {
+        self.runs = Vec::new();
+        self.controls = Vec::new();
+    }
+
     pub(crate) fn update(
         &mut self,
         projection: &Projection,

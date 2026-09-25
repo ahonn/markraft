@@ -5,13 +5,15 @@
 //! mark on both an ancestor and its child. A [`MarkSet`] is sorted by
 //! `(rank, type id, attrs)` within each individual scope.
 
+use std::borrow::Borrow;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::attr::Attrs;
 use crate::schema::{MarkTypeId, Schema};
 
 /// A mark: a mark type plus its attributes.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Mark {
     /// The mark type.
     pub ty: MarkTypeId,
@@ -46,6 +48,15 @@ impl Mark {
 pub struct MarkSet(Option<Arc<Vec<Mark>>>);
 
 impl MarkSet {
+    /// The set holding exactly `marks`, which are already canonically ordered.
+    pub(crate) fn from_sorted(marks: Vec<Mark>) -> MarkSet {
+        if marks.is_empty() {
+            MarkSet(None)
+        } else {
+            MarkSet(Some(Arc::new(marks)))
+        }
+    }
+
     /// The empty mark set.
     pub fn empty() -> MarkSet {
         MarkSet(None)
@@ -124,7 +135,7 @@ impl MarkSet {
         if !placed {
             out.push(mark);
         }
-        MarkSet(Some(Arc::new(out)))
+        schema.shared_set(out)
     }
 
     /// Remove the mark equal to `mark`, if present.
@@ -166,6 +177,15 @@ impl MarkSet {
         }
     }
 
+    /// Whether both sets are the very same allocation, not only equal.
+    #[cfg(test)]
+    pub(crate) fn shares(&self, other: &MarkSet) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
     /// Whether two sets hold the same marks. Equivalent to `==`, spelled out to
     /// match the guide's vocabulary.
     pub fn same_set(&self, other: &MarkSet) -> bool {
@@ -184,6 +204,20 @@ impl PartialEq for MarkSet {
 }
 
 impl Eq for MarkSet {}
+
+/// Hashes as its marks do, so that a set can be looked up by a slice of marks
+/// before one is allocated for it.
+impl Hash for MarkSet {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
+    }
+}
+
+impl Borrow<[Mark]> for MarkSet {
+    fn borrow(&self) -> &[Mark] {
+        self.as_slice()
+    }
+}
 
 impl PartialOrd for MarkSet {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {

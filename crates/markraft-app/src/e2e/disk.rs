@@ -29,10 +29,7 @@ fn edits_meeting_a_rewritten_file_are_kept_as_a_conflicted_copy(cx: &mut TestApp
     let copies = h.other_files("n.md");
     assert_eq!(copies.len(), 1, "{copies:?}");
     assert_eq!(copies[0].1, "hello mine\n");
-    assert_eq!(
-        h.notices(),
-        ["A note changed on disk; your edits were kept as a conflicted copy."]
-    );
+    assert_eq!(h.notices(), [crate::storage::CONFLICT_KEPT]);
 }
 
 // The file was rewritten while the note held what the file used to say: the
@@ -85,10 +82,7 @@ fn a_deleted_file_takes_its_note_and_keeps_its_edits(cx: &mut TestAppContext) {
     let gone = h.app.update(h.cx, |app, _| app.test_note(&note.id));
     assert!(gone.is_none(), "the note left with its file");
     assert_eq!(h.other_files("n.md"), []);
-    assert_eq!(
-        h.notices(),
-        ["A note's file was deleted outside Markraft, so the note is gone too."]
-    );
+    assert_eq!(h.notices(), ["A note's file was deleted outside Markraft."]);
 
     let mut h = open_with(cx, &[("n.md", "hello\n")], |_| {});
     let note = h.active_note();

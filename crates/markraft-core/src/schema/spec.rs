@@ -185,6 +185,11 @@ pub struct MarkTypeSpec {
     pub inclusive: bool,
     /// Sorting rank within a mark set; lower ranks come first.
     pub rank: u8,
+    /// Whether marks of this type recur across a document with a handful of
+    /// attribute values, so that the schema keeps one copy of each value and
+    /// every equal mark shares it. Off for types whose values are as varied as
+    /// the content, such as a link's address.
+    pub shared: bool,
 }
 
 impl MarkTypeSpec {
@@ -197,6 +202,7 @@ impl MarkTypeSpec {
             excludes: None,
             inclusive: true,
             rank: 50,
+            shared: false,
         }
     }
 
@@ -227,6 +233,12 @@ impl MarkTypeSpec {
     /// Set the sorting rank.
     pub fn rank(mut self, rank: u8) -> Self {
         self.rank = rank;
+        self
+    }
+
+    /// Set the `shared` flag.
+    pub fn shared(mut self, shared: bool) -> Self {
+        self.shared = shared;
         self
     }
 }

@@ -59,7 +59,8 @@ pub(super) struct Feedback {
     error: Option<String>,
     platform_error: Option<String>,
     notice: Option<Notice>,
-    queued: VecDeque<String>,
+    /// Sentences waiting their turn, each with the path its button reveals.
+    queued: VecDeque<(String, Option<PathBuf>)>,
     flash_until: Option<Instant>,
 }
 
@@ -132,16 +133,30 @@ impl Feedback {
     /// they just did. It waits for the notice on screen instead of replacing it,
     /// and the same sentence queued twice is said once.
     pub(super) fn queue(&mut self, text: String) {
-        if !self.queued.contains(&text) {
-            log::info!("shown: {text}");
-            self.queued.push_back(text);
+        self.enqueue(text, None);
+    }
+
+    /// [`Self::queue`], with a button that reveals `path` in Finder: what a
+    /// sentence would otherwise have to spell out as a path.
+    pub(super) fn queue_with_reveal(&mut self, text: String, path: PathBuf) {
+        self.enqueue(text, Some(path));
+    }
+
+    /// [`Self::queue`], with a button when there is a `path` to reveal.
+    pub(super) fn enqueue(&mut self, text: String, path: Option<PathBuf>) {
+        if !self.queued.iter().any(|(queued, _)| *queued == text) {
+            match &path {
+                Some(path) => log::info!("shown: {text} ({})", path.display()),
+                None => log::info!("shown: {text}"),
+            }
+            self.queued.push_back((text, path));
         }
     }
 
     /// The sentences waiting their turn.
     #[cfg(test)]
     pub(super) fn queued(&self) -> impl Iterator<Item = &str> {
-        self.queued.iter().map(String::as_str)
+        self.queued.iter().map(|(text, _)| text.as_str())
     }
 
     /// Dismiss a notice that carries an action, and say whether there was one.
@@ -182,12 +197,20 @@ impl Feedback {
         }
         // One queued sentence at a time, once whatever was on screen has had its turn.
         if self.notice.is_none()
-            && let Some(text) = self.queued.pop_front()
+            && let Some((text, path)) = self.queued.pop_front()
         {
             self.notice = Some(Notice {
                 text: text.into(),
-                until: now + READING_NOTICE,
-                action: None,
+                until: now
+                    + if path.is_some() {
+                        WITH_ACTION
+                    } else {
+                        READING_NOTICE
+                    },
+                action: path.map(|path| NoticeAction {
+                    label: "Show in Finder".into(),
+                    path,
+                }),
             });
             changed = true;
         }
@@ -230,6 +253,19 @@ mod tests {
 
     /// The same sentence queued twice is said once: a folder that reports the
     /// same thing about ten files should not make the user read it ten times.
+    #[test]
+    fn a_queued_sentence_can_carry_a_button() {
+        let mut feedback = Feedback::default();
+        feedback.queue_with_reveal("saved aside".into(), PathBuf::from("/kept.md"));
+        assert!(feedback.tick());
+        let notice = feedback.notice().expect("the notice");
+        assert_eq!(notice.text.to_string(), "saved aside");
+        assert_eq!(
+            notice.action().map(|action| action.path.clone()),
+            Some(PathBuf::from("/kept.md"))
+        );
+    }
+
     #[test]
     fn the_same_sentence_is_queued_once() {
         let mut feedback = Feedback::default();

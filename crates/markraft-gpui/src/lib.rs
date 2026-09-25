@@ -768,6 +768,16 @@ impl EditorView {
         self.frame = frame;
     }
 
+    /// Give back the layout of an editor the host is not showing: the rows
+    /// kept for the next frame, the last frame's rows and the text built for
+    /// assistive apps. Nothing a reader sees changes; the next frame that
+    /// draws this editor lays the document out again.
+    pub fn release_layout(&mut self) {
+        self.shaping.release();
+        self.frame.release_rows();
+        self.accessible_text.borrow_mut().release();
+    }
+
     pub fn set_style(&mut self, style: EditorStyle, cx: &mut Context<Self>) {
         self.shaping.set_style(style);
         self.caret.ask_reveal();

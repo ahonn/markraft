@@ -123,7 +123,8 @@ thread_local! {
 fn syntax_for_language(language: &str) -> &'static SyntaxReference {
     let token = match language.to_ascii_lowercase().as_str() {
         "typescript" => "ts",
-        // TSX includes JSX grammar; the bundled Babel grammar needs Oniguruma.
+        // TSX includes JSX grammar. The bundled Babel grammar scopes import and
+        // export as operators, which this palette leaves uncoloured.
         "jsx" => "tsx",
         "shell" | "sh" | "zsh" => "bash",
         "c++" => "cpp",

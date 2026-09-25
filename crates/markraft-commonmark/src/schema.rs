@@ -484,15 +484,24 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
         .mark(MarkTypeSpec::new(SUPERSCRIPT).rank(55).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(SUBSCRIPT).rank(56).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(CODE).rank(60))
-        .mark(MarkTypeSpec::new(MATH).rank(65).attr(AttrSpec::new(
-            MATH_DISPLAY_ATTR,
-            AttrKind::Bool,
-            AttrValue::Bool(false),
-        )))
         .mark(
+            MarkTypeSpec::new(MATH)
+                .rank(65)
+                .shared(true)
+                .attr(AttrSpec::new(
+                    MATH_DISPLAY_ATTR,
+                    AttrKind::Bool,
+                    AttrValue::Bool(false),
+                )),
+        )
+        .mark(
+            // Every delimiter carries one, and its values repeat from block to
+            // block: span ids restart at 0 in each, and a display is nearly
+            // always empty.
             MarkTypeSpec::new(SYNTAX)
                 .rank(70)
                 .inclusive(false)
+                .shared(true)
                 .attr(str_attr(SYNTAX_DISPLAY_ATTR, ""))
                 .attr(AttrSpec::new(
                     SYNTAX_SPAN_ATTR,

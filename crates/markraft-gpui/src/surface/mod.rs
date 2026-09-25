@@ -196,6 +196,12 @@ impl FrameLayout {
         self.single_line_scroll_x
     }
 
+    /// Give back the rows of an editor that is not being drawn. The grids'
+    /// places stay: they are the reader's, and the next paint keeps them.
+    pub(crate) fn release_rows(&mut self) {
+        self.rows = Vec::new();
+    }
+
     /// Forget the rows and the grids' places when the document is replaced;
     /// the content box stays what the last paint made it.
     pub(crate) fn clear(&mut self) {

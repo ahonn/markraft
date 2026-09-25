@@ -405,22 +405,14 @@ impl MarkraftApp {
             persistence.acknowledge(ids);
         }
         if archived > 0 {
-            self.feedback.queue(if archived == 1 {
-                "A note changed on disk; your edits were kept as a conflicted copy.".to_owned()
-            } else {
-                format!(
-                    "{archived} notes changed on disk; your edits were kept as conflicted copies."
-                )
-            });
+            self.feedback
+                .queue(crate::storage::conflicts_kept(archived));
         }
         if vanished > 0 {
             self.feedback.queue(if vanished == 1 {
-                "A note's file was deleted outside Markraft, so the note is gone too."
-                    .to_owned()
+                "A note's file was deleted outside Markraft.".to_owned()
             } else {
-                format!(
-                    "{vanished} notes' files were deleted outside Markraft, so those notes are gone too."
-                )
+                format!("{vanished} notes' files were deleted outside Markraft.")
             });
         }
         cx.notify();
@@ -491,14 +483,8 @@ impl MarkraftApp {
         }
         if !saved.conflicts.is_empty() && completion == SaveCompletion::Current {
             // Disk won mid-save: toast and refresh so the editor adopts disk content.
-            self.feedback.queue(if saved.conflicts.len() == 1 {
-                "Disk version kept; your edits were kept as a conflicted copy.".to_owned()
-            } else {
-                format!(
-                    "{} notes kept the disk version; your edits were kept as conflicted copies.",
-                    saved.conflicts.len()
-                )
-            });
+            self.feedback
+                .queue(crate::storage::conflicts_kept(saved.conflicts.len()));
             if let Some(persistence) = &self.persistence {
                 persistence.refresh();
             }
@@ -650,7 +636,9 @@ impl MarkraftApp {
             } else {
                 self.updater.postpone(continuation);
                 self.show(window, cx);
-                self.inform("Update paused. Resolve the save error, then choose Check for Updates to retry.", cx);
+                self.feedback
+                    .queue("Update paused: a note couldn't be saved.".to_owned());
+                cx.notify();
             }
         }
         if let Some(revision) = self.save.take_due(Instant::now())
@@ -816,13 +804,15 @@ impl MarkraftApp {
     /// Put what a bug report needs on the clipboard, and say so.
     pub fn copy_debug_info(&mut self, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(crate::platform::debug_info()));
-        self.feedback.inform("Debug info copied");
+        self.feedback.inform("Copied debug info");
         cx.notify();
     }
 
-    /// Say that the last run left a crash report, with a button that shows it.
-    pub fn announce_crash_report(&mut self, text: String, report: PathBuf, cx: &mut Context<Self>) {
-        self.feedback.inform_with_reveal(text, report);
+    /// Say something found on the way to the first window — a crash report the
+    /// last run left, settings that were set aside — with a button that shows
+    /// the file.
+    pub fn announce_with_reveal(&mut self, text: String, path: PathBuf, cx: &mut Context<Self>) {
+        self.feedback.queue_with_reveal(text, path);
         cx.notify();
     }
     pub fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1080,7 +1070,7 @@ impl MarkraftApp {
     /// carries the reason.
     fn moved_to_trash(&mut self, moved: bool, folder: Option<PathBuf>, cx: &mut Context<Self>) {
         if !moved {
-            self.feedback.inform("Could not move it to the Trash.");
+            self.feedback.inform("Couldn't move to Trash.");
             cx.notify();
             return;
         }
@@ -1330,7 +1320,7 @@ impl MarkraftApp {
     fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_documents(cx);
         let Some(persistence) = &self.persistence else {
-            self.inform("Open a notes folder before saving.", cx);
+            self.inform("Open a folder to save notes.", cx);
             return;
         };
         let note = self.library.active_note();
@@ -1529,9 +1519,8 @@ impl MarkraftApp {
             && dropped.markdown.is_empty())
         .then(|| dropped.folders[0].clone());
         if folder.is_none() && !dropped.folders.is_empty() {
-            self.feedback.queue(
-                "Drop one folder on its own to open it; folders were left alone.".to_owned(),
-            );
+            self.feedback
+                .queue("Drop a single folder to open it.".to_owned());
         }
         if dropped.skipped > 0 {
             self.feedback.queue(format!(
@@ -1556,10 +1545,8 @@ impl MarkraftApp {
                     cx,
                 );
             } else {
-                self.feedback.queue(
-                    "Open a note before dropping images; they are inserted where the caret is."
-                        .to_owned(),
-                );
+                self.feedback
+                    .queue("Open a note to drop images into.".to_owned());
             }
         }
         if !dropped.markdown.is_empty() {
@@ -1651,7 +1638,7 @@ impl MarkraftApp {
 
     fn configure_new_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.path.clone() else {
-            self.inform("Open a folder to set a default location for new notes.", cx);
+            self.inform("Open a folder to choose where new notes go.", cx);
             return;
         };
         let prompt = cx.prompt_for_paths(PathPromptOptions {
@@ -1754,11 +1741,8 @@ impl MarkraftApp {
             return;
         }
         let Some(path) = self.library.active_note().path.clone() else {
-            self.feedback.queue(
-                "Save this note first — images are stored next to its file. Keep writing; \
-                 the note will be filed automatically."
-                    .to_owned(),
-            );
+            self.feedback
+                .queue("Images need a saved note. Type something first.".to_owned());
             return;
         };
         let root = self
@@ -1789,7 +1773,9 @@ impl MarkraftApp {
             }
             let result = cx
                 .background_executor()
-                .spawn(async move { assets::insert(assets, &path, &root, &policy, naming, &journal) })
+                .spawn(
+                    async move { assets::insert(assets, &path, &root, &policy, naming, &journal) },
+                )
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let inserted = match result {
@@ -1800,15 +1786,21 @@ impl MarkraftApp {
                     }
                 };
                 // Anything that could not be inserted is already on disk, so the
-                // sentence has to end with where it is or the file is lost to them.
-                let kept =
-                    |what: &str| format!("{what} The images are in {}.", inserted.urls.join(", "));
+                // notice has to lead to where it is or the file is lost to them.
+                let kept = |why: &str| {
+                    log::warn!(
+                        "images saved beside “{beside}” were not inserted: {why}: {}",
+                        inserted.urls.join(", ")
+                    );
+                    (
+                        "Images were saved but couldn't be inserted.".to_owned(),
+                        inserted.paths.first().cloned(),
+                    )
+                };
                 let note = this.library.active_note();
                 if this.library.active_id != id || note.read_only.is_some() {
-                    this.feedback.queue(format!(
-                        "The note changed before the images could be added. They are in {}, beside “{beside}”.",
-                        inserted.urls.join(", ")
-                    ));
+                    let (text, path) = kept("the note changed");
+                    this.feedback.enqueue(text, path);
                     return;
                 }
                 let slice = match markraft_commonmark::from_markdown_fragment(
@@ -1817,7 +1809,8 @@ impl MarkraftApp {
                 ) {
                     Ok(slice) => slice,
                     Err(error) => {
-                        this.feedback.queue(kept(&error.to_string()));
+                        let (text, path) = kept(&error.to_string());
+                        this.feedback.enqueue(text, path);
                         return;
                     }
                 };
@@ -1827,7 +1820,8 @@ impl MarkraftApp {
                     editor.run_command(&markraft_core::commands::replace_selection(slice), cx)
                 });
                 if !applied {
-                    this.feedback.queue(kept("This note would not take the images."));
+                    let (text, path) = kept("the note would not take them");
+                    this.feedback.enqueue(text, path);
                 }
             });
         })
@@ -1835,10 +1829,8 @@ impl MarkraftApp {
     }
 }
 /// What to tell someone whose keystroke the source-preserving codec could not
-/// write back, with something they can do about it, because "not saved" on its
-/// own leaves nowhere to go.
-const UNSAVABLE_EDIT: &str = "Markraft could not write this change back without rewriting \
-     source it does not represent. Your text is still here; use Export Markdown… for a copy.";
+/// write back. The text stays in the editor, so Export Markdown… still has it.
+const UNSAVABLE_EDIT: &str = "Can't save this edit without rewriting other Markdown.";
 
 /// Why a formatting command left the note alone, naming the syntax that could
 /// not be written where it was asked for.
@@ -1860,12 +1852,9 @@ fn refusal_message(refusal: &markraft_commonmark::CommandRefusal) -> String {
                 md::LINK => ("a link", "[…](…)"),
                 _ => ("this format", "its delimiters"),
             };
-            format!(
-                "Markdown cannot make this {format} here: the {delimiter} it needs would sit                  between punctuation and a letter, where it reads as plain text. Include or leave                  out the punctuation beside the selection."
-            )
+            format!("Can't add {format} here: {delimiter} next to punctuation stays text.")
         }
-        Inexpressible::Unreadable => "Markdown has no way to write this formatting here without              changing how the text around it reads."
-            .to_owned(),
+        Inexpressible::Unreadable => "Markdown can't write this formatting here.".to_owned(),
     }
 }
 

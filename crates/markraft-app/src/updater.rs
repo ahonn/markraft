@@ -3,9 +3,8 @@ use objc2_foundation::{NSBundle, NSString};
 use sparkle_updater::{MainThreadMarker, RelaunchContinuation, SparkleUpdater, UpdaterConfig};
 use std::{cell::RefCell, path::Path, rc::Rc};
 
-const UNBUNDLED: &str = "Updates are available in the installed Markraft app. Download a release from GitHub to get started.";
-const UNCONFIGURED: &str =
-    "This copy of Markraft is not configured for updates. Install an official release from GitHub.";
+const UNBUNDLED: &str = "Updates work only in the installed app.";
+const UNCONFIGURED: &str = "This copy can't update. Install a release from GitHub.";
 
 pub struct Updater {
     // Retain the controller and delegates for the whole application lifetime.
@@ -79,9 +78,10 @@ impl Updater {
         ) {
             Ok(Some(native)) => this.native = Some(native),
             Ok(None) => {}
-            Err(error) => this.fail(format!(
-                "Markraft could not start automatic updates: {error}"
-            )),
+            Err(error) => {
+                log::warn!("the updater could not start: {error}");
+                this.fail("Automatic updates couldn't start.".into());
+            }
         }
         this
     }

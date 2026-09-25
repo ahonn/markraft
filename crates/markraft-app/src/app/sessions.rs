@@ -64,6 +64,10 @@ impl Sessions {
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Session)> {
         self.entries.iter().map(|(id, session)| (id, session))
     }
+    /// The session activated or inserted last, which is the note on screen.
+    pub fn current(&self) -> Option<(&String, &Session)> {
+        self.entries.back().map(|(id, session)| (id, session))
+    }
     pub fn values(&self) -> impl Iterator<Item = &Session> {
         self.entries.iter().map(|(_, session)| session)
     }
@@ -106,6 +110,14 @@ impl MarkraftApp {
         let restore_focus = self.interaction.note_changed(&id);
         if restore_focus {
             self.leave_input(cx);
+        }
+        // The note going off screen keeps its editor for a quick return, but
+        // not the layout of every line it holds: that is most of what an open
+        // note costs, and the next frame that shows it lays it out again.
+        if let Some((_, previous)) = self.sessions.current().filter(|(key, _)| **key != id) {
+            previous
+                .editor()
+                .update(cx, |editor, _| editor.release_layout());
         }
         if self.sessions.activate(&id) {
             if restore_focus {

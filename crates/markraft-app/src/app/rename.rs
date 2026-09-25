@@ -177,8 +177,8 @@ impl MarkraftApp {
             }
             return;
         };
-        if let Some(reason) = note.read_only.clone() {
-            self.inform(reason, cx);
+        if note.read_only.is_some() {
+            self.inform("Read-only notes can't be renamed.", cx);
             return;
         }
         let id = note.id.clone();
@@ -323,10 +323,7 @@ impl MarkraftApp {
             ));
         }
         if kept > 0 {
-            message.push_str(&format!(
-                " · {kept} {} could not be changed",
-                if kept == 1 { "link" } else { "links" }
-            ));
+            message.push_str(&format!(" · {kept} not changed"));
         }
         self.inform(message, cx);
         Ok(())

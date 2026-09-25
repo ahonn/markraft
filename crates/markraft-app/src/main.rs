@@ -105,6 +105,7 @@ fn main() {
     // After the handover too: a launch that only passes a request along must
     // not take the notice from the one that will show it.
     let crash_notice = crash_reports.as_deref().and_then(crash::take_notice);
+    let settings_notice = settings.recovery_notice();
     let preferences = settings.preferences.clone();
     if restore_files {
         // Only the primary process restores the previous session. A second
@@ -123,9 +124,6 @@ fn main() {
     let opened = Store::open(directory.clone(), settings_path.clone(), settings.clone());
     let (store, library, error) = match opened {
         Ok((mut store, library)) => {
-            if let Some(notice) = settings.recovery_notice() {
-                store.notices().raise(notice);
-            }
             // Remember --dir, the default folder, or a path that only matched
             // after canonicalization.
             let folder = store.directory().to_owned();
@@ -214,8 +212,11 @@ fn main() {
                         cx,
                     )
                 });
+                if let Some((notice, damaged)) = settings_notice {
+                    app.update(cx, |app, cx| app.announce_with_reveal(notice, damaged, cx));
+                }
                 if let Some((notice, report)) = crash_notice {
-                    app.update(cx, |app, cx| app.announce_crash_report(notice, report, cx));
+                    app.update(cx, |app, cx| app.announce_with_reveal(notice, report, cx));
                 }
                 let weak = app.downgrade();
                 window.on_window_should_close(cx, move |window, cx| {

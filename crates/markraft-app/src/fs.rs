@@ -75,7 +75,7 @@ impl fmt::Display for StoreError {
                     }
                     write!(
                         f,
-                        "Disk version kept for “{title}”; your edits were kept as a conflicted copy."
+                        "“{title}” changed on disk. Your edits were saved as a copy."
                     )?;
                 }
                 Ok(())

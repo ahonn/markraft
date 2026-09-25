@@ -503,3 +503,106 @@ fn can_contain_answers_for_direct_children_only() {
     assert!(!schema.can_contain(id("bullet_list"), id("paragraph")));
     assert!(!schema.can_contain(id("doc"), id("list_item")));
 }
+
+/// A schema with one mark type of each kind sharing cares about: one whose
+/// values recur, one whose values are as varied as the content, and one with
+/// no attributes at all.
+fn sharing_schema() -> Schema {
+    Schema::new(
+        SchemaSpec::new()
+            .node(NodeTypeSpec::new("doc", "inline*"))
+            .node(NodeTypeSpec::text("text").group("inline"))
+            .mark(
+                MarkTypeSpec::new("delimiter")
+                    .shared(true)
+                    .attr(AttrSpec::new("span", AttrKind::Int, AttrValue::Int(0)))
+                    .attr(AttrSpec::new(
+                        "display",
+                        AttrKind::Str,
+                        AttrValue::Str(String::new()),
+                    )),
+            )
+            .mark(MarkTypeSpec::new("link").attr(AttrSpec::required("href", AttrKind::Str)))
+            .mark(MarkTypeSpec::new("strong")),
+    )
+    .expect("valid schema")
+}
+
+#[test]
+fn equal_values_of_a_shared_mark_type_are_one_copy() {
+    let schema = sharing_schema();
+    let delimiter = schema.mark_id("delimiter").expect("known");
+    let build = |span: i64| {
+        schema
+            .build_mark_attrs(delimiter, &crate::attrs! {"span" => span})
+            .expect("valid attrs")
+    };
+    assert!(build(3).shares(&build(3)));
+    assert!(!build(3).shares(&build(4)));
+    assert_eq!(build(4).get("span"), Some(&AttrValue::Int(4)));
+
+    let link = schema.mark_id("link").expect("known");
+    let href = || {
+        schema
+            .build_mark_attrs(link, &crate::attrs! {"href" => "a"})
+            .expect("valid attrs")
+    };
+    assert_eq!(href(), href());
+    assert!(!href().shares(&href()), "a link's address is not shared");
+}
+
+#[test]
+fn attributes_that_only_restate_the_defaults_are_the_defaults() {
+    let schema = sharing_schema();
+    let delimiter = schema.mark_id("delimiter").expect("known");
+    let defaults = schema.mark_type(delimiter).default_attrs();
+    for given in [
+        Attrs::empty(),
+        crate::attrs! {"span" => 0i64, "display" => ""},
+    ] {
+        let built = schema.build_mark_attrs(delimiter, &given).expect("valid");
+        assert!(built.shares(defaults));
+    }
+    // Validation still runs first: a value of the wrong kind is refused.
+    assert!(
+        schema
+            .build_mark_attrs(delimiter, &crate::attrs! {"span" => "0"})
+            .is_err()
+    );
+}
+
+#[test]
+fn sets_of_shared_or_bare_marks_are_one_copy() {
+    let schema = sharing_schema();
+    let delimiter = |span: i64| {
+        schema
+            .mark("delimiter", crate::attrs! {"span" => span})
+            .expect("valid mark")
+    };
+    let strong = schema.mark("strong", Attrs::empty()).expect("valid mark");
+    let set = || crate::mark::MarkSet::from_marks(&schema, [strong.clone(), delimiter(2)]);
+    assert!(set().shares(&set()));
+
+    let link = schema
+        .mark("link", crate::attrs! {"href" => "a"})
+        .expect("valid mark");
+    let linked = || crate::mark::MarkSet::from_marks(&schema, [link.clone(), strong.clone()]);
+    assert_eq!(linked(), linked());
+    assert!(!linked().shares(&linked()), "a set with a link is its own");
+}
+
+#[test]
+fn values_past_the_sharing_limit_are_built_unshared() {
+    let schema = sharing_schema();
+    let delimiter = schema.mark_id("delimiter").expect("known");
+    let build = |span: i64| {
+        schema
+            .build_mark_attrs(delimiter, &crate::attrs! {"span" => span})
+            .expect("valid attrs")
+    };
+    for span in 1..=5000 {
+        assert_eq!(build(span).get("span"), Some(&AttrValue::Int(span)));
+    }
+    assert!(build(1).shares(&build(1)), "values kept before the limit");
+    assert!(!build(5000).shares(&build(5000)), "values past it");
+}

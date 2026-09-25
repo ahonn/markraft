@@ -5,7 +5,7 @@ use gpui::{Hsla, Pixels, SharedString, px, rgb, rgba};
 const DEFAULT_FONT_FAMILY: &str = ".SystemUIFont";
 
 /// Editor presentation, independent of document semantics and host window policy.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct EditorStyle {
     pub padding: Pixels,
     /// The widest the text column may be: a readable line length. Where the

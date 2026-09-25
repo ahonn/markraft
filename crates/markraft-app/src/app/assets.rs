@@ -105,6 +105,8 @@ fn relative_url(parent: &Path, path: &Path) -> Result<String, String> {
 pub(super) struct Inserted {
     pub markdown: String,
     pub urls: Vec<String>,
+    /// Where each image is on disk, in the order of `urls`.
+    pub paths: Vec<PathBuf>,
 }
 
 /// Where a copied image goes in `folder`, under a name no file there has yet.
@@ -167,6 +169,7 @@ pub(super) fn insert(
     let root = root.canonicalize().map_err(|error| error.to_string())?;
     let mut references = Vec::new();
     let mut urls = Vec::new();
+    let mut paths = Vec::new();
     for asset in assets {
         let copy = matches!(asset, Asset::Copy(_));
         let (existing, bytes, extension) = match asset {
@@ -236,10 +239,12 @@ pub(super) fn insert(
         let url = relative_url(&parent, &path)?;
         references.push(format!("![image]({url})"));
         urls.push(url);
+        paths.push(path);
     }
     Ok(Inserted {
         markdown: references.join("\n\n"),
         urls,
+        paths,
     })
 }
 

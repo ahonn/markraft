@@ -400,23 +400,51 @@ pub(crate) fn syntax_mark(schema: &Schema, span: u32, display: &str) -> Option<M
 }
 
 /// The derived marks over each of `len` positions.
+///
+/// Every position between two neighbouring range ends lies inside the same
+/// ranges, so the set is worked out once per such stretch and shared by its
+/// positions. Within a stretch the marks are added in the order they are
+/// derived — styles, then conceals — which is what decides between marks that
+/// exclude each other.
 pub(crate) fn derived_marks(schema: &Schema, derived: &Derived, len: usize) -> Vec<MarkSet> {
-    let mut out = vec![MarkSet::empty(); len];
-    for span in &derived.styles {
-        let Some(mark) = style_mark(schema, &span.style) else {
-            continue;
-        };
-        for set in &mut out[span.range.start.min(len)..span.range.end.min(len)] {
-            *set = set.add(schema, mark.clone());
+    let styles = derived
+        .styles
+        .iter()
+        .filter_map(|span| style_mark(schema, &span.style).map(|mark| (span.range.clone(), mark)));
+    let conceals = derived.conceals.iter().filter_map(|conceal| {
+        syntax_mark(schema, conceal.span, &conceal.display)
+            .map(|mark| (conceal.range.clone(), mark))
+    });
+    let marks: Vec<(usize, usize, Mark)> = styles
+        .chain(conceals)
+        .map(|(range, mark)| (range.start.min(len), range.end.min(len), mark))
+        .filter(|(start, end, _)| start < end)
+        .collect();
+    // Where each mark starts and stops applying, in position order.
+    let mut edges: Vec<(usize, usize)> = marks
+        .iter()
+        .enumerate()
+        .flat_map(|(index, (start, end, _))| [(*start, index), (*end, index)])
+        .collect();
+    edges.sort_unstable();
+    let mut active = std::collections::BTreeSet::new();
+    let mut out = Vec::with_capacity(len);
+    let mut edges = edges.into_iter().peekable();
+    while out.len() < len {
+        let at = out.len();
+        while let Some(&(position, index)) = edges.peek()
+            && position == at
+        {
+            if !active.remove(&index) {
+                active.insert(index);
+            }
+            edges.next();
         }
-    }
-    for conceal in &derived.conceals {
-        let Some(mark) = syntax_mark(schema, conceal.span, &conceal.display) else {
-            continue;
-        };
-        for set in &mut out[conceal.range.start.min(len)..conceal.range.end.min(len)] {
-            *set = set.add(schema, mark.clone());
-        }
+        let stop = edges.peek().map_or(len, |&(position, _)| position.min(len));
+        let set = active.iter().fold(MarkSet::empty(), |set, &index| {
+            set.add(schema, marks[index].2.clone())
+        });
+        out.resize(stop, set);
     }
     out
 }
@@ -556,4 +584,62 @@ pub(crate) fn escape_callout_lookalike(schema: &Schema, block: &Node) -> Node {
     items.0.insert(0, Item::Char('\\'));
     let derived = derive(BlockKind::Paragraph, &items.text(), &DeriveContext::new());
     block.copy(Fragment::from_nodes(items.nodes(schema, &derived)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mark every position on its own, adding each range's mark in turn: the
+    /// plainest reading of what `derived_marks` has to produce.
+    fn per_position(schema: &Schema, derived: &Derived, len: usize) -> Vec<MarkSet> {
+        let mut out = vec![MarkSet::empty(); len];
+        let styles = derived
+            .styles
+            .iter()
+            .filter_map(|span| Some((span.range.clone(), style_mark(schema, &span.style)?)));
+        let conceals = derived.conceals.iter().filter_map(|conceal| {
+            Some((
+                conceal.range.clone(),
+                syntax_mark(schema, conceal.span, &conceal.display)?,
+            ))
+        });
+        for (range, mark) in styles.chain(conceals) {
+            for set in &mut out[range.start.min(len)..range.end.min(len)] {
+                *set = set.add(schema, mark.clone());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn derived_marks_match_marking_each_position_on_its_own() {
+        let schema = md::commonmark_schema();
+        let sources = [
+            "",
+            "plain",
+            "**bold** and *em* and `code`",
+            "***both*** __under__ ~~gone~~ ==lit==",
+            "[a **link**](https://example.com \"t\") and ![img](a.png)",
+            "\\*escaped\\* &amp; &copy; <u>under</u> $x^2$",
+            "**unclosed *nested `code` here",
+            "a  \nhard break\\\nand soft\nline",
+            "**`code` in bold** [^note] ~sub~ ^sup^",
+        ];
+        for source in sources {
+            for kind in [
+                BlockKind::Paragraph,
+                BlockKind::Heading,
+                BlockKind::TableCell,
+            ] {
+                let len = source.chars().count();
+                let derived = derive(kind, source, &DeriveContext::new());
+                assert_eq!(
+                    derived_marks(&schema, &derived, len),
+                    per_position(&schema, &derived, len),
+                    "{kind:?} {source:?}"
+                );
+            }
+        }
+    }
 }

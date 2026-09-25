@@ -15,6 +15,12 @@ use std::{
     time::Duration,
 };
 
+/// Said when outside changes will not be noticed as they happen; the details
+/// go to the log.
+const WATCH_FAILED: &str = "Couldn't watch for outside changes.";
+/// Said when a look for outside changes failed; the details go to the log.
+const CHECK_FAILED: &str = "Couldn't check for outside changes.";
+
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A completed snapshot attempt. Recovery can succeed without a Markdown file, so
@@ -111,14 +117,20 @@ impl Persistence {
                         Ok(changes) if !changes.is_empty() => {
                             let _ = outgoing.send(Event::External(changes));
                         }
-                        Err(error) => store.notices().raise(error.to_string()),
+                        Err(error) => {
+                            log::warn!("refreshing changed paths failed: {error}");
+                            store.notices().raise(CHECK_FAILED.to_owned());
+                        }
                         _ => {}
                     },
                     Request::Refresh => match store.refresh() {
                         Ok(changes) if !changes.is_empty() => {
                             let _ = outgoing.send(Event::External(changes));
                         }
-                        Err(error) => store.notices().raise(error.to_string()),
+                        Err(error) => {
+                            log::warn!("refreshing the folder failed: {error}");
+                            store.notices().raise(CHECK_FAILED.to_owned());
+                        }
                         _ => {}
                     },
                     Request::Acknowledge(ids) => store.acknowledge(&ids),
@@ -151,9 +163,10 @@ impl Persistence {
                 Ok(()) => {
                     watched.insert(parent.to_owned());
                 }
-                Err(error) => self.notices.raise(format!(
-                    "This file could not be watched: {error}. Refresh to check external changes."
-                )),
+                Err(error) => {
+                    log::warn!("{} could not be watched: {error}", parent.display());
+                    self.notices.raise(WATCH_FAILED.to_owned());
+                }
             }
         }
     }
@@ -356,9 +369,8 @@ fn watch(store: &Store, requests: Sender<Request>) -> Option<notify::Recommended
                 relevant
             }
             Err(error) => {
-                callback_notices.raise(format!(
-                    "File watching failed: {error}. Refresh the folder to check external edits."
-                ));
+                log::warn!("file watching failed: {error}");
+                callback_notices.raise(WATCH_FAILED.to_owned());
                 full_scan.store(true, Ordering::SeqCst);
                 true
             }
@@ -396,7 +408,8 @@ fn watch(store: &Store, requests: Sender<Request>) -> Option<notify::Recommended
     match result {
         Ok(watcher) => Some(watcher),
         Err(error) => {
-            notices.raise(format!("File watching could not start: {error}. Refresh the folder to check external edits."));
+            log::warn!("file watching could not start: {error}");
+            notices.raise(WATCH_FAILED.to_owned());
             None
         }
     }

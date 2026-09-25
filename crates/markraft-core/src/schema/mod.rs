@@ -11,11 +11,12 @@ mod spec;
 pub use content::{ContentExpr, ContentMatch};
 pub use spec::{BreakKind, MarkTypeSpec, NodeTypeSpec, SchemaSpec};
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::attr::{AttrSpec, AttrValue, Attrs};
 use crate::error::{NodeError, SchemaError};
+use crate::mark::{Mark, MarkSet};
 
 /// Interned identifier of a node type within one [`Schema`].
 ///
@@ -193,6 +194,7 @@ pub struct MarkType {
     excludes: Vec<MarkTypeId>,
     inclusive: bool,
     rank: u8,
+    shared: bool,
     default_attrs: Attrs,
     has_required_attrs: bool,
 }
@@ -242,6 +244,12 @@ impl MarkType {
     pub fn excludes(&self, other: MarkTypeId) -> bool {
         self.excludes.contains(&other)
     }
+
+    /// Whether the schema keeps one copy of each attribute value this type is
+    /// built with; see [`MarkTypeSpec::shared`].
+    pub fn is_shared(&self) -> bool {
+        self.shared
+    }
 }
 
 #[derive(Debug)]
@@ -253,7 +261,25 @@ struct SchemaData {
     content: Vec<ContentExpr>,
     top: NodeTypeId,
     text: Option<NodeTypeId>,
+    shared: Shared,
 }
+
+/// The one copy the schema keeps of each value that shared mark types recur
+/// with, and of each mark set made only of such marks and attribute-less ones.
+/// A document carries thousands of equal delimiter marks and equal sets; built
+/// fresh, each would be an allocation of its own.
+///
+/// Both tables stop growing at [`SHARED_LIMIT`] entries, past which values are
+/// built unshared as before. Nothing in them is ever released, which the limit
+/// keeps small: shared types recur with a handful of values by definition.
+#[derive(Debug, Default)]
+struct Shared {
+    attrs: Mutex<HashSet<(MarkTypeId, Attrs)>>,
+    sets: Mutex<HashSet<MarkSet>>,
+}
+
+/// How many values each table in [`Shared`] keeps.
+const SHARED_LIMIT: usize = 4096;
 
 /// A compiled schema.
 ///
@@ -385,6 +411,7 @@ impl Schema {
             content,
             top,
             text,
+            shared: Shared::default(),
         })))
     }
 
@@ -525,9 +552,55 @@ impl Schema {
 
     /// Complete `attrs` with the mark type's defaults and reject unknown or
     /// mistyped values.
+    ///
+    /// A type declared [`shared`](MarkTypeSpec::shared) gets the one copy the
+    /// schema keeps of the completed map.
     pub fn build_mark_attrs(&self, id: MarkTypeId, attrs: &Attrs) -> Result<Attrs, NodeError> {
         let ty = self.mark_type(id);
-        build_attrs(&ty.name, &ty.attrs, &ty.default_attrs, attrs)
+        let built = build_attrs(&ty.name, &ty.attrs, &ty.default_attrs, attrs)?;
+        if !ty.shared || built.is_empty() {
+            return Ok(built);
+        }
+        let mut table = self
+            .0
+            .shared
+            .attrs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let key = (id, built);
+        if let Some((_, kept)) = table.get(&key) {
+            return Ok(kept.clone());
+        }
+        if table.len() < SHARED_LIMIT {
+            table.insert(key.clone());
+        }
+        Ok(key.1)
+    }
+
+    /// The set holding exactly `marks`, already canonically ordered: the copy
+    /// the schema keeps when every mark is of a shared type or carries no
+    /// attributes, and a set of its own otherwise.
+    pub(crate) fn shared_set(&self, marks: Vec<Mark>) -> MarkSet {
+        let shareable = marks
+            .iter()
+            .all(|mark| mark.attrs.is_empty() || self.mark_type(mark.ty).shared);
+        if marks.is_empty() || !shareable {
+            return MarkSet::from_sorted(marks);
+        }
+        let mut table = self
+            .0
+            .shared
+            .sets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(kept) = table.get(marks.as_slice()) {
+            return kept.clone();
+        }
+        let set = MarkSet::from_sorted(marks);
+        if table.len() < SHARED_LIMIT {
+            table.insert(set.clone());
+        }
+        set
     }
 }
 
@@ -546,31 +619,36 @@ fn build_attrs(
             });
         }
     }
-    let mut out: Vec<(String, AttrValue)> = Vec::with_capacity(specs.len());
     for spec in specs {
-        let value = match given.get(&spec.name) {
-            Some(value) => value.clone(),
-            None => match defaults.get(&spec.name) {
-                Some(value) => value.clone(),
-                None => {
-                    return Err(NodeError::InvalidAttr {
-                        attr: spec.name.clone(),
-                        owner: owner.to_string(),
-                        message: "required attribute is missing".into(),
-                    });
-                }
-            },
+        let Some(value) = given.get(&spec.name).or_else(|| defaults.get(&spec.name)) else {
+            return Err(NodeError::InvalidAttr {
+                attr: spec.name.clone(),
+                owner: owner.to_string(),
+                message: "required attribute is missing".into(),
+            });
         };
-        if !spec.kind.accepts(&value) {
+        if !spec.kind.accepts(value) {
             return Err(NodeError::InvalidAttr {
                 attr: spec.name.clone(),
                 owner: owner.to_string(),
                 message: format!("expected {}", spec.kind),
             });
         }
-        out.push((spec.name.clone(), value));
     }
-    Ok(Attrs::from_pairs(out))
+    // Every attribute resolved, so a map that only restates defaults is the
+    // defaults: the type already holds that map, and every node or mark built
+    // without attributes of its own shares it.
+    if given
+        .iter()
+        .all(|(name, value)| defaults.get(name) == Some(value))
+    {
+        return Ok(defaults.clone());
+    }
+    let resolved = specs.iter().filter_map(|spec| {
+        let value = given.get(&spec.name).or_else(|| defaults.get(&spec.name))?;
+        Some((spec.name.clone(), value.clone()))
+    });
+    Ok(Attrs::from_pairs(resolved))
 }
 
 fn resolve_node_name(
@@ -670,6 +748,7 @@ fn compile_marks(
             excludes,
             inclusive: mark.inclusive,
             rank: mark.rank,
+            shared: mark.shared,
             default_attrs,
             has_required_attrs,
         });

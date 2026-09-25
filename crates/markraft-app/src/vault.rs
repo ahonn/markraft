@@ -188,9 +188,9 @@ impl Store {
             house: Default::default(),
         };
         if reset {
-            store.notices.raise(
-                "This folder's pins and settings could not be read and were reset.".to_owned(),
-            );
+            store
+                .notices
+                .raise("Folder settings were unreadable and have been reset.".to_owned());
         }
         let mut library = store.scan_library()?;
         store.restore_recovery(&mut library);
@@ -385,13 +385,13 @@ impl Store {
         match missing.as_slice() {
             [] => {}
             [path] => self.notices.raise(format!(
-                "“{}” was removed outside Markraft, so the note is gone too.",
+                "“{}” was deleted outside Markraft.",
                 path.file_name()
                     .map(|name| name.to_string_lossy())
                     .unwrap_or_default()
             )),
             _ => self.notices.raise(format!(
-                "{} notes' files were removed outside Markraft, so those notes are gone too.",
+                "{} notes' files were deleted outside Markraft.",
                 missing.len()
             )),
         }
@@ -759,15 +759,11 @@ impl Store {
             let _ = fs::remove_file(&path);
         }
         if conflicted > 0 {
-            self.notices.raise(
-                "A note changed on disk; your edits were kept as a conflicted copy.".to_owned(),
-            );
+            self.notices.raise(crate::storage::CONFLICT_KEPT.to_owned());
         }
         if held > 0 {
-            self.notices.raise(
-                "Some unsaved changes could not be written yet; Markraft will try again next time."
-                    .to_owned(),
-            );
+            self.notices
+                .raise("Some changes aren't saved yet; Markraft will retry.".to_owned());
         }
     }
     fn clear_recovery(&self, id: &str) {
@@ -1392,7 +1388,7 @@ mod tests {
         assert_eq!(library.notes.len(), 1);
         assert_eq!(
             store.notices().take(),
-            ["This folder's pins and settings could not be read and were reset."]
+            ["Folder settings were unreadable and have been reset."]
         );
         let aside: Vec<_> = fs::read_dir(manifest.parent().unwrap())
             .unwrap()
@@ -1431,7 +1427,7 @@ mod tests {
         assert_eq!(library.notes.len(), 1);
         assert_eq!(
             store.notices().take(),
-            ["“Gone.md” was removed outside Markraft, so the note is gone too."]
+            ["“Gone.md” was deleted outside Markraft."]
         );
         drop(store);
         let (store, _) = open(root.path());

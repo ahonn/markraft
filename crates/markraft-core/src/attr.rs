@@ -6,6 +6,7 @@
 
 use std::cmp::Ordering;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -84,6 +85,12 @@ impl PartialEq for AttrValue {
 }
 
 impl Eq for AttrValue {}
+
+impl Hash for AttrValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.order_key().hash(state);
+    }
+}
 
 impl PartialOrd for AttrValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -275,6 +282,15 @@ impl Attrs {
         Attrs(Some(Arc::new(entries)))
     }
 
+    /// Whether both maps are the very same allocation, not only equal.
+    #[cfg(test)]
+    pub(crate) fn shares(&self, other: &Attrs) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
     fn slice(&self) -> &[(String, AttrValue)] {
         self.0.as_ref().map_or(&[], |v| v.as_slice())
     }
@@ -291,6 +307,12 @@ impl PartialEq for Attrs {
 }
 
 impl Eq for Attrs {}
+
+impl Hash for Attrs {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.slice().hash(state);
+    }
+}
 
 impl PartialOrd for Attrs {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
