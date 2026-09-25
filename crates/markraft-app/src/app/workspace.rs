@@ -1,5 +1,51 @@
 use std::time::{Duration, Instant};
 
+/// Work belongs to one workspace generation. Replacing a folder invalidates
+/// every outstanding completion without requiring cancellation of disk writes.
+#[derive(Default)]
+pub(super) struct Operations {
+    pub epoch: u64,
+    pub pending: usize,
+    pub flushing: bool,
+    pub opening: u64,
+    pub external: std::collections::HashMap<String, u64>,
+    pub retry: Vec<crate::vault::External>,
+}
+
+impl Operations {
+    pub fn reset(&mut self) {
+        *self = Self {
+            epoch: self.epoch + 1,
+            ..Self::default()
+        };
+    }
+
+    pub fn external_revision(&mut self, id: &str) -> u64 {
+        let revision = self.external.entry(id.to_owned()).or_default();
+        *revision += 1;
+        *revision
+    }
+}
+
+/// Decide whether adopting disk state requires a durable copy of local edits.
+/// Permission-only changes keep the local document and need no recovery.
+pub(super) fn needs_recovery(
+    local: Option<&crate::storage::Note>,
+    change: &crate::vault::External,
+) -> bool {
+    use crate::vault::External;
+    let Some(local) = local else { return false };
+    match change {
+        External::Updated { previous, note } => {
+            local.document != note.document
+                && previous.as_ref().is_none_or(|previous| {
+                    previous.document != note.document && previous.document != local.document
+                })
+        }
+        External::Removed(note) => local.document != note.document,
+    }
+}
+
 const SAVE_DELAY: Duration = Duration::from_millis(350);
 
 /// Tracks whether the current workspace revision has reached durable storage.
@@ -102,6 +148,39 @@ impl QuitState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconciliation_preserves_local_edits_until_recovery_succeeds() {
+        use crate::{doc, storage::Library, vault::External};
+        let mut library = Library::default();
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown("original"));
+        let before = library.active_note().clone();
+        let mut disk = before.clone();
+        disk.document = doc::from_markdown("external");
+        let update = External::Updated {
+            previous: Some(before.clone()),
+            note: disk,
+        };
+        assert!(!needs_recovery(Some(&before), &update));
+        library.set_document(&id, doc::from_markdown("local"));
+        assert!(needs_recovery(Some(library.active_note()), &update));
+        assert!(needs_recovery(
+            Some(library.active_note()),
+            &External::Removed(before.clone())
+        ));
+
+        let mut permissions = before.clone();
+        permissions.read_only = Some("Read-only".into());
+        assert!(!needs_recovery(
+            Some(library.active_note()),
+            &External::Updated {
+                previous: Some(before),
+                note: permissions,
+            }
+        ));
+        assert!(!needs_recovery(None, &update));
+    }
 
     #[test]
     fn edits_debounce_autosave_without_clearing_dirty_on_dispatch() {

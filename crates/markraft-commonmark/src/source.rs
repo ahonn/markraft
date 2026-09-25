@@ -29,7 +29,7 @@ use std::ops::Range;
 use comrak::Arena;
 use markraft_core::ends::KeptEnds;
 use markraft_core::kind::{HEADING_LEVEL_ATTR, TASK_CHECKED_ATTR};
-use markraft_core::{Fragment, Node, Schema};
+use markraft_core::{ChangeRange, ChangeSet, Fragment, Node, Schema, Transaction};
 
 use crate::derive::BlockKind;
 use crate::textblock::{Item, Items, block_kind};
@@ -257,11 +257,20 @@ impl SourceDocument {
     /// wrote: its document and its blocks' bytes, read again only between the
     /// untouched blocks either side of what changed. `None` when the file
     /// cannot be read at all, which a file `step` wrote always can.
-    fn advanced(&self, schema: &Schema, rendered: String) -> Option<Self> {
+    fn advanced_in(
+        &self,
+        schema: &Schema,
+        rendered: String,
+        changed: Option<Range<usize>>,
+    ) -> Option<Self> {
         if rendered == self.source {
             return Some(self.clone());
         }
-        let next = match self.advanced_near(schema, &rendered) {
+        let near = match changed {
+            Some(changed) => self.advanced_window(schema, &rendered, changed),
+            None => self.advanced_near(schema, &rendered),
+        };
+        let next = match near {
             Some(next) => next,
             None => Self::parse(schema, &rendered).ok()?,
         };
@@ -294,14 +303,18 @@ impl SourceDocument {
             .cloned()
             .collect();
         self.document = if blocks.len() == self.blocks.len() {
-            document.copy(Fragment::from_nodes(blocks))
+            if blocks.len() == document.child_count() {
+                document.clone()
+            } else {
+                document.copy(Fragment::from_nodes(blocks))
+            }
         } else {
             self.read.clone()
         };
         self
     }
 
-    /// [`SourceDocument::advanced`] by reading the new bytes from the start of
+    /// [`SourceDocument::advanced_in`] by reading the new bytes from the start of
     /// the untouched block before the change to the end of the one after it —
     /// `None` when that stretch cannot stand for the whole file: the change
     /// reached the front matter, the blocks either side read otherwise than
@@ -323,7 +336,18 @@ impl SourceDocument {
         if first < self.body_start {
             return None;
         }
-        let changed = first..old.len() - last;
+        self.advanced_window(schema, rendered, first..old.len() - last)
+    }
+
+    // `changed` contains every byte the edit replaced in the previous source.
+    // Transaction-aware writes already know this window and need no text diff.
+    fn advanced_window(
+        &self,
+        schema: &Schema,
+        rendered: &str,
+        changed: Range<usize>,
+    ) -> Option<Self> {
+        let (old, new) = (self.source.as_bytes(), rendered.as_bytes());
         // The blocks the change touched are `touched`: a block that ends where
         // it starts, or starts where it ends, may have grown by it.
         let count = self.blocks.len();
@@ -407,7 +431,66 @@ impl SourceDocument {
         })
     }
 
+    /// A transaction wholly inside one existing top-level block. The strict
+    /// boundaries leave splits, joins and root insertions to the established
+    /// snapshot writer; nested structure still uses the block's normal patcher.
+    fn transaction_window(
+        &self,
+        before: &Node,
+        after: &Node,
+        changes: &ChangeSet,
+    ) -> Option<Changed> {
+        if !self.mapped || before != &self.document || before.child_count() != after.child_count() {
+            return None;
+        }
+        let mut block = None;
+        for change in changes.iter_changes() {
+            let (from_a, to_a, from_b, to_b) = match change {
+                ChangeRange::Replaced {
+                    from_a,
+                    to_a,
+                    from_b,
+                    to_b,
+                    ..
+                }
+                | ChangeRange::Marked {
+                    from_a,
+                    to_a,
+                    from_b,
+                    to_b,
+                    ..
+                } => (from_a, to_a, from_b, to_b),
+            };
+            for (doc, from, to) in [(before, from_a, to_a), (after, from_b, to_b)] {
+                let (index, start) = doc.content().find_index(from)?;
+                let node = doc.maybe_child(index)?;
+                if from <= start
+                    || to >= start + node.node_size()
+                    || block.is_some_and(|previous| previous != index)
+                {
+                    return None;
+                }
+                block = Some(index);
+            }
+        }
+        let index = block?;
+        self.blocks.get(index)?;
+        Some(Changed {
+            old: index..index + 1,
+            new: index..index + 1,
+        })
+    }
+
     fn render_patched(&self, schema: &Schema, document: &Node) -> Result<String, SourceError> {
+        self.render_changed(schema, document, None)
+    }
+
+    fn render_changed(
+        &self,
+        schema: &Schema,
+        document: &Node,
+        changed: Option<Changed>,
+    ) -> Result<String, SourceError> {
         if document == &self.document {
             return Ok(self.source.clone());
         }
@@ -430,14 +513,19 @@ impl SourceDocument {
         if !self.mapped {
             return Err(SourceError::UnsupportedEdit);
         }
-        let old: Vec<_> = self.document.children().cloned().collect();
-        let new: Vec<_> = document.children().cloned().collect();
-        let kept = KeptEnds::of(&old, &new, |a, b| a == b);
-        let (prefix, suffix) = (kept.prefix(), kept.suffix());
-        let (end, new_end) = (kept.old_middle().end, kept.new_middle().end);
-        // Edits far apart are written and checked one by one, so the cost of a
-        // keystroke is the size of what changed rather than the distance
-        // between the first change and the last.
+        let old = self.document.content().as_slice();
+        let new = document.content().as_slice();
+        let changed = changed.unwrap_or_else(|| {
+            let kept = KeptEnds::of(old, new, |a, b| a == b);
+            Changed {
+                old: kept.old_middle(),
+                new: kept.new_middle(),
+            }
+        });
+        let (prefix, suffix) = (changed.old.start, old.len() - changed.old.end);
+        let (end, new_end) = (changed.old.end, changed.new.end);
+        // Edits far apart are parsed and checked one by one, avoiding a parse
+        // of the untouched blocks between the first change and the last.
         if let Some(done) = self.render_islands(
             schema,
             document,
@@ -881,10 +969,10 @@ impl SourceDocument {
 /// A note's file across an editing session: the file as it was read, and the
 /// file as the last write spelled it.
 ///
-/// Each document is written against the last one written, so a keystroke
-/// costs what it changed however far the note has come from the file it was
-/// read from; a document that is the one read, as undoing everything makes
-/// it, is written as the bytes read. The editor asks on every keystroke and
+/// Each document is written against the last one written, limiting reparsing
+/// to recent edits even after many changes. Source strings and block indexes
+/// are still copied. A document that is the one read, as undoing everything
+/// makes it, is written as the bytes read. The editor asks on every keystroke and
 /// the save writes what it was answered, so a keystroke the track took is one
 /// the save can write.
 #[derive(Debug)]
@@ -912,6 +1000,55 @@ impl SourceTrack {
     /// The file for `document`, written against the last file this track
     /// wrote, and read back as far as the change reached.
     pub fn write(&self, schema: &Schema, document: &Node) -> Result<String, SourceError> {
+        self.write_changed(schema, document, None)
+    }
+
+    /// Accept a complete transaction chain, advancing source only after its
+    /// final document can be written. Intermediate appender states are not saved.
+    /// When the current source matches the chain's starting document, token
+    /// ranges locate local patches without diffing the whole document or file.
+    /// Structural edits and unmatched baselines retain the snapshot fallback.
+    pub fn apply_transactions(
+        &self,
+        schema: &Schema,
+        transactions: &[Transaction],
+    ) -> Result<(), SourceError> {
+        let Some(first) = transactions.first() else {
+            return Ok(());
+        };
+        if transactions
+            .windows(2)
+            .any(|pair| pair[0].new_doc() != pair[1].start_state().doc())
+        {
+            return Err(SourceError::UnsupportedEdit);
+        }
+        let document = transactions
+            .last()
+            .expect("nonempty transaction chain")
+            .new_doc();
+        let changes = transactions
+            .iter()
+            .skip(1)
+            .try_fold(first.changes().clone(), |changes, transaction| {
+                changes.compose(transaction.changes())
+            })
+            .ok();
+        self.write_changed(
+            schema,
+            document,
+            changes
+                .as_ref()
+                .map(|changes| (first.start_state().doc(), changes)),
+        )
+        .map(drop)
+    }
+
+    fn write_changed(
+        &self,
+        schema: &Schema,
+        document: &Node,
+        changes: Option<(&Node, &ChangeSet)>,
+    ) -> Result<String, SourceError> {
         let mut held = self
             .current
             .lock()
@@ -927,13 +1064,30 @@ impl SourceTrack {
         // What the file read could hold, the track holds too: an edit its
         // last file cannot take from where it stands is written against the
         // file read, as it would have been without the track.
-        let (base, rendered) = match current.step(schema, document) {
-            Ok(rendered) => (current, rendered),
-            Err(_) => (&self.origin, self.origin.step(schema, document)?),
+        let local = changes
+            .and_then(|(before, changes)| current.transaction_window(before, document, changes));
+        let prepared = local.and_then(|changed| {
+            let bytes =
+                current.blocks[changed.old.start].start..current.blocks[changed.old.end - 1].end;
+            let rendered = current
+                .render_changed(schema, document, Some(changed))
+                .ok()?;
+            let rendered = current.renumbered(schema, document, rendered);
+            Some((rendered, bytes))
+        });
+        let (base, rendered, bytes) = match prepared {
+            Some((rendered, bytes)) => (current, rendered, Some(bytes)),
+            None => match current.step(schema, document) {
+                Ok(rendered) => (current, rendered, None),
+                Err(_) => (&self.origin, self.origin.step(schema, document)?, None),
+            },
         };
-        *held = base
-            .advanced(schema, rendered.clone())
-            .map(|next| next.adopting(schema, document));
+        // Build the next baseline before publishing it. A failed preparation
+        // leaves the source that the caller's editor state still describes.
+        let next = base
+            .advanced_in(schema, rendered.clone(), bytes)
+            .ok_or(SourceError::UnsupportedEdit)?;
+        *held = Some(next.adopting(schema, document));
         Ok(rendered)
     }
 
@@ -2414,5 +2568,99 @@ mod tests {
                 assert_eq!(next.blocks, whole.blocks, "{edited:?}");
             }
         }
+    }
+    #[test]
+    fn transaction_window_locates_only_the_edited_block_in_a_large_file() {
+        use markraft_core::{EditorState, EditorStateConfig, Selection, commands};
+        let schema = commonmark_schema();
+        let text: String = (0..1_000)
+            .map(|index| format!("paragraph {index}\n\n"))
+            .collect();
+        let source = SourceDocument::parse(&schema, &text).unwrap();
+        let block = 500;
+        let position = source
+            .document
+            .children()
+            .take(block)
+            .map(|node| node.node_size())
+            .sum::<usize>()
+            + 3;
+        let state = EditorState::create(
+            EditorStateConfig::new(schema.clone())
+                .doc(source.document.clone())
+                .selection(Selection::cursor(position)),
+        )
+        .unwrap();
+        let transaction = state
+            .update([commands::insert_text("中")(&state).unwrap()])
+            .unwrap();
+        let window = source
+            .transaction_window(state.doc(), transaction.new_doc(), transaction.changes())
+            .unwrap();
+        assert_eq!(window.old, block..block + 1);
+        assert_eq!(window.new, block..block + 1);
+        let patched = source
+            .render_changed(&schema, transaction.new_doc(), Some(window))
+            .unwrap();
+        let bytes = source.blocks[block].clone();
+        let next = source.advanced_window(&schema, &patched, bytes).unwrap();
+        assert_eq!(
+            next.source,
+            source.render(&schema, transaction.new_doc()).unwrap()
+        );
+        assert_eq!(
+            next.read,
+            SourceDocument::parse(&schema, &patched).unwrap().read
+        );
+    }
+
+    #[test]
+    fn a_disconnected_transaction_chain_does_not_advance_source() {
+        use markraft_core::{EditorState, EditorStateConfig, Selection, commands};
+        let schema = commonmark_schema();
+        let source = SourceDocument::parse(&schema, "original").unwrap();
+        let state = EditorState::create(
+            EditorStateConfig::new(schema.clone())
+                .doc(source.document.clone())
+                .selection(Selection::cursor(2)),
+        )
+        .unwrap();
+        let first = state
+            .update([commands::insert_text("a")(&state).unwrap()])
+            .unwrap();
+        let second = state
+            .update([commands::insert_text("b")(&state).unwrap()])
+            .unwrap();
+        let track = super::SourceTrack::new(source);
+        assert!(
+            track
+                .apply_transactions(&schema, &[first.clone(), second])
+                .is_err()
+        );
+        assert!(track.current.lock().unwrap().is_none());
+        track
+            .apply_transactions(&schema, std::slice::from_ref(&first))
+            .unwrap();
+        assert_eq!(track.save(&schema, first.new_doc()).unwrap(), "oariginal");
+        assert!(
+            track
+                .current
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .document
+                .ptr_eq(first.new_doc())
+        );
+        let undo = first
+            .state()
+            .update([markraft_core::TransactionSpec::new()
+                .change_set(first.changes().invert(state.doc()).unwrap())])
+            .unwrap();
+        track
+            .apply_transactions(&schema, std::slice::from_ref(&undo))
+            .unwrap();
+        assert_eq!(track.save(&schema, undo.new_doc()).unwrap(), "original");
+        assert!(track.current.lock().unwrap().is_none());
     }
 }

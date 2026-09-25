@@ -265,6 +265,10 @@ fn intent_icon(intent: &Intent) -> Icon {
 
 impl MarkraftApp {
     fn intent(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_reloading() {
+            self.inform("Reloading from disk…", cx);
+            return;
+        }
         match intent {
             Intent::New => self.new_note(window, cx),
             Intent::Browse => self.open_panel(Panel::Browse, window, cx),
@@ -369,7 +373,7 @@ impl MarkraftApp {
             }
             Intent::Export => {
                 self.intent(Intent::Back, window, cx);
-                self.export(cx);
+                self.export(window, cx);
             }
             Intent::Rename => self.open_rename(window, cx),
             Intent::ApplyRename => self.apply_rename(window, cx),

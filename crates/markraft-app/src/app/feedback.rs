@@ -46,6 +46,8 @@ pub(super) struct Notice {
     pub(super) text: SharedString,
     until: Instant,
     pub(super) action: Option<NoticeAction>,
+    #[cfg(test)]
+    from_queue: bool,
 }
 
 impl Notice {
@@ -113,6 +115,8 @@ impl Feedback {
             text: text.as_ref().to_owned().into(),
             until: Instant::now() + ACKNOWLEDGMENT,
             action: None,
+            #[cfg(test)]
+            from_queue: false,
         });
     }
 
@@ -126,6 +130,8 @@ impl Feedback {
                 label: "Show in Finder".into(),
                 path,
             }),
+            #[cfg(test)]
+            from_queue: false,
         });
     }
 
@@ -153,10 +159,15 @@ impl Feedback {
         }
     }
 
-    /// The sentences waiting their turn.
+    /// Queued sentences still pending or already being displayed. Immediate
+    /// acknowledgments are excluded, so polling cannot change what tests observe.
     #[cfg(test)]
     pub(super) fn queued(&self) -> impl Iterator<Item = &str> {
-        self.queued.iter().map(|(text, _)| text.as_str())
+        self.notice
+            .iter()
+            .filter(|notice| notice.from_queue)
+            .map(|notice| notice.text.as_ref())
+            .chain(self.queued.iter().map(|(text, _)| text.as_str()))
     }
 
     /// Dismiss a notice that carries an action, and say whether there was one.
@@ -211,6 +222,8 @@ impl Feedback {
                     label: "Show in Finder".into(),
                     path,
                 }),
+                #[cfg(test)]
+                from_queue: true,
             });
             changed = true;
         }

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 pub(super) struct Session {
     editor: Entity<EditorView>,
+    read_only: std::rc::Rc<std::cell::RefCell<Option<String>>>,
     _changes: Subscription,
     /// Everything else the editor's state does, a selection that moved without an edit
     /// included: the format toolbar reads it.
@@ -22,6 +23,9 @@ pub(super) struct Session {
 }
 
 impl Session {
+    pub(super) fn set_read_only(&self, reason: Option<String>) {
+        *self.read_only.borrow_mut() = reason;
+    }
     pub(super) fn editor(&self) -> &Entity<EditorView> {
         &self.editor
     }
@@ -134,7 +138,9 @@ impl MarkraftApp {
             .path
             .as_ref()
             .and_then(|path| path.parent().map(ToOwned::to_owned));
-        let protected = note.read_only.clone();
+        let read_only = std::rc::Rc::new(std::cell::RefCell::new(note.read_only.clone()));
+        let protected = read_only.clone();
+        let reloading = self.reloading.clone();
         // The editor checks each keystroke against the track the store saves
         // through, so what it takes is what a save writes.
         let source = note
@@ -187,14 +193,16 @@ impl MarkraftApp {
             .with_image_base(image_base)
             .with_image_root(image_root)
             .with_file_paste(true)
-            .with_document_guard(move |candidate| {
-                if let Some(reason) = &protected {
+            .with_transaction_guard(move |transactions| {
+                if reloading.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(EditRejection::ReadOnly("Reloading from disk…".to_owned()));
+                }
+                if let Some(reason) = protected.borrow().as_ref() {
                     return Err(EditRejection::ReadOnly(reason.clone()));
                 }
                 match &source {
                     Some(Ok(source)) => source
-                        .write(doc::schema(), candidate)
-                        .map(drop)
+                        .apply_transactions(doc::schema(), transactions)
                         .map_err(|_| EditRejection::Protected(UNSAVABLE_EDIT.to_owned())),
                     // The file was read but its Markdown could not be lined up with
                     // its source, so no keystroke could ever be written back.
@@ -320,6 +328,7 @@ impl MarkraftApp {
             id,
             Session {
                 editor,
+                read_only,
                 _changes: changes,
                 _state_changes: state_changes,
                 _extensions: extensions,
@@ -350,6 +359,8 @@ impl MarkraftApp {
         cx: &mut Context<Self>,
     ) {
         self.cancel_input(cx);
+        self.io.reset();
+        self.save_waiters.clear();
         self.library = library;
         self.sessions.clear();
         self.save.reset();

@@ -5,7 +5,6 @@
 //! the note keep its identity and lets the links that pointed at it follow.
 
 use super::*;
-use crate::fs::StoreError;
 use markraft_core::Fragment;
 use std::path::Path;
 
@@ -16,6 +15,8 @@ pub(super) struct Rename {
     /// How many links elsewhere in the folder reach this note by its present name.
     pub(super) links: usize,
     pub(super) update_links: bool,
+    /// Identifies this submission independently of later popovers for the same note.
+    operation: Option<std::rc::Rc<()>>,
 }
 
 /// The notes a link can resolve to, as `resolve_wiki_link` reads them.
@@ -119,8 +120,13 @@ impl MarkraftApp {
     /// Each note's document with its links to `id` respelled for `stem`, and how many
     /// links that is. Notes that take no writing are left out: their links stay as they
     /// are, and the count only promises what can be delivered.
-    fn retargeted(&self, id: &str, stem: &str, after: &Places) -> Vec<(String, Node, usize)> {
-        let before = self.places();
+    fn retargeted(
+        &self,
+        id: &str,
+        stem: &str,
+        before: &Places,
+        after: &Places,
+    ) -> Vec<(String, Node, usize)> {
         let root = self.path.as_deref();
         let moved = |path: &Path| {
             after
@@ -133,12 +139,12 @@ impl MarkraftApp {
             .iter()
             .filter(|note| note.read_only.is_none())
             .filter_map(|note| {
-                let from = note.path.as_deref()?;
+                let from = before.iter().find(|(id, _)| *id == note.id)?.1.as_path();
                 let to = moved(from);
                 let mut changed = 0;
                 let document = map_wiki_targets(
                     &note.document,
-                    &mut |target| retarget(target, id, stem, (from, &to), root, &before, after),
+                    &mut |target| retarget(target, id, stem, (from, &to), root, before, after),
                     &mut changed,
                 )?;
                 Some((note.id.clone(), document, changed))
@@ -172,8 +178,18 @@ impl MarkraftApp {
         // A note with no file yet has nothing to rename; the next autosave files it.
         let Some(path) = note.path.clone() else {
             if !note.document_is_empty() {
-                self.flush(cx);
+                let id = note.id.clone();
                 self.inform("Saving the note first…", cx);
+                self.flush_then(window, cx, move |this, window, cx| {
+                    if this.library.active_id == id
+                        && this
+                            .library
+                            .note(&id)
+                            .is_some_and(|note| note.path.is_some())
+                    {
+                        this.open_rename(window, cx);
+                    }
+                });
             }
             return;
         };
@@ -191,7 +207,12 @@ impl MarkraftApp {
         // Any other name moves every link that reaches this one, so the count does not
         // wait for the name to be typed.
         let links = self
-            .retargeted(&id, "\u{0}", &self.places_after(&id, "\u{0}"))
+            .retargeted(
+                &id,
+                "\u{0}",
+                &self.places(),
+                &self.places_after(&id, "\u{0}"),
+            )
             .iter()
             .map(|(_, _, links)| links)
             .sum();
@@ -200,6 +221,7 @@ impl MarkraftApp {
                 id,
                 links,
                 update_links: true,
+                operation: None,
             }),
             cx,
         );
@@ -227,19 +249,68 @@ impl MarkraftApp {
         let Some(rename) = self.interaction.rename() else {
             return;
         };
+        // A failed save barrier does not invoke its continuation. Once I/O has
+        // settled, a new submission may replace that abandoned operation.
+        if rename.operation.is_some() && self.io.pending > 0 {
+            return;
+        }
         let (id, update_links) = (rename.id.clone(), rename.update_links);
         if self.library.active_id != id {
             self.close_rename(window, cx);
             return;
         }
         let name = self.query().read(cx).text().trim().to_owned();
-        // A name that was refused is gone the moment another is typed, so it is said in
-        // passing and the pill stays open for the next try.
-        if let Err(error) = self.rename_note(&id, &name, update_links, cx) {
-            self.inform(error.to_string(), cx);
+        let operation = std::rc::Rc::new(());
+        self.interaction.rename_mut().unwrap().operation = Some(operation.clone());
+        self.flush_then(window, cx, move |this, window, cx| {
+            let Some(before) = this.library.note(&id).and_then(|note| note.path.clone()) else {
+                this.finish_rename(&operation, false, window, cx);
+                return;
+            };
+            let Some(persistence) = &this.persistence else {
+                this.finish_rename(&operation, false, window, cx);
+                return;
+            };
+            let future = persistence.rename_async(id.clone(), name);
+            this.run_io(
+                future,
+                window,
+                cx,
+                move |this, result, window, cx| match result {
+                    Ok(path) => {
+                        this.complete_rename(&id, &before, path, update_links, cx);
+                        this.finish_rename(&operation, true, window, cx);
+                    }
+                    Err(error) => {
+                        this.finish_rename(&operation, false, window, cx);
+                        this.inform(error.to_string(), cx);
+                    }
+                },
+            );
+        });
+    }
+
+    fn finish_rename(
+        &mut self,
+        operation: &std::rc::Rc<()>,
+        success: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(rename) = self.interaction.rename_mut() else {
+            return;
+        };
+        if !rename
+            .operation
+            .as_ref()
+            .is_some_and(|pending| std::rc::Rc::ptr_eq(pending, operation))
+        {
             return;
         }
-        self.close_rename(window, cx);
+        rename.operation = None;
+        if success {
+            self.close_rename(window, cx);
+        }
     }
 
     /// Rename the file, then — asked to — respell the links that reached it.
@@ -248,41 +319,39 @@ impl MarkraftApp {
     /// stands behind the same barrier a quit does. Links are respelled in the documents
     /// and left to the ordinary save, which writes only the lines that changed; a note
     /// whose source cannot take the change keeps its link as it was.
-    fn rename_note(
+    fn complete_rename(
         &mut self,
         id: &str,
-        name: &str,
+        before: &Path,
+        path: PathBuf,
         update_links: bool,
         cx: &mut Context<Self>,
-    ) -> Result<(), StoreError> {
-        if !self.flush(cx) {
-            return Err(self
-                .feedback
-                .error()
-                .cloned()
-                .unwrap_or_else(|| "Save this note before renaming it.".into())
-                .into());
+    ) {
+        // A save receipt can publish this operation's path first. Accept either
+        // address, but never resurrect a deleted note or undo a later rename.
+        if path == before
+            || !self.library.note(id).is_some_and(|note| {
+                note.path.as_deref() == Some(before) || note.path.as_ref() == Some(&path)
+            })
+        {
+            return;
         }
-        let persistence = self
-            .persistence
-            .as_ref()
-            .ok_or("Open a folder before renaming a note.")?;
-        let before = self
-            .library
-            .note(id)
-            .and_then(|note| note.path.clone())
-            .ok_or("Save this note to a file before renaming it.")?;
-        let path = persistence.rename(id.to_owned(), name.to_owned())?;
-        if path == before {
-            return Ok(());
-        }
+        // Retarget the documents as they are now, including any text entered
+        // while the worker was renaming the file.
+        self.sync_documents(cx);
         let stem = path
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
+        // A save receipt may publish the renamed path before this response.
+        // Resolve old links against the pre-rename address even in that order.
+        let mut before_places = self.places();
+        if let Some((_, place)) = before_places.iter_mut().find(|(note, _)| note == id) {
+            *place = before.to_owned();
+        }
         let after = self.places_after(id, &stem);
         let edits = if update_links {
-            self.retargeted(id, &stem, &after)
+            self.retargeted(id, &stem, &before_places, &after)
         } else {
             Vec::new()
         };
@@ -326,7 +395,6 @@ impl MarkraftApp {
             message.push_str(&format!(" · {kept} not changed"));
         }
         self.inform(message, cx);
-        Ok(())
     }
 }
 
@@ -336,6 +404,66 @@ mod tests {
     use super::{map_wiki_targets, renamed_target, retarget};
     use crate::doc;
     use std::path::{Path, PathBuf};
+
+    #[gpui::test]
+    fn an_early_path_receipt_does_not_skip_backlinks_or_break_their_editor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut h = crate::e2e::harness::open_with(
+            cx,
+            &[
+                ("Welcome.md", "Welcome\n"),
+                ("Backlinks.md", "Backlinks\n\n[[Welcome]]\n"),
+            ],
+            |_| {},
+        );
+        h.keys("cmd-p");
+        h.type_text("Backlinks");
+        h.keys("enter");
+        h.save();
+        let active = h.active_note().id;
+        let app = h.app.clone();
+        h.cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let target = app
+                    .library
+                    .notes
+                    .iter()
+                    .find(|note| {
+                        note.path
+                            .as_ref()
+                            .is_some_and(|path| path.ends_with("Welcome.md"))
+                    })
+                    .unwrap();
+                let id = target.id.clone();
+                let before = target.path.clone().unwrap();
+                let future = app
+                    .persistence
+                    .as_ref()
+                    .unwrap()
+                    .rename_async(id.clone(), "Renamed".into());
+                app.run_io(future, window, cx, move |app, result, _, cx| {
+                    let path = result.unwrap();
+                    // Replay the order in which a save receipt reaches the UI
+                    // before the rename reply, without relying on thread timing.
+                    app.update_paths(vec![(id.clone(), path.clone())], cx);
+                    app.complete_rename(&id, &before, path, true, cx);
+                });
+            });
+        });
+        h.wait_for_io();
+        assert_eq!(h.active_note().id, active);
+        assert_eq!(h.markdown(), "Backlinks\n\n[[Renamed]]");
+        h.keys("cmd-down cmd-right");
+        h.type_text(" retained");
+        h.save();
+        assert_eq!(h.markdown(), "Backlinks\n\n[[Renamed]] retained");
+        assert_eq!(
+            std::fs::read_to_string(h.notes.join("Backlinks.md")).unwrap(),
+            "Backlinks\n\n[[Renamed]] retained\n"
+        );
+        assert_eq!(h.files(), ["Backlinks.md", "Renamed.md"]);
+    }
 
     #[test]
     fn a_renamed_target_keeps_everything_but_the_name() {

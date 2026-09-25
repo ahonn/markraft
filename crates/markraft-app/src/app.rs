@@ -2,6 +2,7 @@ mod assets;
 mod carry;
 mod feedback;
 mod interaction;
+mod io;
 mod lists;
 mod preferences;
 mod presence;
@@ -110,6 +111,11 @@ pub struct MarkraftApp {
     /// The code block's language list.
     code_language: Cursor,
     save: SaveState,
+    io: workspace::Operations,
+    save_waiters: Vec<io::SaveContinuation>,
+    reloading: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    deferred_external: Vec<External>,
+    _persistence_wake: Option<Task<()>>,
     /// Everything the window has to tell the user: the errors that stand, the
     /// notices that pass, and whose turn it is.
     feedback: Feedback,
@@ -229,16 +235,26 @@ impl MarkraftApp {
             cx.notify();
         });
         let quit = cx.on_app_quit(|this, cx| {
-            if !this.prepare_to_quit(cx) {
-                log::warn!(
-                    "{}",
-                    this.feedback
-                        .error()
-                        .map(String::as_str)
-                        .unwrap_or("Could not save")
-                );
+            this.sync_documents(cx);
+            let revision = this.save.barrier();
+            let pending = this
+                .persistence
+                .as_ref()
+                .filter(|_| !this.is_reloading())
+                .map(|p| p.flush_async(revision, this.library.clone(), this.preferences.clone()));
+            let executor = cx.background_executor().clone();
+            async move {
+                if let Some(pending) = pending {
+                    match io::receive(pending, executor).await {
+                        Ok(saved) => {
+                            if let Err(error) = saved.result {
+                                log::error!("quit save failed: {error}");
+                            }
+                        }
+                        Err(error) => log::error!("quit save failed: {error}"),
+                    }
+                }
             }
-            async {}
         });
         let poll = cx.spawn_in(window, async move |this, cx| {
             loop {
@@ -262,7 +278,7 @@ impl MarkraftApp {
         let mut app = Self {
             library,
             preferences,
-            persistence: store.map(|store| Persistence::new(store, house.clone())),
+            persistence: store.map(|store| Self::start_persistence(store, house.clone())),
             house,
             path,
             settings_path,
@@ -276,6 +292,11 @@ impl MarkraftApp {
             picker: Picker::default(),
             code_language: Cursor::default(),
             save: SaveState::default(),
+            io: workspace::Operations::default(),
+            save_waiters: Vec::new(),
+            reloading: Default::default(),
+            deferred_external: Vec::new(),
+            _persistence_wake: None,
             feedback,
             settings_errors: Default::default(),
             app_active: true,
@@ -298,6 +319,7 @@ impl MarkraftApp {
             _quit: quit,
         };
         app.ensure_session(window, cx);
+        app.watch_persistence(window, cx);
         if app.persistence.is_some() {
             app.focus_editor(window, cx);
         } else {
@@ -318,6 +340,81 @@ impl MarkraftApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_reloading() {
+            self.deferred_external.extend(changes);
+            return;
+        }
+        self.sync_documents(cx);
+        let mut ready = Vec::new();
+        for change in changes {
+            let (External::Updated { note, .. } | External::Removed(note)) = &change;
+            let id = note.id.clone();
+            if self.library.deletions.contains_key(&id) {
+                if let Some(persistence) = &self.persistence {
+                    persistence.acknowledge_changes(vec![change]);
+                }
+                continue;
+            }
+            let revision = self.io.external_revision(&id);
+            self.io.retry.retain(|event| {
+                let (External::Updated { note, .. } | External::Removed(note)) = event;
+                note.id != id
+            });
+            let local = self.library.note(&id).cloned();
+            if !workspace::needs_recovery(local.as_ref(), &change) {
+                ready.push(change);
+                continue;
+            }
+            let Some(persistence) = &self.persistence else {
+                self.io.retry.push(change);
+                continue;
+            };
+            let local = local.expect("recovery requires a local document");
+            let future = persistence.recover_async(local.clone());
+            self.run_io(future, window, cx, move |this, result, window, cx| {
+                if this.io.external.get(&id) != Some(&revision) {
+                    return;
+                }
+                if this.library.note(&id).is_none() {
+                    if let Some(persistence) = &this.persistence {
+                        persistence.acknowledge_changes(vec![change]);
+                    }
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        // Editing stays available while the recovery copy is written.
+                        // Recover any newer local content before advancing the baseline.
+                        if this
+                            .library
+                            .note(&id)
+                            .is_some_and(|now| now.document != local.document)
+                        {
+                            this.apply_external(vec![change], window, cx);
+                        } else {
+                            this.adopt_external(vec![change], window, cx);
+                            this.feedback.queue(crate::storage::conflicts_kept(1));
+                        }
+                    }
+                    Err(error) => {
+                        this.feedback.set_error(error);
+                        this.io.retry.push(change);
+                    }
+                }
+            });
+        }
+        if !ready.is_empty() {
+            self.adopt_external(ready, window, cx);
+        }
+    }
+
+    fn adopt_external(
+        &mut self,
+        changes: Vec<External>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let acknowledgements = changes.clone();
         let editor_was_focused = self.editor().focus_handle(cx).is_focused(window);
         self.sync_documents(cx);
         // The active note's caret, to carry over to the version read from disk.
@@ -327,7 +424,6 @@ impl MarkraftApp {
             (state.doc().clone(), state.selection().clone())
         });
         let mut ids = Vec::new();
-        let mut archived = 0;
         let mut vanished = 0;
         for change in changes {
             let (External::Updated { note, .. } | External::Removed(note)) = &change;
@@ -341,24 +437,13 @@ impl MarkraftApp {
                     let permissions_only = previous
                         .as_ref()
                         .is_some_and(|previous| previous.document == note.document);
-                    if let Some(mut local) = local
-                        && local.document != note.document
-                    {
-                        if permissions_only {
-                            local.read_only = note.read_only.clone();
-                            self.library.adopt(local);
-                            ids.push(id);
-                            continue;
+                    if permissions_only && local.is_some() {
+                        self.library.update_read_only(&id, note.read_only.clone());
+                        if let Some(session) = self.sessions.get(&id) {
+                            session.set_read_only(note.read_only);
                         }
-                        if previous.is_none_or(|previous| previous.document != local.document) {
-                            // Only a copy that was actually written is counted: the
-                            // sentence below promises one, and a failure has its own.
-                            match self.persistence.as_ref().map(|p| p.recover(local.clone())) {
-                                Some(Ok(())) => archived += 1,
-                                Some(Err(error)) => self.feedback.set_error(error),
-                                None => {}
-                            }
-                        }
+                        ids.push(id);
+                        continue;
                     }
                     self.library.adopt(note);
                 }
@@ -371,14 +456,8 @@ impl MarkraftApp {
                             vanished += 1;
                         }
                         self.library.remove(&id);
-                    } else if let Some(local) = local {
-                        // Local edits exist for a file that vanished: keep them
-                        // beside where it was; the file is gone from disk.
-                        match self.persistence.as_ref().map(|p| p.recover(local)) {
-                            Some(Ok(())) => archived += 1,
-                            Some(Err(error)) => self.feedback.set_error(error),
-                            None => {}
-                        }
+                    } else if local.is_some() {
+                        // Recovery was completed before this transition was admitted.
                         self.library.remove(&id);
                         vanished += 1;
                     }
@@ -407,11 +486,7 @@ impl MarkraftApp {
             self.focus_editor(window, cx);
         }
         if let Some(persistence) = &self.persistence {
-            persistence.acknowledge(ids);
-        }
-        if archived > 0 {
-            self.feedback
-                .queue(crate::storage::conflicts_kept(archived));
+            persistence.acknowledge_changes(acknowledgements);
         }
         if vanished > 0 {
             self.feedback.queue(if vanished == 1 {
@@ -431,8 +506,11 @@ impl MarkraftApp {
         self.schedule_save(cx);
     }
     /// ⌘S writes the current snapshot.
-    fn save_now(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.flush(cx);
+    fn save_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_reloading() {
+            return;
+        }
+        self.flush_then(window, cx, |this, _, cx| this.inform("Saved", cx));
     }
     /// Hand the latest snapshot to the notes folder without waiting for it.
     ///
@@ -443,6 +521,9 @@ impl MarkraftApp {
     /// key asked for. The receipt comes back through `poll` like any other, so a
     /// failure still reaches `Not saved` and is there when the window returns.
     fn flush_in_background(&mut self, cx: &mut Context<Self>) {
+        if self.is_reloading() {
+            return;
+        }
         self.sync_documents(cx);
         let revision = self.save.barrier();
         let Some(persistence) = &self.persistence else {
@@ -456,31 +537,15 @@ impl MarkraftApp {
             cx.notify();
         }
     }
-    fn flush(&mut self, cx: &mut Context<Self>) -> bool {
-        self.sync_documents(cx);
-        let revision = self.save.barrier();
-        let result = self
-            .persistence
-            .as_ref()
-            .ok_or_else(|| StoreError::from("Open or recover the library before saving."))
-            .and_then(|p| p.flush(revision, self.library.clone(), self.preferences.clone()));
-        match result {
-            Ok(saved) => self.apply_saved(saved, cx),
-            Err(error) => {
-                self.save.apply_completion(revision, false);
-                self.feedback.set_error(error);
-                cx.notify();
-            }
-        }
-        !self.save.is_dirty()
-    }
-
     fn apply_saved(&mut self, saved: Saved, cx: &mut Context<Self>) {
         let completion = self
             .save
             .apply_completion(saved.revision, saved.result.is_ok());
         if completion == SaveCompletion::Ignored {
             return;
+        }
+        if saved.result.is_ok() {
+            self.library.acknowledge_saved(&saved.changes);
         }
         self.update_paths(saved.paths, cx);
         if completion == SaveCompletion::Current {
@@ -494,13 +559,17 @@ impl MarkraftApp {
                 persistence.refresh();
             }
         }
-        if completion == SaveCompletion::Current {
-            match saved.result {
-                Ok(()) => self.feedback.clear_error(),
-                // The conflict was just said above; the banner is for failures.
-                Err(StoreError::Conflict(_)) => {}
-                Err(error) => self.feedback.set_error(error),
+        match saved.result {
+            Ok(()) if completion == SaveCompletion::Current && self.io.retry.is_empty() => {
+                self.feedback.clear_error();
             }
+            Ok(()) => {}
+            // The conflict was just said above; the banner is for failures.
+            Err(StoreError::Conflict(_)) => {}
+            // New edits or window metadata do not make an outstanding write
+            // failure irrelevant. Older receipts already superseded by a newer
+            // completion were rejected above.
+            Err(error) => self.feedback.set_error(error),
         }
         cx.notify();
     }
@@ -626,27 +695,60 @@ impl MarkraftApp {
         for event in events {
             match event {
                 Event::Saved(saved) => self.apply_saved(saved, cx),
-                Event::External(changes) => self.apply_external(changes, window, cx),
+                Event::External(mut changes) => {
+                    changes.retain(|change| {
+                        self.persistence
+                            .as_ref()
+                            .is_some_and(|p| p.is_current_external(change))
+                    });
+                    self.apply_external(changes, window, cx);
+                }
             }
         }
         // Process external file changes first, then make the same save barrier as
         // a normal quit. A failed save must never approve Sparkle's relaunch.
-        if let Some(continuation) = self.updater.take_relaunch() {
-            if self.prepare_to_quit(cx) {
-                cx.defer(move |_| {
-                    if let Some(main_thread) = sparkle_updater::MainThreadMarker::new() {
-                        continuation.resume(main_thread);
+        if !self.is_reloading()
+            && let Some(continuation) = self.updater.take_relaunch()
+        {
+            self.sync_documents(cx);
+            if let Some(persistence) = &self.persistence {
+                let revision = self.save.barrier();
+                let future = persistence.flush_async(
+                    revision,
+                    self.library.clone(),
+                    self.preferences.clone(),
+                );
+                self.run_io(future, window, cx, move |this, result, window, cx| {
+                    let success = match result {
+                        Ok(saved) => {
+                            let ok = saved.result.is_ok();
+                            this.apply_saved(saved, cx);
+                            ok && !this.save.is_dirty()
+                        }
+                        Err(error) => {
+                            this.feedback.set_error(error);
+                            false
+                        }
+                    };
+                    if success {
+                        cx.defer(move |_| {
+                            if let Some(main_thread) = sparkle_updater::MainThreadMarker::new() {
+                                continuation.resume(main_thread);
+                            }
+                        });
+                    } else {
+                        this.updater.postpone(continuation);
+                        this.show(window, cx);
+                        this.feedback
+                            .queue("Update paused: a note couldn't be saved.".to_owned());
                     }
                 });
             } else {
                 self.updater.postpone(continuation);
-                self.show(window, cx);
-                self.feedback
-                    .queue("Update paused: a note couldn't be saved.".to_owned());
-                cx.notify();
             }
         }
-        if let Some(revision) = self.save.take_due(Instant::now())
+        if !self.is_reloading()
+            && let Some(revision) = self.save.take_due(Instant::now())
             && let Some(p) = &self.persistence
             && let Err(e) = p.save(revision, self.library.clone(), self.preferences.clone())
         {
@@ -760,30 +862,21 @@ impl MarkraftApp {
             self.new_note(window, cx);
         }
     }
-    fn prepare_to_quit(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.persistence.is_none() {
-            return true;
+    /// ⌘Q waits for durability without blocking input or the event loop.
+    fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_reloading() {
+            return;
         }
-        self.editor()
-            .update(cx, |editor, cx| editor.cancel_composition(cx));
-        self.flush(cx)
-    }
-    /// ⌘Q. Flush and quit; stay and say why if that fails.
-    fn quit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.quitting.begin() {
             return;
         }
-        self.quit_now(cx);
-    }
-    /// Write everything that has a file and go; stay and say why if that fails.
-    fn quit_now(&mut self, cx: &mut Context<Self>) {
-        if self.prepare_to_quit(cx) {
+        if self.persistence.is_none() {
             cx.quit();
             return;
         }
-        self.quitting.cancel();
-        self.show_popover(Popover::FileStatus, cx);
-        cx.notify();
+        self.editor()
+            .update(cx, |editor, cx| editor.cancel_composition(cx));
+        self.flush_then(window, cx, |_, _, cx| cx.quit());
     }
     /// ⌘&, ⌘*, ⌘( or ⌥⌘C in the note: the block the toolbar would make. Anywhere
     /// else the key is left to whoever has the keyboard.
@@ -870,6 +963,10 @@ impl MarkraftApp {
         }
     }
     fn new_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_reloading() {
+            return;
+        }
+        self.io.opening += 1;
         self.close_popover(cx);
         self.cancel_input(cx);
         if self.persistence.is_none() {
@@ -890,6 +987,7 @@ impl MarkraftApp {
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
         self.sync_documents(cx);
         if self.library.select(id) {
+            self.io.opening += 1;
             self.ensure_session(window, cx);
             self.set_panel(Panel::Editor, cx);
             self.focus_editor(window, cx);
@@ -979,8 +1077,12 @@ impl MarkraftApp {
         notes
     }
     fn toggle_pin(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.is_reloading() {
+            return;
+        }
         if let Some(note) = self.library.notes.iter_mut().find(|note| note.id == id) {
             note.pinned = !note.pinned;
+            self.library.mark_changed(id);
             self.notes_changed(cx);
         }
         // Pinning reorders results; keep the same note selected.
@@ -1038,6 +1140,9 @@ impl MarkraftApp {
         .detach();
     }
     fn trash_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_reloading() {
+            return;
+        }
         self.sync_documents(cx);
         let folder = self
             .library
@@ -1053,12 +1158,16 @@ impl MarkraftApp {
                 .clamp_to(self.library.search(query.trim(), root.as_deref()).len());
             self.ring.release();
             window.focus(&self.query().focus_handle(cx), cx);
-            self.links.invalidate();
-            let moved = self.flush(cx);
-            self.moved_to_trash(moved, folder, cx);
+            self.notes_changed(cx);
+            self.flush_then(window, cx, move |this, _, cx| {
+                this.moved_to_trash(true, folder, cx)
+            });
         }
     }
     fn delete_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_reloading() {
+            return;
+        }
         let id = self.library.active_id.clone();
         self.sync_documents(cx);
         let folder = self
@@ -1071,9 +1180,10 @@ impl MarkraftApp {
             self.ensure_session(window, cx);
             self.set_panel(Panel::Editor, cx);
             self.focus_editor(window, cx);
-            self.links.invalidate();
-            let moved = self.flush(cx);
-            self.moved_to_trash(moved, folder, cx);
+            self.notes_changed(cx);
+            self.flush_then(window, cx, move |this, _, cx| {
+                this.moved_to_trash(true, folder, cx)
+            });
         }
     }
     /// Say where the note went. The Trash holds the file itself, so that is what the
@@ -1257,6 +1367,11 @@ impl MarkraftApp {
         self.inform("Copied as Markdown", cx);
     }
     fn recover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.io.retry.is_empty() {
+            let changes = std::mem::take(&mut self.io.retry);
+            self.apply_external(changes, window, cx);
+            return;
+        }
         if let Some(directory) = self.path.clone() {
             self.open_folder(directory, window, cx);
         }
@@ -1283,137 +1398,153 @@ impl MarkraftApp {
     /// stays open when the new one cannot be. Missing folders are created so Change…
     /// and Retry can recover an empty path.
     fn open_folder(&mut self, directory: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let reopening = self.persistence.is_none();
-        if !reopening
-            && (self.path.as_ref().is_some_and(|current| {
-                current.canonicalize().ok() == directory.canonicalize().ok()
-            }) || !self.flush(cx))
-        {
+        if self.is_reloading() {
             return;
         }
-        let directory = match crate::storage::ensure_notes_folder(&directory) {
-            Ok(directory) => directory,
-            Err(error) => {
-                self.feedback.set_error(error);
-                cx.notify();
+        if self.persistence.is_some() {
+            if self.path.as_ref() == Some(&directory) {
+                self.flush_then(window, cx, |_, _, _| {});
                 return;
             }
-        };
-        let opened = crate::storage::Settings::read(&self.settings_path)
-            .and_then(|settings| {
-                Store::open(directory.clone(), self.settings_path.clone(), settings)
-            })
-            .and_then(|(mut store, library)| {
-                store
-                    .update_settings(|settings| settings.notes_folder = Some(directory.clone()))?;
-                Ok((store, library))
+            self.flush_then(window, cx, move |this, window, cx| {
+                this.load_folder(directory, window, cx)
             });
-        match opened {
-            Ok((store, library)) => {
-                self.path = Some(store.directory().to_owned());
-                self.persistence = Some(Persistence::new(store, self.house.clone()));
-                self.replace_library(library, window, cx);
-                self.feedback.clear_error();
-                self.set_panel(Panel::Editor, cx);
-                self.focus_editor(window, cx);
-                self.apply_theme(window, cx);
-                let refused = self
-                    .platform
-                    .as_mut()
-                    .and_then(|p| apply_platform_preferences(p, &self.preferences, window).err());
-                self.feedback.set_platform_error(refused);
-                self.notes_changed(cx);
-            }
-            Err(e) => {
-                self.feedback.set_error(e);
-                cx.notify();
-            }
+        } else {
+            self.load_folder(directory, window, cx);
         }
     }
+
+    fn load_folder(&mut self, directory: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.io.opening += 1;
+        let opening = self.io.opening;
+        let settings_path = self.settings_path.clone();
+        let house = self.house.clone();
+        let task = cx.background_executor().spawn(async move {
+            let directory = crate::storage::ensure_notes_folder(&directory)?;
+            let mut settings = crate::storage::Settings::read(&settings_path)?;
+            settings.notes_folder = Some(directory.clone());
+            let (mut store, library) = Store::open(directory.clone(), settings_path, settings)?;
+            store.update_settings(|settings| settings.notes_folder = Some(directory.clone()))?;
+            let persistence = Self::start_persistence(store, house);
+            Ok((directory, persistence, library))
+        });
+        self.inform("Opening folder…", cx);
+        self.run_io(task, window, cx, move |this, result, window, cx| {
+            if this.io.opening != opening {
+                return;
+            }
+            match result {
+                Ok((directory, persistence, library)) => {
+                    // Never discard edits made while the new folder was loading.
+                    if this.save.is_dirty() && this.persistence.is_some() {
+                        this.open_folder(directory, window, cx);
+                        return;
+                    }
+                    this.path = Some(directory);
+                    this.persistence = Some(persistence);
+                    this.watch_persistence(window, cx);
+                    this.replace_library(library, window, cx);
+                    this.feedback.clear_error();
+                    this.set_panel(Panel::Editor, cx);
+                    this.focus_editor(window, cx);
+                    this.apply_theme(window, cx);
+                    this.notes_changed(cx);
+                }
+                Err(error) => this.feedback.set_error(error),
+            }
+        });
+    }
     fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.write_copy(true, window, cx);
+    }
+
+    fn write_copy(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_documents(cx);
         let Some(persistence) = &self.persistence else {
             self.inform("Open a folder to save notes.", cx);
             return;
         };
-        let note = self.library.active_note();
-        let filename = format!("{}.md", note.title().replace(['/', ':'], "-"));
-        let mut snapshot = note.clone();
-        snapshot.document = self.editor().read(cx).committed_document().clone();
-        let document = match persistence.markdown(snapshot) {
-            Ok(document) => document,
-            Err(error) => {
-                self.feedback.set_error(error);
-                cx.notify();
-                return;
-            }
-        };
+        let snapshot = self.library.active_note().clone();
+        let original = snapshot.clone();
+        let activation = self.io.opening;
+        let filename = format!("{}.md", snapshot.title().replace(['/', ':'], "-"));
+        let rendering = persistence.markdown_async(snapshot);
         let directory = self.path.clone().unwrap_or_default();
         let prompt = cx.prompt_for_new_path(&directory, Some(&filename));
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(path))) = prompt.await {
-                let written = cx
-                    .background_executor()
+        let executor = cx.background_executor().clone();
+        self.run_io(
+            async move {
+                let document = rendering.await?;
+                let Some(path) = prompt
+                    .await
+                    .map_err(|e| StoreError::from(e.to_string()))?
+                    .map_err(|e| StoreError::from(e.to_string()))?
+                else {
+                    return Ok(None);
+                };
+                executor
                     .spawn(async move {
                         use std::io::Write;
                         let mut file = std::fs::OpenOptions::new()
                             .write(true)
                             .create_new(true)
                             .open(&path)
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| StoreError::from(e.to_string()))?;
                         file.write_all(document.as_bytes())
                             .and_then(|_| file.sync_all())
-                            .map_err(|e| e.to_string())?;
-                        Ok::<_, String>(path.canonicalize().unwrap_or(path))
+                            .map_err(|e| StoreError::from(e.to_string()))?;
+                        Ok(Some(path.canonicalize().unwrap_or(path)))
                     })
-                    .await;
-                let _ = cx.update(|window, cx| {
-                    this.update(cx, |this, cx| match written {
-                        Ok(path) => {
-                            let old_id = this.library.active_id.clone();
-                            let old_pathless = this
-                                .library
-                                .note(&old_id)
-                                .is_some_and(|note| note.path.is_none());
-                            let opened = this
-                                .persistence
-                                .as_ref()
-                                .ok_or_else(|| {
-                                    StoreError::from("Open a notes folder before saving.")
-                                })
-                                .and_then(|p| p.open_file(path));
-                            match opened {
-                                Ok(note) => {
-                                    let id = note.id.clone();
-                                    if this.library.note(&id).is_none() {
-                                        this.library.adopt(note);
-                                    }
+                    .await
+            },
+            window,
+            cx,
+            move |this, result, window, cx| match result {
+                Ok(Some(path)) if open => {
+                    let Some(persistence) = &this.persistence else {
+                        return;
+                    };
+                    let future = persistence.open_file_async(path);
+                    this.run_io(
+                        future,
+                        window,
+                        cx,
+                        move |this, result, window, cx| match result {
+                            Ok(note) => {
+                                let id = note.id.clone();
+                                if this.library.note(&id).is_none() {
+                                    this.library.adopt(note);
+                                }
+                                if this.io.opening == activation
+                                    && this.library.active_id == original.id
+                                    && this
+                                        .library
+                                        .note(&original.id)
+                                        .is_some_and(|now| now.document == original.document)
+                                {
                                     this.library.select(&id);
-                                    if old_pathless && old_id != id {
-                                        this.library.remove(&old_id);
-                                        this.sessions.remove(&old_id);
-                                    }
-                                    this.feedback.clear_error();
-                                    this.ensure_session(window, cx);
-                                    this.focus_editor(window, cx);
-                                    this.notes_changed(cx);
-                                    this.inform("Saved", cx);
                                 }
-                                Err(e) => {
-                                    this.feedback.set_error(e);
-                                    cx.notify();
+                                if original.id != id
+                                    && this.library.note(&original.id).is_some_and(|now| {
+                                        now.path.is_none() && now.document == original.document
+                                    })
+                                {
+                                    this.library.delete(&original.id);
+                                    this.sessions.remove(&original.id);
                                 }
+                                this.ensure_session(window, cx);
+                                this.notes_changed(cx);
+                                this.inform("Saved", cx);
                             }
-                        }
-                        Err(e) => {
-                            this.feedback.set_error(e);
-                            cx.notify();
-                        }
-                    })
-                });
-            }
-        })
-        .detach();
+                            Err(error) => this.feedback.set_error(error),
+                        },
+                    );
+                }
+                Ok(Some(_)) => this.inform("Exported Markdown", cx),
+                Ok(None) => {}
+                Err(error) => this.feedback.set_error(error),
+            },
+        );
     }
     fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let answer = window.prompt(
@@ -1427,26 +1558,44 @@ impl MarkraftApp {
             if answer.await == Ok(1) {
                 let _ = cx.update(|window, cx| {
                     this.update(cx, |this, cx| {
-                        this.save.barrier();
-                        let result = this
-                            .persistence
-                            .as_ref()
-                            .ok_or_else(|| StoreError::from("Choose a notes folder first."))
-                            .and_then(|p| p.reload());
-                        match result {
-                            Ok(library) => {
-                                this.replace_library(library, window, cx);
-                                this.set_panel(Panel::Editor, cx);
-                                this.feedback.clear_error();
-                                this.focus_editor(window, cx);
-                                this.apply_theme(window, cx);
-                                let refused = this.platform.as_mut().and_then(|p| {
-                                    apply_platform_preferences(p, &this.preferences, window).err()
-                                });
-                                this.feedback.set_platform_error(refused);
-                            }
-                            Err(e) => this.feedback.set_error(e),
+                        if this.io.pending > 0 {
+                            this.inform(
+                                "Wait for the current file operation before reloading.",
+                                cx,
+                            );
+                            return;
                         }
+                        this.editor()
+                            .update(cx, |editor, cx| editor.cancel_composition(cx));
+                        this.sync_documents(cx);
+                        this.save.barrier();
+                        let Some(persistence) = &this.persistence else {
+                            return;
+                        };
+                        this.reloading
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        let future = persistence.reload_async();
+                        this.run_io(future, window, cx, move |this, result, window, cx| {
+                            this.reloading
+                                .store(false, std::sync::atomic::Ordering::Relaxed);
+                            match result {
+                                Ok(library) => {
+                                    this.replace_library(library, window, cx);
+                                    this.set_panel(Panel::Editor, cx);
+                                    this.feedback.clear_error();
+                                    this.focus_editor(window, cx);
+                                    this.apply_theme(window, cx);
+                                }
+                                Err(error) => this.feedback.set_error(error),
+                            }
+                            let mut deferred = std::mem::take(&mut this.deferred_external);
+                            deferred.retain(|change| {
+                                this.persistence
+                                    .as_ref()
+                                    .is_some_and(|p| p.is_current_external(change))
+                            });
+                            this.apply_external(deferred, window, cx);
+                        });
                         cx.notify();
                     })
                 });
@@ -1455,53 +1604,8 @@ impl MarkraftApp {
         .detach();
     }
 
-    fn export(&mut self, cx: &mut Context<Self>) {
-        if self.persistence.is_none() {
-            return;
-        }
-        let note = self.library.active_note();
-        let title = note.title();
-        let filename = format!("{}.md", title.replace(['/', ':'], "-"));
-        let mut snapshot = note.clone();
-        snapshot.document = self.editor().read(cx).committed_document().clone();
-        let document = match self.persistence.as_ref().unwrap().markdown(snapshot) {
-            Ok(document) => document,
-            // Nothing was written, so this is not the save banner's business.
-            Err(error) => {
-                self.feedback
-                    .queue(format!("Could not prepare the export: {error}"));
-                cx.notify();
-                return;
-            }
-        };
-        let directory = self.path.clone().unwrap_or_default();
-        let prompt = cx.prompt_for_new_path(&directory, Some(&filename));
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(path))) = prompt.await {
-                let result = cx
-                    .background_executor()
-                    .spawn(async move {
-                        use std::io::Write;
-                        let mut file = std::fs::OpenOptions::new()
-                            .write(true)
-                            .create_new(true)
-                            .open(path)
-                            .map_err(|e| e.to_string())?;
-                        file.write_all(document.as_bytes())
-                            .and_then(|_| file.sync_all())
-                            .map_err(|e| e.to_string())
-                    })
-                    .await;
-                let _ = this.update(cx, |this, cx| match result {
-                    Ok(()) => this.inform("Exported Markdown", cx),
-                    Err(e) => {
-                        this.feedback.set_error(e);
-                        cx.notify();
-                    }
-                });
-            }
-        })
-        .detach();
+    fn export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.write_copy(false, window, cx);
     }
     fn open_markdown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = cx.prompt_for_paths(PathPromptOptions {
@@ -1595,42 +1699,69 @@ impl MarkraftApp {
     }
 
     fn open_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        self.sync_documents(cx);
-        for path in paths {
-            if path.is_dir() {
-                self.open_folder(path, window, cx);
-                continue;
-            }
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string());
-            let result = if let Some(persistence) = &self.persistence {
-                persistence.open_file(path).map(|note| {
-                    let id = note.id.clone();
-                    // An already-open dirty session must not be replaced by disk.
-                    if self.library.note(&id).is_none() {
-                        self.library.adopt(note);
-                    }
-                    self.library.select(&id);
-                })
-            } else {
-                Err(StoreError::from(
-                    "Open a notes folder before opening files.",
-                ))
-            };
-            // Failing to open a file says nothing about saving, so it is a sentence
-            // rather than the save banner — and each file gets its own.
-            if let Err(error) = result {
-                self.feedback
-                    .queue(format!("Could not open “{name}”: {error}"));
-            }
+        if self.is_reloading() {
+            return;
         }
-        self.ensure_session(window, cx);
-        self.set_panel(Panel::Editor, cx);
-        self.show(window, cx);
-        self.focus_editor(window, cx);
-        self.notes_changed(cx);
+        self.sync_documents(cx);
+        if paths.len() == 1 && paths[0].is_dir() {
+            self.open_folder(paths[0].clone(), window, cx);
+            return;
+        }
+        let Some(persistence) = &self.persistence else {
+            self.inform("Open a notes folder before opening files.", cx);
+            return;
+        };
+        self.io.opening += 1;
+        let opening = self.io.opening;
+        let requests: Vec<_> = paths
+            .into_iter()
+            .map(|path| {
+                let name = path.display().to_string();
+                (name, persistence.open_file_async(path))
+            })
+            .collect();
+        self.inform("Opening…", cx);
+        self.run_io(
+            async move {
+                let mut results = Vec::new();
+                for (name, request) in requests {
+                    results.push((name, request.await));
+                }
+                Ok(results)
+            },
+            window,
+            cx,
+            move |this, result, window, cx| {
+                if let Ok(results) = result {
+                    for (name, result) in results {
+                        match result {
+                            Ok(note) => {
+                                let id = note.id.clone();
+                                if this.library.deletions.contains_key(&id) {
+                                    continue;
+                                }
+                                if this.library.note(&id).is_none() {
+                                    this.library.adopt(note);
+                                }
+                                if this.io.opening == opening {
+                                    this.library.select(&id);
+                                }
+                            }
+                            Err(error) => this
+                                .feedback
+                                .queue(format!("Could not open “{name}”: {error}")),
+                        }
+                    }
+                    this.ensure_session(window, cx);
+                    if this.io.opening == opening {
+                        this.set_panel(Panel::Editor, cx);
+                        this.show(window, cx);
+                        this.focus_editor(window, cx);
+                    }
+                    this.notes_changed(cx);
+                }
+            },
+        );
     }
 
     fn update_paths(&mut self, paths: Vec<(String, PathBuf)>, cx: &mut Context<Self>) {
@@ -1748,11 +1879,21 @@ impl MarkraftApp {
                 .queue("Resolve the file's read-only state before inserting images.".to_owned());
             return;
         }
-        // The note must be on disk before an image can be placed beside it.
         let id = self.library.active_id.clone();
-        if !self.flush(cx) {
-            return;
-        }
+        self.flush_then(window, cx, move |this, window, cx| {
+            if this.library.active_id == id {
+                this.insert_saved_assets(assets, window, cx);
+            }
+        });
+    }
+
+    fn insert_saved_assets(
+        &mut self,
+        assets: Vec<assets::Asset>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.library.active_id.clone();
         let Some(path) = self.library.active_note().path.clone() else {
             self.feedback
                 .queue("Images need a saved note. Type something first.".to_owned());

@@ -12,6 +12,8 @@ license.workspace = true
 updater-mock = []
 
 [dependencies]
+futures-channel = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-base.workspace = true

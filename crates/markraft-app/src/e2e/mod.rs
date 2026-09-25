@@ -9,10 +9,13 @@
 //!
 //! The vault writes from a thread of its own, outside GPUI's scheduler, so what is
 //! on disk is waited for with [`Harness::wait_for_file`] rather than assumed.
+//! Explicit operations also wait for their completion, including failures. These
+//! tests request folder refreshes directly instead of initializing native file
+//! watchers; OS event delivery belongs to a separate integration check.
 //!
 //! Each file is one area of the app.
 
-mod harness;
+pub(crate) mod harness;
 
 mod blocks;
 mod disk;

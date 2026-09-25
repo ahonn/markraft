@@ -122,9 +122,40 @@ impl Harness<'_> {
         }
     }
 
-    /// ⌘S, which writes every note that has changed before it returns.
+    /// ⌘S, waiting for its asynchronous result before making disk assertions.
     pub(crate) fn save(&mut self) {
         self.keys("cmd-s");
+        self.wait_for_io();
+    }
+
+    /// Wait for explicit file operations without requiring unsaved edits to
+    /// disappear: a refused save or recovery must leave those edits pending.
+    pub(crate) fn wait_for_io(&mut self) {
+        self.wait_until(|h| !h.app.update(h.cx, |app, _| app.test_io_pending()));
+        assert!(
+            !self.app.update(self.cx, |app, _| app.test_io_pending()),
+            "a file operation did not complete within five seconds"
+        );
+    }
+
+    /// Deliver a folder change deterministically. Headless tests do not start
+    /// an OS watcher; native watcher delivery is covered by its integration test.
+    pub(crate) fn refresh_files(&mut self) {
+        self.app.update(self.cx, |app, _| app.test_refresh_files());
+    }
+
+    /// Open a file through the same single-instance request as a second launch.
+    pub(crate) fn open_path(&mut self, path: &std::path::Path) {
+        let request = Request::OpenPaths(vec![path.to_owned()]);
+        assert!(matches!(
+            Instance::acquire(&self._root.path().join("settings.json"), request)
+                .expect("an open-file request"),
+            Launch::Forwarded
+        ));
+        let path = path.canonicalize().expect("the file being opened");
+        self.wait_until(|h| h.active_note().path.as_ref() == Some(&path));
+        self.wait_for_io();
+        assert_eq!(self.active_note().path.as_ref(), Some(&path));
     }
 
     /// The Markdown the active note's editor holds.
@@ -267,6 +298,7 @@ impl Harness<'_> {
             app.update(cx, |app, cx| app.test_apply_external(changes, window, cx))
         });
         self.cx.run_until_parked();
+        self.wait_for_io();
     }
 
     pub(crate) fn active_note(&mut self) -> crate::storage::Note {

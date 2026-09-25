@@ -432,6 +432,7 @@ impl std::fmt::Display for EditRejection {
 }
 
 type DocumentGuard = Box<dyn Fn(&Node) -> Result<(), EditRejection>>;
+type TransactionGuard = Box<dyn Fn(&[Transaction]) -> Result<(), EditRejection>>;
 
 /// Whether a wiki link target names something the host can open. Only the host can
 /// say, and it is asked once per link per layout, so it answers from what it already
@@ -446,23 +447,49 @@ pub type RemoteImageFetcher = Arc<dyn Fn(&str) -> Result<Vec<u8>, String> + Send
 
 /// Build all transactions before publishing any state. Unlike a transaction
 /// filter, this boundary also covers no-filter edits, undo and appender output.
+#[cfg(test)]
 fn apply_guarded(
     state: &mut EditorState,
     specs: impl IntoIterator<Item = TransactionSpec>,
     guard: Option<&DocumentGuard>,
 ) -> Result<Vec<Transaction>, EditRejection> {
+    apply_guarded_transactions(state, specs, guard, None)
+}
+
+fn apply_guarded_transactions(
+    state: &mut EditorState,
+    specs: impl IntoIterator<Item = TransactionSpec>,
+    guard: Option<&DocumentGuard>,
+    transaction_guard: Option<&TransactionGuard>,
+) -> Result<Vec<Transaction>, EditRejection> {
+    let started = std::time::Instant::now();
     let transactions = state
         .update_with_appended(specs)
         .map_err(|error| EditRejection::Invalid(error.to_string()))?;
     let last = transactions
         .last()
         .ok_or_else(|| EditRejection::Invalid("No transaction was produced.".to_owned()))?;
-    if last.new_doc() != state.doc()
-        && let Some(guard) = guard
-    {
-        guard(last.new_doc())?;
-    }
-    *state = last.state().clone();
+    // Resolve every state field before a source guard commits its baseline.
+    // After successful guards, publishing the prepared state cannot fail.
+    let next = last.state().clone();
+    let built = started.elapsed();
+    let checking = std::time::Instant::now();
+    let result = if last.new_doc() != state.doc() {
+        guard
+            .map_or(Ok(()), |guard| guard(last.new_doc()))
+            .and_then(|()| transaction_guard.map_or(Ok(()), |guard| guard(&transactions)))
+    } else {
+        Ok(())
+    };
+    log::debug!(
+        "editor transaction: build_us={} guard_us={} count={} accepted={}",
+        built.as_micros(),
+        checking.elapsed().as_micros(),
+        transactions.len(),
+        result.is_ok(),
+    );
+    result?;
+    *state = next;
     Ok(transactions)
 }
 
@@ -489,6 +516,7 @@ pub(crate) enum VerticalMove {
 
 pub struct EditorView {
     document_guard: Option<DocumentGuard>,
+    transaction_guard: Option<TransactionGuard>,
     edit_error: Option<EditRejection>,
     file_paste: bool,
     state: EditorState,
@@ -593,6 +621,7 @@ impl EditorView {
         let projection = projection_of(&state);
         Self {
             document_guard: None,
+            transaction_guard: None,
             edit_error: None,
             file_paste: false,
             types,
@@ -687,6 +716,17 @@ impl EditorView {
         guard: impl Fn(&Node) -> Result<(), EditRejection> + 'static,
     ) -> Self {
         self.document_guard = Some(Box::new(guard));
+        self
+    }
+
+    /// Validate the completed transaction chain before publishing its state.
+    /// The guard may advance a source baseline on success: all document guards
+    /// and state construction finish first, and no fallible step follows it.
+    pub fn with_transaction_guard(
+        mut self,
+        guard: impl Fn(&[Transaction]) -> Result<(), EditRejection> + 'static,
+    ) -> Self {
+        self.transaction_guard = Some(Box::new(guard));
         self
     }
 
@@ -964,8 +1004,12 @@ impl EditorView {
         &mut self,
         specs: impl IntoIterator<Item = TransactionSpec>,
     ) -> Option<Vec<Transaction>> {
-        let transactions = match apply_guarded(&mut self.state, specs, self.document_guard.as_ref())
-        {
+        let transactions = match apply_guarded_transactions(
+            &mut self.state,
+            specs,
+            self.document_guard.as_ref(),
+            self.transaction_guard.as_ref(),
+        ) {
             Ok(transactions) => transactions,
             Err(error) => {
                 self.edit_error = Some(error);
@@ -2640,6 +2684,67 @@ mod document_guard_tests {
         // directly rather than asking it to append to an undo once again.
         let undone = state.update([undo_spec]).unwrap();
         assert_eq!(undone.new_doc(), before.doc());
+    }
+
+    #[test]
+    fn transaction_guard_sees_the_whole_chain_and_commits_source_with_state() {
+        use markraft_commonmark::{SourceDocument, SourceTrack};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let schema = commonmark_schema();
+        let source = SourceDocument::parse(&schema, "base").unwrap();
+        let track = Arc::new(SourceTrack::new(source.clone()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let appender: TransactionAppenderFn = Arc::new(|transaction| {
+            if !transaction.doc_changed() || transaction.annotation(appended()).is_some() {
+                return None;
+            }
+            commands::insert_text("!")(transaction.state())
+        });
+        let mut state = build_state(
+            &schema,
+            &transaction_appender().of(appender),
+            Some(source.document().clone()),
+        );
+        let before = state.clone();
+        let guard_track = track.clone();
+        let guard_calls = calls.clone();
+        let guard_schema = schema.clone();
+        let guard: super::TransactionGuard = Box::new(move |transactions| {
+            assert_eq!(transactions.len(), 2);
+            guard_calls.fetch_add(1, Ordering::Relaxed);
+            guard_track
+                .apply_transactions(&guard_schema, transactions)
+                .map_err(|error| EditRejection::Protected(error.to_string()))
+        });
+        let edit = commands::insert_text("new")(&state).unwrap();
+        // A snapshot rejection must run before a source guard with side effects.
+        assert!(
+            super::apply_guarded_transactions(
+                &mut state,
+                [edit.clone()],
+                Some(&read_only()),
+                Some(&guard)
+            )
+            .is_err()
+        );
+        assert_unchanged(&before, &state);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        let transactions =
+            super::apply_guarded_transactions(&mut state, [edit], None, Some(&guard)).unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(state.doc(), transactions.last().unwrap().new_doc());
+        assert_eq!(track.save(&schema, state.doc()).unwrap(), "new!base");
+    }
+
+    #[test]
+    fn transaction_guard_rejection_keeps_state_and_history() {
+        let mut state = at(&state_of("original"), 4);
+        let before = state.clone();
+        let guard: super::TransactionGuard =
+            Box::new(|_| Err(EditRejection::Protected("Cannot save.".into())));
+        let edit = commands::insert_text("new")(&state).unwrap();
+        assert!(super::apply_guarded_transactions(&mut state, [edit], None, Some(&guard)).is_err());
+        assert_unchanged(&before, &state);
     }
 
     #[test]

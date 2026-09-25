@@ -1530,3 +1530,65 @@ fn a_track_saves_what_it_wrote() {
     let read = SourceDocument::parse(&schema, &original).unwrap();
     assert_eq!(track.save(&schema, read.document()).unwrap(), original);
 }
+
+/// Transaction ranges locate normal typing, while list/block transitions and
+/// source-normalized empty paragraphs retain the snapshot writer's behavior.
+#[test]
+fn transaction_tracking_matches_snapshot_writes_through_real_commands() {
+    use markraft_core::{Selection, TransactionSpec, commands};
+    for original in [
+        "---\nowner: kept\n---\nTitle\n=====\n\nlast",
+        "+ one\n+ two",
+        "[r]: /url\n\n[link][r]",
+        "> nested\n>\n> last",
+        "|a|b|\n|-|-|\n| x | y |",
+    ] {
+        let schema = commonmark_schema();
+        let source = SourceDocument::parse(&schema, original).unwrap();
+        let mut state = editor_at_end(&source);
+        let transactions = SourceTrack::new(source.clone());
+        let snapshots = SourceTrack::new(source);
+        for text in ["a", " ", "b", "中", "🙂"] {
+            let transaction = state
+                .update([commands::insert_text(text)(&state).unwrap()])
+                .unwrap();
+            transactions
+                .apply_transactions(&schema, std::slice::from_ref(&transaction))
+                .unwrap();
+            let expected = snapshots.write(&schema, transaction.new_doc()).unwrap();
+            assert_eq!(
+                transactions.save(&schema, transaction.new_doc()).unwrap(),
+                expected
+            );
+            state = transaction.state().clone();
+        }
+        // Enter changes block structure and can create a paragraph the source
+        // cannot represent yet; subsequent typing must work from that baseline.
+        if let Some(spec) = enter_command(&state)(&state) {
+            let transaction = state.update([spec]).unwrap();
+            transactions
+                .apply_transactions(&schema, std::slice::from_ref(&transaction))
+                .unwrap();
+            let expected = snapshots.write(&schema, transaction.new_doc()).unwrap();
+            assert_eq!(
+                transactions.save(&schema, transaction.new_doc()).unwrap(),
+                expected
+            );
+            state = transaction.state().clone();
+        }
+        let moved = state
+            .update([TransactionSpec::new().selection(Selection::cursor(1))])
+            .unwrap();
+        state = moved.state().clone();
+        let transaction = state
+            .update([commands::insert_text("next")(&state).unwrap()])
+            .unwrap();
+        transactions
+            .apply_transactions(&schema, std::slice::from_ref(&transaction))
+            .unwrap();
+        assert_eq!(
+            transactions.save(&schema, transaction.new_doc()).unwrap(),
+            snapshots.write(&schema, transaction.new_doc()).unwrap(),
+        );
+    }
+}

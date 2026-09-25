@@ -4,7 +4,7 @@ use crate::fs::StoreError;
 use markraft_core::Node;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env, fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -468,6 +468,26 @@ pub struct Library {
     pub active_id: String,
     pub notes: Vec<Note>,
     pub workspace: WorkspaceSettings,
+    /// Explicit user deletion intent. Absence from a snapshot never means deletion.
+    pub deletions: HashMap<String, Note>,
+    /// Per-note generations allow receipts to clear only the snapshot they saved.
+    pub changes: HashMap<String, u64>,
+    pub(crate) generation: u64,
+    pub(crate) search_index: SearchIndex,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SearchIndex(Arc<Mutex<HashMap<String, SearchEntry>>>);
+impl PartialEq for SearchIndex {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+#[derive(Clone, Debug)]
+struct SearchEntry {
+    document: Node,
+    text: String,
+    title: String,
 }
 
 impl Default for Library {
@@ -477,6 +497,10 @@ impl Default for Library {
             active_id: String::new(),
             notes: Vec::new(),
             workspace: WorkspaceSettings::default(),
+            deletions: HashMap::new(),
+            changes: HashMap::new(),
+            generation: 0,
+            search_index: SearchIndex::default(),
         };
         library.new_note(doc::empty());
         library
@@ -508,11 +532,14 @@ impl Library {
             conflicted: false,
         });
         self.active_id.clone_from(&id);
+        self.mark_changed(&id);
         id
     }
 
     /// Take a note as another program left it on disk, replacing any note with its id.
     pub fn adopt(&mut self, note: Note) {
+        self.changes.remove(&note.id);
+        self.deletions.remove(&note.id);
         match self
             .notes
             .iter_mut()
@@ -525,6 +552,8 @@ impl Library {
     }
 
     pub fn remove(&mut self, id: &str) {
+        self.changes.remove(id);
+        self.deletions.remove(id);
         self.notes.retain(|note| note.id != id);
         self.ensure_active();
     }
@@ -554,12 +583,36 @@ impl Library {
 
     /// Remove the note from the library. The file is trashed by the store on save.
     pub fn delete(&mut self, id: &str) -> bool {
-        if !self.notes.iter().any(|note| note.id == id) {
+        let Some(index) = self.notes.iter().position(|note| note.id == id) else {
             return false;
-        }
-        self.notes.retain(|note| note.id != id);
+        };
+        let note = self.notes.remove(index);
+        self.deletions.insert(id.to_owned(), note);
+        self.mark_changed(id);
         self.ensure_active();
         true
+    }
+
+    pub fn mark_changed(&mut self, id: &str) {
+        self.generation += 1;
+        self.changes.insert(id.to_owned(), self.generation);
+    }
+
+    pub fn acknowledge_saved(&mut self, changes: &[(String, u64)]) {
+        for (id, generation) in changes {
+            if self.changes.get(id) == Some(generation) {
+                self.changes.remove(id);
+                self.deletions.remove(id);
+            }
+        }
+    }
+
+    /// A permissions notification changes editability, not the local document or
+    /// the generation of an outstanding save.
+    pub fn update_read_only(&mut self, id: &str, value: Option<String>) {
+        if let Some(note) = self.notes.iter_mut().find(|note| note.id == id) {
+            note.read_only = value;
+        }
     }
 
     pub fn set_document(&mut self, id: &str, document: Node) -> bool {
@@ -571,6 +624,7 @@ impl Library {
         }
         note.document = document;
         note.updated_at = timestamp();
+        self.mark_changed(id);
         true
     }
 
@@ -579,45 +633,60 @@ impl Library {
     /// folder, which is what makes a match read like the path the Browse row shows.
     pub fn search(&self, query: &str, root: Option<&Path>) -> Vec<&Note> {
         let query = query.trim().to_lowercase();
-        let mut notes: Vec<_> = self
-            .notes
-            .iter()
-            .filter(|note| {
-                query.is_empty()
-                    || doc::plain_text(&note.document)
-                        .to_lowercase()
-                        .contains(&query)
-                    || note
-                        .location(root)
-                        .is_some_and(|location| location.to_lowercase().contains(&query))
-            })
-            .collect();
-        // How closely a note answers the query: its title the query itself, then a
-        // title that starts with it, then one that holds it, then anything else that
-        // matched — body or path. Without a query every note ranks alike.
-        let rank = |note: &Note| -> u8 {
-            if query.is_empty() {
-                return 0;
-            }
-            let title = note.title().to_lowercase();
-            if title == query {
+        let mut index = self
+            .search_index
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Keep only live entries; snapshots share the cache, but each entry verifies
+        // its document before use, so an older snapshot cannot produce stale results.
+        let live: HashSet<_> = self.notes.iter().map(|note| note.id.as_str()).collect();
+        index.retain(|id, _| live.contains(id.as_str()));
+        let mut matches = Vec::new();
+        for note in &self.notes {
+            let rank = if query.is_empty() {
                 0
-            } else if title.starts_with(&query) {
-                1
-            } else if title.contains(&query) {
-                2
             } else {
-                3
-            }
-        };
-        notes.sort_by(|a, b| {
-            rank(a)
-                .cmp(&rank(b))
+                let entry = index.entry(note.id.clone()).or_insert_with(|| SearchEntry {
+                    document: note.document.clone(),
+                    text: doc::plain_text(&note.document).to_lowercase(),
+                    title: note.title().to_lowercase(),
+                });
+                if entry.document != note.document {
+                    *entry = SearchEntry {
+                        document: note.document.clone(),
+                        text: doc::plain_text(&note.document).to_lowercase(),
+                        title: note.title().to_lowercase(),
+                    };
+                }
+                if !entry.text.contains(&query)
+                    && !note
+                        .location(root)
+                        .is_some_and(|path| path.to_lowercase().contains(&query))
+                {
+                    continue;
+                }
+                if entry.title == query {
+                    0
+                } else if entry.title.starts_with(&query) {
+                    1
+                } else if entry.title.contains(&query) {
+                    2
+                } else {
+                    3
+                }
+            };
+            matches.push((rank, note));
+        }
+        drop(index);
+        matches.sort_by(|(a_rank, a), (b_rank, b)| {
+            a_rank
+                .cmp(b_rank)
                 .then(b.pinned.cmp(&a.pinned))
                 .then(b.updated_at.cmp(&a.updated_at))
                 .then(a.id.cmp(&b.id))
         });
-        notes
+        matches.into_iter().map(|(_, note)| note).collect()
     }
 
     pub fn validate(&self) -> Result<(), StoreError> {
@@ -798,6 +867,57 @@ impl Notices {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permissions_updates_preserve_unsaved_document_generation() {
+        let mut library = Library::default();
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown("Unsaved local text"));
+        let generation = library.changes[&id];
+        library.update_read_only(&id, Some("Read only".into()));
+        assert_eq!(library.changes[&id], generation);
+        assert_eq!(
+            doc::plain_text(&library.note(&id).unwrap().document),
+            "Unsaved local text"
+        );
+        library.update_read_only(&id, None);
+        assert_eq!(library.changes[&id], generation);
+    }
+
+    #[test]
+    fn receipts_clear_only_the_generation_they_saved() {
+        let mut library = Library::default();
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown("First"));
+        let receipt = vec![(id.clone(), library.changes[&id])];
+        library.set_document(&id, doc::from_markdown("Second"));
+        library.acknowledge_saved(&receipt);
+        assert!(library.changes.contains_key(&id));
+        let receipt = vec![(id.clone(), library.changes[&id])];
+        library.acknowledge_saved(&receipt);
+        assert!(!library.changes.contains_key(&id));
+        library.delete(&id);
+        assert!(library.deletions.contains_key(&id));
+        library.acknowledge_saved(&receipt);
+        assert!(library.deletions.contains_key(&id));
+    }
+
+    #[test]
+    fn cached_search_recomputes_changed_documents_and_keeps_ranking() {
+        let mut library = Library::default();
+        let first = library.active_id.clone();
+        library.set_document(&first, doc::from_markdown("# Alpha\n\nBody"));
+        let second = library.new_note(doc::from_markdown("# Alphabet"));
+        assert_eq!(library.search("alpha", None)[0].id, first);
+        library.set_document(&first, doc::from_markdown("# Renamed\n\nOmega"));
+        assert_eq!(library.search("alpha", None)[0].id, second);
+        assert_eq!(library.search("omega", None)[0].id, first);
+        let older = library.clone();
+        library.set_document(&first, doc::from_markdown("# Later"));
+        assert!(library.search("omega", None).is_empty());
+        assert_eq!(older.search("omega", None)[0].id, first);
+        assert!(library.search("omega", None).is_empty());
+    }
 
     #[test]
     fn notes_can_be_created_searched_and_deleted_without_losing_unicode() {

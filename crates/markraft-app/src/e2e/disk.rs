@@ -4,6 +4,23 @@
 use super::harness::{open, open_with};
 use gpui::TestAppContext;
 
+/// Restore the folder even when a fault-injection assertion panics.
+struct Locked(std::path::PathBuf);
+
+impl Locked {
+    fn set(&self, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(mode))
+            .expect("the folder's permissions");
+    }
+}
+
+impl Drop for Locked {
+    fn drop(&mut self) {
+        self.set(0o755);
+    }
+}
+
 /// `note` as the file reads when it says `markdown`.
 fn on_disk(note: &crate::storage::Note, markdown: &str) -> crate::storage::Note {
     crate::storage::Note {
@@ -96,6 +113,72 @@ fn a_deleted_file_takes_its_note_and_keeps_its_edits(cx: &mut TestAppContext) {
     assert_eq!(copies[0].1, "hello mine\n");
 }
 
+// A refused conflict copy is not permission to discard the only remaining
+// local version. The same outside change can be retried after storage recovers.
+#[gpui::test]
+fn failed_recovery_keeps_local_edits_until_a_rewrite_can_be_reconciled(cx: &mut TestAppContext) {
+    use crate::vault::External;
+    let mut h = open_with(cx, &[("n.md", "hello\n")], |_| {});
+    let before = h.active_note();
+    h.keys("cmd-down cmd-right");
+    h.type_text(" mine");
+    std::fs::write(h.notes.join("n.md"), "theirs\n").unwrap();
+    let change = || External::Updated {
+        previous: Some(before.clone()),
+        note: on_disk(&before, "theirs"),
+    };
+    let locked = Locked(h.notes.clone());
+    locked.set(0o555);
+    h.external(vec![change()]);
+    assert_eq!(h.markdown(), "hello mine");
+    assert_eq!(h.active_note().id, before.id);
+    assert!(h.error().is_some(), "a refused recovery said nothing");
+    assert_eq!(h.other_files("n.md"), []);
+
+    locked.set(0o755);
+    h.external(vec![change()]);
+    assert_eq!(h.markdown(), "theirs");
+    let copies = h.other_files("n.md");
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert_eq!(copies[0].1, "hello mine\n");
+    assert_eq!(
+        std::fs::read_to_string(h.notes.join("n.md")).unwrap(),
+        "theirs\n"
+    );
+}
+
+#[gpui::test]
+fn failed_recovery_keeps_a_deleted_notes_session_until_its_edits_are_safe(cx: &mut TestAppContext) {
+    use crate::vault::External;
+    let mut h = open_with(cx, &[("n.md", "hello\n")], |_| {});
+    let before = h.active_note();
+    h.keys("cmd-down cmd-right");
+    h.type_text(" mine");
+    std::fs::remove_file(h.notes.join("n.md")).unwrap();
+    let locked = Locked(h.notes.clone());
+    locked.set(0o555);
+    h.external(vec![External::Removed(before.clone())]);
+    assert_eq!(h.markdown(), "hello mine");
+    assert!(
+        h.app
+            .update(h.cx, |app, _| app.test_note(&before.id))
+            .is_some()
+    );
+    assert!(h.error().is_some(), "a refused recovery said nothing");
+    assert_eq!(h.files(), Vec::<String>::new());
+
+    locked.set(0o755);
+    h.external(vec![External::Removed(before.clone())]);
+    assert!(
+        h.app
+            .update(h.cx, |app, _| app.test_note(&before.id))
+            .is_none()
+    );
+    let copies = h.other_files("n.md");
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert_eq!(copies[0].1, "hello mine\n");
+}
+
 #[gpui::test]
 fn a_note_typed_and_saved_reaches_its_file(cx: &mut TestAppContext) {
     let mut h = open(cx, |_| {});
@@ -104,6 +187,76 @@ fn a_note_typed_and_saved_reaches_its_file(cx: &mut TestAppContext) {
     assert_eq!(h.markdown(), "hello");
     let text = h.wait_for_file("hello.md", |text| text == "hello\n");
     assert_eq!(text, "hello\n", "files: {:?}", h.files());
+}
+
+// Two explicit saves before either receipt arrives must share progress rather
+// than continually invalidating one another's durability barrier.
+#[gpui::test]
+fn overlapping_manual_saves_finish_with_the_latest_edits(cx: &mut TestAppContext) {
+    let mut h = open_with(cx, &[("n.md", "hello\n")], |_| {});
+    h.keys("cmd-down cmd-right");
+    h.type_text(" changed");
+    h.cx.update(|window, cx| {
+        window.dispatch_action(Box::new(crate::app::Save), cx);
+        window.dispatch_action(Box::new(crate::app::Save), cx);
+    });
+    h.wait_for_io();
+    assert_eq!(h.error(), None);
+    assert_eq!(
+        std::fs::read_to_string(h.notes.join("n.md")).unwrap(),
+        "hello changed\n"
+    );
+}
+
+#[gpui::test]
+fn edits_between_manual_saves_reach_the_final_file(cx: &mut TestAppContext) {
+    let mut h = open_with(cx, &[("n.md", "hello\n")], |_| {});
+    h.keys("cmd-down cmd-right");
+    h.type_text(" first");
+    h.keys("cmd-s");
+    h.type_text(" second");
+    h.keys("cmd-s");
+    h.wait_for_io();
+    assert_eq!(h.error(), None);
+    assert_eq!(h.markdown(), "hello first second");
+    assert_eq!(
+        std::fs::read_to_string(h.notes.join("n.md")).unwrap(),
+        "hello first second\n"
+    );
+}
+
+// A second deletion while the first save is in flight belongs to a newer
+// workspace revision and must receive its own durable save before both finish.
+#[gpui::test]
+fn consecutive_deletions_are_both_saved_before_the_first_flush_returns(cx: &mut TestAppContext) {
+    let mut h = open_with(
+        cx,
+        &[("alpha.md", "alpha\n"), ("beta.md", "beta\n")],
+        |preferences| preferences.confirm_delete = false,
+    );
+    h.save();
+    let first = h.active_note().id;
+    h.keys("cmd-k");
+    h.type_text("Move to Trash");
+    h.keys("enter");
+    assert!(h.app.update(h.cx, |app, _| app.test_note(&first)).is_none());
+    assert!(h.app.update(h.cx, |app, _| app.test_io_pending()));
+
+    let second = h.active_note().id;
+    assert_ne!(first, second);
+    h.keys("cmd-k");
+    h.type_text("Move to Trash");
+    h.keys("enter");
+    assert!(
+        h.app
+            .update(h.cx, |app, _| app.test_note(&second))
+            .is_none()
+    );
+    h.wait_for_io();
+
+    assert_eq!(h.error(), None);
+    assert_eq!(h.files(), Vec::<String>::new());
+    assert_eq!(h.markdown(), "");
 }
 
 // A new note has no file for the guard to hold edits to until its first
@@ -205,28 +358,19 @@ fn an_edit_reaches_its_file_without_a_save(cx: &mut TestAppContext) {
 // once a save gets through; the edits wait on screen in between.
 #[gpui::test]
 fn a_refused_save_is_shown_until_a_save_gets_through(cx: &mut TestAppContext) {
-    use std::os::unix::fs::PermissionsExt;
-    /// The folder made read-only, and writable again however the test ends, so
-    /// the temporary directory can still be removed.
-    struct Locked(std::path::PathBuf);
-    impl Locked {
-        fn set(&self, mode: u32) {
-            std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(mode))
-                .expect("the folder's permissions");
-        }
-    }
-    impl Drop for Locked {
-        fn drop(&mut self) {
-            self.set(0o755);
-        }
-    }
     let mut h = open_with(cx, &[("n.md", "a\n")], |_| {});
     let locked = Locked(h.notes.clone());
     locked.set(0o555);
     h.keys("cmd-down cmd-right");
     h.type_text("b");
     h.save();
-    assert!(h.error().is_some(), "a refused save said nothing");
+    assert!(
+        h.error().is_some(),
+        "a refused save said nothing: markdown={:?}, read_only={:?}, disk={:?}",
+        h.markdown(),
+        h.active_note().read_only,
+        std::fs::read_to_string(h.notes.join("n.md"))
+    );
     assert_eq!(h.markdown(), "ab");
     let on_disk = std::fs::read_to_string(h.notes.join("n.md")).expect("the note's file");
     assert_eq!(on_disk, "a\n");
@@ -237,28 +381,57 @@ fn a_refused_save_is_shown_until_a_save_gets_through(cx: &mut TestAppContext) {
     assert_eq!(h.wait_for_file("n.md", |text| text == "ab\n"), "ab\n");
 }
 
-// Another program writing a note's file reaches the note through the watcher,
-// the path the reconciliations above stand in for: taken as it is when the
+#[gpui::test]
+fn newer_edits_do_not_hide_an_earlier_save_failure(cx: &mut TestAppContext) {
+    let mut h = open_with(cx, &[("n.md", "a\n")], |_| {});
+    let locked = Locked(h.notes.clone());
+    locked.set(0o555);
+    h.keys("cmd-down cmd-right");
+    h.type_text("b");
+    h.keys("cmd-s");
+    h.type_text("c");
+    h.wait_for_io();
+    assert!(
+        h.error().is_some(),
+        "new edits hid the pending write's failure"
+    );
+    assert_eq!(h.markdown(), "abc");
+    assert_eq!(
+        std::fs::read_to_string(h.notes.join("n.md")).unwrap(),
+        "a\n"
+    );
+
+    locked.set(0o755);
+    h.save();
+    assert_eq!(h.error(), None);
+    assert_eq!(
+        std::fs::read_to_string(h.notes.join("n.md")).unwrap(),
+        "abc\n"
+    );
+}
+
+// Another program writing a note's file reaches the note through a refresh,
+// the same reconciliation path used by the watcher: taken as it is when the
 // note has nothing unsaved, and with the edits kept beside it when it has.
 #[gpui::test]
 fn a_file_written_by_another_program_reaches_its_note(cx: &mut TestAppContext) {
     let mut h = open_with(cx, &[("n.md", "hello\n")], |_| {});
-    // The window's first activation checks the folder again, which would find
-    // the write without the watcher. Let it happen first; a save after it is
-    // answered only once the vault's thread has done that check.
+    // Let the window's first activation refresh finish before this write.
     h.pass_time(std::time::Duration::from_millis(100));
     h.save();
     std::fs::write(h.notes.join("n.md"), "theirs\n").expect("another program's write");
+    h.refresh_files();
     h.wait_until(|h| h.markdown() == "theirs");
     assert_eq!(h.markdown(), "theirs");
     assert_eq!(h.other_files("n.md"), []);
 
-    // The autosave may reach the file before the watcher's report reaches the
+    // The autosave may reach the file before the refresh's report reaches the
     // note; either way the file wins and the edits are kept as a copy.
     let mut h = open_with(cx, &[("n.md", "hello\n")], |_| {});
     h.keys("cmd-down cmd-right");
     h.type_text(" mine");
     std::fs::write(h.notes.join("n.md"), "theirs\n").expect("another program's write");
+    h.refresh_files();
     h.wait_until(|h| h.markdown() == "theirs" && !h.other_files("n.md").is_empty());
     assert_eq!(h.markdown(), "theirs");
     let copies = h.other_files("n.md");

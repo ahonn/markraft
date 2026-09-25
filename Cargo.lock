@@ -3929,6 +3929,8 @@ dependencies = [
 name = "markraft-app"
 version = "0.1.0"
 dependencies = [
+ "futures-channel",
+ "futures-util",
  "global-hotkey",
  "gpui-base",
  "gpui-pre",
@@ -3985,6 +3987,7 @@ version = "0.1.0"
 dependencies = [
  "emojis",
  "gpui-pre",
+ "log",
  "markraft-commonmark",
  "markraft-core",
  "objc2-app-kit 0.3.2",

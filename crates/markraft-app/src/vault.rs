@@ -14,7 +14,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::UNIX_EPOCH,
 };
 use uuid::Uuid;
@@ -106,6 +106,93 @@ fn read_manifest(path: &Path, bytes: &[u8]) -> Result<(Manifest, bool), StoreErr
         }
     }
 }
+/// Read-only editor baselines. The lock protects Arc lookups only; rendering and
+/// parsing always happen after it is released.
+#[derive(Default)]
+pub(crate) struct Sources(Mutex<HashMap<String, SourceVersions>>);
+#[derive(Clone)]
+struct SourceVersion {
+    document: markraft_core::Node,
+    updated_at: u64,
+    path: Option<PathBuf>,
+    read_only: Option<String>,
+    track: Option<Arc<SourceTrack>>,
+}
+#[derive(Default)]
+struct SourceVersions {
+    current: Option<SourceVersion>,
+    previous: Option<SourceVersion>,
+    history: Vec<SourceVersion>,
+    removed: Option<Note>,
+}
+impl Sources {
+    pub(crate) fn is_current_external(&self, change: &External) -> bool {
+        let entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match change {
+            External::Updated { note, .. } => entries
+                .get(&note.id)
+                .and_then(|versions| versions.current.as_ref())
+                .is_some_and(|version| {
+                    version.document.ptr_eq(&note.document)
+                        && version.updated_at == note.updated_at
+                        && version.path == note.path
+                        && version.read_only == note.read_only
+                }),
+            External::Removed(note) => entries.get(&note.id).is_some_and(|versions| {
+                versions.current.is_none()
+                    && versions
+                        .removed
+                        .as_ref()
+                        .is_some_and(|removed| same_external_version(removed, note))
+            }),
+        }
+    }
+
+    pub(crate) fn source(&self, note: &Note) -> Result<Option<Arc<SourceTrack>>, StoreError> {
+        let entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let baseline = entries.get(&note.id).and_then(|versions| {
+            let exact = |version: &&SourceVersion| {
+                version.document.ptr_eq(&note.document) && version.updated_at == note.updated_at
+            };
+            versions
+                .current
+                .as_ref()
+                .filter(exact)
+                .or_else(|| versions.history.iter().find(exact))
+                .or_else(|| {
+                    versions
+                        .current
+                        .as_ref()
+                        .filter(|version| version.document == note.document)
+                })
+                .or_else(|| {
+                    versions
+                        .history
+                        .iter()
+                        .find(|version| version.document == note.document)
+                })
+                .or(versions.previous.as_ref())
+                .or(versions.current.as_ref())
+        });
+        match baseline {
+            Some(version) => version
+                .track
+                .clone()
+                .map(Some)
+                .ok_or_else(|| "This file is not Markdown Markraft can read.".into()),
+            None => Ok(None),
+        }
+    }
+}
+
+fn same_external_version(left: &Note, right: &Note) -> bool {
+    left.id == right.id
+        && left.document.ptr_eq(&right.document)
+        && left.path == right.path
+        && left.updated_at == right.updated_at
+        && left.read_only == right.read_only
+}
+
 pub struct Store {
     directory: PathBuf,
     state: PathBuf,
@@ -114,11 +201,14 @@ pub struct Store {
     files: HashMap<String, Saved>,
     pending: HashSet<String>,
     previous: HashMap<String, Saved>,
+    removed: HashMap<String, Note>,
     /// Notes whose local edits were kept as a conflicted copy because disk won.
     disk_won: HashSet<String>,
     /// Where the last save's deletions landed in the Trash, for the window to reveal.
     trashed: Vec<PathBuf>,
     manifest: Manifest,
+    manifest_bytes: Vec<u8>,
+    sources: Arc<Sources>,
     settings: Settings,
     notices: Notices,
     loose: HashSet<PathBuf>,
@@ -183,9 +273,12 @@ impl Store {
             files: HashMap::new(),
             pending: HashSet::new(),
             previous: HashMap::new(),
+            removed: HashMap::new(),
             disk_won: HashSet::new(),
             trashed: Vec::new(),
             manifest,
+            manifest_bytes: Vec::new(),
+            sources: Arc::default(),
             settings,
             notices: Notices::default(),
             loose,
@@ -198,6 +291,7 @@ impl Store {
         }
         let mut library = store.scan_library()?;
         store.restore_recovery(&mut library);
+        store.rebuild_sources();
         Ok((store, library))
     }
     pub fn notices(&self) -> Notices {
@@ -239,7 +333,82 @@ impl Store {
             path: path.clone(),
             detail: e.to_string(),
         })?;
-        atomic_write(&path, &bytes)
+        if bytes == self.manifest_bytes {
+            return Ok(());
+        }
+        atomic_write(&path, &bytes)?;
+        self.manifest_bytes = bytes;
+        Ok(())
+    }
+    pub(crate) fn source_cache(&self) -> Arc<Sources> {
+        self.sources.clone()
+    }
+    pub(crate) fn house(&self) -> markraft_commonmark::HouseStyleHandle {
+        self.house.clone()
+    }
+    fn update_source(&self, id: &str) {
+        let version = |saved: &Saved| SourceVersion {
+            document: saved.note.document.clone(),
+            updated_at: saved.note.updated_at,
+            path: saved.note.path.clone(),
+            read_only: saved.note.read_only.clone(),
+            track: saved.track.clone(),
+        };
+        let current = self.files.get(id).map(version);
+        let previous = self.previous.get(id).map(version);
+        let removed = self.removed.get(id).cloned();
+        let mut entries = self.sources.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut history = Vec::new();
+        if self.pending.contains(id)
+            && let Some(old) = entries.remove(id)
+        {
+            history = old.history;
+            if let Some(old) = old.current {
+                let same_track =
+                    current
+                        .as_ref()
+                        .is_some_and(|current| match (&current.track, &old.track) {
+                            (Some(current), Some(old)) => Arc::ptr_eq(current, old),
+                            (None, None) => current.document == old.document,
+                            _ => false,
+                        });
+                if !same_track {
+                    history.push(old);
+                }
+            }
+        }
+        if current.is_none() && previous.is_none() {
+            entries.remove(id);
+        } else {
+            entries.insert(
+                id.to_owned(),
+                SourceVersions {
+                    current,
+                    previous,
+                    history,
+                    removed,
+                },
+            );
+        }
+    }
+    fn rebuild_sources(&self) {
+        self.sources
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        for id in self.files.keys().chain(self.previous.keys()) {
+            self.update_source(id);
+        }
+    }
+    // File changes must reach the editor even when auxiliary metadata cannot be
+    // persisted. Keep the new baseline and report that independent failure.
+    fn persist_refresh(&mut self) {
+        if let Err(error) = self.persist_manifest() {
+            log::warn!("saving refreshed folder metadata failed: {error}");
+            self.notices
+                .raise(format!("Folder settings could not be saved: {error}"));
+        }
     }
     fn read_path(
         &self,
@@ -330,20 +499,31 @@ impl Store {
     pub fn reload(&mut self) -> Result<Library, StoreError> {
         let library = self.scan_library()?;
         let folder = self.state.join("recovery");
-        if folder.exists() {
-            for entry in fs::read_dir(&folder).map_err(|e| describe(&folder, &e))? {
-                let path = entry.map_err(|e| e.to_string())?.path();
-                if path.extension().is_some_and(|e| e == "json") {
-                    let _ = fs::remove_file(&path);
+        let cleanup = (|| -> Result<(), StoreError> {
+            if folder.exists() {
+                for entry in fs::read_dir(&folder).map_err(|e| describe(&folder, &e))? {
+                    let path = entry.map_err(|e| e.to_string())?.path();
+                    if path.extension().is_some_and(|e| e == "json") {
+                        fs::remove_file(&path).map_err(|e| describe(&path, &e))?;
+                    }
                 }
             }
+            Ok(())
+        })();
+        if let Err(error) = cleanup {
+            log::warn!("clearing legacy recovery drafts failed: {error}");
+            self.notices
+                .raise(format!("Old recovery drafts could not be cleared: {error}"));
         }
+        // Nothing after adopting the new baseline can turn this into an error:
+        // the UI must receive the library that the store will now save against.
         Ok(library)
     }
     fn scan_library(&mut self) -> Result<Library, StoreError> {
         self.files = self.read_folder()?;
         self.pending.clear();
         self.previous.clear();
+        self.removed.clear();
         self.disk_won.clear();
         let mut library = Library {
             notes: self.files.values().map(|s| s.note.clone()).collect(),
@@ -363,7 +543,10 @@ impl Store {
                 .paths
                 .insert(saved.path.clone(), identity(&saved.note));
         }
-        self.persist_manifest()?;
+        self.persist_refresh();
+        library.changes.clear();
+        library.deletions.clear();
+        self.rebuild_sources();
         Ok(library)
     }
     /// A file that left while Markraft was not watching has no note to vanish from
@@ -482,6 +665,7 @@ impl Store {
         self.manifest.paths.insert(path, identity(&saved.note));
         let note = saved.note.clone();
         self.files.insert(note.id.clone(), saved);
+        self.update_source(&note.id);
         self.persist_manifest()?;
         Ok(note)
     }
@@ -489,17 +673,22 @@ impl Store {
         let files = self.read_folder()?;
         let mut changes = Vec::new();
         for (id, saved) in &files {
-            let old = self.files.get(id);
+            let old = if self.disk_won.contains(id) {
+                self.previous.get(id).or_else(|| self.files.get(id))
+            } else {
+                self.files.get(id)
+            };
             if old.is_none_or(|old| {
                 old.bytes != saved.bytes || old.note.read_only != saved.note.read_only
             }) {
-                if let Some(old) = old {
+                let old = old.cloned();
+                if let Some(old) = &old {
                     self.previous
                         .entry(id.clone())
                         .or_insert_with(|| old.clone());
                 }
                 changes.push(External::Updated {
-                    previous: old.map(|s| s.note.clone()),
+                    previous: old.map(|s| s.note),
                     note: saved.note.clone(),
                 });
             }
@@ -518,6 +707,14 @@ impl Store {
         for change in &changes {
             let (External::Updated { note, .. } | External::Removed(note)) = change;
             self.pending.insert(note.id.clone());
+            match change {
+                External::Updated { .. } => {
+                    self.removed.remove(&note.id);
+                }
+                External::Removed(_) => {
+                    self.removed.insert(note.id.clone(), note.clone());
+                }
+            }
         }
         self.files = files;
         for saved in self.files.values() {
@@ -525,7 +722,11 @@ impl Store {
                 .paths
                 .insert(saved.path.clone(), identity(&saved.note));
         }
-        self.persist_manifest()?;
+        for change in &changes {
+            let (External::Updated { note, .. } | External::Removed(note)) = change;
+            self.update_source(&note.id);
+        }
+        self.persist_refresh();
         Ok(changes)
     }
     /// File events only read affected paths. Directory events and explicit refreshes rescan.
@@ -539,7 +740,12 @@ impl Store {
             }
             let relative = path.strip_prefix(&self.directory).ok();
             if !self.loose.contains(&path) && (relative.is_none() || relative.is_some_and(|p|p.components().any(|c| matches!(c,Component::Normal(name) if matches!(name.to_str(),Some(".git"|".obsidian"|".markraft"|".trash"|"node_modules")))))) { continue; }
-            let old = self.files.values().find(|s| s.path == path).cloned();
+            let old = self
+                .manifest
+                .paths
+                .get(&path)
+                .and_then(|identity| self.files.get(&identity.id))
+                .cloned();
             if old.is_none()
                 && !self.loose.contains(&path)
                 && fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink())
@@ -547,6 +753,13 @@ impl Store {
                 continue;
             }
             let next = self.read_path(&path, old.as_ref())?;
+            let old = old.map(|old| {
+                if self.disk_won.contains(&old.note.id) {
+                    self.previous.get(&old.note.id).cloned().unwrap_or(old)
+                } else {
+                    old
+                }
+            });
             staged.push((old, next));
         }
         let mut changes = Vec::new();
@@ -566,6 +779,7 @@ impl Store {
                         note: next.note.clone(),
                     });
                     self.pending.insert(id.clone());
+                    self.removed.remove(&id);
                     self.manifest
                         .paths
                         .insert(next.path.clone(), identity(&next.note));
@@ -578,6 +792,7 @@ impl Store {
                         identity.gone = true;
                     }
                     self.pending.insert(id.clone());
+                    self.removed.insert(id.clone(), old.note.clone());
                     self.files.remove(&id);
                     self.previous.entry(id).or_insert(old);
                 }
@@ -585,15 +800,43 @@ impl Store {
             }
         }
         if !changes.is_empty() {
-            self.persist_manifest()?;
+            for change in &changes {
+                let (External::Updated { note, .. } | External::Removed(note)) = change;
+                self.update_source(&note.id);
+            }
+            self.persist_refresh();
         }
         Ok(changes)
     }
+    pub fn acknowledge_changes(&mut self, changes: &[External]) {
+        for change in changes {
+            let (note, current) = match change {
+                External::Updated { note, .. } => {
+                    (note, self.files.get(&note.id).map(|saved| &saved.note))
+                }
+                External::Removed(note) => (
+                    note,
+                    self.removed
+                        .get(&note.id)
+                        .filter(|_| !self.files.contains_key(&note.id)),
+                ),
+            };
+            if current.is_some_and(|current| same_external_version(current, note)) {
+                self.clear_pending(&note.id);
+            }
+        }
+    }
+    fn clear_pending(&mut self, id: &str) {
+        self.pending.remove(id);
+        self.previous.remove(id);
+        self.removed.remove(id);
+        self.disk_won.remove(id);
+        self.update_source(id);
+    }
+    #[cfg(test)]
     pub fn acknowledge(&mut self, ids: &[String]) {
         for id in ids {
-            self.pending.remove(id);
-            self.previous.remove(id);
-            self.disk_won.remove(id);
+            self.clear_pending(id);
         }
     }
     pub fn markdown(&self, note: &Note) -> Result<String, StoreError> {
@@ -601,16 +844,6 @@ impl Store {
     }
     /// The track `note`'s edits are written through, for its editor to check
     /// each keystroke against: `None` for a note with no file yet.
-    pub fn source(&self, note: &Note) -> Result<Option<Arc<SourceTrack>>, StoreError> {
-        match self.baseline(note) {
-            Some(saved) => saved
-                .track
-                .clone()
-                .map(Some)
-                .ok_or_else(|| "This file is not Markdown Markraft can read.".into()),
-            None => Ok(None),
-        }
-    }
     /// The file `note`'s edits are written against. A note that already says
     /// what the file on disk says — the disk version an external change was
     /// just adopted as — takes those bytes as its baseline. The pre-change
@@ -805,37 +1038,43 @@ impl Store {
         // The notes disk won over, by title: one conflict error at the end, so a
         // caller can tell it from a failure and still not take them as saved.
         let mut conflicts: Vec<String> = Vec::new();
-        let live_ids: HashSet<_> = library.notes.iter().map(|n| n.id.clone()).collect();
-        // Notes the library no longer holds were deleted: trash their files.
-        let to_trash: Vec<_> = self
-            .files
-            .keys()
-            .filter(|id| !live_ids.contains(*id))
-            .cloned()
-            .collect();
-        for id in to_trash {
-            if let Some(saved) = self.files.get(&id).cloned()
-                && let Err(error) = self.trash_note(&saved)
-            {
-                errors.push(error);
+        // A stale snapshot cannot authorize deleting a file it has never seen.
+        for id in library.deletions.keys() {
+            if let Some(saved) = self.files.get(id).cloned() {
+                let unchanged = !self.pending.contains(id)
+                    && read_optional(&saved.path)
+                        .is_ok_and(|bytes| bytes.as_ref() == Some(&saved.bytes));
+                if !unchanged {
+                    errors.push(StoreError::Conflict(vec![saved.note.title()]));
+                    continue;
+                }
+                if let Err(error) = self.trash_note(&saved) {
+                    errors.push(error);
+                }
             }
         }
         for note in &library.notes {
-            let saved = self.files.get(&note.id).cloned();
-            if let Some(saved) = &saved {
+            if let Some(saved) = self.files.get_mut(&note.id) {
                 self.manifest
                     .paths
                     .insert(saved.path.clone(), identity(note));
-                if let Some(current) = self.files.get_mut(&note.id) {
-                    current.note.pinned = note.pinned;
+                saved.note.pinned = note.pinned;
+                if !library.changes.contains_key(&note.id) {
+                    continue;
                 }
             }
+            let saved = self.files.get(&note.id).cloned();
             if self.pending.contains(&note.id) {
-                let locally_changed = self
-                    .previous
+                let adopted_disk = self
+                    .files
                     .get(&note.id)
-                    .or_else(|| self.files.get(&note.id))
-                    .is_none_or(|base| base.note.document != note.document);
+                    .is_some_and(|saved| saved.note.document == note.document);
+                let locally_changed = !adopted_disk
+                    && self
+                        .previous
+                        .get(&note.id)
+                        .or_else(|| self.files.get(&note.id))
+                        .is_none_or(|base| base.note.document != note.document);
                 if locally_changed {
                     // Disk already won via refresh; keep local edits as a conflicted copy.
                     if let Err(error) = self.recover(note) {
@@ -867,18 +1106,25 @@ impl Store {
                     read_optional(&s.path).is_ok_and(|disk| disk.as_ref() != Some(&s.bytes))
                 });
                 if external {
-                    // Disk wins mid-save: keep local as conflicted copy, adopt disk bytes.
-                    let recovery = self.recover(note);
-                    if let Some(saved) = &saved
-                        && let Ok(Some(mut disk)) = self.read_path(&saved.path, Some(saved))
-                    {
-                        disk.note.id = note.id.clone();
-                        self.files.insert(note.id.clone(), disk);
-                    }
-                    self.disk_won.insert(note.id.clone());
-                    self.pending.insert(note.id.clone());
-                    match recovery {
-                        Ok(()) => conflicts.push(note.title()),
+                    // Preserve the local version before advancing any conflict
+                    // state. Failed recovery must remain retryable against its base.
+                    match self.recover(note) {
+                        Ok(()) => {
+                            if let Some(saved) = &saved {
+                                self.previous
+                                    .entry(note.id.clone())
+                                    .or_insert_with(|| saved.clone());
+                                if let Ok(Some(mut disk)) = self.read_path(&saved.path, Some(saved))
+                                {
+                                    disk.note.id = note.id.clone();
+                                    self.files.insert(note.id.clone(), disk);
+                                }
+                            }
+                            self.disk_won.insert(note.id.clone());
+                            self.pending.insert(note.id.clone());
+                            self.update_source(&note.id);
+                            conflicts.push(note.title());
+                        }
                         Err(e) => {
                             errors.push(format!("{error}; conflicted copy failed: {e}").into())
                         }
@@ -889,7 +1135,9 @@ impl Store {
             }
         }
         self.manifest.active_id.clone_from(&library.active_id);
-        self.persist_manifest()?;
+        if let Err(error) = self.persist_manifest() {
+            errors.push(error);
+        }
         let settings = Settings {
             preferences: preferences.clone(),
             open_files: {
@@ -900,8 +1148,10 @@ impl Store {
             ..self.settings.clone()
         };
         if settings != self.settings || !self.settings_path.exists() {
-            settings.write(&self.settings_path)?;
-            self.settings = settings;
+            match settings.write(&self.settings_path) {
+                Ok(()) => self.settings = settings,
+                Err(error) => errors.push(error),
+            }
         }
         if !conflicts.is_empty() {
             errors.push(StoreError::Conflict(conflicts));
@@ -928,7 +1178,15 @@ impl Store {
                 .into());
             }
         }
-        let bytes = render(saved, note, &self.house)?.into_bytes();
+        let render_started = std::time::Instant::now();
+        let rendered = render(saved, note, &self.house);
+        log::debug!(
+            "save_render note={} elapsed_us={} success={}",
+            note.id,
+            render_started.elapsed().as_micros(),
+            rendered.is_ok()
+        );
+        let bytes = rendered?.into_bytes();
         // A tree that writes what the file already holds — a picture spelled
         // out under the caret, which saves as the same characters as the
         // picture — is not written again: the file keeps its bytes and its
@@ -947,6 +1205,7 @@ impl Store {
                     ..saved.clone()
                 },
             );
+            self.update_source(&note.id);
             return Ok(());
         }
         let path = match saved {
@@ -988,7 +1247,16 @@ impl Store {
         if path.starts_with(&self.directory) {
             reject_symlink_components(&self.directory, path.parent().unwrap())?;
         }
-        write_document(&path, &bytes, saved.map(|s| s.bytes.as_slice()))?;
+        let write_started = std::time::Instant::now();
+        let written = write_document(&path, &bytes, saved.map(|s| s.bytes.as_slice()));
+        log::debug!(
+            "save_write note={} bytes={} elapsed_us={} success={}",
+            note.id,
+            bytes.len(),
+            write_started.elapsed().as_micros(),
+            written.is_ok()
+        );
+        written?;
         let mut stored = note.clone();
         stored.path = Some(path.clone());
         stored.conflicted = false;
@@ -1010,6 +1278,7 @@ impl Store {
                 note: stored,
             },
         );
+        self.update_source(&note.id);
         Ok(())
     }
     /// Move the file to the system trash and drop it from the store. No in-app
@@ -1023,7 +1292,9 @@ impl Store {
         self.loose.remove(&saved.path);
         self.pending.remove(&saved.note.id);
         self.previous.remove(&saved.note.id);
+        self.removed.remove(&saved.note.id);
         self.clear_recovery(&saved.note.id);
+        self.update_source(&saved.note.id);
         Ok(())
     }
     /// Spell new Markdown in `house`'s style from now on.
@@ -1407,6 +1678,251 @@ mod tests {
         let (store, _) = open(root);
         store.state.join("manifest.json")
     }
+    #[test]
+    fn mid_save_conflict_is_delivered_on_the_next_refresh() {
+        for incremental in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = fixture(root.path(), "note.md", b"Original");
+            let (mut store, mut library) = open(root.path());
+            let id = library.active_id.clone();
+            library.set_document(&id, doc::from_markdown("Local"));
+            fs::write(&path, b"External").unwrap();
+            assert!(store.save(&library, &Preferences::default()).is_err());
+            let changes = if incremental {
+                store.refresh_paths(&[path])
+            } else {
+                store.refresh()
+            }
+            .unwrap();
+            let note = changes
+                .iter()
+                .find_map(|change| match change {
+                    External::Updated {
+                        previous: Some(previous),
+                        note,
+                    } if note.id == id => {
+                        assert_eq!(doc::plain_text(&previous.document), "Original");
+                        Some(note)
+                    }
+                    _ => None,
+                })
+                .expect("the conflicted note must reach the UI");
+            assert_eq!(doc::plain_text(&note.document), "External");
+        }
+    }
+
+    #[test]
+    fn reload_returns_the_adopted_library_when_auxiliary_metadata_cannot_be_written() {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), "note.md", b"Original");
+        let (mut store, _) = open(root.path());
+        let manifest = store.state.join("manifest.json");
+        fs::remove_file(&manifest).unwrap();
+        fs::create_dir(&manifest).unwrap();
+        fixture(root.path(), "added.md", b"Added");
+        let reloaded = store.reload().unwrap();
+        assert_eq!(reloaded.notes.len(), 2);
+        assert_eq!(store.files.len(), 2);
+        assert!(!store.notices().take().is_empty());
+    }
+
+    #[test]
+    fn source_only_changes_with_the_same_timestamp_have_distinct_acknowledgements() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "note.md", b"# Heading\n");
+        let (mut store, library) = open(root.path());
+        let id = library.active_id.clone();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, b"Heading\n=======\n").unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let first = store.refresh_paths(std::slice::from_ref(&path)).unwrap();
+        fs::write(&path, b"# Heading\n").unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let second = store.refresh_paths(std::slice::from_ref(&path)).unwrap();
+        let (External::Updated { note: a, .. }, External::Updated { note: b, .. }) =
+            (&first[0], &second[0])
+        else {
+            panic!()
+        };
+        assert_eq!(a.document, b.document);
+        assert_eq!(a.updated_at, b.updated_at);
+        store.acknowledge_changes(&first);
+        assert!(store.pending.contains(&id));
+        assert_eq!(
+            store
+                .source_cache()
+                .source(a)
+                .unwrap()
+                .unwrap()
+                .origin()
+                .source(),
+            "Heading\n=======\n"
+        );
+        store.acknowledge_changes(&second);
+        assert!(!store.pending.contains(&id));
+    }
+
+    #[test]
+    fn only_latest_external_versions_are_current_and_removal_acks_its_own_version() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "note.md", b"First");
+        let (mut store, library) = open(root.path());
+        let id = library.active_id.clone();
+        let sources = store.source_cache();
+        fs::write(&path, b"Second").unwrap();
+        let updated = store.refresh_paths(std::slice::from_ref(&path)).unwrap();
+        assert!(sources.is_current_external(&updated[0]));
+        fs::remove_file(&path).unwrap();
+        let removed = store.refresh_paths(std::slice::from_ref(&path)).unwrap();
+        assert!(!sources.is_current_external(&updated[0]));
+        assert!(sources.is_current_external(&removed[0]));
+        store.acknowledge_changes(&updated);
+        assert!(store.pending.contains(&id));
+        store.acknowledge_changes(&removed);
+        assert!(!store.pending.contains(&id));
+        assert!(!sources.is_current_external(&removed[0]));
+    }
+
+    #[test]
+    fn reloading_rejects_deferred_events_from_the_previous_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "note.md", b"First");
+        let (mut store, _) = open(root.path());
+        fs::write(&path, b"Second").unwrap();
+        let deferred = store.refresh_paths(std::slice::from_ref(&path)).unwrap();
+        fs::write(&path, b"Latest").unwrap();
+        let reloaded = store.reload().unwrap();
+        assert_eq!(doc::plain_text(&reloaded.active_note().document), "Latest");
+        assert!(!store.source_cache().is_current_external(&deferred[0]));
+    }
+
+    #[test]
+    fn old_acknowledgement_cannot_release_a_newer_external_change() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "note.md", b"First");
+        let (mut store, library) = open(root.path());
+        let id = library.active_id.clone();
+        fs::write(&path, b"Second").unwrap();
+        let first = store.refresh_paths(std::slice::from_ref(&path)).unwrap();
+        fs::write(&path, b"Third").unwrap();
+        let second = store.refresh_paths(std::slice::from_ref(&path)).unwrap();
+        store.acknowledge_changes(&first);
+        assert!(store.pending.contains(&id));
+        let External::Updated { note, .. } = &first[0] else {
+            panic!()
+        };
+        assert_eq!(
+            store
+                .source_cache()
+                .source(note)
+                .unwrap()
+                .unwrap()
+                .origin()
+                .source(),
+            "Second"
+        );
+        store.acknowledge_changes(&second);
+        assert!(!store.pending.contains(&id));
+    }
+
+    #[test]
+    fn stale_snapshot_never_deletes_an_unacknowledged_external_file() {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), "original.md", b"Original");
+        let (mut store, library) = open(root.path());
+        let added = fixture(root.path(), "dropped.md", b"External addition");
+        let changes = store.refresh_paths(std::slice::from_ref(&added)).unwrap();
+        assert_eq!(changes.len(), 1);
+        store.save(&library, &Preferences::default()).unwrap();
+        assert_eq!(fs::read(&added).unwrap(), b"External addition");
+        assert_eq!(store.files.len(), 2);
+    }
+
+    #[test]
+    fn explicit_delete_refuses_a_file_changed_since_its_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "note.md", b"Original");
+        let (mut store, mut library) = open(root.path());
+        let id = library.active_id.clone();
+        assert!(library.delete(&id));
+        fs::write(&path, b"Changed elsewhere").unwrap();
+        assert!(store.save(&library, &Preferences::default()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"Changed elsewhere");
+        assert!(store.files.contains_key(&id));
+    }
+
+    #[test]
+    fn failed_conflict_recovery_preserves_the_original_baseline_for_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "sub/note.md", b"Original");
+        let (mut store, mut library) = open(root.path());
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown("Local changes"));
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(path.parent().unwrap()).unwrap();
+        assert!(store.save(&library, &Preferences::default()).is_err());
+        assert_eq!(store.files[&id].bytes, b"Original");
+        assert!(!store.pending.contains(&id));
+        assert!(!store.disk_won.contains(&id));
+        assert_eq!(
+            doc::plain_text(&library.note(&id).unwrap().document),
+            "Local changes"
+        );
+    }
+
+    #[test]
+    fn manifest_failure_does_not_hide_external_changes_or_leave_the_source_cache_stale() {
+        for incremental in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = fixture(root.path(), "note.md", b"Original");
+            let (mut store, library) = open(root.path());
+            let original = library.active_note().clone();
+            let manifest = store.state.join("manifest.json");
+            fs::remove_file(&manifest).unwrap();
+            fs::create_dir(&manifest).unwrap();
+            fs::write(&path, b"External content").unwrap();
+            let added = fixture(root.path(), "added.md", b"Added");
+            let changes = if incremental {
+                store.refresh_paths(&[path, added])
+            } else {
+                store.refresh()
+            }
+            .unwrap();
+            let note = changes
+                .iter()
+                .find_map(|change| match change {
+                    External::Updated { note, .. } if note.id == original.id => Some(note),
+                    _ => None,
+                })
+                .expect("change must reach the UI");
+            let sources = store.source_cache();
+            assert_eq!(
+                sources
+                    .source(&original)
+                    .unwrap()
+                    .unwrap()
+                    .origin()
+                    .source(),
+                "Original"
+            );
+            assert_eq!(
+                sources.source(note).unwrap().unwrap().origin().source(),
+                "External content"
+            );
+            assert!(!store.notices().take().is_empty());
+        }
+    }
+
     #[test]
     fn an_unreadable_manifest_is_set_aside_and_the_folder_opens() {
         let root = tempfile::tempdir().unwrap();
@@ -2120,7 +2636,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "Draft text\n");
     }
     #[test]
-    fn a_discarded_draft_does_not_come_back() {
+    fn only_explicit_deletion_discards_a_filed_draft() {
         for discard in ["trash", "remove"] {
             let root = tempfile::tempdir().unwrap();
             fixture(root.path(), "one.md", b"One");
@@ -2136,8 +2652,19 @@ mod tests {
             store.save(&library, &Preferences::default()).unwrap();
             drop(store);
             let (_, library) = open(root.path());
-            assert!(library.note(&id).is_none(), "a {discard}ed draft came back");
-            assert!(!target.exists(), "the filed draft was left on disk");
+            if discard == "trash" {
+                assert!(library.note(&id).is_none(), "a discarded draft came back");
+                assert!(
+                    !target.exists(),
+                    "the explicitly deleted draft was left on disk"
+                );
+            } else {
+                assert!(library.note(&id).is_some());
+                assert!(
+                    target.exists(),
+                    "forgetting a note must not authorize deleting its file"
+                );
+            }
         }
     }
     #[test]

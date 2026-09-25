@@ -5,14 +5,21 @@ use crate::{
     storage::{Library, Note, Notices, Preferences},
     vault::{External, Store},
 };
+use futures_channel::{
+    mpsc::{UnboundedReceiver, unbounded},
+    oneshot,
+};
 use notify::Watcher;
+#[cfg(test)]
+use std::sync::mpsc::RecvTimeoutError;
+use std::{future::Future, pin::Pin};
 use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        mpsc::{self, Receiver, Sender},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// Said when outside changes will not be noticed as they happen; the details
@@ -21,6 +28,7 @@ const WATCH_FAILED: &str = "Couldn't watch for outside changes.";
 /// Said when a look for outside changes failed; the details go to the log.
 const CHECK_FAILED: &str = "Couldn't check for outside changes.";
 
+#[cfg(test)]
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A completed snapshot attempt. Recovery can succeed without a Markdown file, so
@@ -28,6 +36,7 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug)]
 pub struct Saved {
     pub revision: u64,
+    pub changes: Vec<(String, u64)>,
     pub result: Result<(), StoreError>,
     pub paths: Vec<(String, std::path::PathBuf)>,
     /// Notes whose local edits were kept as a conflicted copy because disk won.
@@ -38,39 +47,55 @@ pub struct Saved {
 pub enum Event {
     Saved(Saved),
     /// Other programs changed these notes. Snapshots are not written for them until
-    /// the application calls [`Persistence::acknowledge`].
+    /// the application calls [`Persistence::acknowledge_changes`].
     External(Vec<External>),
 }
+/// A response can be awaited on the UI executor without blocking it. Requests are
+/// enqueued before this future is returned, preserving queue barriers.
+pub type Pending<T> = Pin<Box<dyn Future<Output = Result<T, StoreError>> + Send + 'static>>;
+enum Reply<T> {
+    #[cfg(test)]
+    Blocking(Sender<T>),
+    Async(oneshot::Sender<T>),
+}
+impl<T> Reply<T> {
+    fn send(self, value: T) -> Result<(), T> {
+        match self {
+            #[cfg(test)]
+            Self::Blocking(sender) => sender.send(value).map_err(|error| error.0),
+            Self::Async(sender) => sender.send(value),
+        }
+    }
+}
 enum Request {
-    Save(u64, Library, Preferences),
-    Recover(Note, Sender<Result<(), StoreError>>),
-    Markdown(Note, Sender<Result<String, StoreError>>),
-    Source(
-        Note,
-        Sender<Result<Option<std::sync::Arc<markraft_commonmark::SourceTrack>>, StoreError>>,
-    ),
-    OpenFile(std::path::PathBuf, Sender<Result<Note, StoreError>>),
+    Shutdown,
+    Save(u64, Library, Preferences, Instant),
+    Recover(Note, Reply<Result<(), StoreError>>),
+    Markdown(Note, Reply<Result<String, StoreError>>),
+    OpenFile(std::path::PathBuf, Reply<Result<Note, StoreError>>),
     Rename(
         String,
         String,
-        Sender<Result<std::path::PathBuf, StoreError>>,
+        Reply<Result<std::path::PathBuf, StoreError>>,
     ),
-    Flush(u64, Library, Preferences, Sender<Saved>),
-    Reload(Sender<Result<Library, StoreError>>),
+    Flush(u64, Library, Preferences, Reply<Saved>, Instant),
+    Reload(Reply<Result<Library, StoreError>>),
     Refresh,
     RefreshPaths(Vec<std::path::PathBuf>),
+    AcknowledgeChanges(Vec<External>),
+    #[cfg(test)]
     Acknowledge(Vec<String>),
 }
 pub struct Persistence {
     requests: Sender<Request>,
     events: Receiver<Event>,
+    wake: Option<UnboundedReceiver<()>>,
     /// Shared with the store the worker owns, so what it notices on its own
     /// thread still reaches the interface.
     notices: Notices,
-    // Dropping the watcher stops it; the worker ends when `requests` is dropped.
-    _watcher: std::sync::Mutex<Option<notify::RecommendedWatcher>>,
-    watch_root: std::path::PathBuf,
-    extra_watches: std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    watches: Sender<Option<std::path::PathBuf>>,
+    sources: Arc<crate::vault::Sources>,
+    house: markraft_commonmark::HouseStyleHandle,
 }
 impl Persistence {
     /// Start saving `store`'s notes on a thread of their own, spelling new
@@ -82,19 +107,58 @@ impl Persistence {
     fn start(mut store: Store, watching: bool) -> Self {
         let (requests, incoming) = mpsc::channel();
         let (outgoing, events) = mpsc::channel();
+        let (pulse, wake) = unbounded();
         let notices = store.notices();
-        let watch_root = store.directory().to_owned();
-        let extra_watches =
-            std::sync::Mutex::new(store.extra_watch_directories().into_iter().collect());
-        let watcher = watching.then(|| watch(&store, requests.clone())).flatten();
+        let sources = store.source_cache();
+        let house = store.house();
+        let (watches, watch_requests) = mpsc::channel::<Option<std::path::PathBuf>>();
+        if watching {
+            let directory = store.directory().to_owned();
+            let extra = store.extra_watch_directories();
+            let requests = requests.clone();
+            let notices = notices.clone();
+            let pulse = pulse.clone();
+            // FSEvents registration can wait on a system service. It must never
+            // delay opening the editor or processing saves on the store worker.
+            std::thread::spawn(move || {
+                let mut watcher = watch(&directory, &extra, notices.clone(), requests);
+                let _ = pulse.unbounded_send(());
+                let mut watched: std::collections::HashSet<_> = extra.into_iter().collect();
+                for path in watch_requests {
+                    let Some(path) = path else {
+                        break;
+                    };
+                    if path.starts_with(&directory) {
+                        continue;
+                    }
+                    let Some(parent) = path.parent() else {
+                        continue;
+                    };
+                    if watched.contains(parent) {
+                        continue;
+                    }
+                    if let Some(watcher) = watcher.as_mut() {
+                        match watcher.watch(parent, notify::RecursiveMode::NonRecursive) {
+                            Ok(()) => {
+                                watched.insert(parent.to_owned());
+                            }
+                            Err(error) => {
+                                log::warn!("{} could not be watched: {error}", parent.display());
+                                notices.raise(WATCH_FAILED.to_owned());
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        let watch_saved = watches.clone();
         std::thread::spawn(move || {
-            for request in incoming {
+            let mut deferred = None;
+            while let Some(request) = next_request(&incoming, &mut deferred) {
                 match request {
+                    Request::Shutdown => break,
                     Request::Markdown(note, response) => {
                         let _ = response.send(store.markdown(&note));
-                    }
-                    Request::Source(note, response) => {
-                        let _ = response.send(store.source(&note));
                     }
                     Request::Recover(note, response) => {
                         let _ = response.send(store.recover(&note));
@@ -105,17 +169,27 @@ impl Persistence {
                     Request::Rename(id, name, response) => {
                         let _ = response.send(store.rename(&id, &name));
                     }
-                    Request::Save(revision, library, preferences) => {
+                    Request::Save(revision, library, preferences, queued_at) => {
+                        log::debug!(
+                            "save_queue revision={revision} wait_us={}",
+                            queued_at.elapsed().as_micros()
+                        );
                         let saved = save_snapshot(&mut store, revision, &library, &preferences);
+                        for (_, path) in &saved.paths {
+                            let _ = watch_saved.send(Some(path.clone()));
+                        }
                         let _ = outgoing.send(Event::Saved(saved));
                     }
-                    Request::Flush(revision, library, preferences, response) => {
-                        let _ = response.send(save_snapshot(
-                            &mut store,
-                            revision,
-                            &library,
-                            &preferences,
-                        ));
+                    Request::Flush(revision, library, preferences, response, queued_at) => {
+                        log::debug!(
+                            "flush_queue revision={revision} wait_us={}",
+                            queued_at.elapsed().as_micros()
+                        );
+                        let saved = save_snapshot(&mut store, revision, &library, &preferences);
+                        for (_, path) in &saved.paths {
+                            let _ = watch_saved.send(Some(path.clone()));
+                        }
+                        let _ = response.send(saved);
                     }
                     Request::Reload(response) => {
                         let _ = response.send(store.reload());
@@ -140,85 +214,100 @@ impl Persistence {
                         }
                         _ => {}
                     },
+                    Request::AcknowledgeChanges(changes) => store.acknowledge_changes(&changes),
+                    #[cfg(test)]
                     Request::Acknowledge(ids) => store.acknowledge(&ids),
                 }
+                let _ = pulse.unbounded_send(());
             }
         });
         Self {
             requests,
             events,
+            wake: Some(wake),
             notices,
-            _watcher: std::sync::Mutex::new(watcher),
-            watch_root,
-            extra_watches,
+            watches,
+            sources,
+            house,
         }
+    }
+    pub fn take_wake(&mut self) -> Option<UnboundedReceiver<()>> {
+        self.wake.take()
     }
     pub fn refresh(&self) {
         let _ = self.requests.send(Request::Refresh);
     }
+    #[cfg(test)]
+    pub fn new_unwatched(mut store: Store, house: markraft_commonmark::HouseStyleHandle) -> Self {
+        store.set_house(house);
+        Self::start(store, false)
+    }
     fn watch_file(&self, path: &std::path::Path) {
-        if path.starts_with(&self.watch_root) {
-            return;
-        }
-        let Some(parent) = path.parent() else { return };
-        if let (Ok(mut watched), Ok(mut watcher)) =
-            (self.extra_watches.lock(), self._watcher.lock())
-            && !watched.contains(parent)
-            && let Some(watcher) = watcher.as_mut()
-        {
-            match watcher.watch(parent, notify::RecursiveMode::NonRecursive) {
-                Ok(()) => {
-                    watched.insert(parent.to_owned());
-                }
-                Err(error) => {
-                    log::warn!("{} could not be watched: {error}", parent.display());
-                    self.notices.raise(WATCH_FAILED.to_owned());
-                }
-            }
-        }
+        let _ = self.watches.send(Some(path.to_owned()));
     }
-    pub fn open_file(&self, path: std::path::PathBuf) -> Result<Note, StoreError> {
+    fn request_async<T: Send + 'static>(
+        &self,
+        request: impl FnOnce(Reply<T>) -> Request,
+    ) -> Pending<T> {
+        let (sender, receiver) = oneshot::channel();
+        let sent = self
+            .requests
+            .send(request(Reply::Async(sender)))
+            .map_err(|_| stopped());
+        Box::pin(async move {
+            sent?;
+            receiver.await.map_err(|_| stopped())
+        })
+    }
+    pub fn open_file_async(&self, path: std::path::PathBuf) -> Pending<Note> {
         self.watch_file(&path);
-        let (tx, rx) = mpsc::channel();
-        self.requests
-            .send(Request::OpenFile(path, tx))
-            .map_err(|_| stopped())?;
-        rx.recv().map_err(|_| stopped())?
+        let response = self.request_async(|reply| Request::OpenFile(path, reply));
+        Box::pin(async move { response.await? })
     }
-    /// Rename a note's file where it is, answering with the path it has now.
-    pub fn rename(&self, id: String, name: String) -> Result<std::path::PathBuf, StoreError> {
-        let (tx, rx) = mpsc::channel();
-        self.requests
-            .send(Request::Rename(id, name, tx))
-            .map_err(|_| stopped())?;
-        rx.recv().map_err(|_| stopped())?
+    pub fn rename_async(&self, id: String, name: String) -> Pending<std::path::PathBuf> {
+        let response = self.request_async(|reply| Request::Rename(id, name, reply));
+        Box::pin(async move { response.await? })
     }
+    pub fn recover_async(&self, note: Note) -> Pending<()> {
+        let response = self.request_async(|reply| Request::Recover(note, reply));
+        Box::pin(async move { response.await? })
+    }
+    pub fn markdown_async(&self, note: Note) -> Pending<String> {
+        let response = self.request_async(|reply| Request::Markdown(note, reply));
+        Box::pin(async move { response.await? })
+    }
+    pub fn reload_async(&self) -> Pending<Library> {
+        let response = self.request_async(Request::Reload);
+        Box::pin(async move { response.await? })
+    }
+    pub fn flush_async(
+        &self,
+        revision: u64,
+        library: Library,
+        preferences: Preferences,
+    ) -> Pending<Saved> {
+        self.request_async(|reply| {
+            Request::Flush(revision, library, preferences, reply, Instant::now())
+        })
+    }
+    /// Local baseline rendering; no worker round-trip or cache lock is held while
+    /// the source track renders the document.
     pub fn markdown(&self, note: Note) -> Result<String, StoreError> {
-        let (tx, rx) = mpsc::channel();
-        self.requests
-            .send(Request::Markdown(note, tx))
-            .map_err(|_| stopped())?;
-        receive(rx, REPLY_TIMEOUT)?
+        match self.sources.source(&note)? {
+            Some(track) => track
+                .save(crate::doc::schema(), &note.document)
+                .map_err(|error| error.to_string().into()),
+            None => Ok(format!(
+                "{}\n",
+                crate::doc::to_markdown_in(&note.document, &self.house)
+            )),
+        }
     }
-    /// The track `note`'s edits are written through, shared with the store so
-    /// that what its editor takes is what a save writes; `None` for a note
-    /// with no file yet.
     pub fn source(
         &self,
         note: Note,
-    ) -> Result<Option<std::sync::Arc<markraft_commonmark::SourceTrack>>, StoreError> {
-        let (tx, rx) = mpsc::channel();
-        self.requests
-            .send(Request::Source(note, tx))
-            .map_err(|_| stopped())?;
-        receive(rx, REPLY_TIMEOUT)?
-    }
-    pub fn recover(&self, note: Note) -> Result<(), StoreError> {
-        let (tx, rx) = mpsc::channel();
-        self.requests
-            .send(Request::Recover(note, tx))
-            .map_err(|_| stopped())?;
-        rx.recv().map_err(|_| stopped())?
+    ) -> Result<Option<Arc<markraft_commonmark::SourceTrack>>, StoreError> {
+        self.sources.source(&note)
     }
     /// Hand a snapshot to the worker. The write's outcome arrives later through
     /// [`Self::poll`], tagged with `revision`.
@@ -229,7 +318,12 @@ impl Persistence {
         preferences: Preferences,
     ) -> Result<(), StoreError> {
         self.requests
-            .send(Request::Save(revision, library, preferences))
+            .send(Request::Save(
+                revision,
+                library,
+                preferences,
+                Instant::now(),
+            ))
             .map_err(|_| {
                 StoreError::Worker(
                     "Saving stopped working. Copy your note (⇧⌘C), then quit and reopen Markraft."
@@ -255,20 +349,30 @@ impl Persistence {
         }
         events
     }
+    pub fn is_current_external(&self, change: &External) -> bool {
+        self.sources.is_current_external(change)
+    }
+    pub fn acknowledge_changes(&self, changes: Vec<External>) {
+        let _ = self.requests.send(Request::AcknowledgeChanges(changes));
+    }
+    #[cfg(test)]
     pub fn acknowledge(&self, ids: Vec<String>) {
         let _ = self.requests.send(Request::Acknowledge(ids));
     }
     /// Reload after all earlier save requests finish. The caller must confirm discarding
     /// local changes and invalidate their revision acknowledgments before adopting the result.
+    #[cfg(test)]
     pub fn reload(&self) -> Result<Library, StoreError> {
         let (response, result) = mpsc::channel();
-        self.requests.send(Request::Reload(response)).map_err(|_| {
-            StoreError::Worker(
-                "Markraft can no longer reach your notes folder. Copy your note (⇧⌘C), \
+        self.requests
+            .send(Request::Reload(Reply::Blocking(response)))
+            .map_err(|_| {
+                StoreError::Worker(
+                    "Markraft can no longer reach your notes folder. Copy your note (⇧⌘C), \
                  then quit and reopen Markraft."
-                    .into(),
-            )
-        })?;
+                        .into(),
+                )
+            })?;
         // Do not time out and leave an invisible baseline change queued: the UI must
         // receive the adopted library before any later local snapshot can be saved.
         result.recv().map_err(|_| {
@@ -284,6 +388,7 @@ impl Persistence {
     /// apply paths even when `Saved::result` reports a partial failure.
     /// A timeout leaves the request queued; callers retain unsaved state until a later
     /// snapshot confirms it. No result queries are needed after this call.
+    #[cfg(test)]
     pub fn flush(
         &self,
         revision: u64,
@@ -292,6 +397,7 @@ impl Persistence {
     ) -> Result<Saved, StoreError> {
         self.flush_with_timeout(revision, library, preferences, REPLY_TIMEOUT)
     }
+    #[cfg(test)]
     fn flush_with_timeout(
         &self,
         revision: u64,
@@ -301,7 +407,13 @@ impl Persistence {
     ) -> Result<Saved, StoreError> {
         let (response, result) = mpsc::channel();
         self.requests
-            .send(Request::Flush(revision, library, preferences, response))
+            .send(Request::Flush(
+                revision,
+                library,
+                preferences,
+                Reply::Blocking(response),
+                Instant::now(),
+            ))
             .map_err(|_| {
                 StoreError::Worker(
                     "Saving stopped working. Copy your note (⇧⌘C), then quit and reopen Markraft."
@@ -316,6 +428,34 @@ impl Persistence {
     }
 }
 
+impl Drop for Persistence {
+    fn drop(&mut self) {
+        // The watcher and store both own senders, so channel disconnection alone
+        // cannot terminate them. Explicit shutdown also releases the folder lock
+        // if FSEvents is still waiting for its system service.
+        let _ = self.watches.send(None);
+        let _ = self.requests.send(Request::Shutdown);
+    }
+}
+
+/// Coalesce only adjacent autosave snapshots. Any other command is a barrier:
+/// in particular refresh/acknowledgement and explicit flush retain their order.
+fn next_request(incoming: &Receiver<Request>, deferred: &mut Option<Request>) -> Option<Request> {
+    let mut request = deferred.take().or_else(|| incoming.recv().ok())?;
+    if matches!(request, Request::Save(..)) {
+        while let Ok(next) = incoming.try_recv() {
+            match next {
+                Request::Save(..) => request = next,
+                barrier => {
+                    *deferred = Some(barrier);
+                    break;
+                }
+            }
+        }
+    }
+    Some(request)
+}
+
 /// Capture metadata after every attempt, including errors after some notes were written.
 fn save_snapshot(
     store: &mut Store,
@@ -323,9 +463,27 @@ fn save_snapshot(
     library: &Library,
     preferences: &Preferences,
 ) -> Saved {
+    let started = std::time::Instant::now();
     let result = store.save(library, preferences);
+    log::debug!(
+        "save revision={revision} dirty={} notes={} elapsed_ms={} success={}",
+        library.changes.len(),
+        library.notes.len(),
+        started.elapsed().as_millis(),
+        result.is_ok()
+    );
+    let changes = if result.is_ok() {
+        library
+            .changes
+            .iter()
+            .map(|(id, generation)| (id.clone(), *generation))
+            .collect()
+    } else {
+        Vec::new()
+    };
     Saved {
         revision,
+        changes,
         result,
         paths: store.paths(),
         conflicts: store.conflicts(),
@@ -338,6 +496,7 @@ fn stopped() -> StoreError {
     StoreError::Worker("The save worker stopped".into())
 }
 
+#[cfg(test)]
 fn receive<T>(receiver: Receiver<T>, timeout: Duration) -> Result<T, StoreError> {
     receiver.recv_timeout(timeout).map_err(|error| match error {
         RecvTimeoutError::Timeout => StoreError::Worker(
@@ -355,11 +514,15 @@ fn receive<T>(receiver: Receiver<T>, timeout: Duration) -> Result<T, StoreError>
 
 /// One refresh request per burst of file events. A program saving a file produces
 /// several, and Markraft's own writes produce them too; the store tells those apart.
-fn watch(store: &Store, requests: Sender<Request>) -> Option<notify::RecommendedWatcher> {
+fn watch(
+    directory: &std::path::Path,
+    extra: &[std::path::PathBuf],
+    notices: Notices,
+    requests: Sender<Request>,
+) -> Option<notify::RecommendedWatcher> {
     let queued = Arc::new(AtomicBool::new(false));
     let paths = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     let full_scan = Arc::new(AtomicBool::new(false));
-    let notices = store.notices();
     let callback_notices = notices.clone();
     let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let relevant = match event {
@@ -419,9 +582,9 @@ fn watch(store: &Store, requests: Sender<Request>) -> Option<notify::Recommended
         }
     });
     let result = watcher.and_then(|mut watcher| {
-        watcher.watch(store.directory(), notify::RecursiveMode::Recursive)?;
-        for parent in store.extra_watch_directories() {
-            watcher.watch(&parent, notify::RecursiveMode::NonRecursive)?;
+        watcher.watch(directory, notify::RecursiveMode::Recursive)?;
+        for parent in extra {
+            watcher.watch(parent, notify::RecursiveMode::NonRecursive)?;
         }
         Ok(watcher)
     });
@@ -468,6 +631,92 @@ mod tests {
         let path = std::fs::canonicalize(files.remove(0)).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         (path, text)
+    }
+
+    #[test]
+    fn adjacent_autosaves_coalesce_but_refresh_and_flush_are_barriers() {
+        let (sender, receiver) = mpsc::channel();
+        let snapshot = |revision| {
+            Request::Save(
+                revision,
+                Library::default(),
+                Preferences::default(),
+                Instant::now(),
+            )
+        };
+        sender.send(snapshot(1)).unwrap();
+        sender.send(snapshot(2)).unwrap();
+        sender.send(Request::Refresh).unwrap();
+        sender.send(snapshot(3)).unwrap();
+        let (reply, _) = mpsc::channel();
+        sender
+            .send(Request::Flush(
+                4,
+                Library::default(),
+                Preferences::default(),
+                Reply::Blocking(reply),
+                Instant::now(),
+            ))
+            .unwrap();
+        sender.send(snapshot(5)).unwrap();
+        drop(sender);
+        let mut deferred = None;
+        assert!(matches!(
+            next_request(&receiver, &mut deferred),
+            Some(Request::Save(2, ..))
+        ));
+        assert!(matches!(
+            next_request(&receiver, &mut deferred),
+            Some(Request::Refresh)
+        ));
+        assert!(matches!(
+            next_request(&receiver, &mut deferred),
+            Some(Request::Save(3, ..))
+        ));
+        assert!(matches!(
+            next_request(&receiver, &mut deferred),
+            Some(Request::Flush(4, ..))
+        ));
+        assert!(matches!(
+            next_request(&receiver, &mut deferred),
+            Some(Request::Save(5, ..))
+        ));
+        assert!(next_request(&receiver, &mut deferred).is_none());
+    }
+
+    #[test]
+    fn async_flush_is_enqueued_before_its_future_is_polled() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, mut library) = open(directory.path());
+        let persistence = Persistence::start(store, false);
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown("Before barrier"));
+        let unpolled = persistence.flush_async(1, library.clone(), Preferences::default());
+        let reloaded = persistence.reload().unwrap();
+        assert_eq!(
+            doc::plain_text(&reloaded.note(&id).unwrap().document),
+            "Before barrier"
+        );
+        drop(unpolled);
+    }
+
+    #[test]
+    #[ignore = "requires a responsive native FSEvents service"]
+    fn native_watcher_reports_a_file_added_by_another_program() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = open(directory.path());
+        let persistence = Persistence::new(store, Default::default());
+        // Registration is asynchronous; write repeatedly while waiting so the
+        // test also works when startup finishes after the first write.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            std::fs::write(directory.path().join("notes/watched.md"), "Watched").unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            if persistence.poll().iter().any(|event| matches!(event, Event::External(changes) if changes.iter().any(|change| matches!(change, External::Updated { note, .. } if doc::plain_text(&note.document) == "Watched")))) {
+                return;
+            }
+        }
+        panic!("native watcher did not deliver the external addition");
     }
 
     #[test]
@@ -545,13 +794,11 @@ mod tests {
                 .ends_with("Title\n\nFinal é\n")
         );
         let acknowledgments = saves(&persistence);
-        assert_eq!(
-            acknowledgments
-                .iter()
-                .map(|saved| saved.revision)
-                .collect::<Vec<_>>(),
-            vec![1, 2]
-        );
+        let revisions = acknowledgments
+            .iter()
+            .map(|saved| saved.revision)
+            .collect::<Vec<_>>();
+        assert!(revisions == [1, 2] || revisions == [2], "{revisions:?}");
         assert!(acknowledgments.iter().all(|saved| saved.result.is_ok()));
         assert!(persistence.poll().is_empty());
     }
@@ -638,10 +885,11 @@ mod tests {
         let persistence = Persistence {
             requests,
             events: results,
+            wake: None,
             notices: Notices::default(),
-            _watcher: std::sync::Mutex::new(None),
-            watch_root: Default::default(),
-            extra_watches: Default::default(),
+            watches: mpsc::channel().0,
+            sources: Arc::default(),
+            house: Default::default(),
         };
         assert!(
             persistence
@@ -667,16 +915,17 @@ mod tests {
         let persistence = Persistence {
             requests,
             events,
+            wake: None,
             notices: Notices::default(),
-            _watcher: std::sync::Mutex::new(None),
-            watch_root: Default::default(),
-            extra_watches: Default::default(),
+            watches: mpsc::channel().0,
+            sources: Arc::default(),
+            house: Default::default(),
         };
         let error = persistence
             .flush_with_timeout(42, library, Preferences::default(), Duration::ZERO)
             .unwrap_err();
         assert!(error.to_string().contains("may still complete"));
-        let Request::Flush(revision, library, _, response) = incoming.try_recv().unwrap() else {
+        let Request::Flush(revision, library, _, response, _) = incoming.try_recv().unwrap() else {
             panic!("the timed-out flush must remain queued");
         };
         let saved = save_snapshot(&mut store, revision, &library, &Preferences::default());
@@ -753,7 +1002,7 @@ mod tests {
     fn changes_by_other_programs_are_reported_and_held_back_until_acknowledged() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());
-        let persistence = Persistence::new(store, Default::default());
+        let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Original"));
         persistence
@@ -764,6 +1013,7 @@ mod tests {
         let (path, text) = only_note(directory.path());
         std::fs::write(&path, text.replace("Original", "From another editor")).unwrap();
         std::fs::write(directory.path().join("notes/dropped.md"), "Dropped in").unwrap();
+        persistence.refresh();
 
         // Paths are refreshed as the watcher names them, so one write may be
         // reported more than once; wait for both files rather than for two events.
@@ -798,6 +1048,7 @@ mod tests {
         let failed = persistence
             .flush(2, library.clone(), Preferences::default())
             .unwrap();
+        assert!(directory.path().join("notes/dropped.md").exists());
         assert!(failed.result.is_err());
         assert!(failed.conflicts.contains(&id));
         assert!(

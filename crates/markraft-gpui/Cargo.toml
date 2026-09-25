@@ -8,6 +8,7 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
+log = "0.4"
 gpui.workspace = true
 markraft-core.workspace = true
 unicode-segmentation = "1.12"
