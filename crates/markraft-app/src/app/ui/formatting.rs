@@ -132,79 +132,55 @@ impl MarkraftApp {
         let editor = self.editor().read(cx);
         let marks = editor.active_marks();
         let kind = doc::Block::active(editor.state(), &editor.projection());
-        match self.interaction.format_menu() {
+        let block = |label: &'static str, block: doc::Block| {
+            let active = kind == Some(block);
+            (label, Intent::Block(block), active)
+        };
+        let mark = |label: &'static str, inline: doc::Inline| {
+            let active = inline.is_active(&marks);
+            (label, Intent::Mark(inline), active)
+        };
+        let items: Vec<(&'static str, Intent, bool)> = match self.interaction.format_menu() {
             Some(FormatMenu::Block) => {
-                let mut items = vec![(
-                    "Paragraph",
-                    "⌘0",
-                    Intent::Block(doc::Block::Paragraph),
-                    kind == Some(doc::Block::Paragraph),
-                )];
-                for (level, label, shortcut) in [
-                    (1, "Heading 1", "⌘1"),
-                    (2, "Heading 2", "⌘2"),
-                    (3, "Heading 3", "⌘3"),
-                    (4, "Heading 4", "⌘4"),
-                    (5, "Heading 5", "⌘5"),
-                    (6, "Heading 6", "⌘6"),
+                let mut items = vec![block("Paragraph", doc::Block::Paragraph)];
+                for (level, label) in [
+                    (1, "Heading 1"),
+                    (2, "Heading 2"),
+                    (3, "Heading 3"),
+                    (4, "Heading 4"),
+                    (5, "Heading 5"),
+                    (6, "Heading 6"),
                 ] {
-                    items.push((
-                        label,
-                        shortcut,
-                        Intent::Block(doc::Block::Heading(level)),
-                        kind == Some(doc::Block::Heading(level)),
-                    ));
+                    items.push(block(label, doc::Block::Heading(level)));
                 }
                 items
             }
             Some(FormatMenu::Inline) => vec![
-                (
-                    "Bold",
-                    "⌘B",
-                    Intent::Mark(doc::Inline::Bold),
-                    doc::Inline::Bold.is_active(&marks),
-                ),
-                (
-                    "Italic",
-                    "⌘I",
-                    Intent::Mark(doc::Inline::Italic),
-                    doc::Inline::Italic.is_active(&marks),
-                ),
-                (
-                    "Strikethrough",
-                    "⇧⌘S",
-                    Intent::Mark(doc::Inline::Strikethrough),
-                    doc::Inline::Strikethrough.is_active(&marks),
-                ),
+                mark("Bold", doc::Inline::Bold),
+                mark("Italic", doc::Inline::Italic),
+                mark("Strikethrough", doc::Inline::Strikethrough),
             ],
             Some(FormatMenu::List) => vec![
-                (
-                    "No List",
-                    "",
-                    Intent::Block(doc::Block::Paragraph),
-                    kind == Some(doc::Block::Paragraph),
-                ),
-                (
-                    "Ordered List",
-                    "⇧⌘7",
-                    Intent::Block(doc::Block::Ordered),
-                    kind == Some(doc::Block::Ordered),
-                ),
-                (
-                    "Bullet List",
-                    "⇧⌘8",
-                    Intent::Block(doc::Block::Bullet),
-                    kind == Some(doc::Block::Bullet),
-                ),
-                (
-                    "Task List",
-                    "⇧⌘9",
-                    Intent::Block(doc::Block::Task),
-                    kind == Some(doc::Block::Task),
-                ),
+                block("No List", doc::Block::Paragraph),
+                block("Ordered List", doc::Block::Ordered),
+                block("Bullet List", doc::Block::Bullet),
+                block("Task List", doc::Block::Task),
             ],
             None => vec![],
-        }
+        };
+        items
+            .into_iter()
+            .map(|(label, intent, active)| {
+                // "No List" is the paragraph again, but the row is about leaving the
+                // list, not about ⌘0, so it carries no hint.
+                let shortcut = if label == "No List" {
+                    ""
+                } else {
+                    super::shortcut_label(&intent)
+                };
+                (label, shortcut, intent, active)
+            })
+            .collect()
     }
 
     pub(super) fn format_key(

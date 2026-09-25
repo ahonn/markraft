@@ -309,6 +309,11 @@ impl Extension for Vim {
     fn key_context(&self, context: &mut KeyContext) {
         let state = self.state.borrow();
         context.set("vim_mode", state.mode.context());
+        // Outside insert mode keys are commands, which the editor's own
+        // text-editing bindings have to yield to.
+        if state.mode != crate::state::Mode::Insert {
+            context.add("modal");
+        }
         if let Some(operator) = state.pending.operator() {
             context.set("vim_operator", operator.context());
         }

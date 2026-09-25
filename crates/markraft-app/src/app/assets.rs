@@ -213,10 +213,11 @@ pub(super) fn insert(
                 "bytes": bytes.len(),
                 "markdown": format!("![image]({})", relative_url(&parent, &path)?),
             });
-            crate::vault::atomic_write(
+            crate::fs::atomic_write(
                 &record,
                 &serde_json::to_vec(&entry).map_err(|e| e.to_string())?,
-            )?;
+            )
+            .map_err(|error| error.to_string())?;
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)

@@ -13,10 +13,9 @@
 use crate::motion;
 use markraft_core::Node;
 use markraft_core::Slice;
-use markraft_core::commands::{TableTypes, spans_cells};
-use markraft_core::kind::TABLE_ALIGNMENTS_ATTR;
+use markraft_core::commands::spans_cells;
+use markraft_core::kind::DocTypes;
 use markraft_core::projection::{Line, Projection};
-use markraft_gpui::DocTypes;
 use std::ops::Range;
 
 /// One cell of a table, as the projection sees it.
@@ -31,18 +30,6 @@ pub(crate) struct Cell {
     pub line: usize,
     /// The lines of the cell's whole row, which is vim's line here.
     pub row_lines: Range<usize>,
-}
-
-/// The three types the table commands take, or `None` unless the schema
-/// declares all three: every one of them maintains the shape all three
-/// describe, so a partial set cannot keep it.
-pub(crate) fn types(types: &DocTypes) -> Option<TableTypes> {
-    Some(TableTypes::new(
-        types.table?,
-        types.table_row?,
-        types.table_cell?,
-        TABLE_ALIGNMENTS_ATTR,
-    ))
 }
 
 /// Where a line sits in a table: the position before the table, and the line's
@@ -271,7 +258,9 @@ pub(crate) fn line_of_cell(
 /// refuse the whole operator, register and all, so that it can be narrowed
 /// and tried again.
 pub(crate) fn crosses_cells(types: &DocTypes, doc: &Node, range: &Range<usize>) -> bool {
-    self::types(types).is_some_and(|types| spans_cells(types, doc, range.start, range.end))
+    types
+        .table_types()
+        .is_some_and(|types| spans_cells(types, doc, range.start, range.end))
 }
 
 /// Which ancestor of the cursor's line a linewise paste of `slice` belongs

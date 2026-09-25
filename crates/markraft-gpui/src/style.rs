@@ -23,6 +23,11 @@ pub struct EditorStyle {
     pub heading_sizes: [Pixels; 6],
     pub line_height_ratio: f32,
     pub paragraph_gap: Pixels,
+    /// The row a table keeps above its grid for the host's table toolbar,
+    /// focused or not, so the toolbar never covers the block above and the
+    /// caret coming or going never moves what follows. The host that draws
+    /// the toolbar says how tall it is; zero for one that draws none.
+    pub table_toolbar_room: Pixels,
     pub list_gap: Pixels,
     /// Space above each of the six heading levels, except at the top.
     pub heading_top_gaps: [Pixels; 6],
@@ -91,6 +96,7 @@ impl Default for EditorStyle {
             heading_sizes: [px(30.), px(25.), px(21.), px(19.), px(18.), px(17.)],
             line_height_ratio: 1.5,
             paragraph_gap: px(10.),
+            table_toolbar_room: px(28.),
             list_gap: px(10.),
             heading_top_gaps: [px(0.); 6],
             heading_bottom_gap: px(10.),
@@ -149,6 +155,7 @@ impl EditorStyle {
             // Paragraphs part further than the items of a list, which are one
             // block's lines.
             paragraph_gap: px(10.),
+            table_toolbar_room: px(28.),
             list_gap: px(6.),
             // A heading belongs to the text under it, so the space above it has
             // to beat the gap below it at every level.

@@ -36,16 +36,13 @@ pub(super) enum SlashEffect {
 }
 
 impl Command {
-    pub(super) fn new(
-        id: &'static str,
-        label: &'static str,
-        shortcut: &'static str,
-        intent: Intent,
-    ) -> Self {
+    /// A command the ⌘K panel offers, with the shortcut the one table gives its
+    /// intent.
+    pub(super) fn new(id: &'static str, label: &'static str, intent: Intent) -> Self {
         Self {
             id,
             label,
-            shortcut,
+            shortcut: super::shortcut_label(&intent),
             intent: Some(intent),
             slash: None,
             checked: None,
@@ -206,15 +203,14 @@ mod tests {
 
     fn provider() -> SlashProvider {
         SlashProvider::new(vec![
-            Command::new("format-link", "Link", "⌘L", Intent::Link).slash(10, SlashEffect::Host),
+            Command::new("format-link", "Link", Intent::Link).slash(10, SlashEffect::Host),
             Command::new(
                 "format-heading",
                 "Heading 1",
-                "⌘1",
                 Intent::Block(doc::Block::Heading(1)),
             )
             .slash(1, SlashEffect::Block(doc::Block::Heading(1))),
-            Command::new("new-action", "New Note", "⌘N", Intent::New),
+            Command::new("new-action", "New Note", Intent::New),
             Command::editor(
                 "insert-divider",
                 "Divider",

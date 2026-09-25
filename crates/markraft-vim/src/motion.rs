@@ -75,7 +75,7 @@ impl Motion {
 /// at every step of a count, as it is for a caret in the editor: `3l` from
 /// before `**b**` reveals the span on its first step and walks into it on the
 /// next. Which runs these are is the view's to say; see
-/// [`markraft_gpui::concealed_steps`].
+/// [`markraft_core::kind::conceal::concealed_steps`].
 pub(crate) struct Hidden {
     syntax: Option<MarkTypeId>,
     /// Where the cursor stood when the motion began.
@@ -125,7 +125,11 @@ impl Hidden {
         let index = projection.line_at(pos)?;
         let mut runs = self.runs.borrow_mut();
         let line = runs.entry(index).or_insert_with(|| {
-            markraft_gpui::concealed_steps(self.syntax, &projection.lines()[index], self.caret)
+            markraft_core::kind::conceal::concealed_steps(
+                self.syntax,
+                &projection.lines()[index],
+                self.caret,
+            )
         });
         line.iter().find(|run| matches(run)).cloned()
     }
@@ -136,7 +140,7 @@ impl Hidden {
         let Some(line) = projection.lines().get(index) else {
             return Vec::new();
         };
-        markraft_gpui::markup_spans(self.syntax, line)
+        markraft_core::kind::conceal::markup_spans(self.syntax, line)
             .into_iter()
             .flatten()
             .collect()

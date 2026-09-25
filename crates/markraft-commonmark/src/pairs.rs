@@ -68,6 +68,7 @@ use markraft_core::{
 
 use crate::derive::{DeriveContext, Style, derive};
 use crate::textblock::{Items, block_kind};
+use markraft_core::protocol::event;
 
 /// Every pair, opener first.
 const PAIRS: [(char, char); 8] = [
@@ -183,7 +184,7 @@ fn auto_pair(tr: &Transaction) -> Option<Vec<TransactionSpec>> {
     {
         return None;
     }
-    if tr.is_user_event("input.type")
+    if tr.is_user_event(event::INPUT_TYPE)
         && let Some(typed) = Typed::read(tr)
     {
         return typed.respond(tr);
@@ -266,7 +267,7 @@ impl Typed {
         Some(vec![
             TransactionSpec::new()
                 .selection(Selection::cursor(self.from + 1))
-                .user_event("input.type")
+                .user_event(event::INPUT_TYPE)
                 .annotate(STEPPED.of(self.from))
                 .scroll_into_view(),
         ])
@@ -350,7 +351,7 @@ impl Typed {
                     Change::insert(self.to, text(closer)),
                 ])
                 .selection(Selection::text(inner(anchor), inner(head)))
-                .user_event("input.type")
+                .user_event(event::INPUT_TYPE)
                 .scroll_into_view(),
         ])
     }

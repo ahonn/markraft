@@ -491,7 +491,6 @@ fn accept(state: &Rc<RefCell<State>>, provider: &Rc<dyn TypeaheadProvider>, cx: 
 pub(crate) mod tests {
     use super::{Open, State, TriggerMatch, Update, open_match, track_dismissed, trigger_match};
     use crate::typeahead::TypeaheadItem;
-    use crate::types::DocTypes;
     use markraft_commonmark::{
         commonmark_doc_type_names, commonmark_extensions, commonmark_schema, from_markdown,
         schema as md,
@@ -500,6 +499,7 @@ pub(crate) mod tests {
     use markraft_core::commands::{
         Command, delete_range, insert_text, run_command, set_block_type,
     };
+    use markraft_core::kind::DocTypes;
     use markraft_core::projection::projection_of;
     use markraft_core::{
         Attrs, EditorStateConfig, Extension as DocExtension, Schema, Selection, TransactionSpec,

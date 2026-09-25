@@ -50,7 +50,7 @@ impl EditorView {
 
     pub(crate) fn wiki_link_under(&self, point: Point<Pixels>) -> Option<usize> {
         use markraft_core::projection::RunContent;
-        for row in &self.layout {
+        for row in self.frame.rows() {
             let line = self.projection.line(row.index)?;
             for run in line.runs() {
                 if let RunContent::Atom(node) = &run.content

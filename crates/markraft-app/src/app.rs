@@ -3,10 +3,12 @@ mod carry;
 mod feedback;
 mod interaction;
 mod lists;
+mod preferences;
 mod presence;
 mod ring;
 mod sessions;
 mod toolbar;
+use crate::fs::StoreError;
 use sessions::Sessions;
 mod workspace;
 
@@ -25,7 +27,7 @@ use crate::{
     instance::Instance,
     persistence::{Event, Persistence, Saved},
     platform::{Platform, PlatformEvent, Shortcut},
-    storage::Library,
+    storage::{Library, Preferences},
     updater::Updater,
     vault::{External, Store},
 };
@@ -83,6 +85,10 @@ enum FormatMenu {
 }
 pub struct MarkraftApp {
     library: Library,
+    /// This Mac's preferences, kept in the settings file outside the notes folder;
+    /// the settings window changes them and [`MarkraftApp::apply_preferences`]
+    /// carries each change to whatever reads it.
+    preferences: Preferences,
     /// The house style every editor's codecs and formatting commands were
     /// built over; the preferences set it, and they read it as they write.
     house: markraft_commonmark::HouseStyleHandle,
@@ -151,6 +157,7 @@ impl MarkraftApp {
         settings_path: PathBuf,
         store: Option<Store>,
         library: Library,
+        preferences: Preferences,
         error: Option<String>,
         // None runs without the menu bar, the shortcuts and the native window: the
         // headless tests, which have none of them.
@@ -161,7 +168,7 @@ impl MarkraftApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let path = path.map(|path| path.canonicalize().unwrap_or(path));
-        let dark = library.preferences.dark_mode.unwrap_or(matches!(
+        let dark = preferences.dark_mode.unwrap_or(matches!(
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         ));
@@ -171,7 +178,7 @@ impl MarkraftApp {
             Some(Ok(mut p)) => {
                 if let Err(e) = p
                     .configure_window(window)
-                    .and_then(|_| apply_platform_preferences(&mut p, &library.preferences, window))
+                    .and_then(|_| apply_platform_preferences(&mut p, &preferences, window))
                 {
                     platform_error = Some(e);
                 }
@@ -192,7 +199,7 @@ impl MarkraftApp {
             // A resize the app did not ask for is the user's, and dragging the
             // window's edge is how they say they want the height left alone.
             if this.window_size.settled(bounds.size) == Some(false) {
-                this.library.preferences.auto_height = false;
+                this.preferences.auto_height = false;
             }
             let next = Some([
                 f32::from(bounds.origin.x),
@@ -200,8 +207,8 @@ impl MarkraftApp {
                 f32::from(bounds.size.width),
                 f32::from(bounds.size.height),
             ]);
-            if this.library.preferences.window_bounds != next {
-                this.library.preferences.window_bounds = next;
+            if this.preferences.window_bounds != next {
+                this.preferences.window_bounds = next;
                 this.schedule_save(cx);
             }
         });
@@ -243,15 +250,16 @@ impl MarkraftApp {
             }
         });
         let pointer_inside = platform.as_ref().is_none_or(|p| p.pointer_inside(window));
-        let emoji = markraft_gpui::EmojiInsertion::new(library.preferences.emoji_characters);
-        let shortcuts = std::sync::Arc::new(library.preferences.markdown_shortcuts.into());
-        let pairs = std::sync::Arc::new(library.preferences.auto_pair.into());
+        let emoji = markraft_gpui::EmojiInsertion::new(preferences.emoji_characters);
+        let shortcuts = std::sync::Arc::new(preferences.markdown_shortcuts.into());
+        let pairs = std::sync::Arc::new(preferences.auto_pair.into());
         let house = markraft_commonmark::HouseStyleHandle::default();
-        apply_markdown_style(&house, &library.preferences);
+        apply_markdown_style(&house, &preferences);
         let mut app = Self {
             library,
+            preferences,
+            persistence: store.map(|store| Persistence::new(store, house.clone())),
             house,
-            persistence: store.map(Persistence::new),
             path,
             settings_path,
             platform,
@@ -443,7 +451,9 @@ impl MarkraftApp {
         let Some(persistence) = &self.persistence else {
             return;
         };
-        if let Err(error) = persistence.save(revision, self.library.clone()) {
+        if let Err(error) =
+            persistence.save(revision, self.library.clone(), self.preferences.clone())
+        {
             self.save.apply_completion(revision, false);
             self.feedback.set_error(error);
             cx.notify();
@@ -455,8 +465,8 @@ impl MarkraftApp {
         let result = self
             .persistence
             .as_ref()
-            .ok_or_else(|| "Open or recover the library before saving.".to_owned())
-            .and_then(|p| p.flush(revision, self.library.clone()));
+            .ok_or_else(|| StoreError::from("Open or recover the library before saving."))
+            .and_then(|p| p.flush(revision, self.library.clone(), self.preferences.clone()));
         match result {
             Ok(saved) => self.apply_saved(saved, cx),
             Err(error) => {
@@ -496,8 +506,9 @@ impl MarkraftApp {
         if completion == SaveCompletion::Current {
             match saved.result {
                 Ok(()) => self.feedback.clear_error(),
-                Err(error) if saved.conflicts.is_empty() => self.feedback.set_error(error),
-                Err(_) => {}
+                // The conflict was just said above; the banner is for failures.
+                Err(StoreError::Conflict(_)) => {}
+                Err(error) => self.feedback.set_error(error),
             }
         }
         cx.notify();
@@ -576,7 +587,7 @@ impl MarkraftApp {
             let active = platform.app_is_active();
             std::mem::replace(&mut self.app_active, active)
                 && !active
-                && self.library.preferences.hide_on_deactivate
+                && self.preferences.hide_on_deactivate
                 && platform.is_visible(window)
         });
         if deactivated {
@@ -641,7 +652,7 @@ impl MarkraftApp {
         }
         if let Some(revision) = self.save.take_due(Instant::now())
             && let Some(p) = &self.persistence
-            && let Err(e) = p.save(revision, self.library.clone())
+            && let Err(e) = p.save(revision, self.library.clone(), self.preferences.clone())
         {
             self.feedback.set_error(e);
         }
@@ -649,7 +660,7 @@ impl MarkraftApp {
             cx.notify();
         }
         if self.interaction.panel() == Panel::Editor
-            && self.library.preferences.auto_height
+            && self.preferences.auto_height
             && self.persistence.is_some()
         {
             let Some(height) = self.editor().read(cx).content_height() else {
@@ -691,7 +702,7 @@ impl MarkraftApp {
         window.focus(&self.editor().focus_handle(cx), cx);
     }
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let follow_pointer = self.library.preferences.follow_pointer;
+        let follow_pointer = self.preferences.follow_pointer;
         if let Some(p) = &mut self.platform {
             if let Err(e) = p.show(window, follow_pointer) {
                 self.feedback.set_error(e);
@@ -737,7 +748,7 @@ impl MarkraftApp {
         // Brought back from hiding, the note can be a fresh page — but one still blank
         // already is, and a second would only pile up empty notes.
         if hidden
-            && self.library.preferences.summon == crate::storage::Summon::NewNote
+            && self.preferences.summon == crate::storage::Summon::NewNote
             && self.persistence.is_some()
             && self.interaction.panel() == Panel::Editor
             && !doc::is_blank(&self.library.active_note().document)
@@ -979,7 +990,7 @@ impl MarkraftApp {
                 this.delete_note(window, cx);
             }
         };
-        if !self.library.preferences.confirm_delete {
+        if !self.preferences.confirm_delete {
             trash(self, window, cx);
             return;
         }
@@ -1063,7 +1074,7 @@ impl MarkraftApp {
         cx.notify();
     }
     fn apply_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.dark = self.library.preferences.dark_mode.unwrap_or(matches!(
+        self.dark = self.preferences.dark_mode.unwrap_or(matches!(
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         ));
@@ -1151,8 +1162,9 @@ impl MarkraftApp {
         self.editor().read(cx).committed_document().clone()
     }
     fn editor_style(&self) -> EditorStyle {
-        let preferences = &self.library.preferences;
+        let preferences = &self.preferences;
         let mut style = scaled(notes_style(self.dark), preferences.text_size);
+        style.table_toolbar_room = ui::table::TABLE_TOOLBAR_ROOM;
         style.font_family = preferences.font.family().into();
         style.line_height_ratio = preferences.line_height.ratio();
         style.max_line_width = preferences
@@ -1171,17 +1183,6 @@ impl MarkraftApp {
     }
     /// ⌘+, ⌘− and ⌘⇧0, and the Settings window's stepper. The size stays in the range
     /// the stepper offers, so the two never disagree.
-    pub(in crate::app) fn set_text_size(&mut self, size: f32, cx: &mut Context<Self>) {
-        let range = crate::storage::Preferences::TEXT_SIZES;
-        let size = size.round().clamp(*range.start(), *range.end());
-        if size == self.library.preferences.text_size {
-            return;
-        }
-        self.library.preferences.text_size = size;
-        self.restyle_editors(cx);
-        self.schedule_save(cx);
-        cx.notify();
-    }
     /// ⌘L: a link under the caret shows its actions, anything else asks for an address.
     fn open_link_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.persistence.is_none() || self.interaction.panel() != Panel::Editor {
@@ -1282,29 +1283,28 @@ impl MarkraftApp {
                 return;
             }
         };
-        let opened = Store::open(directory.clone(), self.settings_path.clone()).and_then(
-            |(mut store, library)| {
+        let opened = crate::storage::Settings::read(&self.settings_path)
+            .and_then(|settings| {
+                Store::open(directory.clone(), self.settings_path.clone(), settings)
+            })
+            .and_then(|(mut store, library)| {
                 store
                     .update_settings(|settings| settings.notes_folder = Some(directory.clone()))?;
                 Ok((store, library))
-            },
-        );
+            });
         match opened {
-            Ok((store, mut library)) => {
-                // Preferences belong to this Mac, not to the folder.
-                if !reopening {
-                    library.preferences = self.library.preferences.clone();
-                }
+            Ok((store, library)) => {
                 self.path = Some(store.directory().to_owned());
-                self.persistence = Some(Persistence::new(store));
+                self.persistence = Some(Persistence::new(store, self.house.clone()));
                 self.replace_library(library, window, cx);
                 self.feedback.clear_error();
                 self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
                 self.apply_theme(window, cx);
-                let refused = self.platform.as_mut().and_then(|p| {
-                    apply_platform_preferences(p, &self.library.preferences, window).err()
-                });
+                let refused = self
+                    .platform
+                    .as_mut()
+                    .and_then(|p| apply_platform_preferences(p, &self.preferences, window).err());
                 self.feedback.set_platform_error(refused);
                 self.notes_changed(cx);
             }
@@ -1362,7 +1362,9 @@ impl MarkraftApp {
                             let opened = this
                                 .persistence
                                 .as_ref()
-                                .ok_or_else(|| "Open a notes folder before saving.".to_owned())
+                                .ok_or_else(|| {
+                                    StoreError::from("Open a notes folder before saving.")
+                                })
                                 .and_then(|p| p.open_file(path));
                             match opened {
                                 Ok(note) => {
@@ -1413,7 +1415,7 @@ impl MarkraftApp {
                         let result = this
                             .persistence
                             .as_ref()
-                            .ok_or_else(|| "Choose a notes folder first.".to_string())
+                            .ok_or_else(|| StoreError::from("Choose a notes folder first."))
                             .and_then(|p| p.reload());
                         match result {
                             Ok(library) => {
@@ -1423,8 +1425,7 @@ impl MarkraftApp {
                                 this.focus_editor(window, cx);
                                 this.apply_theme(window, cx);
                                 let refused = this.platform.as_mut().and_then(|p| {
-                                    apply_platform_preferences(p, &this.library.preferences, window)
-                                        .err()
+                                    apply_platform_preferences(p, &this.preferences, window).err()
                                 });
                                 this.feedback.set_platform_error(refused);
                             }
@@ -1601,7 +1602,9 @@ impl MarkraftApp {
                     self.library.select(&id);
                 })
             } else {
-                Err("Open a notes folder before opening files.".to_owned())
+                Err(StoreError::from(
+                    "Open a notes folder before opening files.",
+                ))
             };
             // Failing to open a file says nothing about saving, so it is a sentence
             // rather than the save banner — and each file gets its own.

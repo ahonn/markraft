@@ -44,6 +44,7 @@ use crate::state::{
 };
 
 use super::{Command, command};
+use crate::protocol::event;
 
 /// Decides whether a rule fires, given the text before the caret.
 ///
@@ -198,7 +199,7 @@ pub fn undo_input_rule() -> Command {
             TransactionSpec::new()
                 .change_set(undo.changes)
                 .selection(undo.selection)
-                .user_event("delete")
+                .user_event(event::DELETE)
                 .annotate(isolate(IsolateHistory::Both))
                 .scroll_into_view(),
         )
@@ -225,7 +226,7 @@ fn update_undo(value: &Option<InputRuleUndo>, tr: &Transaction) -> Option<InputR
 }
 
 fn run_input_rules(tr: &Transaction) -> Option<Vec<TransactionSpec>> {
-    if !tr.is_user_event("input.type")
+    if !tr.is_user_event(event::INPUT_TYPE)
         || tr.annotation(&APPLIED).is_some()
         || tr.annotation(remote()) == Some(&true)
     {

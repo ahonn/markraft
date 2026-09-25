@@ -13,6 +13,7 @@ use crate::state::{EditorState, TransactionSpec};
 
 use super::structure::can_replace;
 use super::{Command, command, resolve_changes};
+use crate::protocol::event;
 
 /// Type `text` over the selection.
 ///
@@ -104,7 +105,7 @@ pub(crate) fn insert_text_spec(state: &EditorState, text: &str) -> Option<Transa
     let mut spec = TransactionSpec::new()
         .change_set(set)
         .selection(selection)
-        .user_event("input.type")
+        .user_event(event::INPUT_TYPE)
         .scroll_into_view();
     // Stored marks survive typing, so several characters in a row share them.
     if state.stored_marks().is_some() {
@@ -288,7 +289,7 @@ pub fn replace_selection(slice: Slice) -> Command {
             TransactionSpec::new()
                 .change_set(set)
                 .selection(Selection::near(schema, &new_doc, end, -1))
-                .user_event("input.paste")
+                .user_event(event::INPUT_PASTE)
                 .scroll_into_view(),
         )
     })

@@ -1,7 +1,11 @@
 //! In-place Markdown persistence. Application metadata never enters the workspace.
 use crate::{
     doc,
-    storage::{Library, Note, Notices, Settings, WorkspaceSettings},
+    fs::{
+        StoreError, atomic_write, copy_metadata, describe, inherit_folder_mode, move_to_trash,
+        move_without_replacing, read_optional, same_regular_file,
+    },
+    storage::{Library, Note, Notices, Preferences, Settings, WorkspaceSettings},
 };
 use markraft_commonmark::SourceDocument;
 use serde::{Deserialize, Serialize};
@@ -76,9 +80,20 @@ pub struct Store {
     settings: Settings,
     notices: Notices,
     loose: HashSet<PathBuf>,
+    /// The style new Markdown is spelled in; the application hands over its own
+    /// through [`Store::set_house`], so a saved file follows the preferences the
+    /// editor does.
+    house: markraft_commonmark::HouseStyleHandle,
 }
 impl Store {
-    pub fn open(directory: PathBuf, settings_path: PathBuf) -> Result<(Self, Library), String> {
+    /// Open the notes in `directory`, keeping the folder's state under the
+    /// application's settings folder. `settings` is the settings file as the
+    /// caller read it — the store keeps the copy it writes `settings.json` from.
+    pub fn open(
+        directory: PathBuf,
+        settings_path: PathBuf,
+        settings: Settings,
+    ) -> Result<(Self, Library), StoreError> {
         if !directory.exists() {
             return Err(describe(
                 &directory,
@@ -108,16 +123,18 @@ impl Store {
             .truncate(false)
             .open(&lock_path)
             .map_err(|e| describe(&lock_path, &e))?;
-        lock.try_lock()
-            .map_err(|_| "Another Markraft instance is already using this folder.".to_owned())?;
+        lock.try_lock().map_err(|_| {
+            StoreError::Locked("Another Markraft instance is already using this folder.".into())
+        })?;
         let manifest_path = state.join("manifest.json");
         let manifest =
             match read_optional(&manifest_path).map_err(|e| describe(&manifest_path, &e))? {
-                Some(bytes) => serde_json::from_slice(&bytes)
-                    .map_err(|e| format!("Cannot read the folder's saved state: {e}"))?,
+                Some(bytes) => serde_json::from_slice(&bytes).map_err(|e| StoreError::Json {
+                    path: manifest_path.clone(),
+                    detail: e.to_string(),
+                })?,
                 None => Manifest::default(),
             };
-        let settings = Settings::read(&settings_path)?;
         let loose: HashSet<PathBuf> = manifest.loose.iter().cloned().collect();
         let mut store = Self {
             directory,
@@ -133,6 +150,7 @@ impl Store {
             settings,
             notices: Notices::default(),
             loose,
+            house: Default::default(),
         };
         let mut library = store.scan_library()?;
         store.restore_recovery(&mut library);
@@ -168,14 +186,22 @@ impl Store {
             .map(|(id, s)| (id.clone(), s.path.clone()))
             .collect()
     }
-    fn persist_manifest(&mut self) -> Result<(), String> {
+    fn persist_manifest(&mut self) -> Result<(), StoreError> {
         self.manifest.version = 1;
         self.manifest.loose = self.loose.iter().cloned().collect();
         self.manifest.loose.sort();
-        let bytes = serde_json::to_vec_pretty(&self.manifest).map_err(|e| e.to_string())?;
-        atomic_write(&self.state.join("manifest.json"), &bytes)
+        let path = self.state.join("manifest.json");
+        let bytes = serde_json::to_vec_pretty(&self.manifest).map_err(|e| StoreError::Json {
+            path: path.clone(),
+            detail: e.to_string(),
+        })?;
+        atomic_write(&path, &bytes)
     }
-    fn read_path(&self, path: &Path, previous: Option<&Saved>) -> Result<Option<Saved>, String> {
+    fn read_path(
+        &self,
+        path: &Path,
+        previous: Option<&Saved>,
+    ) -> Result<Option<Saved>, StoreError> {
         let Some(bytes) = read_optional(path).map_err(|e| describe(path, &e))? else {
             return Ok(None);
         };
@@ -238,7 +264,7 @@ impl Store {
             note,
         }))
     }
-    fn read_folder(&self) -> Result<HashMap<String, Saved>, String> {
+    fn read_folder(&self) -> Result<HashMap<String, Saved>, StoreError> {
         let mut paths = self.loose.iter().cloned().collect::<Vec<_>>();
         collect_markdown(&self.directory, &mut paths)?;
         paths.sort();
@@ -252,7 +278,7 @@ impl Store {
         }
         Ok(files)
     }
-    pub fn reload(&mut self) -> Result<Library, String> {
+    pub fn reload(&mut self) -> Result<Library, StoreError> {
         let library = self.scan_library()?;
         let folder = self.state.join("recovery");
         if folder.exists() {
@@ -265,14 +291,13 @@ impl Store {
         }
         Ok(library)
     }
-    fn scan_library(&mut self) -> Result<Library, String> {
+    fn scan_library(&mut self) -> Result<Library, StoreError> {
         self.files = self.read_folder()?;
         self.pending.clear();
         self.previous.clear();
         self.disk_won.clear();
         let mut library = Library {
             notes: self.files.values().map(|s| s.note.clone()).collect(),
-            preferences: self.settings.preferences.clone(),
             workspace: self.manifest.workspace.clone(),
             ..Library::default()
         };
@@ -337,7 +362,7 @@ impl Store {
     /// extended attributes, and the note keeps its identity: the manifest follows the
     /// file to its new path, which is what stops the watcher from reading the move as
     /// one note leaving and a stranger arriving.
-    pub fn rename(&mut self, id: &str, name: &str) -> Result<PathBuf, String> {
+    pub fn rename(&mut self, id: &str, name: &str) -> Result<PathBuf, StoreError> {
         let saved = self
             .files
             .get(id)
@@ -347,7 +372,7 @@ impl Store {
             return Err("A note changed on disk. Wait a moment, then try renaming again.".into());
         }
         if let Some(reason) = unsafe_file(&saved.path)? {
-            return Err(reason);
+            return Err(reason.into());
         }
         let extension = saved
             .path
@@ -364,7 +389,8 @@ impl Store {
             return Err(format!(
                 "“{}” changed on disk. Refresh before renaming it.",
                 saved.note.title()
-            ));
+            )
+            .into());
         }
         move_without_replacing(&saved.path, &target)?;
         let parent = target.parent().ok_or("The file has no parent")?;
@@ -388,7 +414,7 @@ impl Store {
         self.persist_manifest()?;
         Ok(target)
     }
-    pub fn add_file(&mut self, path: PathBuf) -> Result<Note, String> {
+    pub fn add_file(&mut self, path: PathBuf) -> Result<Note, StoreError> {
         let path = absolute_file(&path)?;
         if let Some(saved) = self
             .files
@@ -410,7 +436,7 @@ impl Store {
         self.persist_manifest()?;
         Ok(note)
     }
-    pub fn refresh(&mut self) -> Result<Vec<External>, String> {
+    pub fn refresh(&mut self) -> Result<Vec<External>, StoreError> {
         let files = self.read_folder()?;
         let mut changes = Vec::new();
         for (id, saved) in &files {
@@ -454,7 +480,7 @@ impl Store {
         Ok(changes)
     }
     /// File events only read affected paths. Directory events and explicit refreshes rescan.
-    pub fn refresh_paths(&mut self, paths: &[PathBuf]) -> Result<Vec<External>, String> {
+    pub fn refresh_paths(&mut self, paths: &[PathBuf]) -> Result<Vec<External>, StoreError> {
         let mut staged = Vec::new();
         let mut seen = HashSet::new();
         for path in paths {
@@ -521,7 +547,7 @@ impl Store {
             self.disk_won.remove(id);
         }
     }
-    pub fn markdown(&self, note: &Note) -> Result<String, String> {
+    pub fn markdown(&self, note: &Note) -> Result<String, StoreError> {
         // A note that already says what the file on disk says — the disk version
         // an external change was just adopted as — takes those bytes as its
         // baseline. The pre-change copy is kept only for edits made against it
@@ -535,10 +561,11 @@ impl Store {
                 .or_else(|| self.previous.get(&note.id))
                 .or_else(|| self.files.get(&note.id)),
             note,
+            &self.house,
         )
     }
     /// Keep the note's local text as a conflicted copy beside the file. Used when disk wins.
-    pub fn recover(&mut self, note: &Note) -> Result<(), String> {
+    pub fn recover(&mut self, note: &Note) -> Result<(), StoreError> {
         let original = self
             .previous
             .get(&note.id)
@@ -562,7 +589,8 @@ impl Store {
         // newline. It also makes two sightings of one conflict compare equal, which
         // is what keeps the second from becoming a second file.
         let local = ends_with_newline(
-            render(original, note).unwrap_or_else(|_| doc::to_markdown(&note.document)),
+            render(original, note, &self.house)
+                .unwrap_or_else(|_| doc::to_markdown_in(&note.document, &self.house)),
         );
         if !already_kept_beside(&path, local.as_bytes()) {
             let target = conflicted_copy_path(&path);
@@ -598,7 +626,10 @@ impl Store {
                 match fs::read(&path)
                     .map_err(|e| describe(&path, &e))
                     .and_then(|bytes| {
-                        serde_json::from_slice(&bytes).map_err(|e| format!("unreadable draft: {e}"))
+                        serde_json::from_slice(&bytes).map_err(|e| StoreError::Json {
+                            path: path.clone(),
+                            detail: format!("unreadable draft: {e}"),
+                        })
                     }) {
                     Ok(record) => record,
                     Err(error) => {
@@ -710,12 +741,16 @@ impl Store {
     /// immediately. Mid-write disk conflicts keep a conflicted copy of local edits
     /// and keep the disk version. After a note has a file, renaming is explicit —
     /// not driven by later title edits.
-    pub fn save(&mut self, library: &Library) -> Result<(), String> {
+    pub fn save(&mut self, library: &Library, preferences: &Preferences) -> Result<(), StoreError> {
         library.validate()?;
+        preferences.validate()?;
         self.manifest.workspace = library.workspace.clone();
         self.disk_won.clear();
         self.trashed.clear();
-        let mut errors = Vec::new();
+        let mut errors: Vec<StoreError> = Vec::new();
+        // The notes disk won over, by title: one conflict error at the end, so a
+        // caller can tell it from a failure and still not take them as saved.
+        let mut conflicts: Vec<String> = Vec::new();
         let live_ids: HashSet<_> = library.notes.iter().map(|n| n.id.clone()).collect();
         // Notes the library no longer holds were deleted: trash their files.
         let to_trash: Vec<_> = self
@@ -753,10 +788,7 @@ impl Store {
                         errors.push(error);
                     } else {
                         self.disk_won.insert(note.id.clone());
-                        errors.push(format!(
-                            "Disk version kept for “{}”; your edits were kept as a conflicted copy.",
-                            note.title()
-                        ));
+                        conflicts.push(note.title());
                     }
                 }
                 continue;
@@ -768,7 +800,7 @@ impl Store {
                 continue;
             }
             if note.read_only.is_some() {
-                errors.push(format!("{} is read-only", note.title()));
+                errors.push(format!("{} is read-only", note.title()).into());
                 continue;
             }
             if saved.is_none() && doc::is_blank(&note.document) {
@@ -791,13 +823,12 @@ impl Store {
                     }
                     self.disk_won.insert(note.id.clone());
                     self.pending.insert(note.id.clone());
-                    errors.push(match recovery {
-                        Ok(()) => format!(
-                            "Disk version kept for “{}”; your edits were kept as a conflicted copy.",
-                            note.title()
-                        ),
-                        Err(e) => format!("{error}; conflicted copy failed: {e}"),
-                    });
+                    match recovery {
+                        Ok(()) => conflicts.push(note.title()),
+                        Err(e) => {
+                            errors.push(format!("{error}; conflicted copy failed: {e}").into())
+                        }
+                    }
                 } else {
                     errors.push(error);
                 }
@@ -806,8 +837,7 @@ impl Store {
         self.manifest.active_id.clone_from(&library.active_id);
         self.persist_manifest()?;
         let settings = Settings {
-            active_id: library.active_id.clone(),
-            preferences: library.preferences.clone(),
+            preferences: preferences.clone(),
             open_files: {
                 let mut paths: Vec<_> = self.loose.iter().cloned().collect();
                 paths.sort();
@@ -819,10 +849,13 @@ impl Store {
             settings.write(&self.settings_path)?;
             self.settings = settings;
         }
+        if !conflicts.is_empty() {
+            errors.push(StoreError::Conflict(conflicts));
+        }
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(errors.join("\n"))
+            Err(StoreError::several(errors))
         }
     }
     fn save_note(
@@ -830,17 +863,18 @@ impl Store {
         note: &Note,
         saved: Option<&Saved>,
         library: &Library,
-    ) -> Result<(), String> {
+    ) -> Result<(), StoreError> {
         if let Some(saved) = saved {
             let current = read_optional(&saved.path).map_err(|e| describe(&saved.path, &e))?;
             if current.as_ref() != Some(&saved.bytes) {
                 return Err(format!(
                     "“{}” changed on disk, so it was not overwritten.",
                     note.title()
-                ));
+                )
+                .into());
             }
         }
-        let bytes = render(saved, note)?.into_bytes();
+        let bytes = render(saved, note, &self.house)?.into_bytes();
         // A tree that writes what the file already holds — a picture spelled
         // out under the caret, which saves as the same characters as the
         // picture — is not written again: the file keeps its bytes and its
@@ -925,7 +959,7 @@ impl Store {
     }
     /// Move the file to the system trash and drop it from the store. No in-app
     /// restore tombstone is kept.
-    fn trash_note(&mut self, saved: &Saved) -> Result<(), String> {
+    fn trash_note(&mut self, saved: &Saved) -> Result<(), StoreError> {
         if let Some(landed) = move_to_trash(&saved.path)? {
             self.trashed.push(landed);
         }
@@ -937,7 +971,14 @@ impl Store {
         self.clear_recovery(&saved.note.id);
         Ok(())
     }
-    pub fn update_settings(&mut self, update: impl FnOnce(&mut Settings)) -> Result<(), String> {
+    /// Spell new Markdown in `house`'s style from now on.
+    pub fn set_house(&mut self, house: markraft_commonmark::HouseStyleHandle) {
+        self.house = house;
+    }
+    pub fn update_settings(
+        &mut self,
+        update: impl FnOnce(&mut Settings),
+    ) -> Result<(), StoreError> {
         let mut settings = self.settings.clone();
         update(&mut settings);
         settings.write(&self.settings_path)?;
@@ -953,7 +994,11 @@ fn identity(note: &Note) -> Identity {
         gone: false,
     }
 }
-fn render(saved: Option<&Saved>, note: &Note) -> Result<String, String> {
+fn render(
+    saved: Option<&Saved>,
+    note: &Note,
+    house: &markraft_commonmark::HouseStyleHandle,
+) -> Result<String, StoreError> {
     match saved {
         Some(saved) => SourceDocument::parse(
             doc::schema(),
@@ -961,11 +1006,15 @@ fn render(saved: Option<&Saved>, note: &Note) -> Result<String, String> {
         )
         .map_err(|e| e.to_string())?
         .render(doc::schema(), &note.document)
-        .map_err(|e| format!("This edit cannot preserve the original Markdown safely: {e}")),
-        None => Ok(format!("{}\n", doc::to_markdown(&note.document))),
+        .map_err(|e| {
+            StoreError::from(format!(
+                "This edit cannot preserve the original Markdown safely: {e}"
+            ))
+        }),
+        None => Ok(format!("{}\n", doc::to_markdown_in(&note.document, house))),
     }
 }
-fn collect_markdown(folder: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
+fn collect_markdown(folder: &Path, paths: &mut Vec<PathBuf>) -> Result<(), StoreError> {
     for entry in fs::read_dir(folder).map_err(|e| describe(folder, &e))? {
         let entry = entry.map_err(|e| describe(folder, &e))?;
         let path = entry.path();
@@ -990,21 +1039,7 @@ fn collect_markdown(folder: &Path, paths: &mut Vec<PathBuf>) -> Result<(), Strin
     }
     Ok(())
 }
-fn same_regular_file(left: &Path, right: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (fs::symlink_metadata(left), fs::symlink_metadata(right)) {
-        (Ok(a), Ok(b)) => {
-            a.file_type().is_file()
-                && b.file_type().is_file()
-                && a.nlink() == 1
-                && b.nlink() == 1
-                && a.dev() == b.dev()
-                && a.ino() == b.ino()
-        }
-        _ => false,
-    }
-}
-fn absolute_file(path: &Path) -> Result<PathBuf, String> {
+fn absolute_file(path: &Path) -> Result<PathBuf, StoreError> {
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file()) {
         return fs::canonicalize(path).map_err(|e| describe(path, &e));
     }
@@ -1016,7 +1051,7 @@ pub fn safe_relative(path: &Path) -> bool {
     path.components()
         .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
-fn reject_symlink_components(root: &Path, path: &Path) -> Result<(), String> {
+fn reject_symlink_components(root: &Path, path: &Path) -> Result<(), StoreError> {
     let mut current = root.to_owned();
     for part in path
         .strip_prefix(root)
@@ -1032,7 +1067,7 @@ fn reject_symlink_components(root: &Path, path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-fn unsafe_file(path: &Path) -> Result<Option<String>, String> {
+fn unsafe_file(path: &Path) -> Result<Option<String>, StoreError> {
     use std::os::unix::fs::MetadataExt;
     let m = fs::symlink_metadata(path).map_err(|e| describe(path, &e))?;
     Ok(if m.file_type().is_symlink() {
@@ -1109,11 +1144,11 @@ pub(crate) fn safe_stem(title: &str) -> String {
     name.trim_matches(|c: char| c == '.' || c.is_whitespace())
         .to_owned()
 }
-fn write_document(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> Result<(), String> {
+fn write_document(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> Result<(), StoreError> {
     if expected.is_some()
         && let Some(reason) = unsafe_file(path)?
     {
-        return Err(reason);
+        return Err(reason.into());
     }
     let parent = path.parent().ok_or("The file has no parent")?;
     let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| describe(parent, &e))?;
@@ -1153,7 +1188,7 @@ fn write_document(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> Result<
 /// quietly made safe; a typed one is refused instead, because silently filing the note
 /// under something other than what was typed is its own surprise. The file's own
 /// extension may be typed along with the name and is not part of it.
-pub(crate) fn typed_stem(name: &str, extension: &str) -> Result<String, String> {
+pub(crate) fn typed_stem(name: &str, extension: &str) -> Result<String, StoreError> {
     let name = name.trim();
     let suffix = format!(".{extension}");
     let cut = name.len().saturating_sub(suffix.len());
@@ -1174,112 +1209,6 @@ pub(crate) fn typed_stem(name: &str, extension: &str) -> Result<String, String> 
         return Err("That name is too long.".into());
     }
     Ok(stem.to_owned())
-}
-/// Rename `from` to `to` without ever replacing a file already there. Checking first
-/// and renaming after would leave a moment for another program to put a file at `to`,
-/// and that file would be lost, so the refusal is the file system's own.
-fn move_without_replacing(from: &Path, to: &Path) -> Result<(), String> {
-    let occupied = || {
-        format!(
-            "“{}” already exists. Choose another name.",
-            to.file_name().unwrap_or_default().to_string_lossy()
-        )
-    };
-    // A name that differs only in case is the same file on a file system that does
-    // not keep case, and renaming a file over itself replaces nothing.
-    if same_regular_file(from, to) {
-        return fs::rename(from, to).map_err(|e| describe(from, &e));
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::{ffi::CString, os::unix::ffi::OsStrExt};
-        let path = |p: &Path| CString::new(p.as_os_str().as_bytes()).map_err(|e| e.to_string());
-        let (source, target) = (path(from)?, path(to)?);
-        // SAFETY: both arguments are NUL-terminated strings that outlive the call.
-        if unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) } == 0 {
-            return Ok(());
-        }
-        let error = io::Error::last_os_error();
-        match error.raw_os_error() {
-            Some(libc::EEXIST) => return Err(occupied()),
-            // A volume that cannot promise exclusivity falls through to the check below.
-            Some(libc::ENOTSUP) => {}
-            _ => return Err(describe(from, &error)),
-        }
-    }
-    if fs::symlink_metadata(to).is_ok() {
-        return Err(occupied());
-    }
-    fs::rename(from, to).map_err(|e| describe(from, &e))
-}
-/// Moves a file into the system Trash. Returns the Trash location when the platform
-/// reports one; callers do not restore from it.
-#[cfg(target_os = "macos")]
-fn move_to_trash(path: &Path) -> Result<Option<PathBuf>, String> {
-    use objc2::rc::Retained;
-    use objc2_foundation::{NSFileManager, NSURL};
-    let url = NSURL::fileURLWithPath(&objc2_foundation::NSString::from_str(
-        &path.to_string_lossy(),
-    ));
-    let manager = NSFileManager::defaultManager();
-    let mut result: Option<Retained<NSURL>> = None;
-    manager
-        .trashItemAtURL_resultingItemURL_error(&url, Some(&mut result))
-        .map_err(|e| e.to_string())?;
-    // Where it landed, for the window to reveal. The platform does not always say,
-    // and a file that went without an address went all the same.
-    Ok(result
-        .and_then(|url| url.path())
-        .map(|path| PathBuf::from(path.to_string())))
-}
-#[cfg(not(target_os = "macos"))]
-fn move_to_trash(_path: &Path) -> Result<Option<PathBuf>, String> {
-    Err("System Trash is not available on this platform.".into())
-}
-/// The permissions a new file in `folder` should have: the folder's own, without the
-/// execute bits a Markdown file has no use for.
-#[cfg(unix)]
-fn inherit_folder_mode(folder: &Path, file: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = fs::metadata(folder)
-        .map_err(|e| describe(folder, &e))?
-        .permissions()
-        .mode()
-        & 0o666;
-    fs::set_permissions(file, fs::Permissions::from_mode(mode)).map_err(|e| describe(file, &e))
-}
-#[cfg(not(unix))]
-fn inherit_folder_mode(_folder: &Path, _file: &Path) -> Result<(), String> {
-    Ok(())
-}
-#[cfg(target_os = "macos")]
-fn copy_metadata(from: &Path, to: &Path) -> Result<(), String> {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
-    unsafe extern "C" {
-        fn copyfile(
-            from: *const std::ffi::c_char,
-            to: *const std::ffi::c_char,
-            state: *mut std::ffi::c_void,
-            flags: u32,
-        ) -> i32;
-    }
-    let source = CString::new(from.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
-    let target = CString::new(to.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
-    // COPYFILE_ACL | COPYFILE_STAT | COPYFILE_XATTR, without copying file data.
-    if unsafe { copyfile(source.as_ptr(), target.as_ptr(), std::ptr::null_mut(), 7) } != 0 {
-        return Err(describe(from, &io::Error::last_os_error()));
-    }
-    Ok(())
-}
-#[cfg(not(target_os = "macos"))]
-fn copy_metadata(from: &Path, to: &Path) -> Result<(), String> {
-    fs::set_permissions(
-        to,
-        fs::metadata(from)
-            .map_err(|e| describe(from, &e))?
-            .permissions(),
-    )
-    .map_err(|e| describe(to, &e))
 }
 /// Milliseconds since the epoch as (year, month, day, hour, minute, second, millisecond).
 pub(crate) fn civil(milliseconds: u64) -> (i64, u32, u32, u32, u32, u32, u32) {
@@ -1310,59 +1239,6 @@ pub(crate) fn civil(milliseconds: u64) -> (i64, u32, u32, u32, u32, u32, u32) {
         second % 60,
         (milliseconds % 1000) as u32,
     )
-}
-
-/// The one place where a file-system failure becomes something a person can act
-/// on. An `io::Error` reads as the operating system's own report of a system
-/// call — the kind of sentence that belongs in a log, not in a window — so the
-/// raw text is printed for a bug report and reaches the interface only inside
-/// the parentheses of the last resort.
-pub(crate) fn describe(path: &Path, error: &io::Error) -> String {
-    eprintln!("Markraft: {}: {error} ({:?})", path.display(), error.kind());
-    message(path, error)
-}
-
-/// The half of [`describe`] the user reads, separated so it can be tested
-/// without the log.
-fn message(path: &Path, error: &io::Error) -> String {
-    let name = file_label(path);
-    match error.kind() {
-        io::ErrorKind::NotFound => format!(
-            "“{name}” is no longer there. It may have been renamed, moved or deleted; \
-             choose the notes folder again."
-        ),
-        io::ErrorKind::PermissionDenied => format!(
-            "Markraft is not allowed to use “{name}”. Check its permissions in Finder, \
-             or choose another notes folder."
-        ),
-        io::ErrorKind::AlreadyExists => {
-            format!("“{name}” already exists. Rename or move it, then try again.")
-        }
-        io::ErrorKind::InvalidFilename => format!(
-            "“{name}” is not a name this disk accepts. Shorten the note's first line, \
-             then try again."
-        ),
-        io::ErrorKind::StorageFull => {
-            format!("The disk has no room left for “{name}”. Free some space, then try again.")
-        }
-        io::ErrorKind::ReadOnlyFilesystem => format!(
-            "“{name}” is on a disk that cannot be written to. Choose a notes folder \
-             on a disk you can write to."
-        ),
-        io::ErrorKind::TimedOut => format!(
-            "“{name}” did not respond in time. If it is on a network drive or in iCloud, \
-             check the connection and try again."
-        ),
-        _ => format!("Markraft could not use “{name}” ({error})."),
-    }
-}
-
-/// A file or folder as the user knows it. The whole path belongs in the log; in
-/// a message it would bury the sentence.
-pub(crate) fn file_label(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// `text` with the newline a text file ends in.
@@ -1433,31 +1309,14 @@ fn conflicted_copy_path(original: &Path) -> PathBuf {
         .unwrap()
 }
 
-fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path.parent().unwrap_or(Path::new("."));
-    fs::create_dir_all(parent).map_err(|error| describe(parent, &error))?;
-    let mut output =
-        tempfile::NamedTempFile::new_in(parent).map_err(|error| describe(parent, &error))?;
-    output
-        .write_all(bytes)
-        .and_then(|_| output.as_file().sync_all())
-        .map_err(|error| describe(path, &error))?;
-    output
-        .persist(path)
-        .map_err(|error| describe(path, &error.error))?;
-    // Sync the directory entry as well as the file contents when the platform supports it.
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| describe(parent, &error))?;
-    Ok(())
+/// [`Store::open`] over the settings file as it stands, the way a launch reads it.
+#[cfg(test)]
+pub(crate) fn open_reading_settings(
+    directory: PathBuf,
+    settings_path: PathBuf,
+) -> Result<(Store, Library), StoreError> {
+    let settings = Settings::read(&settings_path).unwrap_or_default();
+    Store::open(directory, settings_path, settings)
 }
 
 #[cfg(test)]
@@ -1466,7 +1325,7 @@ mod tests {
     fn open(root: &Path) -> (Store, Library) {
         let notes = root.join("notes");
         fs::create_dir_all(&notes).unwrap();
-        Store::open(notes, root.join("settings.json")).unwrap()
+        open_reading_settings(notes, root.join("settings.json")).unwrap()
     }
     fn fixture(root: &Path, name: &str, text: &[u8]) -> PathBuf {
         let path = root.join("notes").join(name);
@@ -1508,7 +1367,7 @@ mod tests {
         let (mut store, mut library) = open(root.path());
         let id = library.active_id.clone();
         library.notes[0].pinned = true;
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         let path = store.paths()[0].1.clone();
         fs::remove_file(&path).unwrap();
         assert!(matches!(
@@ -1530,11 +1389,11 @@ mod tests {
     fn a_missing_folder_is_refused() {
         let root = tempfile::tempdir().unwrap();
         let missing = root.path().join("notes");
-        let error = match Store::open(missing, root.path().join("settings.json")) {
+        let error = match open_reading_settings(missing, root.path().join("settings.json")) {
             Err(error) => error,
             Ok(_) => panic!("expected missing folder to be refused"),
         };
-        assert!(error.contains("no longer there"), "{error}");
+        assert!(error.to_string().contains("no longer there"), "{error}");
     }
     #[test]
     fn opening_and_pinning_do_not_touch_user_files() {
@@ -1550,7 +1409,7 @@ mod tests {
         let (mut store, mut library) = open(root.path());
         let id = library.active_id.clone();
         library.notes[0].pinned = true;
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         assert_eq!(fs::read(&path).unwrap(), bytes);
         assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
         assert!(!root.path().join("notes/.markraft").exists());
@@ -1577,7 +1436,7 @@ mod tests {
             &id,
             doc::from_markdown("Keep This Name\n\nchanged [site][s]\n\n[s]: https://example.com"),
         );
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "\u{feff}---\r\nid: custom\r\n# comment\r\n---\r\n\r\nKeep This Name\r\n\r\nchanged [site][s]\r\n\r\n[s]: https://example.com\r\n"
@@ -1640,7 +1499,7 @@ mod tests {
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Local"));
         fs::write(&path, b"External\n").unwrap();
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &Preferences::default()).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"External\n");
         assert!(store.conflicts().contains(&id));
         let copies = conflicted_copies_beside(&path);
@@ -1661,7 +1520,7 @@ mod tests {
         library.set_document(&id, doc::from_markdown("Local"));
         fs::remove_file(&path).unwrap();
         store.refresh().unwrap();
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &Preferences::default()).is_err());
         assert!(!path.exists());
         let copies = conflicted_copies_beside(&path);
         assert_eq!(copies.len(), 1);
@@ -1679,7 +1538,7 @@ mod tests {
         assert_eq!(library.notes.len(), 2);
         assert!(library.notes.iter().all(|n| n.read_only.is_some()));
         // Unchanged read-only notes are left alone on save.
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"invalid\xff");
         // Edits are refused by the library before a write is attempted.
         let id = library.active_id.clone();
@@ -1696,12 +1555,12 @@ mod tests {
         let id = library.active_id.clone();
         library.workspace.new_note_directory = "inbox".into();
         library.set_document(&id, doc::from_markdown("Title"));
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         let path = store.paths()[0].1.clone();
         assert_eq!(fs::read_to_string(&path).unwrap(), "Title\n");
         assert!(path.ends_with("inbox/Title.md"));
         library.set_document(&id, doc::from_markdown("Changed"));
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         assert_eq!(store.paths()[0].1, path);
         assert_eq!(fs::read_to_string(&path).unwrap(), "Changed\n");
     }
@@ -1744,7 +1603,7 @@ mod tests {
         let (mut store, mut library) = open(root.path());
         let id = library.active_id.clone();
         library.notes[0].pinned = true;
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         let renamed = store.rename(&id, "Meeting notes").unwrap();
         assert_eq!(renamed, path.with_file_name("Meeting notes.md"));
         assert!(!path.exists());
@@ -1761,7 +1620,7 @@ mod tests {
         // An edit afterwards keeps the filename; renaming is explicit.
         library.notes[0].path = Some(renamed.clone());
         library.set_document(&id, doc::from_markdown("Meeting notes, revised"));
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         assert_eq!(store.paths()[0].1, renamed);
         assert_eq!(
             fs::read_to_string(&renamed).unwrap().trim_end(),
@@ -1789,12 +1648,14 @@ mod tests {
             store
                 .rename(&id, "Two")
                 .unwrap_err()
+                .to_string()
                 .contains("already exists")
         );
         assert!(
             store
                 .rename(&id, "Two.md")
                 .unwrap_err()
+                .to_string()
                 .contains("already exists")
         );
         for name in [
@@ -1836,6 +1697,7 @@ mod tests {
             store
                 .rename(&id, "Uno")
                 .unwrap_err()
+                .to_string()
                 .contains("changed on disk")
         );
         assert!(path.exists());
@@ -1850,9 +1712,9 @@ mod tests {
         let id = library.active_id.clone();
         let original = library.active_note().document.clone();
         library.set_document(&id, doc::from_markdown("# Title\n\nchanged"));
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         library.set_document(&id, original);
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"Title\n=====\n\noriginal\n\n");
     }
     /// A tree that differs from the saved one but writes the same characters —
@@ -1884,7 +1746,7 @@ mod tests {
             .unwrap();
         assert_ne!(library.active_note().document, spelled);
         library.set_document(&id, spelled);
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         assert_eq!(fs::read(&path).unwrap(), text);
         assert!(
             !store
@@ -1903,7 +1765,7 @@ mod tests {
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Local"));
         fs::write(&path, b"External").unwrap();
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &Preferences::default()).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"External");
         assert!(store.conflicts().contains(&id));
         let copies = conflicted_copies_beside(&path);
@@ -1918,7 +1780,7 @@ mod tests {
         );
         // A later save with the disk text adopted writes cleanly.
         library.set_document(&id, doc::from_markdown("External"));
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         assert!(store.conflicts().is_empty());
     }
     /// A queued save and the flush behind it can both see one conflict. The second
@@ -1932,14 +1794,14 @@ mod tests {
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Local"));
         fs::write(&path, b"External").unwrap();
-        assert!(store.save(&library).is_err());
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &Preferences::default()).is_err());
+        assert!(store.save(&library, &Preferences::default()).is_err());
         let copies = conflicted_copies_beside(&path);
         assert_eq!(copies.len(), 1, "{copies:?}");
         assert_eq!(fs::read_to_string(&copies[0]).unwrap().trim_end(), "Local");
         // Different text is a different conflict, and gets its own copy.
         library.set_document(&id, doc::from_markdown("Local, revised"));
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &Preferences::default()).is_err());
         assert_eq!(conflicted_copies_beside(&path).len(), 2);
     }
     /// A leftover draft nobody can read is discarded rather than kept forever as a
@@ -1967,7 +1829,7 @@ mod tests {
         let id = library.active_id.clone();
         library.notes[0].path = Some(path.clone());
         library.set_document(&id, doc::from_markdown("Exact place"));
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         assert_eq!(fs::read_to_string(path).unwrap(), "Exact place\n");
         assert_eq!(fs::read_dir(root.path().join("notes")).unwrap().count(), 0);
     }
@@ -2000,7 +1862,7 @@ mod tests {
         fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
         let (mut store, mut library) = open(root.path());
         let id = library.new_note(doc::from_markdown("Fresh note"));
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         let path = store.files.get(&id).unwrap().path.clone();
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -2009,7 +1871,7 @@ mod tests {
         );
         fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
         let private = library.new_note(doc::from_markdown("Private note"));
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         let path = store.files.get(&private).unwrap().path.clone();
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -2026,13 +1888,13 @@ mod tests {
         library.set_document(&id, doc::from_markdown("Dirty local"));
         fs::write(&path, b"Disk").unwrap();
         store.refresh().unwrap();
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &Preferences::default()).is_err());
         assert_eq!(store.conflicts(), vec![id.clone()]);
         // Acknowledge the disk win, then adopt the store's disk note so a later save is clean.
         store.acknowledge(std::slice::from_ref(&id));
         let disk = store.files.get(&id).unwrap().note.clone();
         library.adopt(disk);
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         assert!(store.conflicts().is_empty());
         assert_eq!(fs::read_to_string(path).unwrap().trim(), "Disk");
     }
@@ -2123,7 +1985,7 @@ mod tests {
         let (mut store, mut library) = open(root.path());
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Q3 #planning\n\nbody"));
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         assert_eq!(
             markdown_files(root.path()),
             [root.path().join("notes/Q3 planning.md")]
@@ -2138,7 +2000,7 @@ mod tests {
         library.workspace.new_note_name = crate::storage::NoteNaming::DateTime;
         let id = library.new_note(doc::from_markdown("Meeting notes"));
         let created = library.note(&id).unwrap().created_at;
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         let path = store.files.get(&id).unwrap().path.clone();
         let local = created.saturating_add_signed(crate::platform::local_utc_offset() * 1000);
         assert_eq!(
@@ -2153,7 +2015,7 @@ mod tests {
         let id = library.new_note(doc::from_markdown("Draft text"));
         let target = root.path().join("notes/draft.md");
         library.notes.iter_mut().find(|n| n.id == id).unwrap().path = Some(target.clone());
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         let path = store.files.get(&id).unwrap().path.clone();
         assert_eq!(path, fs::canonicalize(&target).unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap(), "Draft text\n");
@@ -2167,12 +2029,12 @@ mod tests {
             let id = library.new_note(doc::from_markdown("Draft text"));
             let target = root.path().join("notes/Draft text.md");
             library.notes.iter_mut().find(|n| n.id == id).unwrap().path = Some(target.clone());
-            store.save(&library).unwrap();
+            store.save(&library, &Preferences::default()).unwrap();
             match discard {
                 "trash" => assert!(library.delete(&id)),
                 _ => library.remove(&id),
             }
-            store.save(&library).unwrap();
+            store.save(&library, &Preferences::default()).unwrap();
             drop(store);
             let (_, library) = open(root.path());
             assert!(library.note(&id).is_none(), "a {discard}ed draft came back");
@@ -2194,7 +2056,7 @@ mod tests {
             .clone();
         assert!(library.delete(&id));
         assert!(library.note(&id).is_none());
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         assert!(!gone.exists());
         assert!(path.exists());
         assert_eq!(library.notes.len(), 1);
@@ -2209,7 +2071,7 @@ mod tests {
         let target = root.path().join("elsewhere/New note.md");
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         library.notes.iter_mut().find(|n| n.id == id).unwrap().path = Some(target.clone());
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         drop(store);
         let (_, library) = open(root.path());
         assert!(library.note(&id).is_some());
@@ -2223,11 +2085,11 @@ mod tests {
         let path = fixture(root.path(), "occupied.md", b"Existing");
         library.notes[0].path = Some(path.clone());
         library.set_document(&id, doc::from_markdown("Draft"));
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &Preferences::default()).is_err());
         assert!(store.conflicts().is_empty());
         assert!(!store.pending.contains(&id));
         library.notes[0].path = Some(root.path().join("notes/free.md"));
-        store.save(&library).unwrap();
+        store.save(&library, &Preferences::default()).unwrap();
         assert_eq!(fs::read(path).unwrap(), b"Existing");
         assert!(
             !store
@@ -2272,7 +2134,7 @@ mod tests {
                 doc::from_markdown("# Changed\n\nText with [a link](https://example.com)."),
             );
             let start = std::time::Instant::now();
-            store.save(&library).unwrap();
+            store.save(&library, &Preferences::default()).unwrap();
             let save = start.elapsed();
             eprintln!(
                 "workspace_count={count} cold_ms={} incremental_ms={} save_ms={}",
@@ -2290,7 +2152,7 @@ mod tests {
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Local"));
         fs::write(&path, b"Disk").unwrap();
-        assert!(store.save(&library).is_err());
+        assert!(store.save(&library, &Preferences::default()).is_err());
         let copies = conflicted_copies_beside(&path);
         assert_eq!(copies.len(), 1);
         store.reload().unwrap();

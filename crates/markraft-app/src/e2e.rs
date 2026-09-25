@@ -54,8 +54,14 @@ pub(crate) fn open_with<'a>(
         markraft_vim::bind_keys(cx);
         bind_app_keys(cx);
     });
-    let (store, mut library) = Store::open(notes.clone(), settings.clone()).expect("the store");
-    configure(&mut library.preferences);
+    let (store, library) = Store::open(
+        notes.clone(),
+        settings.clone(),
+        crate::storage::Settings::default(),
+    )
+    .expect("the store");
+    let mut preferences = Preferences::default();
+    configure(&mut preferences);
     let Launch::Primary(instance) =
         Instance::acquire(&settings, Request::Show).expect("the instance lock")
     else {
@@ -68,6 +74,7 @@ pub(crate) fn open_with<'a>(
             settings,
             Some(store),
             library,
+            preferences,
             None,
             None,
             Updater::disabled(),
@@ -594,7 +601,7 @@ mod tests {
     // column changed respells the table, since every row changes with it.
     #[gpui::test]
     fn table_edits_on_a_hand_written_table(cx: &mut TestAppContext) {
-        use markraft_gpui::ColumnAlignment;
+        use markraft_gpui::{ColumnAlignment, TableOp};
         type Edit = fn(
             &mut markraft_gpui::EditorView,
             &mut gpui::Context<markraft_gpui::EditorView>,
@@ -602,37 +609,37 @@ mod tests {
         let edits: [(&str, Edit, &str); 7] = [
             (
                 "row after",
-                |e, cx| e.table_add_row_after(cx),
+                |e, cx| e.table(TableOp::AddRowAfter, cx),
                 "|a|b|\n|-|-|\n|1|2|\n| | |\n",
             ),
             (
                 "row before",
-                |e, cx| e.table_add_row_before(cx),
+                |e, cx| e.table(TableOp::AddRowBefore, cx),
                 "|a|b|\n|-|-|\n| | |\n|1|2|\n",
             ),
             (
                 "column after",
-                |e, cx| e.table_add_column_after(cx),
+                |e, cx| e.table(TableOp::AddColumnAfter, cx),
                 "| a   | b   |     |\n| --- | --- | --- |\n| 1   | 2   |     |\n",
             ),
             (
                 "column before",
-                |e, cx| e.table_add_column_before(cx),
+                |e, cx| e.table(TableOp::AddColumnBefore, cx),
                 "| a   |     | b   |\n| --- | --- | --- |\n| 1   |     | 2   |\n",
             ),
             (
                 "align centre",
-                |e, cx| e.table_set_alignment(ColumnAlignment::Center, cx),
+                |e, cx| e.table(TableOp::SetAlignment(ColumnAlignment::Center), cx),
                 "| a   | b   |\n| --- | :-: |\n| 1   | 2   |\n",
             ),
             (
                 "delete row",
-                |e, cx| e.table_delete_row(cx),
+                |e, cx| e.table(TableOp::DeleteRow, cx),
                 "|a|b|\n|-|-|\n",
             ),
             (
                 "delete column",
-                |e, cx| e.table_delete_column(cx),
+                |e, cx| e.table(TableOp::DeleteColumn, cx),
                 "| a   |\n| --- |\n| 1   |\n",
             ),
         ];

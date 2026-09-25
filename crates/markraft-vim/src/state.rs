@@ -149,7 +149,7 @@ pub(crate) struct State {
     pub composing: bool,
     /// The spelling of a style a change emptied, which Escape takes away when
     /// nothing was typed into it.
-    pub emptied: Option<crate::edit::EmptiedPair>,
+    pub emptied: Option<markraft_core::kind::conceal::EmptiedPair>,
     /// The mode the host has been told about.
     reported: Option<Mode>,
 }

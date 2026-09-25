@@ -9,49 +9,44 @@ mod accessibility;
 mod callout;
 mod caret;
 mod clipboard;
-pub mod commands;
 mod completion;
-mod conceal;
 mod emoji;
 mod extension;
 mod footnotes;
 mod format_state;
 mod images;
 pub mod ime;
-mod keymap;
 mod links;
 mod shaping;
 mod single_line;
 mod style;
 mod surface;
-pub use surface::TABLE_TOOLBAR_ROOM;
 mod syntax;
 mod typeahead;
-mod types;
 mod wiki;
-pub use conceal::{concealed_steps, markup_spans};
 pub use emoji::{EmojiInsertion, EmojiShortcodes, emoji_menu};
 pub use extension::{
     ActionHandler, CaretShape, EXTENSION_ORIGIN_PREFIX, EditorCx, Extension, ExtensionHandle,
     ExtensionPayload, InputPolicy, Overlay, Update,
 };
 pub use markraft_core::commands::ColumnAlignment;
+pub use markraft_core::kind::{CalloutAttrs, DocTypes, DocumentKind, Formatting, PlainKind};
+use markraft_core::kind::{chains, conceal};
 pub use style::EditorStyle;
 pub use syntax::{canonical_language, code_languages};
 pub use typeahead::{Typeahead, TypeaheadItem, TypeaheadProvider};
-pub use types::{CalloutAttrs, DocTypes};
 
 use extension::AnchoredOverlay;
 use gpui::{prelude::*, *};
 use markraft_core::commands::{Command, Direction};
 use markraft_core::projection::{Projection, projection_of};
+use markraft_core::protocol::event;
 use markraft_core::{
     Attrs, EditorState, EditorStateConfig, MarkSet, MarkTypeId, Node, NodeTypeId, Schema,
     Selection, Transaction, TransactionSpec, history::HistoryConfig,
 };
-use std::collections::HashMap;
 use std::{cell::RefCell, rc::Rc, sync::Arc};
-use surface::{EditorSurface, LayoutLine, ShapeInput, TableScroll};
+use surface::{EditorSurface, FrameLayout, LayoutLine, ShapeInput};
 
 /// How long a pause splits one typing session from the next, in milliseconds.
 const TYPING_GROUP_DELAY: u64 = 750;
@@ -240,10 +235,11 @@ pub fn bind_keys(cx: &mut App) {
     typeahead::bind_keys(cx);
 }
 
-/// The Emacs keys every macOS text view takes. Not in a vim mode that reads
-/// keys as commands, where they would edit under a Normal-mode caret.
+/// The Emacs keys every macOS text view takes. Not while an extension reads
+/// keys as commands — a vim Normal mode — where they would edit under its
+/// caret; see [`Extension::key_context`].
 fn emacs_key_bindings() -> Vec<KeyBinding> {
-    const CONTEXT: Option<&str> = Some("Markraft && (!vim_mode || vim_mode == insert)");
+    const CONTEXT: Option<&str> = Some("Markraft && !modal");
     vec![
         KeyBinding::new("ctrl-a", ParagraphStart, CONTEXT),
         KeyBinding::new("ctrl-e", ParagraphEnd, CONTEXT),
@@ -318,12 +314,44 @@ pub struct TableInfo {
     pub alignment: ColumnAlignment,
 }
 
+/// An edit of the table the caret is in — or, with [`TableOp::Insert`], a new
+/// table — as [`EditorView::table`] runs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableOp {
+    /// A new `rows` × `columns` table after the caret's block, or in place of
+    /// an empty one.
+    Insert {
+        /// How many rows, the header among them.
+        rows: usize,
+        /// How many columns.
+        columns: usize,
+    },
+    /// A row above the caret's.
+    AddRowBefore,
+    /// A row below the caret's.
+    AddRowAfter,
+    /// A column before the caret's.
+    AddColumnBefore,
+    /// A column after the caret's.
+    AddColumnAfter,
+    /// The caret's row; the last row takes the table with it.
+    DeleteRow,
+    /// The caret's column; the last column takes the table with it.
+    DeleteColumn,
+    /// The whole table.
+    DeleteTable,
+    /// The caret's column aligned this way.
+    SetAlignment(ColumnAlignment),
+}
+
 /// How to build an [`EditorView`]: the host's document kind and its extensions.
 ///
 /// The view is schema-agnostic. Everything that names a concrete document kind
 /// comes in here: the compiled [`Schema`], the [`DocTypes`] that say which of
 /// its types play the roles the view draws and binds keys to, and the
-/// [`Codecs`](markraft_core::kind::Codecs) the clipboard reads and writes with.
+/// [`DocumentKind`] that supplies the behaviour behind those roles — the
+/// clipboard codecs, the spelling, and how the kind toggles, links, splits and
+/// breaks where it does so differently from the view.
 pub struct Setup {
     /// The document kind's compiled schema.
     pub schema: Schema,
@@ -333,35 +361,9 @@ pub struct Setup {
     /// The host's state extensions — input rules, corrections and fields. The
     /// view adds history, composition and the projection itself.
     pub extensions: markraft_core::Extension,
-    /// How the clipboard reads and writes this document kind. Without it a copy
-    /// writes plain text and a paste is inserted literally.
-    pub codecs: Option<Arc<dyn markraft_core::kind::Codecs>>,
-    /// How this document kind spells the parts of itself a reader may be shown
-    /// as source — a heading's `##`, a code fence, a link's `](…)`. Without it
-    /// the view draws only what it renders, never the characters behind it.
-    pub spelling: Option<Arc<dyn markraft_core::kind::SourceSpelling>>,
-    /// How this document kind toggles an inline mark. A kind that keeps the
-    /// characters spelling a mark in the document edits *those*, which the
-    /// model's own [`toggle_mark`](markraft_core::commands::toggle_mark) knows
-    /// nothing about; one that does not leaves this unset and gets it.
-    pub mark_toggle: Option<MarkToggle>,
-    /// How this document kind links and unlinks the selection, for the same
-    /// reason. Without it the view sets and removes the link mark itself.
-    pub link_setter: Option<LinkSetter>,
-    /// How this document kind splits a textblock: a wrapper around each of
-    /// the view's own splitting commands that Enter runs. A kind that spells
-    /// styles in the text closes and reopens them around the cut here.
-    pub split_wrap: Option<SplitWrap>,
-    /// What Enter does before it splits anything: a document kind in which a
-    /// whole line can spell a block — a Markdown fence, a table's header row —
-    /// turns that line into the block here. Enter carries on as usual where
-    /// it does not apply.
-    pub enter_rule: Option<markraft_core::commands::Command>,
-    /// What a kind that keeps its markup in the text writes before the line
-    /// ending of a hard break Shift-Return makes. Asked each time the key is
-    /// pressed, so a host whose preference changes needs no new view. Without
-    /// it the break is spelled with a trailing `\`.
-    pub break_spelling: Option<BreakSpelling>,
+    /// The document kind's own behaviour. [`PlainKind`] — the default — leaves
+    /// everything to the view.
+    pub kind: Arc<dyn DocumentKind>,
     /// The document to open with. The schema's smallest valid document
     /// otherwise.
     pub doc: Option<Node>,
@@ -373,13 +375,7 @@ impl Setup {
             schema,
             types: DocTypes::none(),
             extensions: markraft_core::Extension::none(),
-            codecs: None,
-            spelling: None,
-            mark_toggle: None,
-            link_setter: None,
-            split_wrap: None,
-            enter_rule: None,
-            break_spelling: None,
+            kind: Arc::new(PlainKind),
             doc: None,
         }
     }
@@ -391,32 +387,8 @@ impl Setup {
         self.extensions = extensions;
         self
     }
-    pub fn codecs(mut self, codecs: Arc<dyn markraft_core::kind::Codecs>) -> Setup {
-        self.codecs = Some(codecs);
-        self
-    }
-    pub fn spelling(mut self, spelling: Arc<dyn markraft_core::kind::SourceSpelling>) -> Setup {
-        self.spelling = Some(spelling);
-        self
-    }
-    pub fn mark_toggle(mut self, toggle: MarkToggle) -> Setup {
-        self.mark_toggle = Some(toggle);
-        self
-    }
-    pub fn link_setter(mut self, setter: LinkSetter) -> Setup {
-        self.link_setter = Some(setter);
-        self
-    }
-    pub fn split_wrap(mut self, wrap: SplitWrap) -> Setup {
-        self.split_wrap = Some(wrap);
-        self
-    }
-    pub fn enter_rule(mut self, rule: markraft_core::commands::Command) -> Setup {
-        self.enter_rule = Some(rule);
-        self
-    }
-    pub fn break_spelling(mut self, spelling: BreakSpelling) -> Setup {
-        self.break_spelling = Some(spelling);
+    pub fn kind(mut self, kind: Arc<dyn DocumentKind>) -> Setup {
+        self.kind = kind;
         self
     }
     pub fn doc(mut self, doc: Node) -> Setup {
@@ -424,29 +396,6 @@ impl Setup {
         self
     }
 }
-
-/// A document kind's formatting edit over a state: `Ok(None)` where it does not
-/// apply, the edit, or — where the kind has no way to write the result — the
-/// sentence the host wants shown, which the view reports as
-/// [`EditRejection::Refused`].
-pub type Formatting =
-    Arc<dyn Fn(&EditorState) -> Result<Option<TransactionSpec>, String> + Send + Sync>;
-
-/// How a document kind toggles one inline mark over the selection.
-pub type MarkToggle = Arc<dyn Fn(markraft_core::MarkTypeId, Attrs) -> Formatting + Send + Sync>;
-
-/// How a document kind links the selection to a URL, or unlinks it with `None`.
-/// The mark type is the one [`DocTypes::link`] names.
-pub type LinkSetter =
-    Arc<dyn Fn(markraft_core::MarkTypeId, Option<&str>) -> Formatting + Send + Sync>;
-
-/// How a document kind wraps a command that splits a textblock at the caret.
-pub type SplitWrap =
-    Arc<dyn Fn(markraft_core::commands::Command) -> markraft_core::commands::Command + Send + Sync>;
-
-/// What a document kind writes before the line ending of a new hard break —
-/// `"\\"` or two spaces in Markdown. See [`Setup::break_spelling`].
-pub type BreakSpelling = Arc<dyn Fn() -> &'static str + Send + Sync>;
 
 /// Why an edit did not reach the document. The editor only keeps the cases apart;
 /// the host words each one, because only it knows what the document is stored in.
@@ -516,6 +465,27 @@ fn apply_guarded(
     Ok(transactions)
 }
 
+/// Where a vertical move goes; see [`EditorView::vertical_target`].
+pub(crate) enum VerticalMove {
+    /// A block-edge rule takes over: the edit that leaves a code block, a
+    /// final table or a selected divider for a new block, or that carries the
+    /// caret to the document's edge.
+    Run(TransactionSpec),
+    /// The neighbouring visual row, at `x` — the column the next vertical
+    /// move keeps.
+    To {
+        /// The document position under the column on the target row.
+        position: usize,
+        /// The column the caret came from.
+        x: Pixels,
+        /// Whether the position sits at the end of a wrapped row rather than
+        /// the start of the next.
+        upstream: bool,
+    },
+    /// Nowhere to go: no layout yet, or an edge with no edit to make there.
+    Stay,
+}
+
 pub struct EditorView {
     document_guard: Option<DocumentGuard>,
     edit_error: Option<EditRejection>,
@@ -523,20 +493,13 @@ pub struct EditorView {
     state: EditorState,
     projection: Arc<Projection>,
     pub(crate) types: DocTypes,
-    /// The host's clipboard codecs, absent for an editor that only holds text.
+    /// The host's document kind; see [`Setup::kind`].
+    kind: Arc<dyn DocumentKind>,
+    /// [`DocumentKind::codecs`], asked once: absent for an editor that only
+    /// holds text.
     pub(crate) codecs: Option<Arc<dyn markraft_core::kind::Codecs>>,
-    /// How the host's document kind spells itself; see [`Setup::spelling`].
+    /// [`DocumentKind::spelling`], asked once.
     pub(crate) spelling: Option<Arc<dyn markraft_core::kind::SourceSpelling>>,
-    /// How the host's document kind toggles a mark; see [`Setup::mark_toggle`].
-    mark_toggle: Option<MarkToggle>,
-    /// How the host's document kind links; see [`Setup::link_setter`].
-    link_setter: Option<LinkSetter>,
-    /// How the host's document kind splits; see [`Setup::split_wrap`].
-    split_wrap: Option<SplitWrap>,
-    /// What Enter tries first; see [`Setup::enter_rule`].
-    enter_rule: Option<markraft_core::commands::Command>,
-    /// How Shift-Return spells a hard break; see [`Setup::break_spelling`].
-    break_spelling: Option<BreakSpelling>,
     /// The host's extensions, kept so the state can be rebuilt on a replacement.
     host_extensions: markraft_core::Extension,
     pub(crate) extensions: Vec<extension::Registration>,
@@ -552,21 +515,13 @@ pub struct EditorView {
     /// editor to several surfaces renames it as it hands it over.
     pub(crate) aria_label: SharedString,
     pub(crate) single_line: bool,
-    pub(crate) single_line_scroll_x: Pixels,
     pub(crate) focus: FocusHandle,
-    pub(crate) layout: Vec<LayoutLine>,
-    /// How far each grid that does not fit the note is scrolled sideways, keyed
-    /// by the position before its table node. Kept across frames — it is the
-    /// reader's place in the grid — and dropped when the grid is gone.
-    pub(crate) tables: HashMap<usize, TableScroll>,
-    /// The box the last frame drew the note's content in, which is what a grid
-    /// is clipped to and what the table toolbar anchors inside.
-    pub(crate) content_bounds: Bounds<Pixels>,
+    /// What the last paint produced; see [`FrameLayout`].
+    pub(crate) frame: FrameLayout,
     pub(crate) scroll: ScrollHandle,
-    pub(crate) reveal: bool,
-    pub(crate) upstream: bool,
+    /// The caret's own view state: break side, kept column, pending reveal.
+    pub(crate) caret: caret::CaretView,
     selecting: bool,
-    pub(crate) preferred_x: Option<Pixels>,
     published_revision: u64,
     undo_group_depth: usize,
     pub(crate) accessible_text: Rc<RefCell<accessibility::AccessibleText>>,
@@ -621,13 +576,7 @@ impl EditorView {
             schema,
             types,
             extensions,
-            codecs,
-            spelling,
-            mark_toggle,
-            link_setter,
-            split_wrap,
-            enter_rule,
-            break_spelling,
+            kind,
             doc,
         } = setup;
         let state = build_state(&schema, &extensions, doc);
@@ -637,13 +586,9 @@ impl EditorView {
             edit_error: None,
             file_paste: false,
             types,
-            codecs,
-            spelling,
-            mark_toggle,
-            link_setter,
-            split_wrap,
-            enter_rule,
-            break_spelling,
+            codecs: kind.codecs(),
+            spelling: kind.spelling(),
+            kind,
             extension_selection: state.selection().clone(),
             state,
             projection,
@@ -653,16 +598,11 @@ impl EditorView {
             indent_text: "\t".into(),
             aria_label: DEFAULT_ARIA_LABEL.into(),
             single_line: false,
-            single_line_scroll_x: px(0.),
             focus: cx.focus_handle(),
-            layout: vec![],
-            tables: HashMap::new(),
-            content_bounds: Bounds::default(),
+            frame: FrameLayout::default(),
             scroll: ScrollHandle::new(),
-            reveal: false,
-            upstream: false,
+            caret: caret::CaretView::default(),
             selecting: false,
-            preferred_x: None,
             published_revision: 0,
             undo_group_depth: 0,
             accessible_text: Rc::default(),
@@ -823,9 +763,14 @@ impl EditorView {
         self.indent_text = text.into();
         cx.notify();
     }
+    /// Take what prepaint produced, in one assignment.
+    pub(crate) fn set_frame(&mut self, frame: FrameLayout) {
+        self.frame = frame;
+    }
+
     pub fn set_style(&mut self, style: EditorStyle, cx: &mut Context<Self>) {
         self.shaping.set_style(style);
-        self.reveal = true;
+        self.caret.ask_reveal();
         cx.notify();
     }
 
@@ -889,7 +834,7 @@ impl EditorView {
     /// projection is the live document, and a lookup that assumes they agree
     /// silently answers for the wrong row when they do not.
     pub(crate) fn row_at(&self, pos: usize) -> Option<(&LayoutLine, usize)> {
-        let row = self.layout.iter().find(|row| row.contains(pos))?;
+        let row = self.frame.rows().iter().find(|row| row.contains(pos))?;
         Some((row, row.pos_to_offset(pos)))
     }
 
@@ -915,8 +860,8 @@ impl EditorView {
 
     /// Height at the most recently laid-out width, including editor padding.
     pub fn content_height(&self) -> Option<Pixels> {
-        (!self.layout.is_empty()).then(|| {
-            self.layout.iter().fold(
+        (!self.frame.rows().is_empty()).then(|| {
+            self.frame.rows().iter().fold(
                 (if self.single_line { px(0.) } else { px(40.) })
                     + self.style().padding * 2.
                     + self.style().top_overlay
@@ -947,7 +892,7 @@ impl EditorView {
         } else {
             doc
         };
-        self.single_line_scroll_x = px(0.);
+        self.frame.clear();
         self.state = build_state(
             &self.state.schema().clone(),
             &self.host_extensions,
@@ -956,8 +901,6 @@ impl EditorView {
         self.projection = projection_of(&self.state);
         self.extension_selection = self.state.selection().clone();
         self.undo_group_depth = 0;
-        self.layout.clear();
-        self.tables.clear();
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.reset_caret_blink(cx);
         self.publish(cx);
@@ -1008,12 +951,10 @@ impl EditorView {
         let composing = self.is_composing();
         let transactions = self.apply(specs)?;
         let changed = transactions.iter().any(Transaction::doc_changed);
-        self.upstream = false;
+        self.caret.moved_by_edit();
         if changed || composing != self.is_composing() {
             self.publish(cx);
         }
-        self.preferred_x = None;
-        self.reveal = true;
         self.reset_caret_blink(cx);
         cx.notify();
         let composing_now = self.is_composing();
@@ -1073,7 +1014,7 @@ impl EditorView {
     /// Select everything, as ⌘A does. A host that fills a field with a value meant to
     /// be typed over calls this, so the first keystroke replaces it.
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
-        let command = commands::select_all(&self.types);
+        let command = chains::select_all(&self.types);
         self.run_command(&command, cx);
     }
 
@@ -1084,25 +1025,19 @@ impl EditorView {
 
     /// The host's way of toggling `ty`, or the model's where it has none.
     fn mark_command(&self, ty: MarkTypeId, attrs: Attrs) -> Formatting {
-        match &self.mark_toggle {
-            Some(toggle) => toggle(ty, attrs),
-            None => {
-                let command = markraft_core::commands::toggle_mark(ty, attrs);
-                Arc::new(move |state| Ok(command(state)))
-            }
-        }
+        self.kind.toggle_mark(ty, attrs.clone()).unwrap_or_else(|| {
+            let command = markraft_core::commands::toggle_mark(ty, attrs);
+            Arc::new(move |state| Ok(command(state)))
+        })
     }
 
     /// The host's way of linking the selection to `url`, or unlinking it, or
     /// the view's own where it has none.
     fn link_command(&self, ty: MarkTypeId, url: Option<&str>) -> Formatting {
-        match &self.link_setter {
-            Some(setter) => setter(ty, url),
-            None => {
-                let url = url.map(str::to_owned);
-                Arc::new(move |state| Ok(links::set_link(state, ty, url.as_deref())))
-            }
-        }
+        self.kind.set_link(ty, url).unwrap_or_else(|| {
+            let url = url.map(str::to_owned);
+            Arc::new(move |state| Ok(links::set_link(state, ty, url.as_deref())))
+        })
     }
 
     /// Run a document kind's formatting edit. A refusal changes nothing and is
@@ -1182,7 +1117,7 @@ impl EditorView {
             vec![
                 TransactionSpec::new()
                     .selection(Selection::cursor(pos))
-                    .user_event("select.pointer")
+                    .user_event(event::SELECT_POINTER)
                     .scroll_into_view(),
             ],
         );
@@ -1212,7 +1147,8 @@ impl EditorView {
     /// Window bounds of the language tag of the code block starting at `pos`,
     /// for anchoring the host's language picker to it.
     pub fn code_language_bounds(&self, pos: usize) -> Option<Bounds<Pixels>> {
-        self.layout
+        self.frame
+            .rows()
             .iter()
             .find(|row| row.code_pos == Some(pos))?
             .code_language_bounds()
@@ -1242,17 +1178,18 @@ impl EditorView {
     /// Where the caret's table is, or `None` outside one. Valid after a paint.
     pub fn table_at_caret(&self) -> Option<TableInfo> {
         let head = self.head();
-        let line = self.layout.iter().find(|line| line.contains(head))?;
+        let line = self.frame.rows().iter().find(|line| line.contains(head))?;
         let cell = line.table?;
         let bounds = self
-            .layout
+            .frame
+            .rows()
             .iter()
             .filter(|line| line.table.is_some_and(|other| other.table == cell.table))
             .filter_map(LayoutLine::cell_bounds)
             .reduce(|all, bounds| all.union(&bounds))?;
         // A grid wider than the note is scrolled inside it, so the toolbar
         // anchors to the part of it the reader can actually see.
-        let bounds = bounds.intersect(&self.content_bounds);
+        let bounds = bounds.intersect(&self.frame.content_bounds());
         Some(TableInfo {
             bounds,
             cell_bounds: line.cell_bounds()?,
@@ -1284,57 +1221,24 @@ impl EditorView {
     }
 
     /// Insert a `rows` by `columns` table of empty cells, caret in the first.
-    pub fn insert_table(&mut self, rows: usize, columns: usize, cx: &mut Context<Self>) -> bool {
+    /// One edit of the table the caret is in, or a new table where there is
+    /// none: what every table control resolves to. `false` where it does not
+    /// apply — outside a table for every shape but [`TableOp::Insert`], and
+    /// in a single-line editor always.
+    pub fn table(&mut self, op: TableOp, cx: &mut Context<Self>) -> bool {
+        use markraft_core::commands as c;
         self.table_command(
-            |types| markraft_core::commands::insert_table(types, rows, columns),
-            cx,
-        )
-    }
-
-    /// Insert an empty row above the caret's row. A row inserted above the
-    /// header becomes the new header.
-    pub fn table_add_row_before(&mut self, cx: &mut Context<Self>) -> bool {
-        self.table_command(markraft_core::commands::add_row_before, cx)
-    }
-
-    /// Insert an empty row below the caret's row.
-    pub fn table_add_row_after(&mut self, cx: &mut Context<Self>) -> bool {
-        self.table_command(markraft_core::commands::add_row_after, cx)
-    }
-
-    /// Insert an empty column to the left of the caret's column.
-    pub fn table_add_column_before(&mut self, cx: &mut Context<Self>) -> bool {
-        self.table_command(markraft_core::commands::add_column_before, cx)
-    }
-
-    /// Insert an empty column to the right of the caret's column.
-    pub fn table_add_column_after(&mut self, cx: &mut Context<Self>) -> bool {
-        self.table_command(markraft_core::commands::add_column_after, cx)
-    }
-
-    /// Delete the caret's row, or the table when it is the only one.
-    pub fn table_delete_row(&mut self, cx: &mut Context<Self>) -> bool {
-        self.table_command(markraft_core::commands::delete_row, cx)
-    }
-
-    /// Delete the caret's column, or the table when it is the only one.
-    pub fn table_delete_column(&mut self, cx: &mut Context<Self>) -> bool {
-        self.table_command(markraft_core::commands::delete_column, cx)
-    }
-
-    /// Delete the whole table the caret is in.
-    pub fn table_delete_table(&mut self, cx: &mut Context<Self>) -> bool {
-        self.table_command(markraft_core::commands::delete_table, cx)
-    }
-
-    /// Set the alignment of the caret's column.
-    pub fn table_set_alignment(
-        &mut self,
-        alignment: ColumnAlignment,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        self.table_command(
-            move |types| markraft_core::commands::set_column_alignment(types, alignment),
+            move |types| match op {
+                TableOp::Insert { rows, columns } => c::insert_table(types, rows, columns),
+                TableOp::AddRowBefore => c::add_row_before(types),
+                TableOp::AddRowAfter => c::add_row_after(types),
+                TableOp::AddColumnBefore => c::add_column_before(types),
+                TableOp::AddColumnAfter => c::add_column_after(types),
+                TableOp::DeleteRow => c::delete_row(types),
+                TableOp::DeleteColumn => c::delete_column(types),
+                TableOp::DeleteTable => c::delete_table(types),
+                TableOp::SetAlignment(alignment) => c::set_column_alignment(types, alignment),
+            },
             cx,
         )
     }
@@ -1347,7 +1251,7 @@ impl EditorView {
             self.state.selection().from(doc),
             self.state.selection().to(doc),
         );
-        let row = surface::selection_anchor_row(&self.layout, start, end)?;
+        let row = surface::selection_anchor_row(self.frame.rows(), start, end)?;
         let offset = row.pos_to_offset(start);
         let range = if start != end {
             offset..row.pos_to_offset(end)
@@ -1361,7 +1265,7 @@ impl EditorView {
             offset..offset
         };
         if range.is_empty() {
-            let caret = row.caret(range.start, self.upstream);
+            let caret = row.caret(range.start, self.caret.upstream());
             return Some(Bounds::new(caret, size(px(0.), row.line_height)));
         }
         let rectangles = row.rectangles(range, false);
@@ -1473,7 +1377,7 @@ impl EditorView {
         let mut specs = vec![
             TransactionSpec::new()
                 .selection(selection)
-                .user_event("select.pointer")
+                .user_event(event::SELECT_POINTER)
                 .scroll_into_view(),
         ];
         if self.is_composing() {
@@ -1484,7 +1388,7 @@ impl EditorView {
 
     /// The document position under `point`.
     pub(crate) fn hit(&self, point: Point<Pixels>) -> usize {
-        let Some(last) = self.layout.last() else {
+        let Some(last) = self.frame.rows().last() else {
             return 0;
         };
         if point.y >= last.origin.y + last.height {
@@ -1500,15 +1404,16 @@ impl EditorView {
     /// The laid-out line `point` falls on, and the point relative to its origin.
     fn row_under(&self, point: Point<Pixels>) -> (&LayoutLine, Point<Pixels>) {
         let row = self
-            .layout
+            .frame
+            .rows()
             .iter()
             .find(|row| point.y < row.origin.y + row.height)
-            .unwrap_or(&self.layout[0]);
+            .unwrap_or(&self.frame.rows()[0]);
         // A grid's cells share one band of y, and only the last of a row
         // carries the row's height, so the search above lands on that one
         // whatever column the point was in. The grid picks the column.
         let row = match row.table.map(|cell| cell.table) {
-            Some(table) => surface::cell_under(&self.layout, table, point).unwrap_or(row),
+            Some(table) => surface::cell_under(self.frame.rows(), table, point).unwrap_or(row),
             None => row,
         };
         let local = gpui::point(point.x - row.origin.x, point.y - row.origin.y);
@@ -1521,7 +1426,7 @@ impl EditorView {
     /// into the spelling. Where the spelling is not what was shown, the caret
     /// stays at the edge.
     fn caret_into_source(&mut self, point: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(last) = self.layout.last() else {
+        let Some(last) = self.frame.rows().last() else {
             return;
         };
         if point.y >= last.origin.y + last.height {
@@ -1551,7 +1456,7 @@ impl EditorView {
 
     fn select_point(&mut self, point: Point<Pixels>, extend: bool, cx: &mut Context<Self>) {
         let (position, upstream) = self.hit_upstream(point);
-        self.upstream = upstream;
+        self.caret.landed(upstream);
         self.select(position, extend, cx);
     }
 
@@ -1570,7 +1475,8 @@ impl EditorView {
     /// each one listed once however many lines sit on it.
     fn visual_row_centers(&self) -> Vec<Pixels> {
         surface::merge_row_centers(
-            self.layout
+            self.frame
+                .rows()
                 .iter()
                 .flat_map(|row| {
                     (0..row.visual_rows())
@@ -1585,8 +1491,8 @@ impl EditorView {
     pub(crate) fn visual_row_target(&self, delta: isize) -> Option<(usize, Pixels, bool)> {
         let head = self.motion_head();
         let (row, offset) = self.row_at(head)?;
-        let caret = row.caret(offset, self.upstream);
-        let x = self.preferred_x.unwrap_or(caret.x);
+        let caret = row.caret(offset, self.caret.upstream());
+        let x = self.caret.preferred_x().unwrap_or(caret.x);
         let centers = self.visual_row_centers();
         if centers.is_empty() {
             return None;
@@ -1607,14 +1513,14 @@ impl EditorView {
             self.row_at(pos)
                 .map(|(row, offset)| row.caret(offset, upstream).y)
         };
-        caret_y(position, upstream) == caret_y(self.motion_head(), self.upstream)
+        caret_y(position, upstream) == caret_y(self.motion_head(), self.caret.upstream())
     }
 
     /// The start or end of the caret's visual row. A wrapped block has several.
     pub(crate) fn line_edge_target(&self, end: bool) -> Option<(usize, bool)> {
         let head = self.motion_head();
         let (row, offset) = self.row_at(head)?;
-        let caret = row.caret(offset, self.upstream);
+        let caret = row.caret(offset, self.caret.upstream());
         Some(self.hit_upstream(point(
             if end {
                 row.origin.x + row.width
@@ -1625,63 +1531,94 @@ impl EditorView {
         )))
     }
 
-    fn vertical(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
+    /// Where a vertical move of `delta` rows from the caret goes: the one
+    /// decision ↑ and ↓ and a modal extension's j and k share, so the block
+    /// edges behave the same under either.
+    ///
+    /// The rules, in order, for a move down with nothing selected: at the end
+    /// of a verbatim block that ends the document it leaves the block for a
+    /// new one ([`exit_code`](markraft_core::commands::exit_code)); on a
+    /// table's last visual row with nothing after the table it leaves the
+    /// table ([`exit_table_below`](markraft_core::commands::exit_table_below));
+    /// on a selected divider with nothing after it, likewise
+    /// ([`chains::exit_leaf_below`]) — each as Typora does. With no row above
+    /// the first or below the last, the caret goes to the start or the end of
+    /// the document, as in every macOS text view, and a shifted arrow takes
+    /// the selection there ([`chains::move_document_edge`]). Otherwise the
+    /// move lands on the neighbouring row at the column the caret keeps.
+    /// Before the first paint nothing moves.
+    pub(crate) fn vertical_target(&self, delta: isize, extend: bool) -> VerticalMove {
+        // Before the first paint there are no rows to move between, and no
+        // edge to have reached.
+        if self.frame.rows().is_empty() {
+            return VerticalMove::Stay;
+        }
         let head = self.head();
+        let cursor = self.state.selection().is_cursor();
         let last_line = self.projection.line_count().saturating_sub(1);
         if delta > 0
             && !extend
-            && self.state.selection().is_cursor()
+            && cursor
             && self.projection.line_at(head) == Some(last_line)
             && self
                 .projection
                 .line(last_line)
                 .is_some_and(|line| line.to() == head && self.types.is_verbatim_block(line))
+            && let Some(spec) = markraft_core::commands::exit_code()(&self.state)
         {
-            let command = markraft_core::commands::exit_code();
-            if self.run_command(&command, cx) {
-                return;
-            }
+            return VerticalMove::Run(spec);
         }
         let target = self.visual_row_target(delta);
-        // ↓ on a table's last visual row has nowhere to go when nothing follows
-        // the table: leave it for a new block, as Typora does.
+        let stuck =
+            target.is_none_or(|(position, _, upstream)| self.same_visual_row(position, upstream));
         if delta > 0
             && !extend
-            && self.state.selection().is_cursor()
+            && cursor
+            && stuck
             && let Some(types) = self.types.table_types()
-            && target.is_none_or(|(position, _, upstream)| self.same_visual_row(position, upstream))
+            && let Some(spec) = markraft_core::commands::exit_table_below(types)(&self.state)
         {
-            let command = markraft_core::commands::exit_table_below(types);
-            if self.run_command(&command, cx) {
-                return;
-            }
+            return VerticalMove::Run(spec);
         }
-        // ↓ on a selected divider with nothing after it has nowhere to go
-        // either: leave it for a new paragraph, as → does.
         if delta > 0
             && !extend
+            && stuck
             && matches!(self.state.selection(), Selection::Node { .. })
-            && target.is_none_or(|(position, _, upstream)| self.same_visual_row(position, upstream))
+            && let Some(spec) = chains::exit_leaf_below()(&self.state)
         {
-            let command = keymap::exit_leaf_below();
-            if self.run_command(&command, cx) {
-                return;
-            }
+            return VerticalMove::Run(spec);
         }
-        // Nowhere up from the first row or down from the last: the caret goes
-        // to the start or the end of the document, as it does in every macOS
-        // text view, and a shifted arrow takes the selection there.
-        if target.is_none_or(|(position, _, upstream)| self.same_visual_row(position, upstream)) {
-            let command = keymap::move_document_edge(delta > 0, extend);
-            if self.run_command(&command, cx) {
-                self.preferred_x = None;
-            }
-            return;
+        if stuck {
+            return match chains::move_document_edge(delta > 0, extend)(&self.state) {
+                Some(spec) => VerticalMove::Run(spec),
+                None => VerticalMove::Stay,
+            };
         }
-        if let Some((position, x, upstream)) = target {
-            self.upstream = upstream;
-            self.select(position, extend, cx);
-            self.preferred_x = Some(x);
+        match target {
+            Some((position, x, upstream)) => VerticalMove::To {
+                position,
+                x,
+                upstream,
+            },
+            None => VerticalMove::Stay,
+        }
+    }
+
+    fn vertical(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
+        match self.vertical_target(delta, extend) {
+            VerticalMove::Run(spec) => {
+                self.edit(cx, false, vec![spec]);
+            }
+            VerticalMove::To {
+                position,
+                x,
+                upstream,
+            } => {
+                self.caret.landed(upstream);
+                self.select(position, extend, cx);
+                self.caret.moved_vertically(x);
+            }
+            VerticalMove::Stay => {}
         }
     }
 
@@ -1694,9 +1631,9 @@ impl EditorView {
     fn delete_to_line_edge(&mut self, end: bool, cx: &mut Context<Self>) {
         let fallback = || {
             if end {
-                keymap::delete_forward(&self.types)
+                chains::delete_forward(&self.types)
             } else {
-                keymap::backspace(&self.types)
+                chains::backspace(&self.types)
             }
         };
         let head = self.head();
@@ -1707,7 +1644,7 @@ impl EditorView {
             .then(|| self.line_edge_range(head, end))
             .flatten();
         let command = match range {
-            Some((from, to)) if from < to => keymap::delete_within_textblock(from, to),
+            Some((from, to)) if from < to => chains::delete_within_textblock(from, to),
             _ => fallback(),
         };
         if !self.run_command(&command, cx) {
@@ -1718,7 +1655,7 @@ impl EditorView {
     /// From `head` to the edge of its visual row that `end` names, ordered.
     fn line_edge_range(&self, head: usize, end: bool) -> Option<(usize, usize)> {
         let (row, offset) = self.row_at(head)?;
-        let caret = row.caret(offset, self.upstream);
+        let caret = row.caret(offset, self.caret.upstream());
         let first = caret.y < row.origin.y + row.line_height;
         let last = caret.y >= row.origin.y + row.line_height * (row.visual_rows() as f32 - 1.);
         let edge = match end {
@@ -1731,8 +1668,8 @@ impl EditorView {
 
     fn line_edge(&mut self, end: bool, extend: bool, cx: &mut Context<Self>) {
         if let Some((position, upstream)) = self.line_edge_target(end) {
-            self.preferred_x = None;
-            self.upstream = upstream;
+            self.caret.forget_column();
+            self.caret.landed(upstream);
             self.select(position, extend, cx);
         }
     }
@@ -1846,7 +1783,7 @@ impl EditorView {
             markraft_core::commands::replace_selection(codecs.from_text(text))(&self.state)
         } else if literal {
             let text = single_line::text(text, self.single_line);
-            keymap::insert_plain(&self.types, &text)(&self.state)
+            chains::insert_plain(&self.types, &text)(&self.state)
         } else if is_web_url(text.trim())
             && self.types.link.is_some()
             && (!self.state.selection().is_empty(self.state.doc()) || self.active_link().is_none())
@@ -1877,14 +1814,14 @@ impl EditorView {
             None
         };
         if let Some(spec) = spec {
-            self.edit(cx, false, vec![spec.user_event("input.paste")]);
+            self.edit(cx, false, vec![spec.user_event(event::INPUT_PASTE)]);
         }
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         self.selecting = true;
-        self.preferred_x = None;
+        self.caret.forget_column();
         if event.modifiers.platform
             && let Some(url) = self.link_under(event.position)
         {
@@ -1916,7 +1853,7 @@ impl EditorView {
         }
         // A focused code block's language tag is chrome over the block's text:
         // a click on it opens the picker rather than placing the caret.
-        if let Some(pos) = self.layout.iter().find_map(|row| {
+        if let Some(pos) = self.frame.rows().iter().find_map(|row| {
             row.code_language_bounds()
                 .filter(|bounds| bounds.contains(&event.position))
                 .and(row.code_pos)
@@ -1993,7 +1930,7 @@ impl EditorView {
             vec![
                 TransactionSpec::new()
                     .selection(Selection::text(from, to))
-                    .user_event("select.pointer"),
+                    .user_event(event::SELECT_POINTER),
             ],
         );
     }
@@ -2183,11 +2120,11 @@ impl EditorView {
                 }));
             };
         }
-        run!(Backspace, keymap::backspace);
-        run!(Delete, keymap::delete_forward);
-        run!(ParagraphStart, |_: &DocTypes| keymap::textblock_edge(false));
-        run!(ParagraphEnd, |_: &DocTypes| keymap::textblock_edge(true));
-        run!(DeleteToParagraphEnd, keymap::delete_to_textblock_end);
+        run!(Backspace, chains::backspace);
+        run!(Delete, chains::delete_forward);
+        run!(ParagraphStart, |_: &DocTypes| chains::textblock_edge(false));
+        run!(ParagraphEnd, |_: &DocTypes| chains::textblock_edge(true));
+        run!(DeleteToParagraphEnd, chains::delete_to_textblock_end);
         root =
             root.on_action(cx.listener(|this, _: &DeleteToLineStart, _, cx| {
                 this.delete_to_line_edge(false, cx)
@@ -2200,11 +2137,7 @@ impl EditorView {
                 cx.propagate();
                 return;
             }
-            let command = keymap::enter_with(
-                &this.types,
-                this.split_wrap.as_ref(),
-                this.enter_rule.as_ref(),
-            );
+            let command = chains::enter_with(&this.types, this.kind.as_ref());
             if !this.run_command(&command, cx) {
                 cx.propagate();
             }
@@ -2214,7 +2147,7 @@ impl EditorView {
                 cx.propagate();
                 return;
             }
-            let command = keymap::line_break(&this.types, this.break_spelling.as_ref());
+            let command = chains::line_break(&this.types, this.kind.as_ref());
             if !this.run_command(&command, cx) {
                 cx.propagate();
             }
@@ -2224,7 +2157,7 @@ impl EditorView {
                 cx.propagate();
                 return;
             }
-            let command = keymap::indent(&this.types, &this.indent_text);
+            let command = chains::indent(&this.types, &this.indent_text);
             if !this.run_command(&command, cx) {
                 cx.propagate();
             }
@@ -2234,70 +2167,70 @@ impl EditorView {
                 cx.propagate();
                 return;
             }
-            let command = keymap::outdent(&this.types, &this.indent_text);
+            let command = chains::outdent(&this.types, &this.indent_text);
             if !this.run_command(&command, cx) {
                 cx.propagate();
             }
         }));
-        run!(Left, |_: &DocTypes| keymap::move_grapheme(
+        run!(Left, |_: &DocTypes| chains::move_grapheme(
             Direction::Backward,
             false
         ));
-        run!(Right, |_: &DocTypes| keymap::move_grapheme(
+        run!(Right, |_: &DocTypes| chains::move_grapheme(
             Direction::Forward,
             false
         ));
-        run!(SelectLeft, |_: &DocTypes| keymap::move_grapheme(
+        run!(SelectLeft, |_: &DocTypes| chains::move_grapheme(
             Direction::Backward,
             true
         ));
-        run!(SelectRight, |_: &DocTypes| keymap::move_grapheme(
+        run!(SelectRight, |_: &DocTypes| chains::move_grapheme(
             Direction::Forward,
             true
         ));
-        run!(WordLeft, |types: &DocTypes| keymap::move_word(
+        run!(WordLeft, |types: &DocTypes| chains::move_word(
             types,
             Direction::Backward,
             false
         ));
-        run!(WordRight, |types: &DocTypes| keymap::move_word(
+        run!(WordRight, |types: &DocTypes| chains::move_word(
             types,
             Direction::Forward,
             false
         ));
-        run!(SelectWordLeft, |types: &DocTypes| keymap::move_word(
+        run!(SelectWordLeft, |types: &DocTypes| chains::move_word(
             types,
             Direction::Backward,
             true
         ));
-        run!(SelectWordRight, |types: &DocTypes| keymap::move_word(
+        run!(SelectWordRight, |types: &DocTypes| chains::move_word(
             types,
             Direction::Forward,
             true
         ));
-        run!(DeleteWordBackward, |types: &DocTypes| keymap::delete_word(
+        run!(DeleteWordBackward, |types: &DocTypes| chains::delete_word(
             types,
             Direction::Backward
         ));
-        run!(DeleteWordForward, |types: &DocTypes| keymap::delete_word(
+        run!(DeleteWordForward, |types: &DocTypes| chains::delete_word(
             types,
             Direction::Forward
         ));
-        run!(DocumentStart, |_: &DocTypes| keymap::move_document_edge(
+        run!(DocumentStart, |_: &DocTypes| chains::move_document_edge(
             false, false
         ));
-        run!(DocumentEnd, |_: &DocTypes| keymap::move_document_edge(
+        run!(DocumentEnd, |_: &DocTypes| chains::move_document_edge(
             true, false
         ));
         run!(SelectDocumentStart, |_: &DocTypes| {
-            keymap::move_document_edge(false, true)
+            chains::move_document_edge(false, true)
         });
         run!(SelectDocumentEnd, |_: &DocTypes| {
-            keymap::move_document_edge(true, true)
+            chains::move_document_edge(true, true)
         });
-        run!(Undo, |_: &DocTypes| keymap::history(true));
-        run!(Redo, |_: &DocTypes| keymap::history(false));
-        run!(SelectAll, keymap::select_all);
+        run!(Undo, |_: &DocTypes| chains::history(true));
+        run!(Redo, |_: &DocTypes| chains::history(false));
+        run!(SelectAll, chains::select_all);
         macro_rules! mark {
             ($action:ty, $role:ident) => {
                 root = root.on_action(cx.listener(|this, _: &$action, _, cx| {
@@ -2353,10 +2286,10 @@ impl EditorView {
             Attrs::from_pairs([("level", 6i64)])
         ));
         rich!(CodeBlock, |types: &DocTypes| match types.code_block {
-            Some(ty) => keymap::code_block(types, ty, Attrs::empty()),
+            Some(ty) => chains::code_block(types, ty, Attrs::empty()),
             None => markraft_core::commands::command(|_| None),
         });
-        rich!(Quote, keymap::toggle_quote);
+        rich!(Quote, chains::toggle_quote);
         rich!(Ordered, |types: &DocTypes| list(
             types,
             types.ordered_list,
@@ -2372,7 +2305,7 @@ impl EditorView {
             types.bullet_list,
             types.task_item
         ));
-        rich!(ToggleTask, keymap::toggle_task);
+        rich!(ToggleTask, chains::toggle_task);
         root = root
             .on_action(cx.listener(|this, _: &ChooseCodeLanguage, window, cx| {
                 if let Some(pos) = this.active_code_pos() {
@@ -2441,7 +2374,7 @@ impl EditorView {
 /// Toggle a block type that the schema may not declare.
 fn block(types: &DocTypes, ty: Option<NodeTypeId>, attrs: Attrs) -> Command {
     match ty {
-        Some(ty) => keymap::toggle_block(types, ty, attrs),
+        Some(ty) => chains::toggle_block(types, ty, attrs),
         None => markraft_core::commands::command(|_| None),
     }
 }
@@ -2453,7 +2386,7 @@ fn block(types: &DocTypes, ty: Option<NodeTypeId>, attrs: Attrs) -> Command {
 /// action itself and calls [`commands::toggle_list`] with its attributes.
 fn list(types: &DocTypes, ty: Option<NodeTypeId>, item: Option<NodeTypeId>) -> Command {
     match (ty, item) {
-        (Some(ty), Some(item)) => keymap::toggle_list(types, ty, Attrs::empty(), item),
+        (Some(ty), Some(item)) => chains::toggle_list(types, ty, Attrs::empty(), item),
         _ => markraft_core::commands::command(|_| None),
     }
 }

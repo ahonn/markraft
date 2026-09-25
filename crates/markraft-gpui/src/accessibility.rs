@@ -1,7 +1,7 @@
 //! AccessKit text coordinates are selectable units, not UTF-16 offsets.
-use crate::conceal::{self, Reveal};
 use crate::surface::LayoutLine;
 use gpui::{A11ySubtreeBuilder, App, Bounds, Entity, Pixels, Role, Window, accesskit};
+use markraft_core::kind::conceal::{self, Reveal};
 use markraft_core::projection::Projection;
 use markraft_core::{EditorState, Selection};
 use std::ops::Range;
@@ -486,7 +486,7 @@ impl crate::EditorView {
                 }
             }
             ControlAction::ToggleTask(_) => {
-                self.run_command(&crate::keymap::toggle_task(&self.types), cx);
+                self.run_command(&markraft_core::kind::chains::toggle_task(&self.types), cx);
             }
             ControlAction::CodeLanguage(pos) => {
                 cx.emit(crate::EditorEvent::CodeLanguageRequested { pos })

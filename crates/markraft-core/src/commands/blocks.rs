@@ -16,6 +16,7 @@ use super::structure::{
     wrap_changes_with,
 };
 use super::{Command, changes_spec, command, cursor, resolve_rounds, selection_block_range};
+use crate::protocol::event;
 
 /// Split the block around the cursor in two.
 ///
@@ -57,7 +58,7 @@ fn split_block_impl(state: &EditorState, keep_marks: bool) -> Option<Transaction
             TransactionSpec::new()
                 .change_set(deleted.changes().compose(split.changes()).ok()?)
                 .selection(split.state().selection().clone())
-                .user_event("split")
+                .user_event(event::SPLIT)
                 .scroll_into_view(),
         );
     }
@@ -139,7 +140,7 @@ fn split_block_impl(state: &EditorState, keep_marks: bool) -> Option<Transaction
     let mut spec = TransactionSpec::new()
         .change_set(set)
         .selection(selection)
-        .user_event("split")
+        .user_event(event::SPLIT)
         .scroll_into_view();
     if keep_marks {
         let marks = marks_at(state, &resolved_from);
@@ -243,7 +244,7 @@ pub fn exit_code() -> Command {
             TransactionSpec::new()
                 .change_set(set)
                 .selection(Selection::near(schema, &new_doc, pos, 1))
-                .user_event("insert")
+                .user_event(event::INSERT)
                 .scroll_into_view(),
         )
     })
@@ -299,7 +300,7 @@ pub fn create_paragraph_near() -> Command {
             TransactionSpec::new()
                 .change_set(set)
                 .selection(selection)
-                .user_event("insert")
+                .user_event(event::INSERT)
                 .scroll_into_view(),
         )
     })
@@ -423,7 +424,7 @@ pub fn set_block_type(node_type: NodeTypeId, attrs: Attrs) -> Command {
         let (set, next_doc) = resolve_rounds(state, rounds)?;
         let mut spec = TransactionSpec::new()
             .change_set(set)
-            .user_event("settype")
+            .user_event(event::SETTYPE)
             .scroll_into_view();
         if let Selection::Text { anchor, head } = state.selection() {
             let before = crate::projection::projection_of(state);

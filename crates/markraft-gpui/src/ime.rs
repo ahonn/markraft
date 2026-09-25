@@ -5,9 +5,10 @@
 //! the [`composition`](markraft_core::composition::composition) extension keeps; nothing here
 //! holds an uncommitted buffer of its own.
 
-use crate::types::DocTypes;
-use crate::{EditorView, keymap, single_line};
+use crate::{EditorView, single_line};
 use gpui::{prelude::*, *};
+use markraft_core::kind::DocTypes;
+use markraft_core::kind::chains;
 use markraft_core::{EditorState, Selection, TransactionSpec, composition::CompositionRange};
 use std::borrow::Cow;
 use std::ops::Range;
@@ -64,7 +65,7 @@ pub fn commit_specs(
     let insert = state
         .update([select.clone()])
         .ok()
-        .and_then(|tr| keymap::insert_plain(types, &text)(tr.state()));
+        .and_then(|tr| chains::insert_plain(types, &text)(tr.state()));
     let mut specs = vec![select];
     if let Some(insert) = insert {
         specs.push(insert.sequential());
@@ -206,7 +207,7 @@ impl EntityInputHandler for EditorView {
         let positions = range.as_ref().and_then(|range| self.positions_of(range));
         if range.is_none() && !self.is_composing() {
             // Ordinary typing: the history groups consecutive characters itself.
-            let command = keymap::insert_plain(&self.types, &text);
+            let command = chains::insert_plain(&self.types, &text);
             self.run_command(&command, cx);
             return;
         }
@@ -292,9 +293,9 @@ impl EntityInputHandler for EditorView {
     ) -> Option<Bounds<Pixels>> {
         let (from, to) = self.positions_of(&range)?;
         let (row, offset) = self.row_at(from)?;
-        let a = row.caret(offset, self.upstream);
+        let a = row.caret(offset, self.caret.upstream());
         let b = if row.contains(to) {
-            row.caret(row.pos_to_offset(to), self.upstream)
+            row.caret(row.pos_to_offset(to), self.caret.upstream())
         } else {
             a
         };
@@ -320,7 +321,7 @@ impl EntityInputHandler for EditorView {
 mod tests {
     use super::commit_specs;
     use crate::typeahead::tests::{at, state_of, types_of};
-    use crate::types::DocTypes;
+    use markraft_core::kind::DocTypes;
     use markraft_core::projection::projection_of;
     use markraft_core::{
         EditorState, TransactionSpec,
@@ -456,7 +457,7 @@ mod tests {
         let types = types_of(&state);
         let start = group(&at(&state, 4), true);
         // The session: a block split, a committed candidate, then more typing.
-        let split = crate::commands::enter(&types);
+        let split = markraft_core::kind::chains::enter(&types);
         let opened = apply(&start, vec![split(&start).expect("Enter applies")]);
         let committed = compose_and_commit(&opened, &types, "hi");
         let typed = markraft_core::commands::insert_text("- /");

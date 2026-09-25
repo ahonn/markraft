@@ -5,15 +5,16 @@
 //! no second implementation of vim to drift.
 
 use markraft_core::commands::Command;
+use markraft_core::kind::DocTypes;
 use markraft_core::projection::Projection;
 use markraft_core::{EditorState, Selection, Slice, TransactionSpec};
-use markraft_gpui::{DocTypes, EditorCx};
+use markraft_gpui::EditorCx;
 use std::sync::Arc;
 
 pub(crate) trait Host {
     fn state(&self) -> &EditorState;
     /// Which of the schema's types play the roles the editor knows about, as
-    /// the host wired them. The `markraft_gpui::commands` take it.
+    /// the host wired them. The `markraft_core::kind::chains` take it.
     fn types(&self) -> &DocTypes;
     fn projection(&self) -> Arc<Projection>;
     /// `slice` as the prose a register holds: the document kind's own plain-text

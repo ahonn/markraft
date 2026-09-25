@@ -6,7 +6,7 @@
 //! transaction touches one, and may return changes that fix it up.
 //!
 //! Corrections are registered in the [`correction`] facet and run by a single
-//! [`transaction_extender`](crate::transaction_extender), whatever number of
+//! [`transaction_extender`], whatever number of
 //! [`corrections`] extensions a configuration holds. Their changes are merged
 //! sequentially, so the positions they return refer to the document the
 //! transaction produces ([`Transaction::new_doc`]) and compose exactly with the
@@ -243,7 +243,7 @@ pub fn correction() -> &'static Facet<Correction> {
 /// them.
 ///
 /// The changes it contributes address [`Transaction::new_doc`]. A configuration
-/// that also registers a [`transaction_extender`](crate::transaction_extender)
+/// that also registers a [`transaction_extender`]
 /// which changes the document must give that extender a *higher* precedence, so
 /// corrections run first; otherwise the transaction is rejected with a length
 /// mismatch rather than silently mis-positioned.

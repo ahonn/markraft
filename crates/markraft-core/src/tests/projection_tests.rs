@@ -387,7 +387,7 @@ fn inline_container_boundaries_do_not_add_text_or_caret_stops() {
         );
     }
     // A surrogate half rounds down to the start of its scalar value.
-    assert_eq!(projection.pos_from_utf16(0, 2), first.offset_to_pos(1));
+    assert_eq!(projection.line_utf16_to_pos(0, 2), first.offset_to_pos(1));
     let end = first.offset_to_pos(first.len()).unwrap();
     let next = projection.line(1).unwrap().offset_to_pos(0).unwrap();
     assert_eq!(projection.next_grapheme_boundary(end), Some(next));

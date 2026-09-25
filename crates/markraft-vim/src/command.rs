@@ -9,9 +9,10 @@ use crate::{
     state::{Mode, Operator, State},
     table,
 };
+use markraft_core::kind::DocTypes;
+use markraft_core::kind::{chains, conceal};
 use markraft_core::projection::{LineKind, Projection};
 use markraft_core::{Selection, TransactionSpec};
-use markraft_gpui::DocTypes;
 use std::ops::Range;
 
 /// Normal mode keeps the cursor on a grapheme, never past the last one of a non-empty
@@ -213,7 +214,7 @@ fn yank(state: &mut State, cx: &mut impl Host, register: Register) {
 }
 
 /// Yank, delete or change a charwise range. An operator keeps markup whole —
-/// see [`edit::delete_charwise_keeping_markup`] — unless `source` says the range
+/// see [`chains::delete_keeping_markup`] — unless `source` says the range
 /// is the source under the cursor as it comes, which is what `x` takes.
 fn charwise(
     state: &mut State,
@@ -235,7 +236,7 @@ fn charwise(
     let yanked = if source {
         range.clone()
     } else {
-        let parts = edit::markup_safe(&cx.projection(), cx.types().syntax, range.clone(), false);
+        let parts = conceal::markup_safe(&cx.projection(), cx.types().syntax, range.clone(), false);
         match (parts.first(), parts.last()) {
             (Some(first), Some(last)) => first.start..last.end,
             _ => range.clone(),
@@ -260,14 +261,21 @@ fn charwise(
         Operator::Change => {
             enter_insert(state, cx);
             state.emptied = (!source)
-                .then(|| edit::emptied_pair(&cx.projection(), cx.types().syntax, range.clone()))
+                .then(|| conceal::emptied_pair(&cx.projection(), cx.types().syntax, range.clone()))
                 .flatten();
             let spec = if source {
                 edit::delete_charwise(cx.state(), range)
             } else {
                 let projection = cx.projection();
                 let syntax = cx.types().syntax;
-                edit::delete_charwise_keeping_markup(cx.state(), &projection, syntax, range, true)
+                chains::delete_keeping_markup(
+                    cx.state(),
+                    &projection,
+                    syntax,
+                    range,
+                    true,
+                    "input.vim",
+                )
             };
             if let Some(spec) = spec {
                 cx.dispatch(vec![spec]);
@@ -281,12 +289,13 @@ fn delete(cx: &mut impl Host, range: Range<usize>, source: bool) -> Option<Trans
         edit::delete_charwise(cx.state(), range)
     } else {
         let projection = cx.projection();
-        edit::delete_charwise_keeping_markup(
+        chains::delete_keeping_markup(
             cx.state(),
             &projection,
             cx.types().syntax,
             range,
             false,
+            "input.vim",
         )
     }
 }
@@ -521,7 +530,7 @@ pub(crate) fn insert(state: &mut State, cx: &mut impl Host, at: InsertAt) {
 /// Not the editor's Enter chain, which inside a cell steps to the row below and appends
 /// one at the bottom of the table — right for Enter, and not what `o` means.
 fn open_row(state: &mut State, cx: &mut impl Host, below: bool) {
-    let Some(types) = table::types(cx.types()) else {
+    let Some(types) = cx.types().table_types() else {
         return;
     };
     let projection = cx.projection();
@@ -583,7 +592,7 @@ pub(crate) fn open_line(state: &mut State, cx: &mut impl Host, below: bool) {
         }),
         false,
     );
-    let command = markraft_gpui::commands::enter(cx.types());
+    let command = chains::enter(cx.types());
     if !cx.run(&command) {
         return;
     }
@@ -726,6 +735,6 @@ pub(crate) fn settle(state: &mut State, cx: &mut impl Host, replaced: bool) -> O
 /// Insert text the way the platform delivers it, for a test that has no window.
 #[cfg(test)]
 pub(crate) fn typed(cx: &mut impl Host, text: &str) {
-    let command = markraft_gpui::commands::insert_plain(cx.types(), text);
+    let command = chains::insert_plain(cx.types(), text);
     cx.run(&command);
 }

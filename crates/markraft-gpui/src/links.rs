@@ -2,10 +2,11 @@
 //!
 //! Which link the caret or the selection is in is read from the marks. Setting
 //! and removing a link is the document kind's business where it spells links in
-//! the text — the host hands the view a [`LinkSetter`](crate::LinkSetter) for
-//! that — and [`set_link`] is what the view does itself for a kind that does
-//! not: it sets or removes the mark.
+//! the text — it answers [`DocumentKind::set_link`](crate::DocumentKind::set_link)
+//! — and [`set_link`] is what the view does itself for a kind that does not:
+//! it sets or removes the mark.
 
+use markraft_core::protocol::event;
 use markraft_core::{
     Attrs, Change, EditorState, Fragment, Mark, MarkSet, MarkTypeId, Node, Selection, Slice,
     TransactionSpec,
@@ -93,8 +94,8 @@ fn href(mark: &Mark) -> String {
 }
 
 /// Link the selection to `url`, or unlink it with `None`, by setting the link
-/// mark itself — what the view does for a document kind that gives it no
-/// [`LinkSetter`](crate::LinkSetter).
+/// mark itself — what the view does for a document kind whose
+/// [`set_link`](crate::DocumentKind::set_link) answers nothing.
 ///
 /// A caret edits the link it touches, and so does a selection inside one link;
 /// elsewhere the URL is inserted as the linked text itself, which is what
@@ -134,7 +135,7 @@ pub(crate) fn set_link(
         TransactionSpec::new()
             .changes([change])
             .selection(Selection::text(from, to))
-            .user_event("format.link")
+            .user_event(event::FORMAT_LINK)
             .scroll_into_view(),
     )
 }
@@ -148,7 +149,7 @@ fn insert_linked(state: &EditorState, ty: MarkTypeId, url: &str) -> Option<Trans
     );
     let slice = Slice::from_fragment(Fragment::from_node(schema.text_marked(url, marks)));
     markraft_core::commands::replace_selection(slice)(state)
-        .map(|spec| spec.user_event("format.link"))
+        .map(|spec| spec.user_event(event::FORMAT_LINK))
 }
 
 #[cfg(test)]

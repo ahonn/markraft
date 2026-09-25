@@ -67,8 +67,9 @@ impl Feedback {
         self.error.as_ref()
     }
 
-    pub(super) fn set_error(&mut self, error: String) {
-        self.error = Some(error);
+    /// Show `error` in the banner. Worded here, once, whatever reported it.
+    pub(super) fn set_error(&mut self, error: impl ToString) {
+        self.error = Some(error.to_string());
     }
 
     pub(super) fn clear_error(&mut self) {

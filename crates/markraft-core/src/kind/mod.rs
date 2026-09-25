@@ -1,5 +1,7 @@
 //! A document kind as an editor sees it: the names a schema gives the roles an
-//! editing surface knows about, and the codecs that read and write its content.
+//! editing surface knows about, the codecs that read and write its content,
+//! the reading of its conceal contract, the key chains a view binds over
+//! those roles, and the hooks a kind fills in.
 //!
 //! Neither item names a concrete document kind, a platform or a schema type, so
 //! a view can be built against them and a host plugs its own kind in. The
@@ -8,7 +10,7 @@
 //! This module is a contract between a view and a document kind, and nothing
 //! else in this crate reads it: the model, the change system and every command
 //! take a [`NodeTypeId`](crate::NodeTypeId) or a
-//! [`MarkTypeId`](crate::MarkTypeId) and never ask what role it plays. The
+//! [`MarkTypeId`] and never ask what role it plays. The
 //! roles below are therefore not the model's idea of what a document is — they
 //! are the vocabulary editing surfaces have converged on, which is the one
 //! CommonMark and GFM gave them. A kind that has no heading leaves
@@ -16,11 +18,95 @@
 //! nothing; a kind whose roles are not on this list resolves its own ids and
 //! hands the view whatever it needs beside this table.
 
-use std::ops::Range;
+pub mod chains;
+pub mod conceal;
+pub mod types;
 
+use std::ops::Range;
+use std::sync::Arc;
+
+use crate::attr::Attrs;
+use crate::commands::Command;
 use crate::node::Node;
 use crate::projection::Line;
+use crate::schema::MarkTypeId;
 use crate::slice::Slice;
+use crate::state::{EditorState, TransactionSpec};
+
+pub use types::{CalloutAttrs, DocTypes};
+
+/// A document kind's formatting edit over a state: `Ok(None)` where it does not
+/// apply, the edit, or — where the kind has no way to write the result — the
+/// sentence the host wants shown, which a view reports as a refused edit.
+pub type Formatting =
+    Arc<dyn Fn(&EditorState) -> Result<Option<TransactionSpec>, String> + Send + Sync>;
+
+/// How a document kind spells itself for a view: the behaviour behind the
+/// roles [`DocTypes`] names.
+///
+/// A view is written against the schema alone and does every one of these
+/// things in a schema-agnostic way — toggles the mark, sets the link mark,
+/// splits the block, writes a `\` before a hard break's line ending. A kind
+/// that keeps its markup in the text does them differently, because the
+/// characters spelling a style are in the document and have to be edited
+/// with it; it answers here, and the view asks before falling back. Every
+/// method has a default that means "the view's own way", so [`PlainKind`] is
+/// the whole contract for an editor that only holds text, and a kind
+/// overrides what it must.
+pub trait DocumentKind: Send + Sync {
+    /// How the clipboard reads and writes this kind. Without it a copy writes
+    /// plain text and a paste is inserted literally.
+    fn codecs(&self) -> Option<Arc<dyn Codecs>> {
+        None
+    }
+    /// How this kind spells the parts of itself a reader may be shown as
+    /// source — a heading's `##`, a code fence, a link's `](…)`. Without it a
+    /// view draws only what it renders, never the characters behind it.
+    fn spelling(&self) -> Option<Arc<dyn SourceSpelling>> {
+        None
+    }
+    /// How this kind toggles the inline mark `ty` over the selection. A kind
+    /// that spells marks in the text edits those characters, which the
+    /// model's own [`toggle_mark`](crate::commands::toggle_mark) knows nothing
+    /// about; `None` leaves it to the view.
+    fn toggle_mark(&self, ty: MarkTypeId, attrs: Attrs) -> Option<Formatting> {
+        let _ = (ty, attrs);
+        None
+    }
+    /// How this kind links the selection to `url`, or unlinks it with `None`,
+    /// for the same reason. `ty` is the mark type [`DocTypes::link`] names.
+    fn set_link(&self, ty: MarkTypeId, url: Option<&str>) -> Option<Formatting> {
+        let _ = (ty, url);
+        None
+    }
+    /// `split`, a command that splits a textblock at the caret, as this kind
+    /// wants it run: one that spells styles in the text closes and reopens
+    /// them around the cut. The default runs `split` as it is.
+    fn wrap_split(&self, split: Command) -> Command {
+        split
+    }
+    /// What Enter tries before it splits anything: a kind in which a whole
+    /// line can spell a block — a Markdown fence, a table's header row —
+    /// turns that line into the block here. Enter carries on where it does
+    /// not apply.
+    fn enter_rule(&self) -> Option<Command> {
+        None
+    }
+    /// What a kind that keeps its markup in the text writes before the line
+    /// ending of the hard break Shift-Return makes — `"\\"` or two spaces in
+    /// Markdown. Asked each time the key is pressed, so a host whose
+    /// preference changes needs no new view. `None` spells it with `\`.
+    fn break_spelling(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+/// The document kind that does nothing of its own: a view over it behaves
+/// the schema-agnostic way in every respect. What a text-only editor uses.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PlainKind;
+
+impl DocumentKind for PlainKind {}
 
 /// The integer attribute of the [`DocTypeNames::syntax`] mark naming the span
 /// a run belongs to. Runs that open and close one span share it.

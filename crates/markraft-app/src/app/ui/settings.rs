@@ -23,7 +23,7 @@ use super::*;
 use crate::platform::Shortcut;
 use crate::storage::{
     BulletMarker, CodeFence, EditorFont, EmphasisMarker, HardBreakStyle, ImageNaming, LineHeight,
-    LineWidth, NoteNaming, OrderedDelimiter, Preferences, Summon, TabKey,
+    LineWidth, NoteNaming, OrderedDelimiter, Pref, Preferences, Summon, TabKey,
 };
 use controls::{
     ChordFace, Palette, button, checkbox, chord_face, error, group_gap, line, metrics::*, row,
@@ -87,7 +87,7 @@ pub(in crate::app) fn bind_keys(cx: &mut App) {
 #[derive(Clone, Default)]
 pub(in crate::app) struct SettingsErrors {
     /// By [`Shortcut`]: the shortcut that shows the note, then the one for a new note.
-    shortcuts: [Option<String>; 2],
+    pub(in crate::app) shortcuts: [Option<String>; 2],
     login: Option<String>,
     new_notes: Option<String>,
     images: Option<String>,
@@ -96,86 +96,46 @@ pub(in crate::app) struct SettingsErrors {
 
 #[derive(Clone)]
 enum Change {
-    Theme(Option<bool>),
-    AutoHeight(bool),
-    VimMode(bool),
-    EmojiCharacters(bool),
-    RemoteImages(bool),
+    /// A preference; see [`Pref`].
+    Pref(Pref),
     LaunchAtLogin(bool),
-    /// Empty turns that global shortcut off.
-    Shortcut(Shortcut, String),
     /// A recorder opening or closing: the running shortcuts are let go of meanwhile.
     Recording(bool),
-    TextSize(f32),
-    HideOnDeactivate(bool),
-    AlwaysOnTop(bool),
     ChooseFolder,
     NewNoteLocation,
     ResetNewNoteLocation,
     ImageLocation,
     ResetImageLocation,
     RevealFolder,
-    TabKey(TabKey),
-    MarkdownShortcuts(bool),
-    Font(EditorFont),
-    LineHeight(LineHeight),
-    Bullet(BulletMarker),
-    Fence(CodeFence),
-    Emphasis(EmphasisMarker),
     NewNoteName(NoteNaming),
     AutomaticUpdates(bool),
     AutomaticDownloads(bool),
     CheckForUpdates,
-    Summon(Summon),
-    LineWidth(LineWidth),
-    AutoPair(bool),
-    ConfirmDelete(bool),
-    AllSpaces(bool),
-    FollowPointer(bool),
-    OrderedDelimiter(OrderedDelimiter),
-    HardBreak(HardBreakStyle),
     ImageName(ImageNaming),
-    /// The page on screen, remembered for the next time the window opens.
-    Page(Page),
+}
+
+/// The preference `which` global shortcut is.
+fn shortcut_pref(which: Shortcut, shortcut: String) -> Pref {
+    match which {
+        Shortcut::Toggle => Pref::Hotkey(shortcut),
+        Shortcut::NewNote => Pref::NewNoteHotkey(shortcut),
+    }
 }
 
 /// What a page draws, read from the app once per frame.
 struct Snapshot {
     dark: bool,
-    theme: Option<bool>,
-    auto_height: bool,
-    vim: bool,
-    emoji_characters: bool,
-    remote_images: bool,
+    preferences: Preferences,
     /// None without the platform layer, which is what answers the question.
     login: Option<bool>,
-    shortcuts: [String; 2],
-    text_size: f32,
-    hide_on_deactivate: bool,
-    always_on_top: bool,
     folder: Option<PathBuf>,
     /// Where new notes and images go, and whether that is other than the default.
     new_notes: Option<(String, bool)>,
     images: Option<(String, bool)>,
     new_note_name: NoteNaming,
-    tab_key: TabKey,
-    markdown_shortcuts: bool,
-    font: EditorFont,
-    line_height: LineHeight,
-    bullet: BulletMarker,
-    fence: CodeFence,
-    emphasis: EmphasisMarker,
     /// None where this copy has no updater to ask: unbundled, or not configured.
     automatic_updates: Option<bool>,
     automatic_downloads: Option<bool>,
-    summon: Summon,
-    line_width: LineWidth,
-    auto_pair: bool,
-    confirm_delete: bool,
-    all_spaces: bool,
-    follow_pointer: bool,
-    ordered_delimiter: OrderedDelimiter,
-    hard_break: HardBreakStyle,
     image_name: ImageNaming,
     errors: SettingsErrors,
 }
@@ -217,47 +177,20 @@ impl MarkraftApp {
             (new_notes, images)
         };
         let (new_notes, images) = self.path.as_ref().map(placed).unzip();
-        let preferences = &self.library.preferences;
         Snapshot {
             dark: self.dark,
-            theme: self.library.preferences.dark_mode,
-            auto_height: self.library.preferences.auto_height,
-            vim: self.library.preferences.vim_mode,
-            emoji_characters: self.library.preferences.emoji_characters,
-            remote_images: self.library.preferences.remote_images,
+            preferences: self.preferences.clone(),
             login: self
                 .platform
                 .as_ref()
                 .filter(|_| login)
                 .map(|platform| platform.launch_at_login_enabled()),
-            shortcuts: [
-                self.library.preferences.hotkey.clone(),
-                self.library.preferences.new_note_hotkey.clone(),
-            ],
-            text_size: self.library.preferences.text_size,
-            hide_on_deactivate: self.library.preferences.hide_on_deactivate,
-            always_on_top: self.library.preferences.always_on_top,
             folder: self.path.clone(),
             new_notes,
             images,
             new_note_name: workspace.new_note_name,
-            tab_key: preferences.tab_key,
-            markdown_shortcuts: preferences.markdown_shortcuts,
-            font: preferences.font,
-            line_height: preferences.line_height,
-            bullet: preferences.bullet_marker,
-            fence: preferences.code_fence,
-            emphasis: preferences.emphasis_marker,
             automatic_updates: self.updater.automatically_checks(),
             automatic_downloads: self.updater.automatically_downloads(),
-            summon: preferences.summon,
-            line_width: preferences.line_width,
-            auto_pair: preferences.auto_pair,
-            confirm_delete: preferences.confirm_delete,
-            all_spaces: preferences.all_spaces,
-            follow_pointer: preferences.follow_pointer,
-            ordered_delimiter: preferences.ordered_delimiter,
-            hard_break: preferences.hard_break,
             image_name: workspace.image_name,
             errors: self.settings_errors.clone(),
         }
@@ -265,39 +198,10 @@ impl MarkraftApp {
 
     fn apply_setting(&mut self, change: Change, window: &mut Window, cx: &mut Context<Self>) {
         match change {
-            Change::Theme(mode) => {
-                self.library.preferences.dark_mode = mode;
-                self.apply_theme(window, cx);
-                self.schedule_save(cx);
-            }
-            Change::AutoHeight(enabled) => {
-                self.library.preferences.auto_height = enabled;
-                self.schedule_save(cx);
-            }
-            Change::VimMode(enabled) => self.set_vim(enabled, cx),
-            Change::EmojiCharacters(enabled) => self.set_emoji_characters(enabled, cx),
-            Change::RemoteImages(enabled) => self.set_remote_images(enabled, cx),
+            Change::Pref(pref) => self.set_preference(pref, window, cx),
             Change::LaunchAtLogin(enabled) => {
                 if let Some(platform) = &mut self.platform {
                     self.settings_errors.login = platform.set_launch_at_login(enabled).err();
-                }
-            }
-            Change::Shortcut(which, shortcut) => {
-                if let Some(platform) = &mut self.platform {
-                    let index = which as usize;
-                    match platform.set_shortcut(which, &shortcut) {
-                        Ok(()) => {
-                            let preferences = &mut self.library.preferences;
-                            match which {
-                                Shortcut::Toggle => preferences.hotkey = shortcut,
-                                Shortcut::NewNote => preferences.new_note_hotkey = shortcut,
-                            }
-                            self.settings_errors.shortcuts[index] = None;
-                            self.feedback.set_platform_error(None);
-                            self.schedule_save(cx);
-                        }
-                        Err(error) => self.settings_errors.shortcuts[index] = Some(error),
-                    }
                 }
             }
             Change::Recording(true) => {
@@ -312,20 +216,6 @@ impl MarkraftApp {
                 {
                     self.settings_errors.shortcuts[0] = Some(error);
                 }
-            }
-            Change::TextSize(size) => self.set_text_size(size, cx),
-            Change::HideOnDeactivate(enabled) => {
-                self.library.preferences.hide_on_deactivate = enabled;
-                self.schedule_save(cx);
-            }
-            Change::AlwaysOnTop(enabled) => {
-                self.library.preferences.always_on_top = enabled;
-                if let Some(platform) = &self.platform
-                    && let Err(error) = platform.set_always_on_top(window, enabled)
-                {
-                    self.feedback.set_platform_error(Some(error));
-                }
-                self.schedule_save(cx);
             }
             Change::ChooseFolder => self.choose_folder(window, cx),
             Change::NewNoteLocation => {
@@ -351,26 +241,6 @@ impl MarkraftApp {
                     cx.reveal_path(path);
                 }
             }
-            Change::TabKey(key) => self.set_tab_key(key, cx),
-            Change::MarkdownShortcuts(enabled) => self.set_markdown_shortcuts(enabled, cx),
-            Change::Font(font) => {
-                self.set_typography(font, self.library.preferences.line_height, cx)
-            }
-            Change::LineHeight(height) => {
-                self.set_typography(self.library.preferences.font, height, cx)
-            }
-            Change::Bullet(bullet) => {
-                let p = &self.library.preferences;
-                self.set_markdown_markers(bullet, p.code_fence, p.emphasis_marker, cx)
-            }
-            Change::Fence(fence) => {
-                let p = &self.library.preferences;
-                self.set_markdown_markers(p.bullet_marker, fence, p.emphasis_marker, cx)
-            }
-            Change::Emphasis(emphasis) => {
-                let p = &self.library.preferences;
-                self.set_markdown_markers(p.bullet_marker, p.code_fence, emphasis, cx)
-            }
             Change::NewNoteName(naming) => {
                 self.library.workspace.new_note_name = naming;
                 self.schedule_save(cx);
@@ -385,53 +255,12 @@ impl MarkraftApp {
                     self.settings_errors.updates = Some(error);
                 }
             }
-            Change::Summon(summon) => {
-                self.library.preferences.summon = summon;
-                self.schedule_save(cx);
-            }
-            Change::LineWidth(width) => {
-                self.library.preferences.line_width = width;
-                self.restyle_editors(cx);
-                self.schedule_save(cx);
-            }
-            Change::AutoPair(enabled) => self.set_auto_pair(enabled, cx),
-            Change::ConfirmDelete(enabled) => {
-                self.library.preferences.confirm_delete = enabled;
-                self.schedule_save(cx);
-            }
-            Change::AllSpaces(enabled) => {
-                self.library.preferences.all_spaces = enabled;
-                if let Some(platform) = &self.platform
-                    && let Err(error) = platform.set_all_spaces(window, enabled)
-                {
-                    self.feedback.set_platform_error(Some(error));
-                }
-                self.schedule_save(cx);
-            }
-            Change::FollowPointer(enabled) => {
-                self.library.preferences.follow_pointer = enabled;
-                self.schedule_save(cx);
-            }
-            Change::OrderedDelimiter(delimiter) => {
-                self.library.preferences.ordered_delimiter = delimiter;
-                crate::app::apply_markdown_style(&self.house, &self.library.preferences);
-                self.schedule_save(cx);
-            }
-            Change::HardBreak(style) => {
-                self.library.preferences.hard_break = style;
-                crate::app::apply_markdown_style(&self.house, &self.library.preferences);
-                self.schedule_save(cx);
-            }
             Change::ImageName(naming) => {
                 self.library.workspace.image_name = naming;
                 self.schedule_save(cx);
             }
             Change::CheckForUpdates => {
                 self.settings_errors.updates = self.updater.check().err();
-            }
-            Change::Page(page) => {
-                self.library.preferences.settings_page = page.key().to_owned();
-                self.schedule_save(cx);
             }
         }
         cx.notify();
@@ -749,7 +578,7 @@ impl SettingsView {
                 .push(cx.on_focus_out(recorder, window, |view, _, _, cx| view.stop_recording(cx)));
         }
         // The window opens on the page it was last closed on, as macOS settings do.
-        let page = Page::remembered(&app.read(cx).library.preferences.settings_page);
+        let page = Page::remembered(&app.read(cx).preferences.settings_page);
         Self {
             link,
             page,
@@ -788,7 +617,8 @@ impl SettingsView {
             self.selects.close();
             self.page = page;
             self.scroll.set_offset(point(px(0.), px(0.)));
-            self.link.send(Change::Page(page), cx);
+            self.link
+                .send(Change::Pref(Pref::SettingsPage(page.key().to_owned())), cx);
             cx.notify();
         }
     }
@@ -833,7 +663,8 @@ impl SettingsView {
     fn commit(&mut self, which: Shortcut, shortcut: String, cx: &mut Context<Self>) {
         self.recording = None;
         self.refusal = None;
-        self.link.send(Change::Shortcut(which, shortcut), cx);
+        self.link
+            .send(Change::Pref(shortcut_pref(which, shortcut)), cx);
     }
 
     /// Escape and ⌘W. Removed from a later turn: this runs inside the dispatch of the
@@ -977,7 +808,7 @@ impl SettingsView {
                 .cursor_pointer()
                 // Its own click, not the field's: clearing is not recording.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(self.on_click(Change::Shortcut(which, String::new())))
+                .on_click(self.on_click(Change::Pref(shortcut_pref(which, String::new()))))
                 .child(sized_icon(Icon::ClearField, p.subtitle, RECORDER_CLEAR))
                 .into_any_element()
         });
@@ -1018,12 +849,12 @@ impl SettingsView {
             "appearance",
             "Appearance",
             &[("Auto", None), ("Light", Some(false)), ("Dark", Some(true))],
-            s.theme,
+            s.preferences.dark_mode,
             p,
-            self.sender(Change::Theme),
+            self.sender(|value| Change::Pref(Pref::Theme(value))),
         );
 
-        let [toggle, new_note] = &s.shortcuts;
+        let (toggle, new_note) = (&s.preferences.hotkey, &s.preferences.new_note_hotkey);
         let summon = self.select(
             "summon",
             "Show on open",
@@ -1031,8 +862,8 @@ impl SettingsView {
                 ("Last Note", Summon::LastNote),
                 ("New Note", Summon::NewNote),
             ],
-            s.summon,
-            Change::Summon,
+            s.preferences.summon,
+            |value| Change::Pref(Pref::Summon(value)),
             p,
             cx,
         );
@@ -1080,46 +911,46 @@ impl SettingsView {
                     checkbox(
                         "always-on-top",
                         "Keep above other windows",
-                        s.always_on_top,
+                        s.preferences.always_on_top,
                         false,
                         p,
-                        self.sender(Change::AlwaysOnTop),
+                        self.sender(|value| Change::Pref(Pref::AlwaysOnTop(value))),
                     )
                     .into_any_element(),
                     checkbox(
                         "hide-on-deactivate",
                         "Hide when another app is used",
-                        s.hide_on_deactivate,
+                        s.preferences.hide_on_deactivate,
                         false,
                         p,
-                        self.sender(Change::HideOnDeactivate),
+                        self.sender(|value| Change::Pref(Pref::HideOnDeactivate(value))),
                     )
                     .into_any_element(),
                     checkbox(
                         "auto-height",
                         "Grow with the note",
-                        s.auto_height,
+                        s.preferences.auto_height,
                         false,
                         p,
-                        self.sender(Change::AutoHeight),
+                        self.sender(|value| Change::Pref(Pref::AutoHeight(value))),
                     )
                     .into_any_element(),
                     checkbox(
                         "all-spaces",
                         "Show on all desktops",
-                        s.all_spaces,
+                        s.preferences.all_spaces,
                         false,
                         p,
-                        self.sender(Change::AllSpaces),
+                        self.sender(|value| Change::Pref(Pref::AllSpaces(value))),
                     )
                     .into_any_element(),
                     checkbox(
                         "follow-pointer",
                         "Open on the display with the pointer",
-                        s.follow_pointer,
+                        s.preferences.follow_pointer,
                         false,
                         p,
-                        self.sender(Change::FollowPointer),
+                        self.sender(|value| Change::Pref(Pref::FollowPointer(value))),
                     )
                     .into_any_element(),
                 ],
@@ -1137,7 +968,7 @@ impl SettingsView {
 
     fn editor(&self, s: &Snapshot, p: Palette, cx: &mut Context<Self>) -> Vec<Div> {
         let range = Preferences::TEXT_SIZES;
-        let size = s.text_size;
+        let size = s.preferences.text_size;
         let link = self.link.clone();
         let mut size_line = vec![
             stepper(
@@ -1145,7 +976,9 @@ impl SettingsView {
                 format!("{size:.0} pt"),
                 (size > *range.start(), size < *range.end()),
                 p,
-                move |delta, _, cx| link.send(Change::TextSize(size + delta as f32), cx),
+                move |delta, _, cx| {
+                    link.send(Change::Pref(Pref::TextSize(size + delta as f32)), cx)
+                },
             )
             .into_any_element(),
         ];
@@ -1155,7 +988,7 @@ impl SettingsView {
                     "reset-text-size",
                     "Default",
                     p,
-                    self.on_click(Change::TextSize(Preferences::DEFAULT_TEXT_SIZE)),
+                    self.on_click(Change::Pref(Pref::TextSize(Preferences::DEFAULT_TEXT_SIZE))),
                 )
                 .into_any_element(),
             );
@@ -1169,8 +1002,8 @@ impl SettingsView {
                 ("Rounded", EditorFont::Rounded),
                 ("Mono", EditorFont::Mono),
             ],
-            s.font,
-            Change::Font,
+            s.preferences.font,
+            |value| Change::Pref(Pref::Font(value)),
             p,
             cx,
         );
@@ -1182,8 +1015,8 @@ impl SettingsView {
                 ("Normal", LineHeight::Normal),
                 ("Relaxed", LineHeight::Relaxed),
             ],
-            s.line_height,
-            Change::LineHeight,
+            s.preferences.line_height,
+            |value| Change::Pref(Pref::LineHeight(value)),
             p,
             cx,
         );
@@ -1195,8 +1028,8 @@ impl SettingsView {
                 ("Normal", LineWidth::Normal),
                 ("Full", LineWidth::Full),
             ],
-            s.line_width,
-            Change::LineWidth,
+            s.preferences.line_width,
+            |value| Change::Pref(Pref::LineWidth(value)),
             p,
             cx,
         );
@@ -1208,8 +1041,8 @@ impl SettingsView {
                 ("2 Spaces", TabKey::TwoSpaces),
                 ("4 Spaces", TabKey::FourSpaces),
             ],
-            s.tab_key,
-            Change::TabKey,
+            s.preferences.tab_key,
+            |value| Change::Pref(Pref::TabKey(value)),
             p,
             cx,
         );
@@ -1225,28 +1058,28 @@ impl SettingsView {
                     checkbox(
                         "markdown-shortcuts",
                         "Format Markdown as you type",
-                        s.markdown_shortcuts,
+                        s.preferences.markdown_shortcuts,
                         false,
                         p,
-                        self.sender(Change::MarkdownShortcuts),
+                        self.sender(|value| Change::Pref(Pref::MarkdownShortcuts(value))),
                     )
                     .into_any_element(),
                     checkbox(
                         "auto-pair",
                         "Pair brackets and quotes",
-                        s.auto_pair,
+                        s.preferences.auto_pair,
                         false,
                         p,
-                        self.sender(Change::AutoPair),
+                        self.sender(|value| Change::Pref(Pref::AutoPair(value))),
                     )
                     .into_any_element(),
                     checkbox(
                         "vim-mode",
                         "Vim mode",
-                        s.vim,
+                        s.preferences.vim_mode,
                         false,
                         p,
-                        self.sender(Change::VimMode),
+                        self.sender(|value| Change::Pref(Pref::VimMode(value))),
                     )
                     .into_any_element(),
                 ],
@@ -1260,10 +1093,10 @@ impl SettingsView {
                     checkbox(
                         "remote-images",
                         "Load images linked from the web",
-                        s.remote_images,
+                        s.preferences.remote_images,
                         false,
                         p,
-                        self.sender(Change::RemoteImages),
+                        self.sender(|value| Change::Pref(Pref::RemoteImages(value))),
                     )
                     .into_any_element(),
                 ],
@@ -1393,10 +1226,10 @@ impl SettingsView {
                     checkbox(
                         "confirm-delete",
                         "Ask before moving a note to the Trash",
-                        s.confirm_delete,
+                        s.preferences.confirm_delete,
                         false,
                         p,
-                        self.sender(Change::ConfirmDelete),
+                        self.sender(|value| Change::Pref(Pref::ConfirmDelete(value))),
                     )
                     .into_any_element(),
                 ],
@@ -1415,8 +1248,8 @@ impl SettingsView {
                 ("*  Item", BulletMarker::Star),
                 ("+  Item", BulletMarker::Plus),
             ],
-            s.bullet,
-            Change::Bullet,
+            s.preferences.bullet_marker,
+            |value| Change::Pref(Pref::Bullet(value)),
             p,
             cx,
         );
@@ -1424,8 +1257,8 @@ impl SettingsView {
             "code-fence",
             "Code block",
             &[("```", CodeFence::Backticks), ("~~~", CodeFence::Tildes)],
-            s.fence,
-            Change::Fence,
+            s.preferences.code_fence,
+            |value| Change::Pref(Pref::Fence(value)),
             p,
             cx,
         );
@@ -1436,8 +1269,8 @@ impl SettingsView {
                 ("1.  Item", OrderedDelimiter::Period),
                 ("1)  Item", OrderedDelimiter::Parenthesis),
             ],
-            s.ordered_delimiter,
-            Change::OrderedDelimiter,
+            s.preferences.ordered_delimiter,
+            |value| Change::Pref(Pref::OrderedDelimiter(value)),
             p,
             cx,
         );
@@ -1448,8 +1281,8 @@ impl SettingsView {
                 ("Backslash", HardBreakStyle::Backslash),
                 ("Two Spaces", HardBreakStyle::Spaces),
             ],
-            s.hard_break,
-            Change::HardBreak,
+            s.preferences.hard_break,
+            |value| Change::Pref(Pref::HardBreak(value)),
             p,
             cx,
         );
@@ -1460,8 +1293,8 @@ impl SettingsView {
                 ("*Italic*  **Bold**", EmphasisMarker::Star),
                 ("_Italic_  __Bold__", EmphasisMarker::Underscore),
             ],
-            s.emphasis,
-            Change::Emphasis,
+            s.preferences.emphasis_marker,
+            |value| Change::Pref(Pref::Emphasis(value)),
             p,
             cx,
         );
@@ -1478,10 +1311,10 @@ impl SettingsView {
                     checkbox(
                         "emoji-characters",
                         "Insert emoji as characters",
-                        s.emoji_characters,
+                        s.preferences.emoji_characters,
                         false,
                         p,
-                        self.sender(Change::EmojiCharacters),
+                        self.sender(|value| Change::Pref(Pref::EmojiCharacters(value))),
                     )
                     .into_any_element(),
                 ],

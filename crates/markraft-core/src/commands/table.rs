@@ -39,6 +39,7 @@ use crate::state::{EditorState, Extension, Transaction, TransactionSpec, transac
 
 use super::structure::{can_replace, default_block_type, markup_of};
 use super::{Command, changes_spec, command, resolve_changes};
+use crate::protocol::event;
 
 /// The node types a table is built from, and the attribute its alignments
 /// live in.
@@ -408,7 +409,6 @@ fn node_slice(node: Node) -> Slice {
     Slice::from_fragment(Fragment::from_node(node))
 }
 
-/// Move the cursor to the start of cell (`row`, `column`) of the current table.
 /// Move into the cell at `row` and `column`: with `select`, taking what it
 /// holds, so typing replaces it — as Tab, Shift-Tab and Enter do in Typora —
 /// and otherwise with a caret at its start.
@@ -438,7 +438,7 @@ fn move_to_cell(
     Some(
         TransactionSpec::new()
             .selection(selection)
-            .user_event("move")
+            .user_event(event::MOVE)
             .scroll_into_view(),
     )
 }
@@ -460,7 +460,7 @@ fn append_row(
         TransactionSpec::new()
             .change_set(set)
             .selection(selection)
-            .user_event("insert")
+            .user_event(event::INSERT)
             .scroll_into_view(),
     )
 }
@@ -482,7 +482,7 @@ pub fn insert_row_below(types: TableTypes) -> Command {
             TransactionSpec::new()
                 .change_set(set)
                 .selection(selection)
-                .user_event("insert")
+                .user_event(event::INSERT)
                 .scroll_into_view(),
         )
     })
@@ -573,7 +573,7 @@ pub fn exit_table_below(types: TableTypes) -> Command {
             TransactionSpec::new()
                 .change_set(set)
                 .selection(Selection::near(schema, &new_doc, end, 1))
-                .user_event("insert")
+                .user_event(event::INSERT)
                 .scroll_into_view(),
         )
     })
@@ -718,7 +718,6 @@ pub fn delete_table(types: TableTypes) -> Command {
 /// Backspace joins that block with whatever comes before it.
 pub fn delete_empty_table(types: TableTypes) -> Command {
     command(move |state| {
-        let doc = state.doc();
         if !state.selection().is_cursor() {
             return None;
         }
@@ -726,7 +725,7 @@ pub fn delete_empty_table(types: TableTypes) -> Command {
         if ctx.pos.row != 0 || ctx.pos.column != 0 {
             return None;
         }
-        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        let resolved = state.resolved_head()?;
         let depth = cell_depth(types, &resolved)?;
         if resolved.pos().checked_sub(resolved.depth() - depth) != Some(resolved.start(depth)) {
             return None;
@@ -836,7 +835,7 @@ pub fn insert_table(types: TableTypes, rows: usize, columns: usize) -> Command {
                 TransactionSpec::new()
                     .change_set(deleted.changes().compose(inserted.changes()).ok()?)
                     .selection(inserted.state().selection().clone())
-                    .user_event("insert")
+                    .user_event(event::INSERT)
                     .scroll_into_view(),
             );
         }
@@ -879,7 +878,7 @@ fn insert_table_at_cursor(
         TransactionSpec::new()
             .change_set(set)
             .selection(selection)
-            .user_event("insert")
+            .user_event(event::INSERT)
             .scroll_into_view(),
     )
 }
@@ -990,7 +989,7 @@ fn declared_columns(table: &Node, attr: &str) -> Option<usize> {
 /// refused edit becomes.
 fn refusal() -> TransactionSpec {
     TransactionSpec::new()
-        .user_event("guard")
+        .user_event(event::GUARD)
         .add_to_history(false)
 }
 

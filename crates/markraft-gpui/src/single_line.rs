@@ -51,7 +51,7 @@ pub(crate) fn document(
     let slice = Slice::new(doc.content().clone(), 0, 0);
     let plain = match codecs {
         Some(codecs) => codecs.to_text(&slice),
-        None => crate::conceal::slice_text(from, syntax, &slice),
+        None => markraft_core::kind::conceal::slice_text(from, syntax, &slice),
     };
     let flat = text(&plain, true).into_owned();
     document_from_text(&flat)
@@ -141,7 +141,7 @@ mod tests {
         );
         // Without codecs the view's own reading of the conceal role flattens
         // it the same way.
-        let syntax = crate::types::DocTypes::from_schema_names(
+        let syntax = markraft_core::kind::DocTypes::from_schema_names(
             &rich,
             &markraft_commonmark::commonmark_doc_type_names(),
         )

@@ -28,8 +28,9 @@
 //! # Annotations
 //!
 //! Every command annotates its spec with the [`user_event`](crate::protocol::user_event)
-//! that describes it, so the undo history groups edits the way the P1
-//! documentation describes, and asks the view to scroll where a user would
+//! that describes it — one of the names in
+//! [`protocol::event`](crate::protocol::event) — so the undo history groups
+//! edits by what the user did, and asks the view to scroll where a user would
 //! expect the caret to be visible.
 //!
 //! # Validity

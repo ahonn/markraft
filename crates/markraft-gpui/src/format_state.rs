@@ -1,6 +1,6 @@
 //! What the selection is formatted as, for a host drawing a toolbar.
 
-use crate::conceal::{Reveal, Shown};
+use markraft_core::kind::conceal::{Reveal, Shown};
 use markraft_core::projection::{Line, Projection};
 use markraft_core::{Attrs, EditorState, MarkSet, MarkTypeId, NodeTypeId};
 
@@ -41,7 +41,7 @@ pub(crate) fn active_marks(state: &EditorState, syntax: Option<MarkTypeId>) -> M
         if line.to() <= from || line.from() >= to {
             continue;
         }
-        let shown = crate::conceal::shown(syntax, line, &Reveal::nothing());
+        let shown = markraft_core::kind::conceal::shown(syntax, line, &Reveal::nothing());
         for (run, shown) in line.runs().iter().zip(shown) {
             if line.abs(run.start).max(from) >= line.abs(run.end).min(to) || shown == Shown::Hidden
             {

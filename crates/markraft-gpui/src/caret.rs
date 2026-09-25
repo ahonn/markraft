@@ -1,6 +1,100 @@
 use std::time::Duration;
 
+use gpui::Pixels;
+
 pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// The caret as the view shows it, beyond where the selection puts it: which
+/// side of a wrapped row's break it stands on, the column a run of vertical
+/// moves keeps, and whether the next paint has to bring it into view.
+///
+/// Every change goes through a move named for what happened, which is what
+/// keeps the one rule the three values obey: an edit or a pointer move forgets
+/// the preferred column and only a vertical move sets it — after the edit
+/// funnel has run, since the funnel forgets it — and every selection change
+/// asks for a reveal that stands until prepaint takes it.
+#[derive(Default)]
+pub(crate) struct CaretView {
+    upstream: bool,
+    preferred_x: Option<Pixels>,
+    reveal: bool,
+}
+
+impl CaretView {
+    /// Whether a caret on a wrapped row's break is drawn at the end of the row
+    /// before it rather than the start of the row after.
+    pub(crate) fn upstream(&self) -> bool {
+        self.upstream
+    }
+
+    /// The column a run of vertical moves keeps, once one has started.
+    pub(crate) fn preferred_x(&self) -> Option<Pixels> {
+        self.preferred_x
+    }
+
+    /// Whether a reveal was asked for and not yet honoured.
+    pub(crate) fn reveal_pending(&self) -> bool {
+        self.reveal
+    }
+
+    /// Take the pending reveal, if any: prepaint asks once per frame.
+    pub(crate) fn take_reveal(&mut self) -> bool {
+        std::mem::take(&mut self.reveal)
+    }
+
+    /// Something other than a move wants the caret shown — a style change.
+    pub(crate) fn ask_reveal(&mut self) {
+        self.reveal = true;
+    }
+
+    /// The document or the selection changed through the editor's own funnel:
+    /// the caret is drawn downstream, the column is forgotten and the caret is
+    /// brought into view.
+    pub(crate) fn moved_by_edit(&mut self) {
+        self.upstream = false;
+        self.preferred_x = None;
+        self.reveal = true;
+    }
+
+    /// An extension dispatched an edit: as [`Self::moved_by_edit`], except that
+    /// the column stays, so a modal editor's own vertical moves keep it across
+    /// the edits they dispatch between rows.
+    pub(crate) fn edited_by_extension(&mut self) {
+        self.upstream = false;
+        self.reveal = true;
+    }
+
+    /// An extension set the selection: the caret lands on the side of the break
+    /// the move chose, the column is forgotten and the caret is brought into view.
+    pub(crate) fn moved_by_command(&mut self, upstream: bool) {
+        self.upstream = upstream;
+        self.preferred_x = None;
+        self.reveal = true;
+    }
+
+    /// A move landed on `upstream`'s side of a wrapped row's break.
+    pub(crate) fn landed(&mut self, upstream: bool) {
+        self.upstream = upstream;
+    }
+
+    /// A vertical move reached its row: the column it left from is kept for
+    /// the next one.
+    pub(crate) fn moved_vertically(&mut self, x: Pixels) {
+        self.preferred_x = Some(x);
+    }
+
+    /// Put back the column a move that was only correcting the caret within its
+    /// row would otherwise have forgotten.
+    pub(crate) fn keep_column(&mut self, column: Option<Pixels>) {
+        self.preferred_x = column;
+    }
+
+    /// A horizontal move, a pointer press or an edit: the column no longer means
+    /// anything.
+    pub(crate) fn forget_column(&mut self) {
+        self.preferred_x = None;
+    }
+}
 
 /// A composition or selected range pauses blinking, and a caret that covers the
 /// grapheme it rests on never blinks at all: a block or underline caret is a

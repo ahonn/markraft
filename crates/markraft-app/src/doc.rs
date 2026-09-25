@@ -3,9 +3,9 @@
 //!
 //! One CommonMark schema is shared by every note editor, the query field's
 //! flattening and the vault's codec, so a document read from disk can be handed
-//! to any of them. [`types`] and [`codecs`] are what the editor view needs of
-//! that kind: which types play the roles it draws, and how the clipboard reads
-//! and writes it. [`Block`] and [`Inline`] are the application's own names for
+//! to any of them. [`types`] and [`MarkdownKind`] are what the editor view
+//! needs of that kind: which types play the roles it draws, and how the kind
+//! reads, writes and spells itself. [`Block`] and [`Inline`] are the application's own names for
 //! the formats its toolbar and slash menu offer; each resolves to a command from
 //! the editor's catalogue.
 
@@ -15,13 +15,13 @@ use markraft_commonmark::{
     schema as md,
 };
 use markraft_core::commands::{Command, command, replace_selection};
-use markraft_core::kind::Codecs;
+use markraft_core::kind::{
+    CalloutAttrs, Codecs, DocTypes, DocumentKind, Formatting, SourceSpelling,
+};
 use markraft_core::projection::{Line, Projection};
 use markraft_core::{
     Attrs, EditorState, Extension, Fragment, MarkSet, MarkTypeId, Node, NodeTypeId, Schema, Slice,
 };
-use markraft_gpui::{CalloutAttrs, DocTypes};
-use markraft_gpui::{Formatting, LinkSetter, MarkToggle, SplitWrap};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, LazyLock};
 use unicode_segmentation::UnicodeSegmentation;
@@ -50,10 +50,9 @@ pub fn types() -> &'static DocTypes {
     &TYPES
 }
 
-/// How the editor's clipboard reads and writes this document kind, spelling
-/// new syntax in `house`'s style as it stands at each write. The application
-/// owns the one handle its preferences set.
-pub fn codecs(house: &HouseStyleHandle) -> Arc<dyn Codecs> {
+/// How the clipboard reads and writes this document kind, spelling new syntax
+/// in `house`'s style as it stands at each write.
+fn codecs(house: &HouseStyleHandle) -> Arc<dyn Codecs> {
     Arc::new(CommonMarkCodecs::new(schema().clone(), house.clone()))
 }
 
@@ -106,53 +105,89 @@ fn markers() -> Markers {
     MARKERS.with(|cell| cell.get())
 }
 
-/// How this document kind spells the parts of itself a focused line reveals.
-pub fn spelling() -> Arc<dyn markraft_core::kind::SourceSpelling> {
-    SPELLING.clone()
-}
-
-/// How this document kind toggles an inline mark.
+/// This document kind as the editor view sees it: CommonMark spelled in the
+/// house style the preferences ask for, with the input-rule switch and the
+/// application's words for a refusal.
 ///
-/// Markdown keeps the characters that spell a mark in the document, so a toggle
-/// edits those rather than the mark alone; the model's own `toggle_mark` would
-/// leave the two disagreeing. Where Markdown cannot spell the result, the
-/// editor is told why in the words `refusal` gives it.
-pub fn mark_toggle(refusal: fn(&CommandRefusal) -> String, house: &HouseStyleHandle) -> MarkToggle {
-    let formatter = formatter(house);
-    Arc::new(move |ty, _| worded(formatter.toggle_style(ty), refusal))
+/// Markdown keeps the characters that spell a mark in the document, so a
+/// toggle, a link or a split edits those rather than the mark alone; the
+/// model's own commands would leave the two disagreeing. Where Markdown cannot
+/// spell the result, the editor is told why in the words `refusal` gives it.
+pub struct MarkdownKind {
+    house: HouseStyleHandle,
+    /// Whether typed Markdown becomes formatting — what Enter's block rule
+    /// answers to, as the input rules do.
+    shortcuts: Arc<AtomicBool>,
+    refusal: fn(&CommandRefusal) -> String,
 }
 
-/// How this document kind links and unlinks: by editing the link's source.
-pub fn link_setter(refusal: fn(&CommandRefusal) -> String, house: &HouseStyleHandle) -> LinkSetter {
-    let formatter = formatter(house);
-    Arc::new(move |_, url| {
+impl MarkdownKind {
+    pub fn new(
+        house: HouseStyleHandle,
+        shortcuts: Arc<AtomicBool>,
+        refusal: fn(&CommandRefusal) -> String,
+    ) -> MarkdownKind {
+        MarkdownKind {
+            house,
+            shortcuts,
+            refusal,
+        }
+    }
+
+    fn formatter(&self) -> Formatter {
+        formatter(&self.house)
+    }
+}
+
+impl DocumentKind for MarkdownKind {
+    fn codecs(&self) -> Option<Arc<dyn Codecs>> {
+        Some(codecs(&self.house))
+    }
+
+    /// The parts of itself a focused line reveals.
+    fn spelling(&self) -> Option<Arc<dyn SourceSpelling>> {
+        Some(SPELLING.clone())
+    }
+
+    fn toggle_mark(&self, ty: MarkTypeId, _attrs: Attrs) -> Option<Formatting> {
+        Some(worded(self.formatter().toggle_style(ty), self.refusal))
+    }
+
+    /// By editing the link's source.
+    fn set_link(&self, _ty: MarkTypeId, url: Option<&str>) -> Option<Formatting> {
+        let formatter = self.formatter();
         let command = match url {
             Some(url) => formatter.set_link(url, ""),
             None => formatter.unlink(),
         };
-        worded(command, refusal)
-    })
-}
+        Some(worded(command, self.refusal))
+    }
 
-/// How this document kind splits a block: every style open at the caret is
-/// closed before the cut and opened again after it.
-pub fn split_wrap(house: &HouseStyleHandle) -> SplitWrap {
-    let formatter = formatter(house);
-    Arc::new(move |split| formatter.keeping_styles(split))
-}
+    /// Every style open at the caret is closed before the cut and opened again
+    /// after it.
+    fn wrap_split(&self, split: Command) -> Command {
+        self.formatter().keeping_styles(split)
+    }
 
-/// What Enter makes of a line that spells a whole block's opening — a fence, a
-/// table's header row, a thematic break — and where it goes on after a
-/// footnote definition. It is Markdown turned into formatting as it is typed, so
-/// it runs only while `shortcuts` holds, as the input rules do.
-pub fn enter_rule(shortcuts: Arc<AtomicBool>) -> Command {
-    let rule = markraft_commonmark::block_from_line();
-    command(move |state| {
-        shortcuts
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .then(|| rule(state))
-            .flatten()
-    })
+    /// What Enter makes of a line that spells a whole block's opening — a
+    /// fence, a table's header row, a thematic break — and where it goes on
+    /// after a footnote definition. It is Markdown turned into formatting as it
+    /// is typed, so it runs only while `shortcuts` holds, as the input rules do.
+    fn enter_rule(&self) -> Option<Command> {
+        let rule = markraft_commonmark::block_from_line();
+        let shortcuts = self.shortcuts.clone();
+        Some(command(move |state| {
+            shortcuts
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .then(|| rule(state))
+                .flatten()
+        }))
+    }
+
+    /// Shift-Return writes the break the preferences ask for.
+    fn break_spelling(&self) -> Option<&'static str> {
+        Some(self.house.get().hard_break.marker())
+    }
 }
 
 /// A kind's formatting command, its refusal put in the application's words.
@@ -364,37 +399,39 @@ impl Block {
     pub fn command(self) -> Command {
         let types = types();
         match self {
-            Block::Paragraph => {
-                markraft_gpui::commands::toggle_block(types, node(md::PARAGRAPH), Attrs::empty())
-            }
-            Block::Heading(level) => markraft_gpui::commands::toggle_block(
+            Block::Paragraph => markraft_core::kind::chains::toggle_block(
+                types,
+                node(md::PARAGRAPH),
+                Attrs::empty(),
+            ),
+            Block::Heading(level) => markraft_core::kind::chains::toggle_block(
                 types,
                 node(md::HEADING),
                 Attrs::from_pairs([("level", i64::from(level))]),
             ),
-            Block::Code => markraft_gpui::commands::code_block(
+            Block::Code => markraft_core::kind::chains::code_block(
                 types,
                 node(md::CODE_BLOCK),
                 Attrs::from_pairs([("fence_char", markers().fence.to_string())]),
             ),
-            Block::Quote => markraft_gpui::commands::toggle_quote(types),
-            Block::Callout => markraft_gpui::commands::toggle_wrap(
+            Block::Quote => markraft_core::kind::chains::toggle_quote(types),
+            Block::Callout => markraft_core::kind::chains::toggle_wrap_in(
                 node(md::BLOCKQUOTE),
                 Attrs::from_pairs([("callout", "note"), ("fold", ""), ("title", "")]),
             ),
-            Block::Ordered => markraft_gpui::commands::toggle_list(
+            Block::Ordered => markraft_core::kind::chains::toggle_list(
                 types,
                 node(md::ORDERED_LIST),
                 Attrs::from_pairs([("delimiter", markers().ordered.to_string())]),
                 node(md::LIST_ITEM),
             ),
-            Block::Bullet => markraft_gpui::commands::toggle_list(
+            Block::Bullet => markraft_core::kind::chains::toggle_list(
                 types,
                 node(md::BULLET_LIST),
                 bullet_attrs(),
                 node(md::LIST_ITEM),
             ),
-            Block::Task => markraft_gpui::commands::toggle_list(
+            Block::Task => markraft_core::kind::chains::toggle_list(
                 types,
                 node(md::BULLET_LIST),
                 bullet_attrs(),

@@ -22,6 +22,7 @@ use super::{
     Command, at_block_end, at_block_start, changes_spec, command, find_cut_after, find_cut_before,
     resolve_changes,
 };
+use crate::protocol::event;
 
 /// Delete everything the selection covers, leaving a caret where it was.
 ///
@@ -46,7 +47,7 @@ pub fn delete_selection() -> Command {
             TransactionSpec::new()
                 .change_set(set)
                 .selection(Selection::near(state.schema(), &new_doc, at, 1))
-                .user_event("delete.selection")
+                .user_event(event::DELETE_SELECTION)
                 .scroll_into_view(),
         )
     })
@@ -127,7 +128,7 @@ fn select_node_at_cut(state: &EditorState, dir: i32) -> Option<TransactionSpec> 
     Some(
         TransactionSpec::new()
             .selection(Selection::node(pos))
-            .user_event("select")
+            .user_event(event::SELECT)
             .scroll_into_view(),
     )
 }
@@ -406,7 +407,7 @@ fn join_in_direction(state: &EditorState, dir: i32) -> Option<TransactionSpec> {
     let (set, new_doc) = resolve_changes(state, join_changes(point, 1))?;
     let mut spec = TransactionSpec::new()
         .change_set(set)
-        .user_event("delete")
+        .user_event(event::DELETE)
         .scroll_into_view();
     if let Selection::Node { .. } = selection {
         let resolved = new_doc.resolve(point).ok()?;
@@ -425,7 +426,7 @@ pub fn select_all() -> Command {
         Some(
             TransactionSpec::new()
                 .selection(Selection::All)
-                .user_event("select.all"),
+                .user_event(event::SELECT_ALL),
         )
     })
 }
@@ -443,7 +444,7 @@ pub fn select_parent_node() -> Command {
         Some(
             TransactionSpec::new()
                 .selection(Selection::node(from.before(shared)))
-                .user_event("select")
+                .user_event(event::SELECT)
                 .scroll_into_view(),
         )
     })
@@ -476,7 +477,7 @@ fn select_textblock_edge(state: &EditorState, start: bool) -> Option<Transaction
     Some(
         TransactionSpec::new()
             .selection(Selection::cursor(target))
-            .user_event("move")
+            .user_event(event::MOVE)
             .scroll_into_view(),
     )
 }

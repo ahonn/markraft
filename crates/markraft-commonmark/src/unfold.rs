@@ -41,6 +41,7 @@ use markraft_core::{
 
 use crate::schema as md;
 use crate::textblock::{atom_spelling, block_kind};
+use markraft_core::protocol::event;
 
 /// Set on a transaction the filter extended to spell out an atom.
 static UNFOLDS: LazyLock<AnnotationType<bool>> = LazyLock::new(AnnotationType::define);
@@ -66,7 +67,7 @@ pub(crate) fn unfold_atoms() -> Extension {
 pub(crate) fn keeps_spelling_at_caret(tr: &Transaction) -> bool {
     tr.annotation(&UNFOLDS) == Some(&true)
         || !tr.doc_changed()
-        || tr.is_user_event("input.type")
+        || tr.is_user_event(event::INPUT_TYPE)
         || tr.replays_history()
 }
 

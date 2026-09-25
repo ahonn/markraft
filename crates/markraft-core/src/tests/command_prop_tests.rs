@@ -394,7 +394,7 @@ fn projection_round_trips_for_random_documents() {
             let units = projection.pos_to_utf16(pos).expect("utf16 offset");
             assert_eq!(projection.utf16_to_pos(units), Some(pos));
             assert_eq!(
-                projection.utf16_offset(line, pos),
+                projection.line_pos_to_utf16(line, pos),
                 projection
                     .pos_to_utf16(pos)
                     .map(|u| u - projection.line(line).expect("line").utf16_start())

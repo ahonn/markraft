@@ -126,10 +126,13 @@ impl MarkraftApp {
             .as_ref()
             .and(self.persistence.as_ref())
             .map(|persistence| {
-                persistence.markdown(note.clone()).and_then(|text| {
-                    markraft_commonmark::SourceDocument::parse(doc::schema(), &text)
-                        .map_err(|error| error.to_string())
-                })
+                persistence
+                    .markdown(note.clone())
+                    .map_err(|error| error.to_string())
+                    .and_then(|text| {
+                        markraft_commonmark::SourceDocument::parse(doc::schema(), &text)
+                            .map_err(|error| error.to_string())
+                    })
             });
         let image_root = source
             .as_ref()
@@ -148,19 +151,13 @@ impl MarkraftApp {
             })
         });
         let style = self.editor_style();
-        let house = self.house.clone();
+        let kind =
+            doc::MarkdownKind::new(self.house.clone(), self.shortcuts.clone(), refusal_message);
         let editor = cx.new(|cx| {
             EditorView::new(
                 Setup::new(doc::schema().clone())
                     .types(doc::types().clone())
-                    .codecs(doc::codecs(&self.house))
-                    .spelling(doc::spelling())
-                    .mark_toggle(doc::mark_toggle(refusal_message, &self.house))
-                    .link_setter(doc::link_setter(refusal_message, &self.house))
-                    .split_wrap(doc::split_wrap(&self.house))
-                    .enter_rule(doc::enter_rule(self.shortcuts.clone()))
-                    // Shift-Return writes the break the preferences ask for.
-                    .break_spelling(std::sync::Arc::new(move || house.get().hard_break.marker()))
+                    .kind(std::sync::Arc::new(kind))
                     .extensions(doc::extensions(self.shortcuts.clone(), self.pairs.clone()))
                     .doc(document),
                 cx,
@@ -201,7 +198,7 @@ impl MarkraftApp {
         let extensions = editor.update(cx, |editor, cx| {
             editor.set_wiki_resolver(resolver, cx);
             editor.set_remote_images(self.remote_image_fetcher(), cx);
-            editor.set_indent_text(self.library.preferences.tab_key.text(), cx);
+            editor.set_indent_text(self.preferences.tab_key.text(), cx);
             [
                 editor.add_extension(menu, cx),
                 editor.add_extension(links, cx),
@@ -210,7 +207,6 @@ impl MarkraftApp {
             ]
         });
         let vim = self
-            .library
             .preferences
             .vim_mode
             .then(|| Self::attach_vim(&editor, cx));
@@ -344,107 +340,9 @@ impl MarkraftApp {
 impl MarkraftApp {
     /// What a note editor fetches remote images with: nothing while the preference
     /// is off, so each one reads as an image this editor does not load.
-    fn remote_image_fetcher(&self) -> Option<markraft_gpui::RemoteImageFetcher> {
-        self.library
-            .preferences
+    pub(in crate::app) fn remote_image_fetcher(&self) -> Option<markraft_gpui::RemoteImageFetcher> {
+        self.preferences
             .remote_images
             .then(crate::remote_images::shared)
-    }
-
-    /// Write emoji characters rather than shortcodes, or back, in every open note at
-    /// once: their menus and auto-replace share [`MarkraftApp::emoji`].
-    pub(super) fn set_emoji_characters(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.library.preferences.emoji_characters == enabled {
-            return;
-        }
-        self.library.preferences.emoji_characters = enabled;
-        self.emoji.set_characters(enabled);
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
-    /// Turn the Markdown input rules on or off in every open note at once: their rules
-    /// all read the one flag.
-    pub(super) fn set_markdown_shortcuts(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        self.library.preferences.markdown_shortcuts = enabled;
-        self.shortcuts
-            .store(enabled, std::sync::atomic::Ordering::Relaxed);
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
-    /// Turn bracket and quote pairing on or off in every open note at once.
-    pub(super) fn set_auto_pair(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        self.library.preferences.auto_pair = enabled;
-        self.pairs
-            .store(enabled, std::sync::atomic::Ordering::Relaxed);
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
-    pub(super) fn set_tab_key(&mut self, key: crate::storage::TabKey, cx: &mut Context<Self>) {
-        self.library.preferences.tab_key = key;
-        let editors: Vec<_> = self
-            .sessions
-            .values()
-            .map(|session| session.editor().clone())
-            .collect();
-        for editor in editors {
-            editor.update(cx, |editor, cx| editor.set_indent_text(key.text(), cx));
-        }
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
-    /// The typeface or line height changed: every open note is set again.
-    pub(super) fn set_typography(
-        &mut self,
-        font: crate::storage::EditorFont,
-        line_height: crate::storage::LineHeight,
-        cx: &mut Context<Self>,
-    ) {
-        self.library.preferences.font = font;
-        self.library.preferences.line_height = line_height;
-        self.restyle_editors(cx);
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
-    /// The markers new syntax is written with. What is already written stays as it is.
-    pub(super) fn set_markdown_markers(
-        &mut self,
-        bullet: crate::storage::BulletMarker,
-        fence: crate::storage::CodeFence,
-        emphasis: crate::storage::EmphasisMarker,
-        cx: &mut Context<Self>,
-    ) {
-        let preferences = &mut self.library.preferences;
-        preferences.bullet_marker = bullet;
-        preferences.code_fence = fence;
-        preferences.emphasis_marker = emphasis;
-        super::apply_markdown_style(&self.house, preferences);
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
-    /// Turn fetching remote images on or off in every open note at once.
-    pub(super) fn set_remote_images(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.library.preferences.remote_images == enabled {
-            return;
-        }
-        self.library.preferences.remote_images = enabled;
-        let fetcher = self.remote_image_fetcher();
-        let editors: Vec<_> = self
-            .sessions
-            .values()
-            .map(|session| session.editor().clone())
-            .collect();
-        for editor in editors {
-            editor.update(cx, |editor, cx| {
-                editor.set_remote_images(fetcher.clone(), cx)
-            });
-        }
-        self.schedule_save(cx);
-        cx.notify();
     }
 }

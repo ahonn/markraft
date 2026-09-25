@@ -82,6 +82,7 @@ use crate::pending::{Layer, pending, pending_after, runs};
 use crate::schema as md;
 use crate::serialize::spell_run;
 use crate::textblock::{Item, Items, block_kind, document_context, style_mark, syntax_mark};
+use markraft_core::protocol::event;
 
 /// Why a formatting command left the document alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1306,7 +1307,7 @@ fn word_around(text: &str, offset: usize) -> Option<Range<usize>> {
 fn caret_moved(pos: usize) -> TransactionSpec {
     TransactionSpec::new()
         .selection(Selection::cursor(pos))
-        .user_event("format.mark")
+        .user_event(event::FORMAT_MARK)
         .scroll_into_view()
 }
 
@@ -1350,7 +1351,7 @@ fn write_pair(
     let caret = block.start + region.start + left.chars().count();
     let mut spec = TransactionSpec::new()
         .selection(Selection::cursor(caret))
-        .user_event("format.mark")
+        .user_event(event::FORMAT_MARK)
         .scroll_into_view()
         .annotate(pending_after(layers));
     if let Some(change) = replace_items(schema, block, region, &items) {
@@ -1500,7 +1501,7 @@ fn insert_linked(state: &EditorState, link: &Style, href: &str, house: HouseStyl
                 Slice::from_fragment(Fragment::from_nodes(items_to_nodes(schema, &new_items))),
             )])
             .selection(Selection::cursor(start + caret))
-            .user_event("format.link")
+            .user_event(event::FORMAT_LINK)
             .scroll_into_view(),
     ))
 }

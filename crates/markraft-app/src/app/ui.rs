@@ -6,12 +6,13 @@ mod link;
 mod rename;
 pub(in crate::app) mod settings;
 pub(in crate::app) mod slash;
-mod table;
+pub(super) mod table;
 mod tokens;
 mod vim;
 pub(in crate::app) mod wiki;
 
 use super::*;
+use crate::storage::Pref;
 use focus::Surface;
 use icons::{Icon, icon, sized_icon};
 use slash::{Command, SlashEffect};
@@ -74,6 +75,48 @@ enum Intent {
 }
 
 /// Shared ordering and separators for the command menu, including filtered results.
+/// The shortcut shown beside an intent, wherever it is offered: the ⌘K panel,
+/// the toolbar's menus and the `/` menu all read it here, so a rebinding is
+/// one edit and the three cannot disagree. Empty for an intent without one.
+///
+/// The labels are written here rather than derived from the keymap: the editor's
+/// bindings live in gpui's own binding table, keyed by action, and are not
+/// exposed per intent.
+fn shortcut_label(intent: &Intent) -> &'static str {
+    match intent {
+        Intent::New => "⌘N",
+        Intent::Browse => "⌘P",
+        Intent::Save => "⌘S",
+        Intent::Copy => "⇧⌘C",
+        Intent::PastePlain => "⇧⌘V",
+        Intent::PasteMarkdown => "⌥⇧⌘V",
+        Intent::Export => "⇧⌘E",
+        Intent::OpenMarkdown => "⌘O",
+        Intent::Link => "⌘L",
+        Intent::Mark(doc::Inline::Bold) => "⌘B",
+        Intent::Mark(doc::Inline::Italic) => "⌘I",
+        Intent::Mark(doc::Inline::Strikethrough) => "⇧⌘S",
+        Intent::Mark(doc::Inline::Code) => "⌘E",
+        Intent::Block(doc::Block::Paragraph) => "⌘0",
+        Intent::Block(doc::Block::Heading(1)) => "⌘1",
+        Intent::Block(doc::Block::Heading(2)) => "⌘2",
+        Intent::Block(doc::Block::Heading(3)) => "⌘3",
+        Intent::Block(doc::Block::Heading(4)) => "⌘4",
+        Intent::Block(doc::Block::Heading(5)) => "⌘5",
+        Intent::Block(doc::Block::Heading(6)) => "⌘6",
+        Intent::Block(doc::Block::Quote) => "⇧⌘B",
+        Intent::Block(doc::Block::Code) => "⌥⌘C",
+        Intent::Block(doc::Block::Ordered) => "⇧⌘7",
+        Intent::Block(doc::Block::Bullet) => "⇧⌘8",
+        Intent::Block(doc::Block::Task) => "⇧⌘9",
+        Intent::ToggleTask => "⌘↩",
+        Intent::ChooseCodeLanguage => "⌥⌘L",
+        Intent::CopyCodeBlock => "⌥⇧⌘C",
+        Intent::Table(TableEdit::RowAfter) => "⌘↩",
+        _ => "",
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ActionGroup {
     Notes,
@@ -373,7 +416,15 @@ impl MarkraftApp {
             }
             Intent::InsertTable => {
                 self.close_popover(cx);
-                self.editor().update(cx, |e, cx| e.insert_table(2, 3, cx));
+                self.editor().update(cx, |e, cx| {
+                    e.table(
+                        markraft_gpui::TableOp::Insert {
+                            rows: 2,
+                            columns: 3,
+                        },
+                        cx,
+                    )
+                });
                 self.set_panel(Panel::Editor, cx);
                 self.focus_editor(window, cx);
             }
@@ -1063,7 +1114,7 @@ impl MarkraftApp {
     /// caret already is, so `caret` keeps them out of the panel everywhere else.
     fn action_items(&self, caret: Caret) -> Vec<Command> {
         let mut items = vec![
-            Command::new("new-action", "New Note", "⌘N", Intent::New),
+            Command::new("new-action", "New Note", Intent::New),
             Command::new(
                 "pin-note",
                 if self.library.active_note().pinned {
@@ -1071,143 +1122,103 @@ impl MarkraftApp {
                 } else {
                     "Pin Note"
                 },
-                "",
                 Intent::Pin,
             ),
-            Command::new("browse-action", "Browse Notes", "⌘P", Intent::Browse),
-            Command::new("save-now", "Save Now", "⌘S", Intent::Save),
-            Command::new("copy-markdown", "Copy as Markdown", "⇧⌘C", Intent::Copy),
-            Command::new(
-                "paste-plain",
-                "Paste as Plain Text",
-                "⇧⌘V",
-                Intent::PastePlain,
-            ),
-            Command::new(
-                "paste-markdown",
-                "Paste as Markdown",
-                "⌥⇧⌘V",
-                Intent::PasteMarkdown,
-            ),
-            Command::new("export-note", "Export Markdown…", "⇧⌘E", Intent::Export),
-            Command::new("rename-note", "Rename…", "", Intent::Rename),
+            Command::new("browse-action", "Browse Notes", Intent::Browse),
+            Command::new("save-now", "Save Now", Intent::Save),
+            Command::new("copy-markdown", "Copy as Markdown", Intent::Copy),
+            Command::new("paste-plain", "Paste as Plain Text", Intent::PastePlain),
+            Command::new("paste-markdown", "Paste as Markdown", Intent::PasteMarkdown),
+            Command::new("export-note", "Export Markdown…", Intent::Export),
+            Command::new("rename-note", "Rename…", Intent::Rename),
             Command::new(
                 "open-markdown-action",
                 "Open Markdown…",
-                "⌘O",
                 Intent::OpenMarkdown,
             ),
-            Command::new("format-bold", "Bold", "⌘B", Intent::Mark(doc::Inline::Bold)),
-            Command::new(
-                "format-italic",
-                "Italic",
-                "⌘I",
-                Intent::Mark(doc::Inline::Italic),
-            ),
+            Command::new("format-bold", "Bold", Intent::Mark(doc::Inline::Bold)),
+            Command::new("format-italic", "Italic", Intent::Mark(doc::Inline::Italic)),
             Command::new(
                 "format-strikethrough",
                 "Strikethrough",
-                "⇧⌘S",
                 Intent::Mark(doc::Inline::Strikethrough),
             ),
             Command::new(
                 "format-code",
                 "Inline Code",
-                "⌘E",
                 Intent::Mark(doc::Inline::Code),
             ),
-            Command::new("format-link", "Link", "⌘L", Intent::Link).slash(13, SlashEffect::Host),
+            Command::new("format-link", "Link", Intent::Link).slash(13, SlashEffect::Host),
             Command::new(
                 "format-heading",
                 "Heading 1",
-                "⌘1",
                 Intent::Block(doc::Block::Heading(1)),
             )
             .slash(1, SlashEffect::Block(doc::Block::Heading(1))),
             Command::new(
                 "format-heading-2",
                 "Heading 2",
-                "⌘2",
                 Intent::Block(doc::Block::Heading(2)),
             )
             .slash(2, SlashEffect::Block(doc::Block::Heading(2))),
             Command::new(
                 "format-heading-3",
                 "Heading 3",
-                "⌘3",
                 Intent::Block(doc::Block::Heading(3)),
             )
             .slash(3, SlashEffect::Block(doc::Block::Heading(3))),
             Command::new(
                 "format-heading-4",
                 "Heading 4",
-                "⌘4",
                 Intent::Block(doc::Block::Heading(4)),
             )
             .slash(4, SlashEffect::Block(doc::Block::Heading(4))),
             Command::new(
                 "format-heading-5",
                 "Heading 5",
-                "⌘5",
                 Intent::Block(doc::Block::Heading(5)),
             )
             .slash(5, SlashEffect::Block(doc::Block::Heading(5))),
             Command::new(
                 "format-heading-6",
                 "Heading 6",
-                "⌘6",
                 Intent::Block(doc::Block::Heading(6)),
             )
             .slash(6, SlashEffect::Block(doc::Block::Heading(6))),
-            Command::new(
-                "format-quote",
-                "Quote",
-                "⇧⌘B",
-                Intent::Block(doc::Block::Quote),
-            )
-            .slash(10, SlashEffect::Block(doc::Block::Quote)),
+            Command::new("format-quote", "Quote", Intent::Block(doc::Block::Quote))
+                .slash(10, SlashEffect::Block(doc::Block::Quote)),
             Command::new(
                 "format-callout",
                 "Callout",
-                "",
                 Intent::Block(doc::Block::Callout),
             )
             .slash(10, SlashEffect::Block(doc::Block::Callout)),
             Command::new(
                 "format-code-block",
                 "Code Block",
-                "⌥⌘C",
                 Intent::Block(doc::Block::Code),
             )
             .slash(11, SlashEffect::Block(doc::Block::Code)),
             Command::new(
                 "format-paragraph",
                 "Paragraph",
-                "⌘0",
                 Intent::Block(doc::Block::Paragraph),
             )
             .slash(0, SlashEffect::Block(doc::Block::Paragraph)),
             Command::new(
                 "format-ordered",
                 "Ordered List",
-                "⇧⌘7",
                 Intent::Block(doc::Block::Ordered),
             )
             .slash(8, SlashEffect::Block(doc::Block::Ordered)),
             Command::new(
                 "format-bullet",
                 "Bullet List",
-                "⇧⌘8",
                 Intent::Block(doc::Block::Bullet),
             )
             .slash(7, SlashEffect::Block(doc::Block::Bullet)),
-            Command::new(
-                "format-task",
-                "Task List",
-                "⇧⌘9",
-                Intent::Block(doc::Block::Task),
-            )
-            .slash(9, SlashEffect::Block(doc::Block::Task)),
+            Command::new("format-task", "Task List", Intent::Block(doc::Block::Task))
+                .slash(9, SlashEffect::Block(doc::Block::Task)),
             // A rule replaces the line it is on, so only the `/` menu offers it.
             Command::editor(
                 "insert-divider",
@@ -1219,22 +1230,16 @@ impl MarkraftApp {
         // A table cannot nest in another one, and a code block keeps its pipes literal.
         if caret.table.is_none() && !caret.in_code {
             items.push(
-                Command::new("insert-table", "Table", "", Intent::InsertTable)
+                Command::new("insert-table", "Table", Intent::InsertTable)
                     .slash(14, SlashEffect::Host),
             );
         }
-        items.extend([Command::new(
-            "delete-note",
-            "Move to Trash",
-            "",
-            Intent::Delete,
-        )]);
+        items.extend([Command::new("delete-note", "Move to Trash", Intent::Delete)]);
         // Each of these reveals a different thing, and only while there is one.
         if self.library.active_note().path.is_some() {
             items.push(Command::new(
                 "reveal-note",
                 "Reveal Note in Finder",
-                "",
                 Intent::RevealNote,
             ));
         }
@@ -1242,7 +1247,6 @@ impl MarkraftApp {
             items.push(Command::new(
                 "reveal-folder",
                 "Show Folder in Finder",
-                "",
                 Intent::Reveal,
             ));
         }
@@ -1250,7 +1254,6 @@ impl MarkraftApp {
             items.push(Command::new(
                 "toggle-task",
                 "Toggle Task",
-                "⌘↩",
                 Intent::ToggleTask,
             ));
         }
@@ -1259,22 +1262,16 @@ impl MarkraftApp {
                 Command::new(
                     "code-language",
                     "Choose Code Language",
-                    "⌥⌘L",
                     Intent::ChooseCodeLanguage,
                 ),
-                Command::new(
-                    "copy-code-block",
-                    "Copy Code Block",
-                    "⌥⇧⌘C",
-                    Intent::CopyCodeBlock,
-                ),
+                Command::new("copy-code-block", "Copy Code Block", Intent::CopyCodeBlock),
             ]);
         }
         if caret.in_link {
             items.extend([
-                Command::new("copy-link", "Copy Link", "", Intent::CopyLink),
-                Command::new("open-link", "Open Link", "", Intent::OpenLink),
-                Command::new("remove-link", "Remove Link", "", Intent::Unlink),
+                Command::new("copy-link", "Copy Link", Intent::CopyLink),
+                Command::new("open-link", "Open Link", Intent::OpenLink),
+                Command::new("remove-link", "Remove Link", Intent::Unlink),
             ]);
         }
         if let Some(table) = caret.table {
@@ -1282,37 +1279,31 @@ impl MarkraftApp {
                 Command::new(
                     "table-row-above",
                     "Add Row Above",
-                    "",
                     Intent::Table(TableEdit::RowBefore),
                 ),
                 Command::new(
                     "table-row-below",
                     "Add Row Below",
-                    "⌘↩",
                     Intent::Table(TableEdit::RowAfter),
                 ),
                 Command::new(
                     "table-column-left",
                     "Add Column Left",
-                    "",
                     Intent::Table(TableEdit::ColumnBefore),
                 ),
                 Command::new(
                     "table-column-right",
                     "Add Column Right",
-                    "",
                     Intent::Table(TableEdit::ColumnAfter),
                 ),
                 Command::new(
                     "table-delete-row",
                     "Delete Row",
-                    "",
                     Intent::Table(TableEdit::DeleteRow),
                 ),
                 Command::new(
                     "table-delete-column",
                     "Delete Column",
-                    "",
                     Intent::Table(TableEdit::DeleteColumn),
                 ),
             ]);
@@ -1335,14 +1326,13 @@ impl MarkraftApp {
                 ),
             ] {
                 items.push(
-                    Command::new(id, label, "", Intent::Table(TableEdit::Align(alignment)))
+                    Command::new(id, label, Intent::Table(TableEdit::Align(alignment)))
                         .checked(table.alignment == alignment),
                 );
             }
             items.push(Command::new(
                 "table-delete",
                 "Delete Table",
-                "",
                 Intent::Table(TableEdit::DeleteTable),
             ));
         }
@@ -1354,7 +1344,6 @@ impl MarkraftApp {
             } else {
                 "Open Folder…"
             },
-            "",
             Intent::ChooseFolder,
         ));
         items
@@ -1696,14 +1685,18 @@ impl Render for MarkraftApp {
             )
             .on_action(cx.listener(|this, _: &Link, w, cx| this.intent(Intent::Link, w, cx)))
             .on_action(cx.listener(|this, _: &Export, w, cx| this.intent(Intent::Export, w, cx)))
-            .on_action(cx.listener(|this, _: &IncreaseTextSize, _, cx| {
-                this.set_text_size(this.library.preferences.text_size + 1., cx)
+            .on_action(cx.listener(|this, _: &IncreaseTextSize, w, cx| {
+                this.set_preference(Pref::TextSize(this.preferences.text_size + 1.), w, cx)
             }))
-            .on_action(cx.listener(|this, _: &DecreaseTextSize, _, cx| {
-                this.set_text_size(this.library.preferences.text_size - 1., cx)
+            .on_action(cx.listener(|this, _: &DecreaseTextSize, w, cx| {
+                this.set_preference(Pref::TextSize(this.preferences.text_size - 1.), w, cx)
             }))
-            .on_action(cx.listener(|this, _: &ResetTextSize, _, cx| {
-                this.set_text_size(crate::storage::Preferences::DEFAULT_TEXT_SIZE, cx)
+            .on_action(cx.listener(|this, _: &ResetTextSize, w, cx| {
+                this.set_preference(
+                    Pref::TextSize(crate::storage::Preferences::DEFAULT_TEXT_SIZE),
+                    w,
+                    cx,
+                )
             }))
             .on_action(cx.listener(|this, _: &OpenMarkdown, w, cx| {
                 this.intent(Intent::OpenMarkdown, w, cx)
@@ -2136,5 +2129,49 @@ impl Render for Hint {
             .text_size(px(11.))
             .child(text.to_owned())
             .when(!keys.is_empty(), |s| s.child(keycaps(keys, self.dark)))
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    // Not `use super::*`: that would bring gpui's `test` macro in over the built-in one.
+    use super::{Command, Intent, TableEdit, shortcut_label};
+    use crate::doc;
+
+    #[test]
+    fn a_command_takes_its_shortcut_from_the_one_table() {
+        for intent in [
+            Intent::New,
+            Intent::Mark(doc::Inline::Bold),
+            Intent::Block(doc::Block::Heading(3)),
+            Intent::Table(TableEdit::RowAfter),
+            Intent::Rename,
+        ] {
+            let command = Command::new("id", "Label", intent.clone());
+            assert_eq!(command.shortcut, shortcut_label(&intent));
+        }
+    }
+
+    #[test]
+    fn the_table_gives_every_surface_the_same_labels() {
+        // The bindings the toolbar menus and the `/` menu used to spell by hand.
+        assert_eq!(shortcut_label(&Intent::Block(doc::Block::Paragraph)), "⌘0");
+        for level in 1..=6 {
+            assert_eq!(
+                shortcut_label(&Intent::Block(doc::Block::Heading(level))),
+                ["⌘1", "⌘2", "⌘3", "⌘4", "⌘5", "⌘6"][usize::from(level) - 1]
+            );
+        }
+        assert_eq!(shortcut_label(&Intent::Mark(doc::Inline::Bold)), "⌘B");
+        assert_eq!(shortcut_label(&Intent::Mark(doc::Inline::Italic)), "⌘I");
+        assert_eq!(
+            shortcut_label(&Intent::Mark(doc::Inline::Strikethrough)),
+            "⇧⌘S"
+        );
+        assert_eq!(shortcut_label(&Intent::Block(doc::Block::Ordered)), "⇧⌘7");
+        assert_eq!(shortcut_label(&Intent::Block(doc::Block::Bullet)), "⇧⌘8");
+        assert_eq!(shortcut_label(&Intent::Block(doc::Block::Task)), "⇧⌘9");
+        assert_eq!(shortcut_label(&Intent::Link), "⌘L");
+        assert_eq!(shortcut_label(&Intent::Rename), "");
     }
 }

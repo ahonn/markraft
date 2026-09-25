@@ -5,10 +5,10 @@
 //! none of them and draws plain text. What a missing role costs is written on
 //! the field.
 
-use markraft_core::commands::{ColumnAlignment, TableTypes};
-use markraft_core::kind::TABLE_ALIGNMENTS_ATTR;
-use markraft_core::projection::{Ancestor, Line};
-use markraft_core::{Attrs, EditorState, MarkTypeId, Node, NodeTypeId, Schema, kind::DocTypeNames};
+use crate::commands::{ColumnAlignment, TableTypes};
+use crate::kind::TABLE_ALIGNMENTS_ATTR;
+use crate::projection::{Ancestor, Line};
+use crate::{Attrs, EditorState, MarkTypeId, Node, NodeTypeId, Schema, kind::DocTypeNames};
 
 /// The conventional schema names of the two roles [`DocTypeNames`] has no
 /// entry for.
@@ -40,7 +40,7 @@ pub struct CalloutAttrs {
 ///
 /// A host builds this once — with [`DocTypes::from_schema_names`] from a
 /// document kind's own table, or field by field — and hands it to the view in
-/// [`Setup`](crate::Setup).
+/// the view's setup.
 #[derive(Clone, Debug, Default)]
 pub struct DocTypes {
     /// The default textblock. Without it a block toggle cannot return to a
@@ -89,7 +89,7 @@ pub struct DocTypes {
     /// One cell of a table row, which is a textblock. See [`DocTypes::table`].
     pub table_cell: Option<NodeTypeId>,
     /// A line break. The view finds breaks through the projection, which reads
-    /// each type's declared [`BreakKind`](markraft_core::BreakKind), rather
+    /// each type's declared [`BreakKind`](crate::BreakKind), rather
     /// than here, so this names the type for hosts and extensions that insert
     /// one.
     pub hard_break: Option<NodeTypeId>,
@@ -122,7 +122,7 @@ pub struct DocTypes {
     pub strikethrough: Option<MarkTypeId>,
     /// Underline. Present for HTML paste; Markdown write strips it.
     pub underline: Option<MarkTypeId>,
-    /// Highlighted text, drawn over [`EditorStyle::highlight`](crate::EditorStyle::highlight).
+    /// Highlighted text, drawn over the view's highlight colour.
     pub highlight: Option<MarkTypeId>,
     /// Superscript, drawn smaller and raised in the slot full-size text would
     /// take. Without it the text is drawn on the line like its neighbours.
@@ -212,17 +212,17 @@ impl DocTypes {
     }
 
     /// Whether `ty` is one of the two list types.
-    pub(crate) fn is_list(&self, ty: NodeTypeId) -> bool {
+    pub fn is_list(&self, ty: NodeTypeId) -> bool {
         Some(ty) == self.bullet_list || Some(ty) == self.ordered_list
     }
 
     /// Whether `ty` is one of the two list item types.
-    pub(crate) fn is_item(&self, ty: NodeTypeId) -> bool {
+    pub fn is_item(&self, ty: NodeTypeId) -> bool {
         Some(ty) == self.list_item || Some(ty) == self.task_item
     }
 
     /// The heading level of a line's own block, when it is a heading.
-    pub(crate) fn heading_level(&self, line: &Line) -> Option<u8> {
+    pub fn heading_level(&self, line: &Line) -> Option<u8> {
         let own = line.ancestors().last()?;
         (Some(own.node_type) == self.heading).then(|| {
             own.attrs
@@ -234,14 +234,14 @@ impl DocTypes {
     }
 
     /// Whether the line's own block is a code block.
-    pub(crate) fn is_code_block(&self, line: &Line) -> bool {
+    pub fn is_code_block(&self, line: &Line) -> bool {
         line.node_type()
             .is_some_and(|ty| Some(ty) == self.code_block)
     }
 
     /// Whether the line's own block is a raw block, whose source is its text
     /// and is drawn as the source it is.
-    pub(crate) fn is_raw_block(&self, line: &Line) -> bool {
+    pub fn is_raw_block(&self, line: &Line) -> bool {
         line.node_type()
             .is_some_and(|ty| Some(ty) == self.raw_block)
     }
@@ -250,14 +250,14 @@ impl DocTypes {
     /// raw block. The two are drawn differently, but a key pressed inside one
     /// does what it does inside the other: a line ending is a character, Tab is
     /// a tab, and nothing typed is read as markup.
-    pub(crate) fn is_verbatim_block(&self, line: &Line) -> bool {
+    pub fn is_verbatim_block(&self, line: &Line) -> bool {
         self.is_code_block(line) || self.is_raw_block(line)
     }
 
     /// Whether `node`, sitting in a textblock of type `parent`, is a `<br>` in
     /// a table cell: the cell's line break, drawn as one, as Typora does,
     /// rather than inline HTML shown as its source.
-    pub(crate) fn is_cell_break(&self, parent: NodeTypeId, node: &Node) -> bool {
+    pub fn is_cell_break(&self, parent: NodeTypeId, node: &Node) -> bool {
         Some(parent) == self.table_cell
             && Some(node.type_id()) == self.raw_inline
             && node
@@ -272,30 +272,28 @@ impl DocTypes {
 
     /// Whether a block of type `ty` holds its text verbatim, as
     /// [`DocTypes::is_verbatim_block`] asks of a line.
-    pub(crate) fn is_verbatim(&self, ty: NodeTypeId) -> bool {
+    pub fn is_verbatim(&self, ty: NodeTypeId) -> bool {
         Some(ty) == self.code_block || Some(ty) == self.raw_block
     }
 
     /// Whether the cursor sits in a verbatim block, for the paths that ask
     /// about the document rather than about a laid-out line.
-    pub(crate) fn in_verbatim_block_at(&self, state: &EditorState) -> bool {
-        let doc = state.doc();
-        doc.resolve(state.selection().head(doc))
-            .is_ok_and(|resolved| {
-                let ty = Some(resolved.parent().type_id());
-                ty == self.code_block || ty == self.raw_block
-            })
+    pub fn in_verbatim_block_at(&self, state: &EditorState) -> bool {
+        state.resolved_head().is_some_and(|resolved| {
+            let ty = Some(resolved.parent().type_id());
+            ty == self.code_block || ty == self.raw_block
+        })
     }
 
     /// Whether the line is the first block of a ticked task item.
-    pub(crate) fn in_checked_item(&self, line: &Line) -> bool {
+    pub fn in_checked_item(&self, line: &Line) -> bool {
         self.item_of(line).is_some_and(|(item, _)| {
             Some(item.node_type) == self.task_item && DocTypes::task_checked(&item.attrs)
         })
     }
 
     /// The language attribute of a code block line.
-    pub(crate) fn code_language<'a>(&self, line: &'a Line) -> Option<&'a str> {
+    pub fn code_language<'a>(&self, line: &'a Line) -> Option<&'a str> {
         let own = line.ancestors().last()?;
         (Some(own.node_type) == self.code_block).then(|| {
             own.attrs
@@ -307,14 +305,14 @@ impl DocTypes {
 
     /// The index in [`Line::ancestors`] of the innermost list item a line sits
     /// in.
-    pub(crate) fn item_index(&self, line: &Line) -> Option<usize> {
+    pub fn item_index(&self, line: &Line) -> Option<usize> {
         line.ancestors()
             .iter()
             .rposition(|ancestor| self.is_item(ancestor.node_type))
     }
 
     /// The innermost list item ancestor of a line, with the list holding it.
-    pub(crate) fn item_of<'a>(&self, line: &'a Line) -> Option<(&'a Ancestor, &'a Ancestor)> {
+    pub fn item_of<'a>(&self, line: &'a Line) -> Option<(&'a Ancestor, &'a Ancestor)> {
         let index = self.item_index(line)?;
         let list = line.ancestors().get(index.checked_sub(1)?)?;
         self.is_list(list.node_type)
@@ -323,7 +321,7 @@ impl DocTypes {
 
     /// How many list levels a line sits in, counting from zero for a top-level
     /// item. Used for the marker shape, which cycles with depth.
-    pub(crate) fn list_depth(&self, line: &Line) -> usize {
+    pub fn list_depth(&self, line: &Line) -> usize {
         line.ancestors()
             .iter()
             .filter(|ancestor| self.is_list(ancestor.node_type))
@@ -332,7 +330,7 @@ impl DocTypes {
     }
 
     /// The innermost footnote definition a line sits in.
-    pub(crate) fn footnote_of<'a>(&self, line: &'a Line) -> Option<&'a Ancestor> {
+    pub fn footnote_of<'a>(&self, line: &'a Line) -> Option<&'a Ancestor> {
         let ty = self.footnote_definition?;
         line.ancestors()
             .iter()
@@ -343,7 +341,7 @@ impl DocTypes {
     /// Whether a line is the first of its footnote definition, where the label
     /// is drawn: every block between the definition and the line is the first
     /// of its parent.
-    pub(crate) fn starts_footnote(&self, line: &Line) -> bool {
+    pub fn starts_footnote(&self, line: &Line) -> bool {
         let Some(ty) = self.footnote_definition else {
             return false;
         };
@@ -361,7 +359,7 @@ impl DocTypes {
     }
 
     /// How many block quotes a line sits in.
-    pub(crate) fn quote_depth(&self, line: &Line) -> usize {
+    pub fn quote_depth(&self, line: &Line) -> usize {
         line.ancestors()
             .iter()
             .filter(|ancestor| Some(ancestor.node_type) == self.blockquote)
@@ -372,7 +370,7 @@ impl DocTypes {
     ///
     /// `None` unless the schema declares all three: every one of those commands
     /// maintains the shape all three describe, so a partial set cannot keep it.
-    pub(crate) fn table_types(&self) -> Option<TableTypes> {
+    pub fn table_types(&self) -> Option<TableTypes> {
         Some(TableTypes::new(
             self.table?,
             self.table_row?,
@@ -386,7 +384,7 @@ impl DocTypes {
     ///
     /// The projection gives a cell one line of its own, so this doubles as the
     /// test for "is this line a table cell".
-    pub(crate) fn table_cell_of(&self, line: &Line) -> Option<(usize, usize, usize)> {
+    pub fn table_cell_of(&self, line: &Line) -> Option<(usize, usize, usize)> {
         let cell = line.ancestors().last()?;
         if Some(cell.node_type) != self.table_cell {
             return None;
@@ -402,7 +400,7 @@ impl DocTypes {
     }
 
     /// Whether a line sits in a table's header row, which is its first row.
-    pub(crate) fn is_table_header(&self, line: &Line) -> bool {
+    pub fn is_table_header(&self, line: &Line) -> bool {
         matches!(self.table_cell_of(line), Some((_, 0, _)))
     }
 
@@ -412,9 +410,9 @@ impl DocTypes {
     /// layout pass holds lines, not the tree, and the ancestor carries the
     /// table's attributes verbatim. A missing, short or over-long attribute is
     /// padded and trimmed to `columns`, exactly as
-    /// [`column_alignments`](markraft_core::commands::column_alignments) does,
+    /// [`column_alignments`](crate::commands::column_alignments) does,
     /// so a caller never has to bounds-check the result.
-    pub(crate) fn column_alignments(&self, line: &Line, columns: usize) -> Vec<ColumnAlignment> {
+    pub fn column_alignments(&self, line: &Line, columns: usize) -> Vec<ColumnAlignment> {
         let declared = line
             .ancestors()
             .iter()
@@ -433,7 +431,7 @@ impl DocTypes {
     }
 
     /// Whether a task item's box is ticked.
-    pub(crate) fn task_checked(attrs: &Attrs) -> bool {
+    pub fn task_checked(attrs: &Attrs) -> bool {
         attrs
             .get("checked")
             .and_then(|value| value.as_bool())

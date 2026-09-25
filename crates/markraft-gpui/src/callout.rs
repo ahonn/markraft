@@ -13,7 +13,7 @@
 //! A note whose body an editor hid would be a note whose body could not be
 //! edited, and the marker's byte is preserved either way.
 
-use crate::types::DocTypes;
+use markraft_core::kind::DocTypes;
 use markraft_core::projection::{Ancestor, Line};
 
 /// The colour family a callout is drawn in, following Obsidian's own grouping.

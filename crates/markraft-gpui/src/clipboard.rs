@@ -14,8 +14,8 @@
 //! other two flavours come from the host's [`Codecs`], so the view never learns
 //! which document kind it is editing.
 
-use crate::types::DocTypes;
 use gpui::{App, ClipboardItem};
+use markraft_core::kind::DocTypes;
 use markraft_core::{EditorState, Fragment, Schema, Selection, Slice, kind::Codecs};
 
 /// A selection from the start of a list item's text into a later item of the

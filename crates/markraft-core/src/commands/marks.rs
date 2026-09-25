@@ -11,6 +11,7 @@ use crate::slice::{Slice, Token};
 use crate::state::{EditorState, TransactionSpec};
 
 use super::{Command, command};
+use crate::protocol::event;
 
 /// Whether a mark of type `ty` may be applied anywhere in `ranges`.
 ///
@@ -140,7 +141,7 @@ fn change_mark_spec(
     let schema = state.schema();
     let doc = state.doc();
     if state.selection().is_cursor() {
-        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        let resolved = state.resolved_head()?;
         let marks = state
             .stored_marks()
             .cloned()
@@ -152,7 +153,7 @@ fn change_mark_spec(
         return Some(
             TransactionSpec::new()
                 .stored_marks(Some(marks))
-                .user_event("mark"),
+                .user_event(event::MARK),
         );
     }
     let from = state.selection().from(doc);

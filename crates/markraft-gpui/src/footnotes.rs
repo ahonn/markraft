@@ -7,7 +7,7 @@
 use markraft_core::kind::FOOTNOTE_LABEL_ATTR;
 use markraft_core::{Attrs, Node, Schema};
 
-use crate::types::DocTypes;
+use markraft_core::kind::DocTypes;
 
 fn label(attrs: &Attrs) -> Option<&str> {
     attrs

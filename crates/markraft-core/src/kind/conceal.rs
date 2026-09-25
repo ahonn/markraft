@@ -3,12 +3,14 @@
 //!
 //! A document kind that keeps its markup in the text marks the characters
 //! that spell it with the conceal role
-//! ([`DocTypeNames::syntax`](markraft_core::kind::DocTypeNames::syntax)): each such
+//! ([`DocTypeNames::syntax`](crate::kind::DocTypeNames::syntax)): each such
 //! run carries the id of the span it belongs to and what it displays while
-//! concealed. This module is the view's one reading of that contract. The
-//! surface, the accessibility tree, the plain-text fallbacks and the
-//! formatting state all ask it, so none of them looks at a concealed run's
-//! own characters to decide what a reader sees — and they cannot disagree.
+//! concealed. This module is the one reading of that contract — for the view,
+//! for the key chains it binds, and for any extension, vim among them, that
+//! edits around markup. The surface, the accessibility tree, the plain-text
+//! fallbacks, the formatting state and the operators all ask it, so none of
+//! them looks at a concealed run's own characters to decide what a reader sees
+//! — and they cannot disagree.
 //!
 //! A span is revealed while the selection, a caret or an input method's
 //! marked text touches it: anywhere from the start of its first run to the
@@ -18,22 +20,22 @@
 
 use std::ops::Range;
 
-use markraft_core::commands::Direction;
-use markraft_core::kind::{SYNTAX_DISPLAY_ATTR, SYNTAX_SPAN_ATTR};
-use markraft_core::projection::{Line, Projection, RunContent};
-use markraft_core::{Fragment, MarkSet, MarkTypeId, Node, Schema, Slice};
+use crate::commands::Direction;
+use crate::kind::{SYNTAX_DISPLAY_ATTR, SYNTAX_SPAN_ATTR};
+use crate::projection::{Line, Projection, RunContent};
+use crate::{Fragment, MarkSet, MarkTypeId, Node, Schema, Slice};
 
 /// What a run marked with the conceal role says about itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Concealed<'a> {
+pub struct Concealed<'a> {
     /// The span the run belongs to, shared by the runs that open and close it.
-    pub(crate) span: i64,
+    pub span: i64,
     /// What a reader sees in its place while it is concealed.
-    pub(crate) display: &'a str,
+    pub display: &'a str,
 }
 
 /// The conceal-role mark among `marks`, read, when `syntax` names the role.
-pub(crate) fn concealed(syntax: Option<MarkTypeId>, marks: &MarkSet) -> Option<Concealed<'_>> {
+pub fn concealed(syntax: Option<MarkTypeId>, marks: &MarkSet) -> Option<Concealed<'_>> {
     let mark = marks.get(syntax?)?;
     let attr = |name: &str| mark.attrs.get(name);
     Some(Concealed {
@@ -48,7 +50,7 @@ pub(crate) fn concealed(syntax: Option<MarkTypeId>, marks: &MarkSet) -> Option<C
 
 /// What the view shows for one run of a line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Shown<'a> {
+pub enum Shown<'a> {
     /// The run's own characters: it spells nothing.
     Source,
     /// The run's own characters: it spells, and its span is revealed.
@@ -62,20 +64,20 @@ pub(crate) enum Shown<'a> {
 /// What reveals a concealed span: the selection and an input method's marked
 /// text, as document ranges. A plain-text reading reveals nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Reveal {
+pub struct Reveal {
     selection: Option<Range<usize>>,
     composition: Option<Range<usize>>,
 }
 
 impl Reveal {
     /// Every concealed run concealed: how a reader who is not editing sees it.
-    pub(crate) fn nothing() -> Reveal {
+    pub fn nothing() -> Reveal {
         Reveal::default()
     }
 
     /// Revealed where `selection` (`from..to`, empty for a caret) or
     /// `composition` touches.
-    pub(crate) fn at(selection: Range<usize>, composition: Option<Range<usize>>) -> Reveal {
+    pub fn at(selection: Range<usize>, composition: Option<Range<usize>>) -> Reveal {
         Reveal {
             selection: Some(selection),
             composition,
@@ -84,7 +86,7 @@ impl Reveal {
 
     /// Whether anything here touches the document range `from..to`. A caret
     /// touches at either edge; a range has to overlap.
-    pub(crate) fn touches(&self, from: usize, to: usize) -> bool {
+    pub fn touches(&self, from: usize, to: usize) -> bool {
         let touches = |range: &Range<usize>| {
             if range.start == range.end {
                 range.start >= from && range.start <= to
@@ -98,11 +100,7 @@ impl Reveal {
 }
 
 /// What the view shows for each run of `line`, index for index.
-pub(crate) fn shown<'l>(
-    syntax: Option<MarkTypeId>,
-    line: &'l Line,
-    reveal: &Reveal,
-) -> Vec<Shown<'l>> {
+pub fn shown<'l>(syntax: Option<MarkTypeId>, line: &'l Line, reveal: &Reveal) -> Vec<Shown<'l>> {
     let concealed: Vec<Option<Concealed<'l>>> = line
         .runs()
         .iter()
@@ -190,7 +188,7 @@ pub fn concealed_steps(syntax: Option<MarkTypeId>, line: &Line, caret: usize) ->
 /// next to a run the caret leaves concealed moves past it, and a step that
 /// covers nothing a reader sees does not count: from the end of
 /// `a **b** c`, word motion back stops before `c`, then before `**b`.
-pub(crate) fn word_boundary(
+pub fn word_boundary(
     syntax: Option<MarkTypeId>,
     projection: &Projection,
     caret: usize,
@@ -318,18 +316,18 @@ fn shows_something(
 /// One stretch of what a line shows, and the stretch of the line's text it
 /// stands for.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Piece<'a> {
+pub struct Piece<'a> {
     /// `char` offsets into the line's projected text.
-    pub(crate) source: Range<usize>,
+    pub source: Range<usize>,
     /// What is shown for it. Empty for a hidden run.
-    pub(crate) text: &'a str,
+    pub text: &'a str,
     /// Whether `text` is the source itself, character for character.
-    pub(crate) own: bool,
+    pub own: bool,
 }
 
 /// What `line`, whose projected text is `text`, shows under `shown`, run by
 /// run — an atom as the projection's own placeholder.
-pub(crate) fn pieces<'a>(line: &Line, text: &'a str, shown: &[Shown<'a>]) -> Vec<Piece<'a>> {
+pub fn pieces<'a>(line: &Line, text: &'a str, shown: &[Shown<'a>]) -> Vec<Piece<'a>> {
     let mut out = Vec::with_capacity(line.runs().len());
     let mut chars = text
         .char_indices()
@@ -365,12 +363,12 @@ pub(crate) fn pieces<'a>(line: &Line, text: &'a str, shown: &[Shown<'a>]) -> Vec
 
 /// `slice` as plain text with every concealed run read as what it displays —
 /// the flattening a view falls back to when its host has no codecs of its own.
-pub(crate) fn slice_text(schema: &Schema, syntax: Option<MarkTypeId>, slice: &Slice) -> String {
+pub fn slice_text(schema: &Schema, syntax: Option<MarkTypeId>, slice: &Slice) -> String {
     let content = match syntax {
         Some(_) => displayed(syntax, slice.content()),
         None => slice.content().clone(),
     };
-    markraft_core::projection::slice_to_plain_text(schema, &Slice::new(content, 0, 0))
+    crate::projection::slice_to_plain_text(schema, &Slice::new(content, 0, 0))
 }
 
 /// `content` with each concealed run replaced by what it displays.
@@ -392,171 +390,142 @@ fn displayed(syntax: Option<MarkTypeId>, content: &Fragment) -> Fragment {
     Fragment::from_nodes(children)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::typeahead::tests::state_of;
-    use crate::types::DocTypes;
-    use markraft_commonmark::{commonmark_doc_type_names, commonmark_schema};
-    use markraft_core::projection::projection_of;
-
-    fn syntax() -> Option<MarkTypeId> {
-        let schema = commonmark_schema();
-        DocTypes::from_schema_names(&schema, &commonmark_doc_type_names()).syntax
-    }
-
-    /// What the first line of `source` shows with `reveal`, as text.
-    fn showing(source: &str, reveal: impl Fn(&Line) -> Reveal) -> String {
-        let state = state_of(source);
-        let projection = projection_of(&state);
-        let line = &projection.lines()[0];
-        let text = projection.line_text(0).unwrap_or_default();
-        let shown = shown(syntax(), line, &reveal(line));
-        pieces(line, text, &shown)
-            .iter()
-            .map(|piece| piece.text)
-            .collect()
-    }
-
-    /// A caret at the `offset`th character of the line's source.
-    fn caret(offset: usize) -> impl Fn(&Line) -> Reveal {
-        move |line| {
-            let pos = line.offset_to_pos(offset).expect("a position in the line");
-            Reveal::at(pos..pos, None)
+/// `range` with the markup it must not split taken out and the markup it
+/// empties put in, as ordered, disjoint ranges.
+///
+/// A span whose text the range takes entirely goes with its spelling, and a
+/// span the range only reaches into keeps every run of its spelling: taking
+/// `bold` out of `x **bold** y` leaves `x y`, and taking `old` leaves
+/// `x **b**`, where a plain deletion would leave `x ** y` and `x **b` —
+/// asterisks that no longer pair, read back as text. With `keep_emptied` the
+/// spelling of a span the range empties stays, so text typed next goes inside
+/// it; see [`emptied_pair`] for what is left standing then.
+pub fn markup_safe(
+    projection: &Projection,
+    syntax: Option<MarkTypeId>,
+    range: Range<usize>,
+    keep_emptied: bool,
+) -> Vec<Range<usize>> {
+    let mut take = vec![range.clone()];
+    let mut keep = Vec::new();
+    let lines = projection
+        .lines()
+        .iter()
+        .filter(|line| line.from() <= range.end && range.start <= line.to());
+    for line in lines {
+        for runs in markup_spans(syntax, line) {
+            let (Some(first), Some(last)) = (runs.first(), runs.last()) else {
+                continue;
+            };
+            // What the span holds: the text between its first run and its last,
+            // or — spelled by one run, an entity — the run itself.
+            let content = if runs.len() > 1 {
+                first.end..last.start
+            } else {
+                first.clone()
+            };
+            let emptied =
+                !content.is_empty() && range.start <= content.start && content.end <= range.end;
+            if emptied && !keep_emptied {
+                take.push(first.start..last.end);
+            } else {
+                keep.extend(runs);
+            }
         }
     }
+    subtract(union(take), &keep)
+}
 
-    #[test]
-    fn a_concealed_line_reads_as_prose() {
-        let away = |_: &Line| Reveal::nothing();
-        assert_eq!(showing("**a** *b* `c` [d](e)", away), "a b c d");
-        assert_eq!(showing(r"\*f\* &amp; g", away), "*f* & g");
+/// The spelling a change over `range` leaves with nothing between it: every
+/// run of each span whose text the range takes, in order — `****` for a
+/// change of `bold` in `**bold**` — where it will stand once the text is gone,
+/// and how much of it comes before the caret. `None` when the range empties
+/// no span.
+pub fn emptied_pair(
+    projection: &Projection,
+    syntax: Option<MarkTypeId>,
+    range: Range<usize>,
+) -> Option<EmptiedPair> {
+    let mut runs: Vec<Range<usize>> = projection
+        .lines()
+        .iter()
+        .filter(|line| line.from() <= range.end && range.start <= line.to())
+        .flat_map(|line| markup_spans(syntax, line))
+        .filter(|runs| {
+            runs.len() > 1
+                && runs.first().zip(runs.last()).is_some_and(|(first, last)| {
+                    first.end < last.start && range.start <= first.end && last.start <= range.end
+                })
+        })
+        .flatten()
+        .collect();
+    runs.sort_by_key(|run| run.start);
+    let at = runs.first()?.start;
+    let text: String = runs
+        .iter()
+        .filter_map(|run| projection.text_between(run.start, run.end))
+        .collect();
+    let caret = runs
+        .iter()
+        .filter(|run| run.end <= range.start)
+        .map(|run| run.end - run.start)
+        .sum::<usize>();
+    Some(EmptiedPair {
+        at,
+        caret: at + caret,
+        text,
+    })
+}
+
+/// A style's spelling a change emptied: where it stands, the caret between
+/// its halves, and its characters.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmptiedPair {
+    /// Where the spelling starts.
+    pub at: usize,
+    /// The caret between its halves.
+    pub caret: usize,
+    /// Its characters, both halves together.
+    pub text: String,
+}
+
+impl EmptiedPair {
+    /// The pair still as the change left it — the caret between its halves and
+    /// nothing typed there — and the range it takes, for a caller to remove.
+    pub fn untouched(&self, projection: &Projection, head: usize) -> Option<Range<usize>> {
+        let end = self.at + self.text.chars().count();
+        (head == self.caret && projection.text_between(self.at, end) == Some(self.text.as_str()))
+            .then_some(self.at..end)
     }
+}
 
-    /// Two spans of one style side by side are two spans: the caret in one
-    /// opens only that one, though the style runs on unbroken across both.
-    #[test]
-    fn adjacent_spans_of_one_style_reveal_apart() {
-        assert_eq!(showing("**a**__b__", caret(3)), "**a**b");
-        assert_eq!(showing("**a**__b__", caret(8)), "a__b__");
-        // `**a****b**` is one span to CommonMark — the middle run cannot close
-        // the first pair (the rule of three) — so its middle is text, and the
-        // caret anywhere in it opens the one pair around it.
-        assert_eq!(showing("**a****b**", caret(3)), "**a****b**");
-        assert_eq!(showing("**a****b** c", caret(12)), "a****b c");
+/// `ranges` merged where they touch or overlap, in order.
+fn union(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    ranges.sort_by_key(|range| range.start);
+    let mut out: Vec<Range<usize>> = Vec::new();
+    for range in ranges {
+        match out.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => out.push(range),
+        }
     }
+    out
+}
 
-    /// The span a caret stands at the edge of is revealed, from outside as
-    /// well as inside.
-    #[test]
-    fn a_caret_at_a_span_edge_reveals_it() {
-        assert_eq!(showing("x **a** y", caret(2)), "x **a** y");
-        assert_eq!(showing("x **a** y", caret(7)), "x **a** y");
-        assert_eq!(showing("x **a** y", caret(1)), "x a y");
-        assert_eq!(showing("x **a** y", caret(8)), "x a y");
-    }
-
-    /// A caret at the start edge of a span one character wide reveals it,
-    /// as it does a longer one.
-    #[test]
-    fn a_caret_at_the_start_of_a_short_span_reveals_it() {
-        assert_eq!(showing(r"x \*66\* y", caret(2)), r"x \*66* y");
-        assert_eq!(showing("x &#38; y", caret(2)), "x &#38; y");
-        assert_eq!(showing("x [44](55) y", caret(2)), "x [44](55) y");
-    }
-
-    /// Nested spans are revealed by where the caret is in each: inside the
-    /// inner one both open, inside only the outer one only it does.
-    #[test]
-    fn nested_spans_reveal_by_their_own_extent() {
-        assert_eq!(showing("*a **b** c*", caret(5)), "*a **b** c*");
-        assert_eq!(showing("*a **b** c*", caret(10)), "*a b c*");
-    }
-
-    /// An escape is a span of its own: the caret beside it opens it, and a
-    /// style span next to it stays as it was.
-    #[test]
-    fn an_escape_next_to_a_span_is_its_own_span() {
-        assert_eq!(showing(r"\***a**", caret(1)), r"\*a");
-        assert_eq!(showing(r"\***a**", caret(5)), "***a**");
-    }
-
-    /// An entity shows what it stands for until the caret reaches it.
-    #[test]
-    fn an_entity_shows_its_character_until_revealed() {
-        assert_eq!(showing("a &amp; b", caret(0)), "a & b");
-        assert_eq!(showing("a &amp; b", caret(4)), "a &amp; b");
-    }
-
-    /// A hard break's spelling is hidden unless the caret ends its row.
-    #[test]
-    fn a_hard_break_spelling_shows_only_at_the_caret() {
-        let state = state_of("a\\\nb");
-        let projection = projection_of(&state);
-        let line = &projection.lines()[0];
-        let text = projection.line_text(0).unwrap_or_default();
-        let read = |reveal: Reveal| -> String {
-            let shown = shown(syntax(), line, &reveal);
-            pieces(line, text, &shown)
-                .iter()
-                .map(|piece| piece.text)
-                .collect()
-        };
-        let at = |offset| {
-            let pos = line.offset_to_pos(offset).expect("a position");
-            Reveal::at(pos..pos, None)
-        };
-        assert_eq!(read(Reveal::nothing()), "a\nb");
-        assert_eq!(read(at(2)), "a\\\nb", "the caret right after the backslash");
-        assert_eq!(read(at(3)), "a\nb", "the caret on the next row");
-    }
-
-    /// Marked text reveals as a caret does, wherever the selection is.
-    #[test]
-    fn a_composition_inside_a_span_reveals_it() {
-        let reveal = |line: &Line| {
-            let pos = line.offset_to_pos(3).expect("a position");
-            Reveal::at(line.from()..line.from(), Some(pos..pos + 1))
-        };
-        assert_eq!(showing("x **ab** y", reveal), "x **ab** y");
-    }
-
-    /// What `concealed_steps` finds on the first line of `source` for a caret
-    /// at `offset`, as `char` offsets into the line.
-    fn steps(source: &str, offset: usize) -> Vec<Range<usize>> {
-        let state = state_of(source);
-        let projection = projection_of(&state);
-        let line = &projection.lines()[0];
-        let caret = line.offset_to_pos(offset).expect("a position");
-        concealed_steps(syntax(), line, caret)
+/// `ranges` without any position `holes` cover, dropping what empties.
+fn subtract(ranges: Vec<Range<usize>>, holes: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut out = ranges;
+    for hole in holes {
+        out = out
             .into_iter()
-            .map(|range| {
-                let offset = |pos| line.pos_to_offset(pos).expect("an offset");
-                offset(range.start)..offset(range.end)
+            .flat_map(|range| {
+                [
+                    range.start..hole.start.clamp(range.start, range.end),
+                    hole.end.clamp(range.start, range.end)..range.end,
+                ]
             })
-            .collect()
+            .filter(|range| !range.is_empty())
+            .collect();
     }
-
-    #[test]
-    fn a_caret_steps_over_what_it_leaves_concealed() {
-        // Away from the span both delimiter runs are steps; beside it neither.
-        assert_eq!(steps("x **a** y", 0), [2..4, 5..7]);
-        assert!(steps("x **a** y", 2).is_empty());
-        // Two runs that close two spans at once are one step.
-        assert_eq!(steps("x ***a*** y", 0), [2..5, 6..9]);
-        // An entity shows its character: a step of its own.
-        assert_eq!(steps("x &amp;*a* y", 0), [2..7, 7..8, 9..10]);
-    }
-
-    #[test]
-    fn a_slice_flattens_to_what_it_displays() {
-        let state = state_of("**a** &amp; \\*b");
-        let slice = Slice::new(state.doc().content().clone(), 0, 0);
-        assert_eq!(slice_text(state.schema(), syntax(), &slice), "a & *b");
-        assert_eq!(
-            slice_text(state.schema(), None, &slice),
-            "**a** &amp; \\*b",
-            "a kind with no conceal role flattens to its characters"
-        );
-    }
+    out
 }

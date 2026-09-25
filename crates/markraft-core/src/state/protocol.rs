@@ -20,8 +20,9 @@
 //!
 //! # What is here
 //!
-//! * Describing a transaction: [`user_event`] (with [`matches_user_event`]),
-//!   [`time`], [`remote`], [`origin`], [`add_to_history`].
+//! * Describing a transaction: [`user_event`] (with [`matches_user_event`]
+//!   and the names in [`event`]), [`time`], [`remote`], [`origin`],
+//!   [`add_to_history`].
 //! * Shaping the undo history: [`isolate_history`] (and [`isolate`]),
 //!   [`fold_into_previous`].
 //! * Reporting what a hook or the model did: [`appended`],
@@ -57,14 +58,7 @@ static APPEND_CONFIG: LazyLock<StateEffectType<Extension>> = LazyLock::new(State
 static COMPARTMENT: LazyLock<StateEffectType<(Compartment, Extension)>> =
     LazyLock::new(StateEffectType::define);
 
-/// What the user did, as a dotted hierarchy.
-///
-/// The vocabulary the rest of this crate uses: `input`, `input.type`,
-/// `input.type.compose`, `input.paste`, `input.drop`, `delete`,
-/// `delete.selection`, `delete.forward`, `delete.backward`, `delete.cut`,
-/// `move`, `move.drop`, `select`, `select.pointer`, `select.all`, `undo`,
-/// `redo`, `insert`, `mark`, `mark.add`, `mark.remove`, `split`, `wrap`,
-/// `unwrap`, `settype`.
+/// What the user did, as a dotted hierarchy; the names are in [`event`].
 ///
 /// [`Transaction::is_user_event`](crate::Transaction::is_user_event) matches on
 /// dotted prefixes, so `select` matches `select.pointer`.
@@ -264,4 +258,79 @@ pub fn append_config() -> &'static StateEffectType<Extension> {
 /// [`Compartment::reconfigure`].
 pub fn compartment_reconfigure() -> &'static StateEffectType<(Compartment, Extension)> {
     &COMPARTMENT
+}
+
+/// The names a [`user_event`] annotation takes, as a dotted hierarchy.
+///
+/// A command names what the user did with one of these; the history groups
+/// consecutive transactions by the name, and an extension asks
+/// [`Transaction::is_user_event`](crate::Transaction::is_user_event) with a
+/// prefix. Keeping the names here rather than as literals at each site is what
+/// keeps a typo from silently changing how edits group. An extension with a
+/// refinement of its own — vim's `input.vim` — writes it under the prefix it
+/// refines.
+pub mod event {
+    /// Something arrived from the user: typing, a paste, a drop.
+    pub const INPUT: &str = "input";
+    /// Characters typed.
+    pub const INPUT_TYPE: &str = "input.type";
+    /// Characters typed through an input method's composition.
+    pub const INPUT_TYPE_COMPOSE: &str = super::COMPOSE_USER_EVENT;
+    /// A paste.
+    pub const INPUT_PASTE: &str = "input.paste";
+    /// A drop.
+    pub const INPUT_DROP: &str = "input.drop";
+    /// Typed text that replaced what was typed before it — an input rule, an
+    /// emoji shortcode, a pair completed.
+    pub const INPUT_REPLACE: &str = "input.replace";
+    /// Content deleted.
+    pub const DELETE: &str = "delete";
+    /// The selection deleted.
+    pub const DELETE_SELECTION: &str = "delete.selection";
+    /// Deleted forward from the caret.
+    pub const DELETE_FORWARD: &str = "delete.forward";
+    /// Deleted backward from the caret.
+    pub const DELETE_BACKWARD: &str = "delete.backward";
+    /// Cut to the clipboard.
+    pub const DELETE_CUT: &str = "delete.cut";
+    /// Content moved.
+    pub const MOVE: &str = "move";
+    /// Content moved by a drag and drop.
+    pub const MOVE_DROP: &str = "move.drop";
+    /// The selection changed.
+    pub const SELECT: &str = "select";
+    /// The selection changed by the pointer.
+    pub const SELECT_POINTER: &str = "select.pointer";
+    /// Everything selected.
+    pub const SELECT_ALL: &str = "select.all";
+    /// An undo.
+    pub const UNDO: &str = "undo";
+    /// A redo.
+    pub const REDO: &str = "redo";
+    /// Content inserted by a command rather than typed.
+    pub const INSERT: &str = "insert";
+    /// A mark changed.
+    pub const MARK: &str = "mark";
+    /// A mark added.
+    pub const MARK_ADD: &str = "mark.add";
+    /// A mark removed.
+    pub const MARK_REMOVE: &str = "mark.remove";
+    /// A block split.
+    pub const SPLIT: &str = "split";
+    /// Content wrapped in a container.
+    pub const WRAP: &str = "wrap";
+    /// A container lifted away.
+    pub const UNWRAP: &str = "unwrap";
+    /// A block's type changed.
+    pub const SETTYPE: &str = "settype";
+    /// A style spelled or unspelled by a formatting command.
+    pub const FORMAT: &str = "format";
+    /// A mark toggled by a formatting command.
+    pub const FORMAT_MARK: &str = "format.mark";
+    /// A link set or removed by a formatting command.
+    pub const FORMAT_LINK: &str = "format.link";
+    /// A transaction that changes nothing, and stops a chain.
+    pub const NOOP: &str = "noop";
+    /// An edit refused by an invariant, replaced by one that changes nothing.
+    pub const GUARD: &str = "guard";
 }

@@ -117,7 +117,10 @@
 //!   without changing the document.
 //! * [`projection`] — a flat, line-oriented view of a document for renderers
 //!   and for the platform text APIs that think in lines and UTF-16.
-//! * [`kind`] — what a view needs of a concrete document kind (see below).
+//! * [`kind`] — what a view needs of a concrete document kind (see below):
+//!   the roles ([`kind::DocTypeNames`], [`kind::DocTypes`]), the codecs and
+//!   spelling, the reading of the conceal contract ([`kind::conceal`]), the
+//!   key chains a view binds ([`kind::chains`]) and the hooks a kind fills in.
 //!
 //! The extensions depend on the three layers and on [`protocol`], never on
 //! one another. Where one has to affect another, it does so through the
@@ -138,11 +141,13 @@
 //! against them and a host supplies the implementations.
 //!
 //! These two are a **presentation contract, not part of the document model**.
-//! Nothing in this crate reads either of them: the model, the change system and
-//! every command are parameterised by [`NodeTypeId`] and [`MarkTypeId`] and
-//! never consult a role table. They live here so that a view crate and a
-//! document-kind crate can be written against the same vocabulary without
-//! depending on one another — and that vocabulary, the roles
+//! The model, the change system and every command in the [`commands`]
+//! catalogue are parameterised by [`NodeTypeId`] and [`MarkTypeId`] and never
+//! consult a role table. The one place that does is [`kind::chains`], by
+//! design: it is what a view binds to its keys, built on the catalogue and
+//! choosing from it by the roles a kind fills. They live here so that a view
+//! crate and a document-kind crate can be written against the same vocabulary
+//! without depending on one another — and that vocabulary, the roles
 //! [`kind::DocTypeNames`] enumerates, is the shape rich text has taken since
 //! CommonMark and GFM. A kind with roles of its own resolves its ids itself and
 //! leaves the unfilled entries `None`; it is not made to pretend it has

@@ -19,9 +19,9 @@ use markraft_commonmark::{
     commonmark_doc_type_names, commonmark_extensions, commonmark_schema, from_markdown, to_markdown,
 };
 use markraft_core::commands::Command;
+use markraft_core::kind::DocTypes;
 use markraft_core::projection::{Projection, projection_of, slice_to_plain_text};
 use markraft_core::{EditorState, EditorStateConfig, Extension, Selection, Slice, TransactionSpec};
-use markraft_gpui::DocTypes;
 use std::sync::Arc;
 
 /// A state plus a clipboard, standing in for `EditorCx`.
@@ -218,7 +218,7 @@ impl Keys {
 
     /// The Return key, which is the editor's own Enter chain.
     fn enter(&mut self) -> &mut Self {
-        let command = markraft_gpui::commands::enter(&self.host.types.clone());
+        let command = markraft_core::kind::chains::enter(&self.host.types.clone());
         self.host.run(&command);
         self
     }

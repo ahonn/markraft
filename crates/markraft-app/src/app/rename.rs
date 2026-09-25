@@ -5,6 +5,7 @@
 //! the note keep its identity and lets the links that pointed at it follow.
 
 use super::*;
+use crate::fs::StoreError;
 use markraft_core::Fragment;
 use std::path::Path;
 
@@ -235,7 +236,7 @@ impl MarkraftApp {
         // A name that was refused is gone the moment another is typed, so it is said in
         // passing and the pill stays open for the next try.
         if let Err(error) = self.rename_note(&id, &name, update_links, cx) {
-            self.inform(error, cx);
+            self.inform(error.to_string(), cx);
             return;
         }
         self.close_rename(window, cx);
@@ -253,13 +254,14 @@ impl MarkraftApp {
         name: &str,
         update_links: bool,
         cx: &mut Context<Self>,
-    ) -> Result<(), String> {
+    ) -> Result<(), StoreError> {
         if !self.flush(cx) {
             return Err(self
                 .feedback
                 .error()
                 .cloned()
-                .unwrap_or_else(|| "Save this note before renaming it.".into()));
+                .unwrap_or_else(|| "Save this note before renaming it.".into())
+                .into());
         }
         let persistence = self
             .persistence
@@ -413,7 +415,8 @@ mod tests {
         let source = "---\r\ntags: [a]\r\n---\r\n\r\nIndex\r\n\r\nSee   [[Old#H|the old one]] and *this*.\r\n\r\n* item ![[Old]]\r\n";
         std::fs::write(notes.join("Index.md"), source).unwrap();
         let (mut store, mut library) =
-            crate::vault::Store::open(notes.clone(), root.path().join("settings.json")).unwrap();
+            crate::vault::open_reading_settings(notes.clone(), root.path().join("settings.json"))
+                .unwrap();
         let id = library.active_id.clone();
         let document = map_wiki_targets(
             &library.active_note().document,
@@ -422,7 +425,9 @@ mod tests {
         )
         .unwrap();
         assert!(library.set_document(&id, document));
-        store.save(&library).unwrap();
+        store
+            .save(&library, &crate::storage::Preferences::default())
+            .unwrap();
         assert_eq!(
             std::fs::read_to_string(notes.join("Index.md")).unwrap(),
             source.replace("Old", "New")

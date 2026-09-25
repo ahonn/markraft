@@ -5,13 +5,14 @@
 //! [`EmojiInsertion`]: the shortcode, as Typora writes it, which the document kind
 //! draws as its emoji, or the emoji character itself.
 
-use crate::types::DocTypes;
 use crate::{
     EditorCx, Extension, Typeahead, TypeaheadItem, TypeaheadProvider, Update, typeahead::is_trigger,
 };
 use emojis::Emoji;
 use markraft_core::commands::{Command, command, insert_text};
+use markraft_core::kind::DocTypes;
 use markraft_core::projection::Projection;
+use markraft_core::protocol::event;
 use markraft_core::{EditorState, Node};
 use std::cell::Cell;
 use std::ops::Range;
@@ -121,7 +122,7 @@ impl Extension for EmojiShortcodes {
     /// extension's origin, so the next round leaves it alone and the fixed point is
     /// reached; undoing it is an `undo` user event, so the emoji does not come back.
     fn update(&mut self, update: &Update, cx: &mut EditorCx<'_>) {
-        let typed = update.is_user_event("input.type") && update.origin().is_none();
+        let typed = update.is_user_event(event::INPUT_TYPE) && update.origin().is_none();
         if !typed || cx.is_composing() || !cx.selection().is_cursor() {
             return;
         }

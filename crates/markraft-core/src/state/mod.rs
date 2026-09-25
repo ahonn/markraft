@@ -71,6 +71,7 @@ use crate::error::{ChangeError, NodeError};
 use crate::fragment::Fragment;
 use crate::mark::MarkSet;
 use crate::node::Node;
+use crate::pos::ResolvedPos;
 use crate::schema::Schema;
 use crate::selection::Selection;
 
@@ -307,6 +308,17 @@ impl EditorState {
         &self.0.selection
     }
 
+    /// The moving end of the selection.
+    pub fn head(&self) -> usize {
+        self.selection().head(self.doc())
+    }
+
+    /// The selection's head resolved against the document, with its ancestor
+    /// chain — what nearly every command asks first.
+    pub fn resolved_head(&self) -> Option<ResolvedPos> {
+        self.doc().resolve(self.head()).ok()
+    }
+
     /// The marks content typed next should get, overriding the marks the
     /// surrounding content would give it.
     ///
@@ -350,7 +362,7 @@ impl EditorState {
     /// other, while a spec marked [`TransactionSpec::sequential`] is taken to
     /// refer to the document the previous specs produce.
     ///
-    /// Unlike Wordgard, this is fallible: turning a [`Change`](crate::Change)
+    /// This is fallible: turning a [`Change`](crate::Change)
     /// list into a [`ChangeSet`](crate::ChangeSet) and applying it can fail, and
     /// reporting that here is what makes every [`Transaction`] accessor
     /// infallible.

@@ -18,11 +18,7 @@ impl MarkraftApp {
 
     /// Turn modal editing on or off for every open note editor at once, rather than on
     /// the next launch. The query field never gets it: it is a single-line host control.
-    pub(in crate::app) fn set_vim(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.library.preferences.vim_mode == enabled {
-            return;
-        }
-        self.library.preferences.vim_mode = enabled;
+    pub(in crate::app) fn apply_vim(&mut self, enabled: bool, cx: &mut Context<Self>) {
         let editors: Vec<_> = self
             .sessions
             .iter()
@@ -34,7 +30,6 @@ impl MarkraftApp {
                 session.set_vim(handle);
             }
         }
-        self.schedule_save(cx);
         cx.notify();
     }
 
@@ -58,7 +53,7 @@ impl MarkraftApp {
     /// The left-hand mode indicator stays visible beside the centered format bar.
     /// Abbreviate only when the full label would overlap it in a narrow window.
     pub(in crate::app) fn vim_badge(&self, compact: bool) -> Option<Stateful<Div>> {
-        if !self.library.preferences.vim_mode {
+        if !self.preferences.vim_mode {
             return None;
         }
         let mode = self.sessions.get(&self.library.active_id)?.vim_mode();

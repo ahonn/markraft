@@ -16,6 +16,7 @@ use crate::state::{EditorState, TransactionSpec};
 
 use super::structure::{can_split, content_match_at, lift_target_within, markup_of};
 use super::{Command, changes_spec, command, resolve_changes};
+use crate::protocol::event;
 
 /// Wrap the blocks the selection covers in a list.
 ///
@@ -204,7 +205,7 @@ pub fn split_list_item(item_type: NodeTypeId) -> Command {
             TransactionSpec::new()
                 .change_set(set)
                 .selection(caret)
-                .user_event("split")
+                .user_event(event::SPLIT)
                 .scroll_into_view(),
         )
     })

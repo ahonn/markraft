@@ -191,11 +191,10 @@ fn extensions_that_keep_answering_each_other_stop_after_the_round_budget(cx: &mu
 }
 
 // `EditorCx::move_visual_rows`, which modal extensions use for j and k, and
-// the ↓ key (`EditorView::vertical`) do not agree at a block's lower edge: the
-// arrow runs `exit_code`, `exit_table_below` or `move_document_edge`, while the
-// row motion only walks the laid-out rows and, with no row below, lands back on
-// the one it started from. These tests pin that divergence so that the change
-// meant to remove it has to update them.
+// the ↓ key (`EditorView::vertical`) decide a move in one place
+// (`EditorView::vertical_target`), so at a block's lower edge vim's j does
+// what the arrow does: leave a final code block or table for a new block, and
+// go to the document's end from its last row.
 //
 // The test platform lays text out with a placeholder text system, so
 // positions and rows exist but no pixel is asserted on here.
@@ -228,7 +227,7 @@ fn place_caret(view: &Entity<EditorView>, cx: &mut VisualTestContext, pos: usize
     });
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
-        assert!(!view.layout.is_empty(), "no layout was painted")
+        assert!(!view.frame.rows().is_empty(), "no layout was painted")
     });
 }
 
@@ -259,63 +258,53 @@ fn blocks(view: &Entity<EditorView>, cx: &mut VisualTestContext) -> usize {
     view.read_with(cx, |view, _| view.state().doc().child_count())
 }
 
-#[gpui::test]
-fn vim_rows_do_not_leave_a_code_block_like_the_arrow_does(cx: &mut TestAppContext) {
-    let source = "```\ncode\n```";
-    let (view, cx) = laid_out(cx, source);
-    let end = view.read_with(cx, |view, _| line_start(view, "code")) + "code".len();
-    place_caret(&view, cx, end);
-    let before = text(&view, cx);
-
-    assert!(vim_row_down(&view, cx));
-    assert_eq!(caret(&view, cx), end);
-    assert_eq!(text(&view, cx), before);
-    assert_eq!(blocks(&view, cx), 1);
-
-    arrow_down(&view, cx);
-    assert!(caret(&view, cx) > end, "the arrow leaves the code block");
-    assert_eq!(blocks(&view, cx), 2, "the arrow adds a block after it");
-}
-
-#[gpui::test]
-fn vim_rows_do_not_leave_a_final_table_like_the_arrow_does(cx: &mut TestAppContext) {
-    let source = "| a | b |\n| - | - |\n| c | d |";
-    let (view, cx) = laid_out(cx, source);
-    let cell = view.read_with(cx, |view, _| line_start(view, "c"));
-    place_caret(&view, cx, cell);
-    let before = text(&view, cx);
-
-    assert!(vim_row_down(&view, cx));
-    assert_eq!(caret(&view, cx), cell);
-    assert_eq!(text(&view, cx), before);
-
-    assert_eq!(blocks(&view, cx), 1);
-
-    arrow_down(&view, cx);
-    assert_eq!(
-        blocks(&view, cx),
-        2,
-        "the arrow adds a block after the table"
-    );
-    let table_end = view.read_with(cx, |view, _| line_start(view, "d")) + 1;
-    assert!(caret(&view, cx) > table_end, "the arrow leaves the table");
-}
-
-#[gpui::test]
-fn vim_rows_stay_put_on_the_last_row_where_the_arrow_goes_to_the_document_end(
+/// The caret and block count after `down` from `pos` in a fresh view of `source`.
+fn after_down(
     cx: &mut TestAppContext,
-) {
+    source: &str,
+    pos: impl Fn(&EditorView) -> usize,
+    down: fn(&Entity<EditorView>, &mut VisualTestContext),
+) -> (usize, usize, String) {
+    let (view, cx) = laid_out(cx, source);
+    let at = view.read_with(cx, |view, _| pos(view));
+    place_caret(&view, cx, at);
+    down(&view, cx);
+    (caret(&view, cx), blocks(&view, cx), text(&view, cx))
+}
+
+fn vim_down(view: &Entity<EditorView>, cx: &mut VisualTestContext) {
+    assert!(vim_row_down(view, cx));
+}
+
+#[gpui::test]
+fn vim_rows_leave_a_final_code_block_as_the_arrow_does(cx: &mut TestAppContext) {
+    let source = "```\ncode\n```";
+    let end = |view: &EditorView| line_start(view, "code") + "code".len();
+    let vim = after_down(cx, source, end, vim_down);
+    let arrow = after_down(cx, source, end, arrow_down);
+    assert_eq!(vim, arrow);
+    assert_eq!(vim.1, 2, "both add a block after the code block");
+}
+
+#[gpui::test]
+fn vim_rows_leave_a_final_table_as_the_arrow_does(cx: &mut TestAppContext) {
+    let source = "| a | b |\n| - | - |\n| c | d |";
+    let cell = |view: &EditorView| line_start(view, "c");
+    let vim = after_down(cx, source, cell, vim_down);
+    let arrow = after_down(cx, source, cell, arrow_down);
+    assert_eq!(vim, arrow);
+    assert_eq!(vim.1, 2, "both add a block after the table");
+}
+
+#[gpui::test]
+fn vim_rows_go_to_the_document_end_from_the_last_row_as_the_arrow_does(cx: &mut TestAppContext) {
+    let inside = |view: &EditorView| line_start(view, "two") + 1;
+    let vim = after_down(cx, "one\n\ntwo", inside, vim_down);
+    let arrow = after_down(cx, "one\n\ntwo", inside, arrow_down);
+    assert_eq!(vim, arrow);
     let (view, cx) = laid_out(cx, "one\n\ntwo");
-    let inside = view.read_with(cx, |view, _| line_start(view, "two")) + 1;
-    place_caret(&view, cx, inside);
-
-    // Not `false`: the row motion finds a target, the row it is already on.
-    assert!(vim_row_down(&view, cx));
-    assert_eq!(caret(&view, cx), inside);
-
-    arrow_down(&view, cx);
     let end = view.read_with(cx, |view, _| view.state().doc().content_size() - 1);
-    assert_eq!(caret(&view, cx), end);
+    assert_eq!(vim.0, end);
 }
 
 #[gpui::test]

@@ -239,7 +239,7 @@ impl Selection {
     /// no longer lands in inline content, and a node selection whose node is
     /// gone, both fall back to [`Selection::near`].
     ///
-    /// Unlike Wordgard, the mapping takes the resulting document as well as the
+    /// The mapping takes the resulting document as well as the
     /// change description: the built-in kinds need it to decide whether the
     /// mapped position is still valid.
     pub fn map(&self, schema: &Schema, doc: &Node, changes: &ChangeDesc) -> Selection {

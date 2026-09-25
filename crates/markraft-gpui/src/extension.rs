@@ -120,6 +120,11 @@ pub trait Extension: 'static {
     /// Stable identity, used for the edits' `origin` and [`EditorEvent::Extension`].
     fn id(&self) -> &'static str;
     /// Contribute identifiers to the editor's key context, merged every render.
+    ///
+    /// One identifier the view itself reads: an extension that is reading keys
+    /// as commands rather than as text — a modal editor outside its insert
+    /// mode — adds `modal`, and the view keeps its Emacs-style editing keys
+    /// out of the way while it stands.
     fn key_context(&self, _context: &mut KeyContext) {}
     /// Whether the platform may insert text. The first extension returning `Some` wins;
     /// with none the editor accepts text, as it always has.
@@ -305,8 +310,7 @@ impl<'a> EditorCx<'a> {
             .map(|spec| spec.annotate(markraft_core::protocol::origin().of(origin.clone())))
             .collect();
         let applied = self.view.apply(specs)?;
-        self.view.upstream = false;
-        self.view.reveal = true;
+        self.view.caret.edited_by_extension();
         self.effects.transactions.extend(applied.iter().cloned());
         applied.into_iter().next_back()
     }
@@ -338,34 +342,48 @@ impl<'a> EditorCx<'a> {
         if self.view.is_composing() {
             return false;
         }
-        let column = self.view.preferred_x;
+        let column = self.view.caret.preferred_x();
         self.apply_selection(selection, false);
         if keep_column {
-            self.view.preferred_x = column;
+            self.view.caret.keep_column(column);
         }
         true
     }
     /// Move the caret `rows` visual rows, negative for up, keeping the column it started
-    /// from the way ↑ and ↓ do. `false` before the first paint, when no layout exists,
-    /// and while composing.
+    /// from the way ↑ and ↓ do — and doing what they do at a block's lower edge, see
+    /// [`EditorView::vertical_target`]. `false` before the first paint, when no layout
+    /// exists, and while composing.
     pub fn move_visual_rows(&mut self, rows: isize, extend: bool) -> bool {
         if self.view.is_composing() {
             return false;
         }
-        let Some((head, x, upstream)) = self.view.visual_row_target(rows) else {
-            return false;
-        };
-        let anchor = if extend {
-            self.view
-                .state()
-                .selection()
-                .anchor(self.view.state().doc())
-        } else {
-            head
-        };
-        self.apply_selection(Selection::text(anchor, head), upstream);
-        self.view.preferred_x = Some(x);
-        true
+        match self.view.vertical_target(rows, extend) {
+            crate::VerticalMove::Run(spec) => {
+                let moved = self.dispatch([spec]).is_some();
+                if moved {
+                    self.view.caret.forget_column();
+                }
+                moved
+            }
+            crate::VerticalMove::To {
+                position,
+                x,
+                upstream,
+            } => {
+                let anchor = if extend {
+                    self.view
+                        .state()
+                        .selection()
+                        .anchor(self.view.state().doc())
+                } else {
+                    position
+                };
+                self.apply_selection(Selection::text(anchor, position), upstream);
+                self.view.caret.moved_vertically(x);
+                true
+            }
+            crate::VerticalMove::Stay => false,
+        }
     }
     /// Move the caret to the start or end of its visual row, the way Home and End do.
     /// A wrapped block has several of them.
@@ -394,9 +412,7 @@ impl<'a> EditorCx<'a> {
         {
             self.effects.transactions.extend(applied);
         }
-        self.view.upstream = upstream;
-        self.view.preferred_x = None;
-        self.view.reveal = true;
+        self.view.caret.moved_by_command(upstream);
         self.effects.selected = true;
     }
     /// Fold every undo entry made from now until [`Self::end_undo_group`] into one, so
@@ -416,7 +432,7 @@ impl<'a> EditorCx<'a> {
     pub fn plain_text(&self, slice: &Slice) -> String {
         match &self.view.codecs {
             Some(codecs) => codecs.to_text(slice),
-            None => crate::conceal::slice_text(
+            None => markraft_core::kind::conceal::slice_text(
                 self.view.state().schema(),
                 self.view.types.syntax,
                 slice,
@@ -638,7 +654,7 @@ impl EditorView {
         } else {
             // An edit resets the column a vertical move would keep, even when the
             // extension also moved the selection.
-            self.preferred_x = None;
+            self.caret.forget_column();
             self.reset_caret_blink(cx);
             self.publish(cx);
         }

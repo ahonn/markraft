@@ -1,5 +1,6 @@
 //! Local note-library persistence owned by the application, never by the editor.
 use crate::doc;
+use crate::fs::StoreError;
 use markraft_core::Node;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -26,9 +27,9 @@ pub fn default_notes_folder_in(home: &Path) -> PathBuf {
 }
 
 /// Create `directory` if needed and return its canonical path.
-pub fn ensure_notes_folder(directory: &Path) -> Result<PathBuf, String> {
-    fs::create_dir_all(directory).map_err(|error| crate::vault::describe(directory, &error))?;
-    fs::canonicalize(directory).map_err(|error| crate::vault::describe(directory, &error))
+pub fn ensure_notes_folder(directory: &Path) -> Result<PathBuf, StoreError> {
+    fs::create_dir_all(directory).map_err(|error| crate::fs::describe(directory, &error))?;
+    fs::canonicalize(directory).map_err(|error| crate::fs::describe(directory, &error))
 }
 
 /// Pick the notes folder for this launch: `--dir`, then Settings, then the default.
@@ -40,7 +41,7 @@ pub fn resolve_notes_folder(
     override_dir: Option<PathBuf>,
     settings_folder: Option<PathBuf>,
     home: Option<&Path>,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, StoreError> {
     if let Some(path) = override_dir {
         return ensure_notes_folder(&path);
     }
@@ -293,6 +294,22 @@ impl EmphasisMarker {
 impl Preferences {
     pub const DEFAULT_TEXT_SIZE: f32 = 14.;
     pub const TEXT_SIZES: std::ops::RangeInclusive<f32> = 11.0..=24.0;
+
+    /// Whether these preferences can be written as they stand: a remembered
+    /// window size that is not a size refuses the save, since it would refuse
+    /// the next launch.
+    pub fn validate(&self) -> Result<(), StoreError> {
+        if self.window_bounds.is_some_and(|bounds| {
+            bounds.iter().any(|value| !value.is_finite()) || bounds[2] <= 0.0 || bounds[3] <= 0.0
+        }) {
+            return Err(
+                "The window size Markraft remembered cannot be used, so it stopped before \
+                 saving. Resize the window, then try again."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Default for Preferences {
@@ -325,6 +342,81 @@ impl Default for Preferences {
             follow_pointer: false,
             ordered_delimiter: OrderedDelimiter::default(),
             hard_break: HardBreakStyle::default(),
+        }
+    }
+}
+
+/// One preference as the settings window sets it: the vocabulary the window
+/// speaks, with [`Pref::apply`] the one place each word meets its field. The
+/// window's bounds are the window's to remember, not the settings window's to
+/// set, so they have no word here.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pref {
+    Theme(Option<bool>),
+    AutoHeight(bool),
+    VimMode(bool),
+    EmojiCharacters(bool),
+    RemoteImages(bool),
+    /// The global shortcut that shows the note. Empty turns it off.
+    Hotkey(String),
+    /// The global shortcut that opens a new note. Empty turns it off.
+    NewNoteHotkey(String),
+    /// Rounded and kept within [`Preferences::TEXT_SIZES`].
+    TextSize(f32),
+    HideOnDeactivate(bool),
+    AlwaysOnTop(bool),
+    TabKey(TabKey),
+    MarkdownShortcuts(bool),
+    Font(EditorFont),
+    LineHeight(LineHeight),
+    Bullet(BulletMarker),
+    Fence(CodeFence),
+    Emphasis(EmphasisMarker),
+    Summon(Summon),
+    LineWidth(LineWidth),
+    AutoPair(bool),
+    ConfirmDelete(bool),
+    AllSpaces(bool),
+    FollowPointer(bool),
+    OrderedDelimiter(OrderedDelimiter),
+    HardBreak(HardBreakStyle),
+    /// The settings page on screen, remembered for the next time the window opens.
+    SettingsPage(String),
+}
+
+impl Pref {
+    /// Write this setting into `preferences`.
+    pub fn apply(self, preferences: &mut Preferences) {
+        match self {
+            Pref::Theme(mode) => preferences.dark_mode = mode,
+            Pref::AutoHeight(on) => preferences.auto_height = on,
+            Pref::VimMode(on) => preferences.vim_mode = on,
+            Pref::EmojiCharacters(on) => preferences.emoji_characters = on,
+            Pref::RemoteImages(on) => preferences.remote_images = on,
+            Pref::Hotkey(shortcut) => preferences.hotkey = shortcut,
+            Pref::NewNoteHotkey(shortcut) => preferences.new_note_hotkey = shortcut,
+            Pref::TextSize(size) => {
+                let range = Preferences::TEXT_SIZES;
+                preferences.text_size = size.round().clamp(*range.start(), *range.end());
+            }
+            Pref::HideOnDeactivate(on) => preferences.hide_on_deactivate = on,
+            Pref::AlwaysOnTop(on) => preferences.always_on_top = on,
+            Pref::TabKey(key) => preferences.tab_key = key,
+            Pref::MarkdownShortcuts(on) => preferences.markdown_shortcuts = on,
+            Pref::Font(font) => preferences.font = font,
+            Pref::LineHeight(height) => preferences.line_height = height,
+            Pref::Bullet(marker) => preferences.bullet_marker = marker,
+            Pref::Fence(fence) => preferences.code_fence = fence,
+            Pref::Emphasis(marker) => preferences.emphasis_marker = marker,
+            Pref::Summon(summon) => preferences.summon = summon,
+            Pref::LineWidth(width) => preferences.line_width = width,
+            Pref::AutoPair(on) => preferences.auto_pair = on,
+            Pref::ConfirmDelete(on) => preferences.confirm_delete = on,
+            Pref::AllSpaces(on) => preferences.all_spaces = on,
+            Pref::FollowPointer(on) => preferences.follow_pointer = on,
+            Pref::OrderedDelimiter(delimiter) => preferences.ordered_delimiter = delimiter,
+            Pref::HardBreak(style) => preferences.hard_break = style,
+            Pref::SettingsPage(page) => preferences.settings_page = page,
         }
     }
 }
@@ -375,7 +467,6 @@ pub struct Library {
     pub version: u32,
     pub active_id: String,
     pub notes: Vec<Note>,
-    pub preferences: Preferences,
     pub workspace: WorkspaceSettings,
 }
 
@@ -385,7 +476,6 @@ impl Default for Library {
             version: LIBRARY_VERSION,
             active_id: String::new(),
             notes: Vec::new(),
-            preferences: Preferences::default(),
             workspace: WorkspaceSettings::default(),
         };
         library.new_note(doc::empty());
@@ -530,7 +620,7 @@ impl Library {
         notes
     }
 
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), StoreError> {
         if self.version != LIBRARY_VERSION {
             return Err(
                 "These notes were written by a different version of Markraft. \
@@ -554,15 +644,6 @@ impl Library {
             return Err(
                 "Markraft lost track of which note is open, so it stopped before saving. \
                  Open a note from the list, then try again."
-                    .into(),
-            );
-        }
-        if self.preferences.window_bounds.is_some_and(|bounds| {
-            bounds.iter().any(|value| !value.is_finite()) || bounds[2] <= 0.0 || bounds[3] <= 0.0
-        }) {
-            return Err(
-                "The window size Markraft remembered cannot be used, so it stopped before \
-                 saving. Resize the window, then try again."
                     .into(),
             );
         }
@@ -626,7 +707,6 @@ pub struct Settings {
     /// or to `~/Documents/Markraft` when none was stored yet.
     pub notes_folder: Option<PathBuf>,
     pub open_files: Vec<PathBuf>,
-    pub active_id: String,
     pub preferences: Preferences,
     /// Where the unreadable settings file was kept when these settings had to
     /// fall back to the defaults. It belongs to this launch, not to the file, so
@@ -637,11 +717,11 @@ pub struct Settings {
 
 impl Settings {
     /// A missing file is a first launch. A damaged one is set aside, not overwritten.
-    pub fn read(path: &Path) -> Result<Self, String> {
+    pub fn read(path: &Path) -> Result<Self, StoreError> {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(error) => return Err(crate::vault::describe(path, &error)),
+            Err(error) => return Err(crate::fs::describe(path, &error)),
         };
         serde_json::from_slice(&bytes).or_else(|error| {
             eprintln!(
@@ -651,7 +731,7 @@ impl Settings {
             let mut damaged = path.as_os_str().to_os_string();
             damaged.push(format!(".damaged-{}", Uuid::new_v4()));
             let damaged = PathBuf::from(damaged);
-            fs::rename(path, &damaged).map_err(|error| crate::vault::describe(path, &error))?;
+            fs::rename(path, &damaged).map_err(|error| crate::fs::describe(path, &error))?;
             Ok(Self {
                 recovered_from: Some(damaged),
                 ..Self::default()
@@ -666,17 +746,17 @@ impl Settings {
             format!(
                 "Markraft could not read your settings, so your notes folder and shortcut \
                  were reset. The unreadable file was kept as “{}”.",
-                crate::vault::file_label(damaged)
+                crate::fs::file_label(damaged)
             )
         })
     }
 
-    pub fn write(&self, path: &Path) -> Result<(), String> {
+    pub fn write(&self, path: &Path) -> Result<(), StoreError> {
         let bytes = serde_json::to_vec_pretty(self).map_err(|error| {
             eprintln!("Markraft: settings could not be encoded: {error}");
             "Markraft could not prepare your settings for saving.".to_owned()
         })?;
-        crate::vault::atomic_write(path, &bytes)
+        crate::fs::atomic_write(path, &bytes)
     }
 }
 
@@ -859,7 +939,7 @@ mod tests {
     #[test]
     fn resolve_requires_home_when_falling_back_to_the_default() {
         let error = resolve_notes_folder(None, None, None).unwrap_err();
-        assert!(error.contains("HOME"), "{error}");
+        assert!(error.to_string().contains("HOME"), "{error}");
     }
 
     #[test]
@@ -900,10 +980,10 @@ mod tests {
         assert_eq!(reread.recovery_notice(), None);
     }
 
-    #[test]
-    fn every_preference_survives_the_settings_file() {
-        // Each field is set to something other than its default, so a field
-        // that serialization drops or renames shows up as a difference here.
+    /// Every field set to something other than its default, so a field that
+    /// serialization drops or renames — or a setting aimed at the wrong field —
+    /// shows up as a difference.
+    fn every_preference_changed() -> Preferences {
         let preferences = Preferences {
             dark_mode: Some(true),
             auto_height: false,
@@ -934,7 +1014,12 @@ mod tests {
             hard_break: HardBreakStyle::Spaces,
         };
         assert_ne!(preferences, Preferences::default());
+        preferences
+    }
 
+    #[test]
+    fn every_preference_survives_the_settings_file() {
+        let preferences = every_preference_changed();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.json");
         Settings {
@@ -944,6 +1029,58 @@ mod tests {
         .write(&path)
         .unwrap();
         assert_eq!(Settings::read(&path).unwrap().preferences, preferences);
+    }
+
+    /// Every word the settings window speaks lands in its own field: a field
+    /// without a word fails to build the literal, a word aimed at the wrong
+    /// field fails the comparison.
+    #[test]
+    fn every_pref_sets_its_own_field() {
+        let changed = every_preference_changed();
+        let words = vec![
+            Pref::Theme(changed.dark_mode),
+            Pref::AutoHeight(changed.auto_height),
+            Pref::VimMode(changed.vim_mode),
+            Pref::EmojiCharacters(changed.emoji_characters),
+            Pref::RemoteImages(changed.remote_images),
+            Pref::Hotkey(changed.hotkey.clone()),
+            Pref::NewNoteHotkey(changed.new_note_hotkey.clone()),
+            Pref::TextSize(changed.text_size),
+            Pref::HideOnDeactivate(changed.hide_on_deactivate),
+            Pref::AlwaysOnTop(changed.always_on_top),
+            Pref::TabKey(changed.tab_key),
+            Pref::MarkdownShortcuts(changed.markdown_shortcuts),
+            Pref::Font(changed.font),
+            Pref::LineHeight(changed.line_height),
+            Pref::Bullet(changed.bullet_marker),
+            Pref::Fence(changed.code_fence),
+            Pref::Emphasis(changed.emphasis_marker),
+            Pref::Summon(changed.summon),
+            Pref::LineWidth(changed.line_width),
+            Pref::AutoPair(changed.auto_pair),
+            Pref::ConfirmDelete(changed.confirm_delete),
+            Pref::AllSpaces(changed.all_spaces),
+            Pref::FollowPointer(changed.follow_pointer),
+            Pref::OrderedDelimiter(changed.ordered_delimiter),
+            Pref::HardBreak(changed.hard_break),
+            Pref::SettingsPage(changed.settings_page.clone()),
+        ];
+        let mut applied = Preferences::default();
+        for word in words {
+            word.apply(&mut applied);
+        }
+        // The window remembers its own bounds; no setting speaks for them.
+        applied.window_bounds = changed.window_bounds;
+        assert_eq!(applied, changed);
+    }
+
+    #[test]
+    fn a_text_size_is_rounded_and_kept_within_range() {
+        let mut preferences = Preferences::default();
+        Pref::TextSize(99.).apply(&mut preferences);
+        assert_eq!(preferences.text_size, *Preferences::TEXT_SIZES.end());
+        Pref::TextSize(12.4).apply(&mut preferences);
+        assert_eq!(preferences.text_size, 12.);
     }
 
     #[test]

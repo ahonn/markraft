@@ -33,6 +33,7 @@ use markraft_core::{
 use crate::from_markdown;
 use crate::schema as md;
 use crate::textblock::{Item, Items};
+use markraft_core::protocol::event;
 
 /// Enter at the end of a paragraph whose whole text opens a block: a fence
 /// becomes an empty code block in that language, and a row of `|`-separated
@@ -56,12 +57,11 @@ pub fn block_from_line() -> Command {
 /// caret ends, the caret in it. Not for an empty paragraph, which is a
 /// definition's own, nor anywhere but the end of the last one.
 fn out_of_footnote(state: &EditorState) -> Option<TransactionSpec> {
-    let doc = state.doc();
     let schema = state.schema();
     if !state.selection().is_cursor() {
         return None;
     }
-    let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+    let resolved = state.resolved_head()?;
     let depth = resolved.depth().checked_sub(1)?;
     let paragraph = resolved.parent();
     let definition = resolved.node(depth);
@@ -94,7 +94,7 @@ fn out_of_footnote(state: &EditorState) -> Option<TransactionSpec> {
         TransactionSpec::new()
             .change_set(applied.changes().clone())
             .selection(selection)
-            .user_event("input")
+            .user_event(event::INPUT)
             .scroll_into_view(),
     )
 }
@@ -116,12 +116,11 @@ struct Line {
 
 impl Line {
     fn at_caret(state: &EditorState) -> Option<Line> {
-        let doc = state.doc();
         let schema = state.schema();
         if !state.selection().is_cursor() {
             return None;
         }
-        let resolved = doc.resolve(state.selection().head(doc)).ok()?;
+        let resolved = state.resolved_head()?;
         let depth = resolved.depth();
         let paragraph = resolved.node(depth);
         if paragraph.type_id() != schema.node_id(md::PARAGRAPH)?
@@ -201,7 +200,7 @@ impl Line {
             TransactionSpec::new()
                 .change_set(applied.changes().clone())
                 .selection(selection)
-                .user_event("input")
+                .user_event(event::INPUT)
                 .scroll_into_view(),
         )
     }

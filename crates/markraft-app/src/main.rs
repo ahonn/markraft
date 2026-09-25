@@ -2,6 +2,7 @@ mod app;
 mod doc;
 #[cfg(test)]
 mod e2e;
+mod fs;
 mod instance;
 mod persistence;
 mod platform;
@@ -84,15 +85,17 @@ fn main() {
     } else {
         Request::OpenPaths(paths)
     };
-    let instance =
-        match Instance::acquire(&settings_path, initial_request).unwrap_or_else(|e| fail(&e)) {
-            Launch::Forwarded => return,
-            Launch::Primary(instance) => instance,
-        };
+    let instance = match Instance::acquire(&settings_path, initial_request)
+        .unwrap_or_else(|e| fail(&e.to_string()))
+    {
+        Launch::Forwarded => return,
+        Launch::Primary(instance) => instance,
+    };
     // After the handover, because this read is what sets a damaged settings file
     // aside — a second launch that is only passing a request along must not move
     // the file this one is using, and its notice would have nowhere to be shown.
     let settings = Settings::read(&settings_path).unwrap_or_default();
+    let preferences = settings.preferences.clone();
     if restore_files {
         // Only the primary process restores the previous session. A second
         // ordinary launch just raises the current one. Queue individual paths
@@ -106,8 +109,9 @@ fn main() {
     }
     let home = env::var_os("HOME").map(PathBuf::from);
     let directory = resolve_notes_folder(directory, settings.notes_folder.clone(), home.as_deref())
-        .unwrap_or_else(|error| fail(&error));
-    let (store, library, error) = match Store::open(directory.clone(), settings_path.clone()) {
+        .unwrap_or_else(|error| fail(&error.to_string()));
+    let opened = Store::open(directory.clone(), settings_path.clone(), settings.clone());
+    let (store, library, error) = match opened {
         Ok((mut store, library)) => {
             if let Some(notice) = settings.recovery_notice() {
                 store.notices().raise(notice);
@@ -123,7 +127,7 @@ fn main() {
             }
             (Some(store), library, None)
         }
-        Err(error) => (None, Library::default(), Some(error)),
+        Err(error) => (None, Library::default(), Some(error.to_string())),
     };
     let sender = instance.sender();
     let application = gpui_platform::application();
@@ -148,7 +152,7 @@ fn main() {
         let platform = Platform::new();
         let size = size(px(480.), px(320.));
         let mut bounds = Bounds::centered(None, size, cx);
-        if let Some([x, y, w, h]) = library.preferences.window_bounds {
+        if let Some([x, y, w, h]) = preferences.window_bounds {
             // Clamp to the display the window was last on, so a note left on a
             // second monitor is not dragged back to the primary one. An unplugged
             // monitor falls to the display nearest to where the note used to be.
@@ -191,6 +195,7 @@ fn main() {
                         settings_path,
                         store,
                         library,
+                        preferences,
                         error,
                         Some(platform),
                         updater::Updater::new(),

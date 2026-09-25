@@ -1,4 +1,5 @@
 //! Typed, bounded launch requests shared by CLI, Finder, and the running app.
+use crate::fs::StoreError;
 use std::{
     fs::{File, OpenOptions, TryLockError},
     io::{self, Write},
@@ -24,20 +25,18 @@ pub enum Request {
 }
 
 impl Request {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<(), StoreError> {
         if let Self::OpenPaths(paths) = self
             && (paths.is_empty()
                 || paths.len() > MAX_PATHS
                 || paths.iter().any(|p| !p.is_absolute()))
         {
-            return Err(format!(
-                "An open request needs 1–{MAX_PATHS} absolute file paths."
-            ));
+            return Err(format!("An open request needs 1–{MAX_PATHS} absolute file paths.").into());
         }
         Ok(())
     }
 
-    fn encode(&self) -> Result<Vec<u8>, String> {
+    fn encode(&self) -> Result<Vec<u8>, StoreError> {
         self.validate()?;
         let message = serde_json::to_vec(self).map_err(|error| error.to_string())?;
         if message.len() > MAX_REQUEST_BYTES {
@@ -48,7 +47,7 @@ impl Request {
         Ok(message)
     }
 
-    fn decode(message: &[u8]) -> Result<Self, String> {
+    fn decode(message: &[u8]) -> Result<Self, StoreError> {
         if message.len() > MAX_REQUEST_BYTES {
             return Err("Launch request is too large.".into());
         }
@@ -64,14 +63,14 @@ impl Request {
 pub struct RequestSender(SyncSender<Request>);
 
 impl RequestSender {
-    pub fn send(&self, request: Request) -> Result<(), String> {
+    pub fn send(&self, request: Request) -> Result<(), StoreError> {
         request.encode()?;
         self.0
             .try_send(request)
-            .map_err(|error| format!("Could not queue the open request: {error}"))
+            .map_err(|error| StoreError::from(format!("Could not queue the open request: {error}")))
     }
 
-    pub fn open_urls(&self, urls: Vec<String>) -> Result<(), String> {
+    pub fn open_urls(&self, urls: Vec<String>) -> Result<(), StoreError> {
         let paths = urls
             .into_iter()
             .map(|value| {
@@ -99,7 +98,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub fn acquire(file: &Path, request: Request) -> Result<Launch, String> {
+    pub fn acquire(file: &Path, request: Request) -> Result<Launch, StoreError> {
         let message = request.encode()?;
         let canonical = canonical_target(file)?;
         let mut lock_name = canonical.into_os_string();
@@ -112,7 +111,7 @@ impl Instance {
             .truncate(false)
             .mode(0o600)
             .open(&lock_path)
-            .map_err(|error| crate::vault::describe(file, &error))?;
+            .map_err(|error| crate::fs::describe(file, &error))?;
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match lock.try_lock() {
@@ -132,10 +131,10 @@ impl Instance {
                     // Publish only after the socket is listening, while retaining the lock
                     // for this instance's lifetime. A simultaneous launcher waits below.
                     lock.set_len(0)
-                        .map_err(|error| crate::vault::describe(file, &error))?;
+                        .map_err(|error| crate::fs::describe(file, &error))?;
                     lock.write_all(path.as_os_str().as_encoded_bytes())
                         .and_then(|_| lock.sync_all())
-                        .map_err(|error| crate::vault::describe(file, &error))?;
+                        .map_err(|error| crate::fs::describe(file, &error))?;
                     let (sender, pending) = mpsc::sync_channel(MAX_PENDING);
                     let sender = RequestSender(sender);
                     sender.send(request)?;
@@ -163,15 +162,17 @@ impl Instance {
                         }
                     }
                     if Instant::now() >= deadline {
-                        return Err("Markraft is already running, but it did not answer. \
-                                    Wait a moment and open it again, or quit it from the \
-                                    menu bar first."
-                            .into());
+                        return Err(StoreError::Locked(
+                            "Markraft is already running, but it did not answer. \
+                             Wait a moment and open it again, or quit it from the \
+                             menu bar first."
+                                .into(),
+                        ));
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(TryLockError::Error(error)) => {
-                    return Err(crate::vault::describe(file, &error));
+                    return Err(crate::fs::describe(file, &error));
                 }
             }
         }
@@ -209,27 +210,27 @@ impl Instance {
 /// The private channel a second launch uses to hand its request to this one.
 /// Its failures are about this machine rather than about the notes, so they
 /// share one sentence and leave the detail in the log.
-fn relaunch_failure(error: &io::Error) -> String {
+fn relaunch_failure(error: &io::Error) -> StoreError {
     eprintln!("Markraft: the launch channel failed: {error}");
     "Markraft could not set up the link that a second launch uses to reopen its window. \
      Quit Markraft and open it again."
-        .to_owned()
+        .into()
 }
 
-fn canonical_target(file: &Path) -> Result<PathBuf, String> {
+fn canonical_target(file: &Path) -> Result<PathBuf, StoreError> {
     if file.exists() {
         return file
             .canonicalize()
-            .map_err(|error| crate::vault::describe(file, &error));
+            .map_err(|error| crate::fs::describe(file, &error));
     }
     let parent = file
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|error| crate::vault::describe(parent, &error))?;
+    std::fs::create_dir_all(parent).map_err(|error| crate::fs::describe(parent, &error))?;
     Ok(parent
         .canonicalize()
-        .map_err(|error| crate::vault::describe(parent, &error))?
+        .map_err(|error| crate::fs::describe(parent, &error))?
         .join(
             file.file_name()
                 .ok_or("Markraft needs a settings file to work with, not a folder.")?,

@@ -12,6 +12,7 @@ use crate::state::{EditorState, TransactionSpec};
 
 use super::text::delete_range_changes;
 use super::{Command, command};
+use crate::protocol::event;
 
 /// Which way a motion command moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,7 +193,7 @@ fn collapse(state: &EditorState, dir: Direction, extend: bool) -> Option<Transac
     Some(
         TransactionSpec::new()
             .selection(next)
-            .user_event("move")
+            .user_event(event::MOVE)
             .scroll_into_view(),
     )
 }

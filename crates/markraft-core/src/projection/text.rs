@@ -124,7 +124,7 @@ impl Projection {
     }
 
     /// The UTF-16 offset of `pos` inside line `line`'s text.
-    pub fn utf16_offset(&self, line: usize, pos: usize) -> Option<usize> {
+    pub fn line_pos_to_utf16(&self, line: usize, pos: usize) -> Option<usize> {
         let entry = self.line(line)?;
         if pos < entry.from() || pos > entry.to() {
             return None;
@@ -138,7 +138,7 @@ impl Projection {
     ///
     /// An offset that falls between the two halves of a surrogate pair rounds
     /// down to the start of that `char`.
-    pub fn pos_from_utf16(&self, line: usize, offset: usize) -> Option<usize> {
+    pub fn line_utf16_to_pos(&self, line: usize, offset: usize) -> Option<usize> {
         let entry = self.line(line)?;
         let text = self.line_text(line)?;
         let mut units = 0usize;
@@ -154,7 +154,7 @@ impl Projection {
     /// A document position as a UTF-16 offset into [`Projection::plain_text`].
     pub fn pos_to_utf16(&self, pos: usize) -> Option<usize> {
         let line = self.line_at(pos)?;
-        Some(self.line(line)?.utf16_start() + self.utf16_offset(line, pos)?)
+        Some(self.line(line)?.utf16_start() + self.line_pos_to_utf16(line, pos)?)
     }
 
     /// A UTF-16 offset into [`Projection::plain_text`] as a document position.
@@ -169,7 +169,7 @@ impl Projection {
             Err(index) => index - 1,
         };
         let line = &lines[index];
-        self.pos_from_utf16(index, offset.saturating_sub(line.utf16_start()))
+        self.line_utf16_to_pos(index, offset.saturating_sub(line.utf16_start()))
     }
 
     /// A UTF-16 range over [`Projection::plain_text`] as a position range.

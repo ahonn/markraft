@@ -1,7 +1,11 @@
 use super::*;
+use markraft_gpui::TableOp;
 
 /// The pill's height; its radius is the one that height gives it, as the link pill's is.
 const HEIGHT: Pixels = px(32.);
+/// The row every table keeps above its grid for this pill, which the editor is told
+/// through its style so the two cannot disagree.
+pub(in crate::app) const TABLE_TOOLBAR_ROOM: Pixels = px(28.);
 /// The pill's width, which it has to be anchored by before it has been laid out: its
 /// ten 28 px controls, the 1 px gap between each pair of neighbours, two dividers with
 /// their margins, and 5 px of padding and border at each end.
@@ -80,18 +84,24 @@ pub(super) enum TableEdit {
     Align(ColumnAlignment),
 }
 
+impl From<TableEdit> for TableOp {
+    fn from(edit: TableEdit) -> TableOp {
+        match edit {
+            TableEdit::RowBefore => TableOp::AddRowBefore,
+            TableEdit::RowAfter => TableOp::AddRowAfter,
+            TableEdit::ColumnBefore => TableOp::AddColumnBefore,
+            TableEdit::ColumnAfter => TableOp::AddColumnAfter,
+            TableEdit::DeleteRow => TableOp::DeleteRow,
+            TableEdit::DeleteColumn => TableOp::DeleteColumn,
+            TableEdit::DeleteTable => TableOp::DeleteTable,
+            TableEdit::Align(alignment) => TableOp::SetAlignment(alignment),
+        }
+    }
+}
+
 impl TableEdit {
     pub(super) fn run(self, editor: &mut EditorView, cx: &mut Context<EditorView>) -> bool {
-        match self {
-            TableEdit::RowBefore => editor.table_add_row_before(cx),
-            TableEdit::RowAfter => editor.table_add_row_after(cx),
-            TableEdit::ColumnBefore => editor.table_add_column_before(cx),
-            TableEdit::ColumnAfter => editor.table_add_column_after(cx),
-            TableEdit::DeleteRow => editor.table_delete_row(cx),
-            TableEdit::DeleteColumn => editor.table_delete_column(cx),
-            TableEdit::DeleteTable => editor.table_delete_table(cx),
-            TableEdit::Align(alignment) => editor.table_set_alignment(alignment, cx),
-        }
+        editor.table(self.into(), cx)
     }
 
     pub(super) fn icon(self) -> Icon {
@@ -156,7 +166,7 @@ impl MarkraftApp {
         // top of them; then it goes below.
         // The row is a little shorter than the pill, which reaches into the gap every
         // block keeps below itself rather than into the block.
-        let above = anchor.top() - HEIGHT - (markraft_gpui::TABLE_TOOLBAR_ROOM - HEIGHT).abs();
+        let above = anchor.top() - HEIGHT - (TABLE_TOOLBAR_ROOM - HEIGHT).abs();
         let top = if above < TOOLBAR_HEIGHT + GAP {
             anchor.bottom() + GAP
         } else {
