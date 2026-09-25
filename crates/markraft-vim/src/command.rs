@@ -154,6 +154,17 @@ pub(crate) fn motion(state: &mut State, cx: &mut impl Host, motion: Motion) {
     }
 }
 
+/// The end of the line `pos` sits on when it is the document's last line and
+/// belongs to a code or raw block.
+fn final_verbatim_line_end(types: &DocTypes, projection: &Projection, pos: usize) -> Option<usize> {
+    let index = projection.line_at(pos)?;
+    if index + 1 != projection.line_count() {
+        return None;
+    }
+    let line = projection.line(index)?;
+    types.is_verbatim_block(line).then(|| line.to())
+}
+
 /// `j` and `k`. They follow visual rows in Normal and charwise Visual mode, where the
 /// caret is somewhere in a wrapped line; with an operator pending and in Visual Line
 /// mode they are linewise, so `dj` takes two whole lines however they wrap. Inside a
@@ -192,6 +203,16 @@ pub(crate) fn vertical(state: &mut State, cx: &mut impl Host, delta: isize) {
         return;
     }
     if state.mode != Mode::Visual {
+        // A Normal-mode caret rests on a line's last character, where the
+        // editor's own caret would sit after it. On the last line of a code
+        // block that ends the document that is the one position from which ↓
+        // leaves the block, so the caret is put there first and the editor's
+        // row motion decides, as it does for the arrow.
+        if rows > 0
+            && let Some(end) = final_verbatim_line_end(cx.types(), &projection, from)
+        {
+            cx.select(Selection::cursor(end), false);
+        }
         cx.rows(rows, false);
         return;
     }

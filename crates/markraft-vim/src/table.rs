@@ -162,7 +162,9 @@ pub(crate) fn count_rows(
 
 /// Where `j` and `k` go inside a table: the same column of the row `delta`
 /// rows away, or out of the table at its edges, which is where vim's next line
-/// is. `None` when `pos` is not in a table.
+/// is. `None` when `pos` is not in a table — and below a table that ends the
+/// document, where nothing follows for a motion to land on: the editor's own
+/// row motion then decides, and leaves the table for a new block as ↓ does.
 ///
 /// No row is ever appended. Core's `goto_cell_below` grows the table at its
 /// last row, which is what Enter should do and what a motion must not.
@@ -179,9 +181,12 @@ pub(crate) fn row_step(
         // Out of the top of the table, or nowhere to go when it opens the
         // document.
         grid.lines.start.checked_sub(1)
+    } else if let Some(line) = grid.line(row as usize, cell.column) {
+        Some(line)
+    } else if grid.lines.end < projection.line_count() {
+        Some(grid.lines.end)
     } else {
-        grid.line(row as usize, cell.column)
-            .or_else(|| (grid.lines.end < projection.line_count()).then_some(grid.lines.end))
+        return None;
     };
     Some(line.map_or(pos, |line| motion::first_non_blank(projection, line)))
 }

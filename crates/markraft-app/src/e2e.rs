@@ -1059,6 +1059,23 @@ mod tests {
         h.assert_round_trip("vim operators");
     }
 
+    // vim's `j` leaves a code block or a table that ends the note for a new
+    // block, as ↓ does — through the real bindings and a laid-out editor, which
+    // is the path the unit tests over a bare state cannot take.
+    #[gpui::test]
+    fn vim_j_leaves_a_final_code_block_and_table_as_the_arrow_does(cx: &mut TestAppContext) {
+        let mut h = open_with(cx, &[("c.md", "```\n1\n2\n```\n")], |p| p.vim_mode = true);
+        h.keys("cmd-up j j i");
+        h.type_text("8");
+        assert_eq!(h.markdown(), "```\n1\n2\n```\n\n8");
+        let mut h = open_with(cx, &[("t.md", "| 1 | 2 |\n| - | - |\n| 3 | 4 |\n")], |p| {
+            p.vim_mode = true
+        });
+        h.keys("cmd-up j j i");
+        h.type_text("8");
+        assert!(h.markdown().ends_with("|\n\n8"), "{:?}", h.markdown());
+    }
+
     // G6: the wiki-link and emoji menus open as the trigger is typed and write what
     // is chosen.
     #[gpui::test]
