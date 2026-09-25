@@ -46,6 +46,12 @@
 //! tag. On top of whatever the rules say, `font-weight`, `font-style`,
 //! `text-decoration` and `vertical-align: super` or `sub` are read as the
 //! marks they stand for.
+//!
+//! # Depth
+//!
+//! Elements nested deeper than the Markdown reader builds containers give their
+//! text and nothing else: everything after this walks the tree recursively,
+//! and a page of nested `<div>`s would otherwise take the stack with it.
 
 mod rules;
 mod serialize;
@@ -67,7 +73,7 @@ use crate::fit::{fit, fit_document};
 use crate::fragment::open_fragment;
 use crate::house::HouseStyleHandle;
 use crate::inline::InlineContent;
-use crate::parse::ParseError;
+use crate::parse::{MAX_BLOCK_DEPTH, ParseError};
 use crate::schema as md;
 use crate::serialize::MarkdownSerializer;
 
@@ -135,6 +141,7 @@ impl HtmlParser {
             inline: InlineContent::new(&self.schema),
             leading_space: true,
             inline_only: false,
+            depth: 0,
         };
         build.children(html.root_element(), &[])?;
         build.flush()?;
@@ -153,6 +160,8 @@ struct Build<'s> {
     /// Whether the builder is filling a textblock's inline content, where a
     /// block element has nowhere to start a block of its own.
     inline_only: bool,
+    /// How many elements deep the element being read is.
+    depth: usize,
 }
 
 impl<'s> Build<'s> {
@@ -275,6 +284,22 @@ impl<'s> Build<'s> {
     }
 
     fn element(&mut self, element: ElementRef<'s>, marks: &[Mark]) -> Result<(), ParseError> {
+        if self.depth >= MAX_BLOCK_DEPTH {
+            let text: String = element.text().collect();
+            self.text(&text, marks);
+            return Ok(());
+        }
+        self.depth += 1;
+        let read = self.element_within_depth(element, marks);
+        self.depth -= 1;
+        read
+    }
+
+    fn element_within_depth(
+        &mut self,
+        element: ElementRef<'s>,
+        marks: &[Mark],
+    ) -> Result<(), ParseError> {
         let target = HtmlTarget {
             element,
             schema: self.schema,
@@ -456,6 +481,7 @@ impl<'s> Build<'s> {
             inline: InlineContent::new(self.schema),
             leading_space: true,
             inline_only: false,
+            depth: self.depth,
         };
         inner.children(element, marks)?;
         inner.flush()?;
@@ -478,6 +504,7 @@ impl<'s> Build<'s> {
             inline: InlineContent::new(self.schema),
             leading_space: true,
             inline_only: true,
+            depth: self.depth,
         };
         inner.children(element, marks)?;
         inner.inline.trim_end();

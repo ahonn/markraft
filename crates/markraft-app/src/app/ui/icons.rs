@@ -117,7 +117,7 @@ fn load(kind: Icon, color: Hsla, extent: f32, scale: f32) -> Option<Arc<RenderIm
             return image.clone();
         }
         let image = symbols::render(kind.symbol(), extent, scale, color).or_else(|| {
-            eprintln!("Markraft: could not render SF Symbol {}", kind.symbol());
+            log::warn!("could not render SF Symbol {}", kind.symbol());
             symbols::render("questionmark", extent, scale, color)
         });
         // Bound textures retained across repeated theme/display changes. Current

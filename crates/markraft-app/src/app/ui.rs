@@ -72,6 +72,10 @@ enum Intent {
     Block(doc::Block),
     InsertTable,
     Table(TableEdit),
+    /// Getting a problem to someone who can fix it.
+    ReportIssue,
+    CopyDebugInfo,
+    RevealLogs,
 }
 
 /// The shortcut shown beside an intent, wherever it is offered: the ⌘K panel,
@@ -222,6 +226,9 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::Rename => Icon::Edit,
         Intent::OpenMarkdown => Icon::Document,
         Intent::Settings => Icon::Settings,
+        Intent::ReportIssue => Icon::External,
+        Intent::CopyDebugInfo => Icon::Copy,
+        Intent::RevealLogs => Icon::Open,
         Intent::Save | Intent::SaveAs => Icon::Save,
         Intent::ToggleTask => Icon::Task,
         Intent::ChooseCodeLanguage => Icon::CodeBlock,
@@ -279,6 +286,18 @@ impl MarkraftApp {
             Intent::Settings => {
                 self.intent(Intent::Back, window, cx);
                 self.open_settings(window, cx);
+            }
+            Intent::ReportIssue => {
+                self.intent(Intent::Back, window, cx);
+                self.report_issue(cx);
+            }
+            Intent::CopyDebugInfo => {
+                self.intent(Intent::Back, window, cx);
+                self.copy_debug_info(cx);
+            }
+            Intent::RevealLogs => {
+                self.intent(Intent::Back, window, cx);
+                self.reveal_logs(cx);
             }
             Intent::Link => {
                 self.set_panel(Panel::Editor, cx);
@@ -1136,6 +1155,9 @@ impl MarkraftApp {
                 "Open Markdown…",
                 Intent::OpenMarkdown,
             ),
+            Command::new("report-issue", "Report an Issue…", Intent::ReportIssue),
+            Command::new("copy-debug-info", "Copy Debug Info", Intent::CopyDebugInfo),
+            Command::new("reveal-logs", "Show Logs in Finder", Intent::RevealLogs),
             Command::new("format-bold", "Bold", Intent::Mark(doc::Inline::Bold)),
             Command::new("format-italic", "Italic", Intent::Mark(doc::Inline::Italic)),
             Command::new(

@@ -174,6 +174,12 @@ pub(super) fn insert(
                 if !is_image(&path) {
                     return Err("Only image files can be inserted here.".into());
                 }
+                // The name handed over says what the image is: a symbolic
+                // link's target may have no extension at all.
+                let extension = path
+                    .extension()
+                    .map(|extension| extension.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 let path = path.canonicalize().map_err(|error| error.to_string())?;
                 if !copy && path.starts_with(&root) {
                     (Some(path), Vec::new(), String::new())
@@ -183,7 +189,6 @@ pub(super) fn insert(
                         return Err("The image exceeds 16 MB.".into());
                     }
                     let bytes = fs::read(&path).map_err(|error| error.to_string())?;
-                    let extension = path.extension().unwrap().to_string_lossy().into_owned();
                     (None, bytes, extension)
                 }
             }
@@ -532,6 +537,31 @@ mod tests {
             assert_eq!(fs::read(source).unwrap(), b"original image");
         }
         assert_eq!(fs::read_dir(root.join("assets")).unwrap().count(), 4);
+    }
+
+    #[test]
+    fn a_linked_image_takes_the_link_s_extension_not_its_target_s() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("notes");
+        fs::create_dir(&root).unwrap();
+        let target = directory.path().join("blob");
+        fs::write(&target, b"linked image").unwrap();
+        let link = directory.path().join("linked.png");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let inserted = insert(
+            vec![Asset::File(link)],
+            &root.join("note.md"),
+            &root,
+            &AttachmentPolicy::Default,
+            ImageNaming::RandomId,
+            &directory.path().join("journal"),
+        )
+        .unwrap();
+        let [relative] = inserted.urls.as_slice() else {
+            panic!("one image, one url");
+        };
+        assert!(relative.ends_with(".png"), "{relative}");
+        assert_eq!(fs::read(root.join(relative)).unwrap(), b"linked image");
     }
 
     #[test]

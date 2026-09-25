@@ -234,7 +234,7 @@ pub(crate) fn copy_metadata(from: &Path, to: &Path) -> Result<(), StoreError> {
 /// raw text is printed for a bug report and reaches the interface only inside
 /// the parentheses of the last resort, through [`StoreError::Io`]'s `Display`.
 pub(crate) fn describe(path: &Path, error: &io::Error) -> StoreError {
-    eprintln!("Markraft: {}: {error} ({:?})", path.display(), error.kind());
+    log::warn!("{}: {error} ({:?})", path.display(), error.kind());
     StoreError::Io {
         path: path.to_owned(),
         kind: error.kind(),

@@ -41,6 +41,10 @@
 //!   extension produces — is kept as source text: a `raw_block` whose text is
 //!   that source where a block is expected. Inline HTML has its own raw
 //!   primitive.
+//! * A container nested deeper than [`MAX_BLOCK_DEPTH`] is kept as source
+//!   text too, in a `raw_block`: every pass over the tree after this one
+//!   recurses once per level, and a file of nothing but `>` would otherwise
+//!   take the stack with it.
 //!
 //! # Repair
 //!
@@ -61,6 +65,13 @@ use comrak::{Arena, Options, parse_document};
 use markraft_core::{Attrs, Fragment, Node, NodeError, NodeTypeId, Schema, Slice};
 
 use crate::rules::{ParseCx, ParseRule, ParseRules, ParseTarget, commonmark_rules};
+
+/// How many containers deep the tree is built. The first container past it
+/// that a `raw_block` can stand in for is kept as its source in one.
+///
+/// comrak stops opening lists at 100; quotes it nests without limit. A list
+/// item counts twice, once for the list and once for the item.
+pub(crate) const MAX_BLOCK_DEPTH: usize = 128;
 
 /// Why a document could not be built.
 ///
@@ -566,7 +577,7 @@ impl MarkdownParser {
             cx: &cx,
             options: &self.options,
         };
-        let blocks = walk.blocks(root)?;
+        let blocks = walk.blocks(root, self.schema.top_type(), 0)?;
         let doc = walk.fit(self.schema.top_type(), Attrs::empty(), blocks)?;
         let doc = crate::table::normalize_tables(&self.schema, &doc).unwrap_or(doc);
         let doc = crate::textblock::resolve_references(&self.schema, &doc);
@@ -602,14 +613,21 @@ impl<'a> Walk<'a> {
 
     // -- blocks ------------------------------------------------------------
 
-    fn blocks(&self, parent: &'a AstNode<'a>) -> Result<Vec<Node>, ParseError> {
+    /// The blocks inside `parent`, a `parent_ty` that sits `depth` containers
+    /// deep.
+    fn blocks(
+        &self,
+        parent: &'a AstNode<'a>,
+        parent_ty: NodeTypeId,
+        depth: usize,
+    ) -> Result<Vec<Node>, ParseError> {
         let mut out = Vec::new();
         let pos = self.target(parent).sourcepos();
         let mut next = pos.start.line.max(1);
         for child in parent.children() {
             let child_pos = self.target(child).sourcepos();
             self.push_definitions(parent, next, child_pos.start.line, &mut out)?;
-            self.block(child, &mut out)?;
+            self.block(child, parent_ty, depth, &mut out)?;
             next = next.max(child_pos.end.line + 1);
         }
         self.push_definitions(parent, next, pos.end.line + 1, &mut out)?;
@@ -646,7 +664,13 @@ impl<'a> Walk<'a> {
         Ok(())
     }
 
-    fn block(&self, node: &'a AstNode<'a>, out: &mut Vec<Node>) -> Result<(), ParseError> {
+    fn block(
+        &self,
+        node: &'a AstNode<'a>,
+        parent_ty: NodeTypeId,
+        depth: usize,
+        out: &mut Vec<Node>,
+    ) -> Result<(), ParseError> {
         let target = self.target(node);
         if self.is_empty_paragraph_html(node)
             && let Some(name) = self.paragraph_type(target)
@@ -669,8 +693,11 @@ impl<'a> Walk<'a> {
                         out.push(self.raw_block(crate::schema::RAW_BLOCK, &definitions)?);
                     }
                     children
+                } else if depth >= MAX_BLOCK_DEPTH && self.holds_raw(parent_ty)? {
+                    out.push(self.raw_block(crate::schema::RAW_BLOCK, &self.block_source(node))?);
+                    return Ok(());
                 } else {
-                    self.blocks(node)?
+                    self.blocks(node, ty, depth + 1)?
                 };
                 let (attrs, children) = self.callout(node, attrs(target), children);
                 out.push(self.fit(ty, attrs, children)?);
@@ -817,6 +844,17 @@ impl<'a> Walk<'a> {
             return source.trim_end_matches('\n').to_string();
         }
         self.cx.block_source(self.target(node).sourcepos())
+    }
+
+    /// Whether a `raw_block` can stand among `parent`'s children as it is.
+    ///
+    /// A list's children are items and a table's are rows: a raw block there
+    /// would be wrapped in a new item, whose marker the source already spells,
+    /// and every save would add one more. Such a container is kept and the cut
+    /// falls a level further down.
+    fn holds_raw(&self, parent: NodeTypeId) -> Result<bool, ParseError> {
+        let raw = self.node_id(crate::schema::RAW_BLOCK)?;
+        Ok(self.schema.can_contain(parent, raw))
     }
 
     /// A raw block holding `source` as its text. An empty source leaves the

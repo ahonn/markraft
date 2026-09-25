@@ -18,7 +18,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{ffi::CStr, path::Path, ptr, str::FromStr};
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
-    menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
+    menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu},
 };
 
 // Minimal AppKit geometry for struct-returning messages; objc2 checks the encoding.
@@ -66,6 +66,38 @@ pub fn app_version() -> (String, Option<String>) {
     (version, build)
 }
 
+/// The macOS version, such as `26.0.1`, read from the kernel.
+pub fn system_version() -> Option<String> {
+    let name = c"kern.osproductversion";
+    let mut buffer = [0u8; 64];
+    let mut length = buffer.len();
+    let status = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            &mut length,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    (status == 0).then(|| {
+        CStr::from_bytes_until_nul(&buffer[..length.min(buffer.len())])
+            .map(|version| version.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    })
+}
+
+/// What a bug report needs to know about this copy and this Mac.
+pub fn debug_info() -> String {
+    let (version, build) = app_version();
+    let build = build.map(|build| format!(" ({build})")).unwrap_or_default();
+    let system = system_version().unwrap_or_else(|| "unknown".to_owned());
+    format!(
+        "Markraft {version}{build}\nmacOS {system}, {}",
+        std::env::consts::ARCH
+    )
+}
+
 /// Seconds this Mac's clock stands ahead of UTC, including whatever daylight saving is
 /// in force. Timestamps are stored in UTC; a date shown to the user has to be the one
 /// on their calendar, so it is read through this.
@@ -108,6 +140,9 @@ pub enum PlatformEvent {
     NewNote,
     Settings,
     CheckForUpdates,
+    ReportIssue,
+    CopyDebugInfo,
+    RevealLogs,
     Quit,
 }
 
@@ -132,6 +167,22 @@ impl Platform {
         let new_note = MenuItem::new("New Note", true, None);
         let settings = MenuItem::new("Settings…", true, None);
         let updates = MenuItem::new("Check for Updates…", true, None);
+        // An accessory app has no menu bar of its own, so what a menu bar's Help
+        // menu would hold lives here.
+        let report = MenuItem::new("Report an Issue…", true, None);
+        let debug_info = MenuItem::new("Copy Debug Info", true, None);
+        let logs = MenuItem::new("Show Logs in Finder", true, None);
+        let help = Submenu::with_items(
+            "Help",
+            true,
+            &[
+                &report,
+                &debug_info,
+                &PredefinedMenuItem::separator(),
+                &logs,
+            ],
+        )
+        .map_err(menu_bar_failure)?;
         let quit = MenuItem::new("Quit Markraft", true, None);
         menu.append_items(&[
             &toggle,
@@ -139,6 +190,7 @@ impl Platform {
             &PredefinedMenuItem::separator(),
             &settings,
             &updates,
+            &help,
             &PredefinedMenuItem::separator(),
             &quit,
         ])
@@ -148,6 +200,9 @@ impl Platform {
             (new_note.id().clone(), PlatformEvent::NewNote),
             (settings.id().clone(), PlatformEvent::Settings),
             (updates.id().clone(), PlatformEvent::CheckForUpdates),
+            (report.id().clone(), PlatformEvent::ReportIssue),
+            (debug_info.id().clone(), PlatformEvent::CopyDebugInfo),
+            (logs.id().clone(), PlatformEvent::RevealLogs),
             (quit.id().clone(), PlatformEvent::Quit),
         ];
         let tray = TrayIconBuilder::new()
@@ -184,7 +239,7 @@ impl Platform {
             None
         } else {
             Some(HotKey::from_str(shortcut).map_err(|error| {
-                eprintln!("Markraft: {shortcut} is not a hotkey: {error}");
+                log::warn!("{shortcut} is not a hotkey: {error}");
                 format!(
                     "“{shortcut}” is not a shortcut Markraft understands. \
                      Try one like Alt+N or Ctrl+Shift+Space."
@@ -206,7 +261,7 @@ impl Platform {
         }
         if let Some(next) = next {
             self.hotkeys.register(next).map_err(|error| {
-                eprintln!("Markraft: {shortcut} could not be registered: {error}");
+                log::warn!("{shortcut} could not be registered: {error}");
                 format!(
                     "“{shortcut}” is not available — another app is probably using it. \
                      Choose a different shortcut."
@@ -219,7 +274,7 @@ impl Platform {
             if let Some(next) = next {
                 let _ = self.hotkeys.unregister(next);
             }
-            eprintln!("Markraft: a shortcut could not be released: {error}");
+            log::warn!("a shortcut could not be released: {error}");
             return Err("Markraft could not release the shortcut it was using. \
                         Quit and reopen Markraft, then set it again."
                 .into());
@@ -236,7 +291,7 @@ impl Platform {
         }
         for shortcut in self.shortcuts.into_iter().flatten() {
             if let Err(error) = self.hotkeys.unregister(shortcut) {
-                eprintln!("Markraft: a shortcut could not be suspended: {error}");
+                log::warn!("a shortcut could not be suspended: {error}");
             }
         }
         self.suspended = true;
@@ -252,7 +307,7 @@ impl Platform {
             if let Some(shortcut) = *slot
                 && let Err(error) = self.hotkeys.register(shortcut)
             {
-                eprintln!("Markraft: a shortcut could not be resumed: {error}");
+                log::warn!("a shortcut could not be resumed: {error}");
                 *slot = None;
                 lost = true;
             }
@@ -521,7 +576,7 @@ const NO_NATIVE_WINDOW: &str = "Markraft could not find its own window. Quit and
 /// The menu bar item and the global shortcut are one thing to the user, and a
 /// failure to set them up leaves the notes themselves working.
 fn menu_bar_failure(detail: impl std::fmt::Display) -> String {
-    eprintln!("Markraft: the menu bar item could not be set up: {detail}");
+    log::warn!("the menu bar item could not be set up: {detail}");
     "Markraft could not put its icon in the menu bar. Notes still work, but the \
      menu bar item and the shortcut that opens them are unavailable."
         .to_owned()
@@ -634,7 +689,7 @@ fn native_window(window: &gpui::Window) -> Result<*mut AnyObject, String> {
 /// GPUI's own view, which draws the window: a subview of the content view.
 fn native_view(window: &gpui::Window) -> Result<*mut AnyObject, String> {
     let handle = HasWindowHandle::window_handle(window).map_err(|error| {
-        eprintln!("Markraft: the window handle is unavailable: {error}");
+        log::warn!("the window handle is unavailable: {error}");
         NO_NATIVE_WINDOW.to_owned()
     })?;
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
@@ -743,13 +798,25 @@ fn menu_bar_image() -> Option<Retained<NSImage>> {
 
 fn diagnostics(event: &str) {
     if std::env::var_os("MARKRAFT_DIAGNOSTICS").is_some() {
-        eprintln!("Markraft: {event}");
+        log::warn!("{event}");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_info_names_the_version_and_the_system() {
+        let system = system_version().expect("the kernel reports a product version");
+        assert!(system.starts_with(|c: char| c.is_ascii_digit()), "{system}");
+        let info = debug_info();
+        assert!(info.starts_with("Markraft "), "{info}");
+        assert!(
+            info.contains(&format!("macOS {system}, {}", std::env::consts::ARCH)),
+            "{info}"
+        );
+    }
 
     // A re-rendered asset of the wrong size would otherwise only show up as a soft
     // or missing menu bar item.

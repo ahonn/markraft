@@ -11,6 +11,9 @@
 //! on screen instead of replacing it, and the same sentence twice in a row is
 //! one sentence. Both rules live here rather than with the callers, since both
 //! are easy to lose in a `VecDeque` anyone can push to.
+//!
+//! Everything said here is also logged, once per change, so a screenshot of
+//! the window can be matched to the log a report carries.
 
 use gpui::SharedString;
 use std::{
@@ -69,7 +72,11 @@ impl Feedback {
 
     /// Show `error` in the banner. Worded here, once, whatever reported it.
     pub(super) fn set_error(&mut self, error: impl ToString) {
-        self.error = Some(error.to_string());
+        let error = error.to_string();
+        if self.error.as_ref() != Some(&error) {
+            log::error!("shown: {error}");
+        }
+        self.error = Some(error);
     }
 
     pub(super) fn clear_error(&mut self) {
@@ -84,6 +91,12 @@ impl Feedback {
     }
 
     pub(super) fn set_platform_error(&mut self, error: Option<String>) {
+        if let Some(error) = error
+            .as_ref()
+            .filter(|&error| self.platform_error.as_ref() != Some(error))
+        {
+            log::warn!("shown: {error}");
+        }
         self.platform_error = error;
     }
 
@@ -94,6 +107,7 @@ impl Feedback {
     /// An acknowledgment of what the user just did, which replaces whatever is
     /// on screen: they are looking at the thing they just did.
     pub(super) fn inform(&mut self, text: impl AsRef<str>) {
+        log::debug!("shown: {}", text.as_ref());
         self.notice = Some(Notice {
             text: text.as_ref().to_owned().into(),
             until: Instant::now() + ACKNOWLEDGMENT,
@@ -103,6 +117,7 @@ impl Feedback {
 
     /// An acknowledgment with a path the user can reveal — stays long enough to click.
     pub(super) fn inform_with_reveal(&mut self, text: impl AsRef<str>, path: PathBuf) {
+        log::info!("shown: {} ({})", text.as_ref(), path.display());
         self.notice = Some(Notice {
             text: text.as_ref().to_owned().into(),
             until: Instant::now() + WITH_ACTION,
@@ -118,6 +133,7 @@ impl Feedback {
     /// and the same sentence queued twice is said once.
     pub(super) fn queue(&mut self, text: String) {
         if !self.queued.contains(&text) {
+            log::info!("shown: {text}");
             self.queued.push_back(text);
         }
     }

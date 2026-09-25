@@ -42,6 +42,9 @@ struct Identity {
     /// editor replaces it; the next launch drops it without saying so twice.
     gone: bool,
 }
+/// The manifest layout this build writes. A folder whose manifest says more
+/// was last opened by a newer Markraft, and is refused rather than misread.
+const MANIFEST_VERSION: u32 = 1;
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Manifest {
@@ -63,6 +66,41 @@ struct Recovery {
     local: String,
     disk: Option<Vec<u8>>,
     conflict: bool,
+}
+/// The manifest in `bytes`, and whether it could not be read and was replaced.
+///
+/// It holds what Markraft remembers about the folder — identities, pins, the
+/// folder's settings — never a note's text, so an unreadable one is set aside
+/// beside itself and the folder opens fresh rather than not at all. One a newer
+/// Markraft wrote is refused instead: starting fresh would write over it.
+fn read_manifest(path: &Path, bytes: &[u8]) -> Result<(Manifest, bool), StoreError> {
+    let newer = || {
+        StoreError::Invalid(
+            "A newer version of Markraft last opened this folder. Update Markraft to open it."
+                .into(),
+        )
+    };
+    match serde_json::from_slice::<Manifest>(bytes) {
+        Ok(manifest) if manifest.version > MANIFEST_VERSION => Err(newer()),
+        Ok(manifest) => Ok((manifest, false)),
+        Err(error) => {
+            let version = serde_json::from_slice::<serde_json::Value>(bytes)
+                .ok()
+                .and_then(|value| value.get("version")?.as_u64());
+            if version.is_some_and(|version| version > u64::from(MANIFEST_VERSION)) {
+                return Err(newer());
+            }
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs());
+            let aside = path.with_file_name(format!("manifest.unreadable-{stamp}.json"));
+            log::warn!("{} could not be read: {error}", path.display());
+            if let Err(error) = fs::rename(path, &aside) {
+                log::warn!("{} could not be set aside: {error}", path.display());
+            }
+            Ok((Manifest::default(), true))
+        }
+    }
 }
 pub struct Store {
     directory: PathBuf,
@@ -127,13 +165,10 @@ impl Store {
             StoreError::Locked("Another Markraft instance is already using this folder.".into())
         })?;
         let manifest_path = state.join("manifest.json");
-        let manifest =
+        let (manifest, reset) =
             match read_optional(&manifest_path).map_err(|e| describe(&manifest_path, &e))? {
-                Some(bytes) => serde_json::from_slice(&bytes).map_err(|e| StoreError::Json {
-                    path: manifest_path.clone(),
-                    detail: e.to_string(),
-                })?,
-                None => Manifest::default(),
+                Some(bytes) => read_manifest(&manifest_path, &bytes)?,
+                None => (Manifest::default(), false),
             };
         let loose: HashSet<PathBuf> = manifest.loose.iter().cloned().collect();
         let mut store = Self {
@@ -152,6 +187,11 @@ impl Store {
             loose,
             house: Default::default(),
         };
+        if reset {
+            store.notices.raise(
+                "This folder's pins and settings could not be read and were reset.".to_owned(),
+            );
+        }
         let mut library = store.scan_library()?;
         store.restore_recovery(&mut library);
         Ok((store, library))
@@ -187,7 +227,7 @@ impl Store {
             .collect()
     }
     fn persist_manifest(&mut self) -> Result<(), StoreError> {
-        self.manifest.version = 1;
+        self.manifest.version = MANIFEST_VERSION;
         self.manifest.loose = self.loose.iter().cloned().collect();
         self.manifest.loose.sort();
         let path = self.state.join("manifest.json");
@@ -633,7 +673,7 @@ impl Store {
                     }) {
                     Ok(record) => record,
                     Err(error) => {
-                        eprintln!("Markraft: {} was discarded: {error}", path.display());
+                        log::warn!("{} was discarded: {error}", path.display());
                         let _ = fs::remove_file(&path);
                         continue;
                     }
@@ -658,7 +698,7 @@ impl Store {
                         let _ = fs::remove_file(&path);
                     }
                     Err(error) => {
-                        eprintln!("Markraft: {error}");
+                        log::warn!("{error}");
                         held += 1;
                     }
                 }
@@ -666,10 +706,7 @@ impl Store {
             }
             // Path missing: recreate the file from the recovery local text once.
             let Ok(source) = SourceDocument::parse(doc::schema(), &record.local) else {
-                eprintln!(
-                    "Markraft: {} holds text no document can be made of",
-                    path.display()
-                );
+                log::warn!("{} holds text no document can be made of", path.display());
                 let _ = fs::remove_file(&path);
                 continue;
             };
@@ -692,12 +729,12 @@ impl Store {
             if let Some(parent) = file_path.parent()
                 && let Err(error) = fs::create_dir_all(parent)
             {
-                eprintln!("Markraft: {}", describe(parent, &error));
+                log::warn!("{}", describe(parent, &error));
                 held += 1;
                 continue;
             }
             if let Err(error) = write_document(&file_path, &bytes, None) {
-                eprintln!("Markraft: {error}");
+                log::warn!("{error}");
                 held += 1;
                 continue;
             }
@@ -1339,6 +1376,47 @@ mod tests {
         collect_markdown(&root.join("notes"), &mut paths).unwrap();
         paths.sort();
         paths
+    }
+    /// The folder's manifest, once `root` has been opened and closed.
+    fn manifest_path(root: &Path) -> PathBuf {
+        let (store, _) = open(root);
+        store.state.join("manifest.json")
+    }
+    #[test]
+    fn an_unreadable_manifest_is_set_aside_and_the_folder_opens() {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), "Kept.md", b"kept");
+        let manifest = manifest_path(root.path());
+        fs::write(&manifest, b"{\"paths\": [").unwrap();
+        let (store, library) = open(root.path());
+        assert_eq!(library.notes.len(), 1);
+        assert_eq!(
+            store.notices().take(),
+            ["This folder's pins and settings could not be read and were reset."]
+        );
+        let aside: Vec<_> = fs::read_dir(manifest.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.starts_with("manifest.unreadable-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "{aside:?}");
+    }
+    #[test]
+    fn a_manifest_from_a_newer_version_is_refused_not_reset() {
+        for newer in [
+            &b"{\"version\": 2}"[..],
+            b"{\"version\": 2, \"paths\": \"a shape this build does not know\"}",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let manifest = manifest_path(root.path());
+            fs::write(&manifest, newer).unwrap();
+            let notes = root.path().join("notes");
+            let Err(error) = open_reading_settings(notes, root.path().join("settings.json")) else {
+                panic!("a newer manifest opened");
+            };
+            assert!(error.to_string().contains("newer version"), "{error}");
+            assert_eq!(fs::read(&manifest).unwrap(), newer);
+        }
     }
     #[test]
     fn a_file_removed_while_closed_is_named_once() {

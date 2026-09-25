@@ -65,9 +65,7 @@ impl Updater {
             main_thread,
             UpdaterConfig {
                 event_callback: if cfg!(feature = "updater-mock") {
-                    Some(Rc::new(|event| {
-                        eprintln!("Markraft mock update: {event:?}")
-                    }))
+                    Some(Rc::new(|event| log::info!("mock update: {event:?}")))
                 } else {
                     None
                 },
@@ -101,7 +99,7 @@ impl Updater {
     }
 
     fn fail(&mut self, message: String) {
-        eprintln!("Markraft: {message}");
+        log::warn!("{message}");
         self.unavailable = message.clone();
         self.startup_error = Some(message);
     }

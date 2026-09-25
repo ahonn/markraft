@@ -226,8 +226,8 @@ impl MarkraftApp {
         });
         let quit = cx.on_app_quit(|this, cx| {
             if !this.prepare_to_quit(cx) {
-                eprintln!(
-                    "Markraft: {}",
+                log::warn!(
+                    "{}",
                     this.feedback
                         .error()
                         .map(String::as_str)
@@ -613,6 +613,9 @@ impl MarkraftApp {
                 }
                 PlatformEvent::Settings => self.open_settings(window, cx),
                 PlatformEvent::CheckForUpdates => self.check_for_updates(window, cx),
+                PlatformEvent::ReportIssue => self.report_issue(cx),
+                PlatformEvent::CopyDebugInfo => self.copy_debug_info(cx),
+                PlatformEvent::RevealLogs => self.reveal_logs(cx),
                 PlatformEvent::Quit => self.quit(window, cx),
             }
         }
@@ -797,6 +800,30 @@ impl MarkraftApp {
         }
         cx.stop_propagation();
         editor.update(cx, |e, cx| e.run_command(&block.command(), cx));
+    }
+    /// Open the tracker's bug form with this copy's environment filled in.
+    pub fn report_issue(&mut self, cx: &mut Context<Self>) {
+        cx.open_url(&crate::crash::new_issue_url(&crate::platform::debug_info()));
+    }
+
+    /// Show the log in Finder, beside whatever crash reports there are.
+    pub fn reveal_logs(&mut self, cx: &mut Context<Self>) {
+        if let Some(directory) = crate::crash::directory() {
+            cx.reveal_path(&crate::logging::file(&directory));
+        }
+    }
+
+    /// Put what a bug report needs on the clipboard, and say so.
+    pub fn copy_debug_info(&mut self, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(crate::platform::debug_info()));
+        self.feedback.inform("Debug info copied");
+        cx.notify();
+    }
+
+    /// Say that the last run left a crash report, with a button that shows it.
+    pub fn announce_crash_report(&mut self, text: String, report: PathBuf, cx: &mut Context<Self>) {
+        self.feedback.inform_with_reveal(text, report);
+        cx.notify();
     }
     pub fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(error) = self.updater.check() {

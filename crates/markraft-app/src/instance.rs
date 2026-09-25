@@ -194,11 +194,11 @@ impl Instance {
             match self.socket.recv(&mut message) {
                 Ok(length) => match Request::decode(&message[..length]) {
                     Ok(request) => requests.push(request),
-                    Err(error) => eprintln!("Markraft: ignored invalid launch request: {error}"),
+                    Err(error) => log::warn!("ignored invalid launch request: {error}"),
                 },
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(error) => {
-                    eprintln!("Markraft: could not receive launch request: {error}");
+                    log::warn!("could not receive launch request: {error}");
                     break;
                 }
             }
@@ -211,7 +211,7 @@ impl Instance {
 /// Its failures are about this machine rather than about the notes, so they
 /// share one sentence and leave the detail in the log.
 fn relaunch_failure(error: &io::Error) -> StoreError {
-    eprintln!("Markraft: the launch channel failed: {error}");
+    log::warn!("the launch channel failed: {error}");
     "Markraft could not set up the link that a second launch uses to reopen its window. \
      Quit Markraft and open it again."
         .into()

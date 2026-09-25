@@ -303,3 +303,23 @@ fn an_item_added_to_an_ordered_list_renumbers_the_file(cx: &mut TestAppContext) 
         assert_eq!(text, expected, "{source:?}");
     }
 }
+
+// A quote nested thousands deep, which a stray paste or a generated file can
+// hold, opens, takes an edit and saves: past the depth the tree is built to,
+// the rest of the quote stays the source it was, and every pass over the tree
+// recurses no further than that depth on a test thread's small stack.
+#[gpui::test]
+fn a_quote_nested_thousands_deep_opens_and_saves(cx: &mut TestAppContext) {
+    let source = format!("{} x\n", ">".repeat(10_000));
+    let mut h = open_with(cx, &[("n.md", &source)], |_| {});
+    h.keys("cmd-down");
+    h.type_text("y");
+    h.assert_round_trip("typing at the end");
+    let text = h.markdown();
+    assert!(
+        text.ends_with(" xy"),
+        "{:?}",
+        &text[text.len().saturating_sub(40)..]
+    );
+    assert_eq!(text.matches('>').count(), 10_000);
+}

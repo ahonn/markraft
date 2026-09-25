@@ -406,7 +406,7 @@ fn create(
             Some(handle)
         }
         Err(error) => {
-            eprintln!("Markraft: the Settings window could not be opened: {error}");
+            log::warn!("the Settings window could not be opened: {error}");
             None
         }
     }

@@ -724,10 +724,7 @@ impl Settings {
             Err(error) => return Err(crate::fs::describe(path, &error)),
         };
         serde_json::from_slice(&bytes).or_else(|error| {
-            eprintln!(
-                "Markraft: {} is not readable settings: {error}",
-                path.display()
-            );
+            log::warn!("{} is not readable settings: {error}", path.display());
             let mut damaged = path.as_os_str().to_os_string();
             damaged.push(format!(".damaged-{}", Uuid::new_v4()));
             let damaged = PathBuf::from(damaged);
@@ -753,7 +750,7 @@ impl Settings {
 
     pub fn write(&self, path: &Path) -> Result<(), StoreError> {
         let bytes = serde_json::to_vec_pretty(self).map_err(|error| {
-            eprintln!("Markraft: settings could not be encoded: {error}");
+            log::warn!("settings could not be encoded: {error}");
             "Markraft could not prepare your settings for saving.".to_owned()
         })?;
         crate::fs::atomic_write(path, &bytes)

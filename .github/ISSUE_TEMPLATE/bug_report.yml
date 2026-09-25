@@ -1,0 +1,36 @@
+name: Bug report
+description: Something Markraft did that it should not have, or did not do.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: From a fresh note if you can. Paste the Markdown involved if the note's content matters.
+      placeholder: |
+        1. Type `- [ ] item`
+        2. Press Return twice
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Copy Debug Info fills this in, and Report an Issue… does it for you. Both are in the Help menu under Markraft's menu bar icon, and in ⌘K.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log or crash report
+      description: Optional. Show Logs in Finder, beside those two, opens the folder with Markraft.log and any crash-*.log. Paste the relevant part; file names and bits of notes can appear in it, so read it first.
+      render: text

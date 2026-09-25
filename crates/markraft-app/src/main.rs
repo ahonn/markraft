@@ -1,9 +1,11 @@
 mod app;
+mod crash;
 mod doc;
 #[cfg(test)]
 mod e2e;
 mod fs;
 mod instance;
+mod logging;
 mod persistence;
 mod platform;
 mod remote_images;
@@ -38,6 +40,11 @@ is hidden. ⌥N toggles the window and ⌘K lists every action with its shortcut
 ";
 
 fn main() {
+    let crash_reports = crash::directory();
+    if let Some(directory) = &crash_reports {
+        logging::init(directory);
+        crash::install(directory.clone());
+    }
     let mut args = env::args_os().skip(1);
     let mut directory = None;
     let mut settings_path = None;
@@ -95,6 +102,9 @@ fn main() {
     // aside — a second launch that is only passing a request along must not move
     // the file this one is using, and its notice would have nowhere to be shown.
     let settings = Settings::read(&settings_path).unwrap_or_default();
+    // After the handover too: a launch that only passes a request along must
+    // not take the notice from the one that will show it.
+    let crash_notice = crash_reports.as_deref().and_then(crash::take_notice);
     let preferences = settings.preferences.clone();
     if restore_files {
         // Only the primary process restores the previous session. A second
@@ -103,7 +113,7 @@ fn main() {
         let sender = instance.sender();
         for path in &settings.open_files {
             if let Err(error) = sender.send(Request::OpenPaths(vec![path.clone()])) {
-                eprintln!("Markraft: could not reopen {}: {error}", path.display());
+                log::warn!("could not reopen {}: {error}", path.display());
             }
         }
     }
@@ -123,7 +133,7 @@ fn main() {
                 && let Err(error) =
                     store.update_settings(|settings| settings.notes_folder = Some(folder))
             {
-                eprintln!("Markraft: could not remember the notes folder: {error}");
+                log::warn!("could not remember the notes folder: {error}");
             }
             (Some(store), library, None)
         }
@@ -133,7 +143,7 @@ fn main() {
     let application = gpui_platform::application();
     application.on_open_urls(move |urls| {
         if let Err(error) = sender.open_urls(urls) {
-            eprintln!("Markraft: {error}");
+            log::warn!("{error}");
         }
     });
     application.on_reopen(|cx| {
@@ -204,6 +214,9 @@ fn main() {
                         cx,
                     )
                 });
+                if let Some((notice, report)) = crash_notice {
+                    app.update(cx, |app, cx| app.announce_crash_report(notice, report, cx));
+                }
                 let weak = app.downgrade();
                 window.on_window_should_close(cx, move |window, cx| {
                     let _ = weak.update(cx, |app, cx| app.hide(window, cx));
