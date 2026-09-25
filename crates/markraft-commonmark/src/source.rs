@@ -27,6 +27,7 @@
 use std::ops::Range;
 
 use comrak::Arena;
+use markraft_core::ends::KeptEnds;
 use markraft_core::kind::{HEADING_LEVEL_ATTR, TASK_CHECKED_ATTR};
 use markraft_core::{Fragment, Node, Schema};
 
@@ -38,7 +39,11 @@ use crate::{ParseError, commonmark_options, from_markdown, to_markdown};
 #[derive(Clone, Debug)]
 pub struct SourceDocument {
     source: String,
+    /// What an edit is written against: the file's reading, or, once a
+    /// [`SourceTrack`] wrote the file for the editor's document, that document.
     document: Node,
+    /// The file's own reading, block for block with `blocks`.
+    read: Node,
     body_start: usize,
     blocks: Vec<Range<usize>>,
     mapped: bool,
@@ -73,21 +78,7 @@ impl SourceDocument {
     pub fn parse(schema: &Schema, source: &str) -> Result<Self, ParseError> {
         let body_start = body_start(source);
         let body = &source[body_start..];
-        let document = from_markdown(schema, body)?;
-        let arena = Arena::new();
-        let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
-        let root = crate::parse::parse_ast(&arena, &normalized, &commonmark_options());
-        let lines = line_ranges(body);
-        let blocks = block_lines(schema, &document, root, &normalized)
-            .into_iter()
-            .filter_map(|(start, end)| {
-                let first = lines.get(start.checked_sub(1)?)?;
-                let last = lines.get(end.checked_sub(1)?)?;
-                Some(body_start + first.start..body_start + last.end)
-            })
-            .collect::<Vec<_>>();
-        let mapped = blocks.len() == document.child_count()
-            && blocks.windows(2).all(|pair| pair[0].end <= pair[1].start);
+        let (document, blocks, mapped) = read_blocks(schema, body, body_start)?;
         let newline = if body.contains("\r\n") {
             "\r\n"
         } else if body.contains('\r') {
@@ -97,6 +88,7 @@ impl SourceDocument {
         };
         Ok(Self {
             source: source.to_owned(),
+            read: document.clone(),
             document,
             body_start,
             blocks,
@@ -120,9 +112,26 @@ impl SourceDocument {
     /// This baseline is immutable, so undoing back to its document restores its
     /// exact bytes. Keep it for the lifetime of an editing session if undo must
     /// also restore the spelling that preceded an intervening save.
+    ///
+    /// Choosing a spelling only reads the stretches an edit changed, which
+    /// stands for the whole file by how CommonMark reads blocks; see
+    /// [`SourceDocument::validate_near`]. What is written is read back whole
+    /// first — a save is not a keystroke — and a file that would not read as
+    /// `document` is refused rather than written.
     pub fn render(&self, schema: &Schema, document: &Node) -> Result<String, SourceError> {
         let rendered = self.render_patched(schema, document)?;
-        Ok(self.renumbered(schema, document, rendered))
+        let rendered = self.renumbered(schema, document, rendered);
+        if rendered == self.source {
+            return Ok(rendered);
+        }
+        self.validate(schema, document, rendered)
+    }
+
+    /// Whether [`SourceDocument::render`] can write `document`, without the
+    /// ordinals it counts again: a list numbered as the file had it reads the
+    /// same, so the answer is the same, and an editor asks on every keystroke.
+    pub fn check(&self, schema: &Schema, document: &Node) -> Result<(), SourceError> {
+        self.render_patched(schema, document).map(|_| ())
     }
 
     /// `rendered` with the ordinals of each ordered list the edit touched
@@ -223,21 +232,192 @@ impl SourceDocument {
         for (line, column, digits, wanted) in edits.into_iter().rev() {
             lines[line].replace_range(column..column + digits, &wanted.to_string());
         }
-        self.validate(schema, document, lines.join("\n"))
+        // The counted lists lie in the blocks the edit changed, so reading
+        // those is enough to tell, as it is for the edit itself.
+        let old: Vec<Node> = self.document.children().cloned().collect();
+        let new: Vec<Node> = document.children().cloned().collect();
+        let kept = KeptEnds::of(&old, &new, |a, b| a == b);
+        let changed = Changed {
+            old: kept.old_middle(),
+            new: kept.new_middle(),
+        };
+        self.validate_near(schema, document, lines.join("\n"), &changed)
             .unwrap_or(rendered)
+    }
+
+    /// The file for `document` as [`SourceDocument::render`] writes it, but
+    /// read back only as far as the edit reached: the step a [`SourceTrack`]
+    /// takes on every keystroke.
+    fn step(&self, schema: &Schema, document: &Node) -> Result<String, SourceError> {
+        let rendered = self.render_patched(schema, document)?;
+        Ok(self.renumbered(schema, document, rendered))
+    }
+
+    /// This baseline moved on to `rendered`, a file [`SourceDocument::step`]
+    /// wrote: its document and its blocks' bytes, read again only between the
+    /// untouched blocks either side of what changed. `None` when the file
+    /// cannot be read at all, which a file `step` wrote always can.
+    fn advanced(&self, schema: &Schema, rendered: String) -> Option<Self> {
+        if rendered == self.source {
+            return Some(self.clone());
+        }
+        let next = match self.advanced_near(schema, &rendered) {
+            Some(next) => next,
+            None => Self::parse(schema, &rendered).ok()?,
+        };
+        #[cfg(debug_assertions)]
+        if let Ok(whole) = Self::parse(schema, &rendered) {
+            debug_assert!(
+                whole.read == next.read && whole.blocks == next.blocks,
+                "a baseline read near its edit differs from the file read whole: {rendered:?}"
+            );
+        }
+        Some(next)
+    }
+
+    /// This baseline standing for `document`, the editor's document it was
+    /// just written for, when their blocks line up one to one.
+    ///
+    /// The file reads back as `document` up to what reading cannot give back —
+    /// an empty paragraph typed into next, spaces a caret stands after — and
+    /// the next edit is made to `document`, so that is what it is written
+    /// against: a paragraph the file holds as a bare list marker is still the
+    /// paragraph the next keystroke types into. An empty paragraph between
+    /// blocks has no block in the file, so it stands aside; when the blocks
+    /// still do not line up, the file's own reading stands. The blocks the
+    /// edit left alone come over as the same nodes, which compare by identity.
+    fn adopting(mut self, schema: &Schema, document: &Node) -> Self {
+        let paragraph = schema.node_id(crate::schema::PARAGRAPH);
+        let blocks: Vec<Node> = document
+            .children()
+            .filter(|block| Some(block.type_id()) != paragraph || block.child_count() > 0)
+            .cloned()
+            .collect();
+        self.document = if blocks.len() == self.blocks.len() {
+            document.copy(Fragment::from_nodes(blocks))
+        } else {
+            self.read.clone()
+        };
+        self
+    }
+
+    /// [`SourceDocument::advanced`] by reading the new bytes from the start of
+    /// the untouched block before the change to the end of the one after it —
+    /// `None` when that stretch cannot stand for the whole file: the change
+    /// reached the front matter, the blocks either side read otherwise than
+    /// they did, or a definition any link may read is in the stretch.
+    fn advanced_near(&self, schema: &Schema, rendered: &str) -> Option<Self> {
+        if !self.mapped || self.blocks.is_empty() {
+            return None;
+        }
+        let (old, new) = (self.source.as_bytes(), rendered.as_bytes());
+        let first = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+        let shorter = old.len().min(new.len());
+        let last = old[first..]
+            .iter()
+            .rev()
+            .zip(new[first..].iter().rev())
+            .take(shorter - first)
+            .take_while(|(a, b)| a == b)
+            .count();
+        if first < self.body_start {
+            return None;
+        }
+        let changed = first..old.len() - last;
+        // The blocks the change touched are `touched`: a block that ends where
+        // it starts, or starts where it ends, may have grown by it.
+        let count = self.blocks.len();
+        let touched_start = self
+            .blocks
+            .partition_point(|block| block.end < changed.start);
+        let touched_end = self
+            .blocks
+            .partition_point(|block| block.start <= changed.end);
+        let before = touched_start.checked_sub(1);
+        let after = (touched_end < count).then_some(touched_end);
+        let lo = before.unwrap_or(0);
+        let hi = after.map_or(count, |after| after + 1);
+        let start = before.map_or(self.body_start, |before| self.blocks[before].start);
+        let old_end = after.map_or(old.len(), |after| self.blocks[after].end);
+        let shift = |at: usize| (at + new.len()).checked_sub(old.len());
+        let new_end = shift(old_end)?;
+        let stretch = rendered.get(start..new_end)?;
+        let (read, ranges, mapped) = read_blocks(schema, stretch, start).ok()?;
+        if !mapped {
+            return None;
+        }
+        let olds: Vec<Node> = self.read.children().cloned().collect();
+        let defines = |nodes: &[Node]| {
+            !crate::textblock::definition_candidates(
+                schema,
+                &self.read.copy(Fragment::from_nodes(nodes.iter().cloned())),
+            )
+            .is_empty()
+        };
+        let read_blocks: Vec<Node> = read.children().cloned().collect();
+        if defines(&olds[lo..hi]) || defines(&read_blocks) {
+            return None;
+        }
+        // Read on its own, the stretch has none of the note's definitions;
+        // none of them changed, so its links resolve against the note's.
+        let read = crate::textblock::resolve_references_from(schema, &read, &self.read);
+        let mut read: Vec<Node> = read.children().cloned().collect();
+        let anchors = usize::from(before.is_some()) + usize::from(after.is_some());
+        if read.len() < anchors {
+            return None;
+        }
+        if let Some(before) = before {
+            if read[0] != olds[before] || ranges[0] != self.blocks[before] {
+                return None;
+            }
+            read[0] = olds[before].clone();
+        }
+        if let Some(after) = after {
+            let at = read.len() - 1;
+            let was = &self.blocks[after];
+            if read[at] != olds[after] || ranges[at] != (shift(was.start)?..shift(was.end)?) {
+                return None;
+            }
+            read[at] = olds[after].clone();
+        }
+        let children = olds[..lo]
+            .iter()
+            .cloned()
+            .chain(read)
+            .chain(olds[hi..].iter().cloned());
+        let blocks = self.blocks[..lo]
+            .iter()
+            .cloned()
+            .chain(ranges)
+            .chain(
+                self.blocks[hi..]
+                    .iter()
+                    .map(|block| shift(block.start).unwrap_or(0)..shift(block.end).unwrap_or(0)),
+            )
+            .collect();
+        let read = self.read.copy(Fragment::from_nodes(children));
+        Some(Self {
+            source: rendered.to_owned(),
+            document: read.clone(),
+            read,
+            body_start: self.body_start,
+            blocks,
+            mapped: true,
+            newline: self.newline,
+        })
     }
 
     fn render_patched(&self, schema: &Schema, document: &Node) -> Result<String, SourceError> {
         if document == &self.document {
             return Ok(self.source.clone());
         }
-        let expected = to_markdown(schema, document);
-        if expected == to_markdown(schema, &self.document) {
-            return Ok(self.source.clone());
-        }
         // An empty Markdown file has an implicit editor paragraph but no AST
         // block. There is no existing syntax to disturb in this special case.
         if self.blocks.is_empty() {
+            let expected = to_markdown(schema, document);
+            if expected == to_markdown(schema, &self.document) {
+                return Ok(self.source.clone());
+            }
             let mut result = self.source.clone();
             if !self.source[self.body_start..].trim().is_empty() {
                 // A reference-definition-only file has no semantic AST blocks.
@@ -252,21 +432,40 @@ impl SourceDocument {
         }
         let old: Vec<_> = self.document.children().cloned().collect();
         let new: Vec<_> = document.children().cloned().collect();
-        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-        let suffix = old[prefix..]
-            .iter()
-            .rev()
-            .zip(new[prefix..].iter().rev())
-            .take_while(|(a, b)| a == b)
-            .count();
-        let (end, new_end) = (old.len() - suffix, new.len() - suffix);
+        let kept = KeptEnds::of(&old, &new, |a, b| a == b);
+        let (prefix, suffix) = (kept.prefix(), kept.suffix());
+        let (end, new_end) = (kept.old_middle().end, kept.new_middle().end);
+        // Edits far apart are written and checked one by one, so the cost of a
+        // keystroke is the size of what changed rather than the distance
+        // between the first change and the last.
+        if let Some(done) = self.render_islands(
+            schema,
+            document,
+            &old[prefix..end],
+            &new[prefix..new_end],
+            prefix,
+        ) {
+            return Ok(done);
+        }
         let after = block_markdown(schema, document, &new[prefix..new_end]);
+        // An edit the writer cannot see — the blocks it touched spell as they
+        // did — leaves the file as it is. The blocks around it are the same
+        // nodes, so only a whole spelling can tell whether they part the same.
+        if after == block_markdown(schema, &self.document, &old[prefix..end])
+            && to_markdown(schema, document) == to_markdown(schema, &self.document)
+        {
+            return Ok(self.source.clone());
+        }
+        let changed = Changed {
+            old: prefix..end,
+            new: prefix..new_end,
+        };
         if prefix == end {
             return self.insert_blocks(
                 schema,
                 document,
                 self.source.clone(),
-                prefix,
+                &changed,
                 suffix,
                 &after,
             );
@@ -277,7 +476,7 @@ impl SourceDocument {
             // gaps, a blank line too many, where they stood.
             let mut result = self.source.clone();
             result.replace_range(self.dropped_range(prefix, end, suffix), "");
-            return self.validate(schema, document, result);
+            return self.validate_near(schema, document, result, &changed);
         }
         let region = self.blocks[prefix].start..self.blocks[end - 1].end;
         let pieces = self.pieces(
@@ -289,7 +488,7 @@ impl SourceDocument {
         );
         let mut result = self.source.clone();
         result.replace_range(region.clone(), &pieces);
-        if let Ok(done) = self.validate(schema, document, result) {
+        if let Ok(done) = self.validate_near(schema, document, result, &changed) {
             return Ok(done);
         }
         // The blocks the edit touched, written together the way the writer
@@ -297,7 +496,7 @@ impl SourceDocument {
         // cannot hold the edit — two lists that would run together, say.
         let mut result = self.source.clone();
         result.replace_range(region, &self.with_newlines(&after));
-        self.validate(schema, document, result)
+        self.validate_near(schema, document, result, &changed)
     }
 
     /// The source of the changed top-level blocks `new` in place of `old`,
@@ -385,12 +584,13 @@ impl SourceDocument {
         schema: &Schema,
         document: &Node,
         mut result: String,
-        prefix: usize,
+        changed: &Changed,
         suffix: usize,
         after: &str,
     ) -> Result<String, SourceError> {
+        let prefix = changed.old.start;
         if after.is_empty() {
-            return self.validate(schema, document, result);
+            return self.validate_near(schema, document, result, changed);
         }
         let separator = self.newline.repeat(2);
         let blocks = self.with_newlines(after);
@@ -404,11 +604,14 @@ impl SourceDocument {
                 insertion.push_str(&separator);
             }
             result.insert_str(at, &insertion);
-            return self.validate(schema, document, result);
+            return self.validate_near(schema, document, result, changed);
         };
         let mut candidate = result.clone();
-        candidate.insert_str(before.end, &format!("{separator}{blocks}"));
-        let placed = self.validate(schema, document, candidate);
+        let following = self
+            .following(schema, document, &changed.new)
+            .unwrap_or_else(|| format!("{separator}{blocks}"));
+        candidate.insert_str(before.end, &following);
+        let placed = self.validate_near(schema, document, candidate, changed);
         if placed.is_ok() || suffix == 0 {
             return placed;
         }
@@ -424,7 +627,26 @@ impl SourceDocument {
             gap.end..gap.end
         };
         result.replace_range(range, &format!("{separator}{blocks}{separator}"));
-        self.validate(schema, document, result)
+        self.validate_near(schema, document, result, changed)
+    }
+
+    /// The writer's spelling of `document`'s blocks `new`, with the gap that
+    /// parts them from the block before, spelled after that block as the
+    /// writer would go on from it — `None` when there is no block before, or
+    /// when spelling it with them changes its own spelling.
+    ///
+    /// How the writer parts blocks depends on the block before them: an
+    /// empty paragraph after a divider writes as nothing, and after a
+    /// paragraph as a blank line. Spelled on their own, the new blocks would
+    /// not know which.
+    fn following(&self, schema: &Schema, document: &Node, new: &Range<usize>) -> Option<String> {
+        let before = document.children().nth(new.start.checked_sub(1)?)?.clone();
+        let blocks = document.children().skip(new.start).take(new.len()).cloned();
+        let alone = block_markdown(schema, document, std::slice::from_ref(&before));
+        let together: Vec<Node> = std::iter::once(before).chain(blocks).collect();
+        let together = block_markdown(schema, document, &together);
+        let rest = together.strip_prefix(&alone)?;
+        Some(self.with_newlines(rest))
     }
 
     fn with_newlines(&self, source: &str) -> String {
@@ -439,33 +661,385 @@ impl SourceDocument {
     ) -> Result<String, SourceError> {
         let parsed = from_markdown(schema, &source[self.body_start..])
             .map_err(|_| SourceError::UnsupportedEdit)?;
-        if parsed == *target || to_markdown(schema, &parsed) == to_markdown(schema, target) {
-            return Ok(source);
-        }
-        // CommonMark discards spaces at a paragraph/heading's end. During
-        // typing those spaces are real editor content (the next keystroke can
-        // make them internal). Keep their bytes in the candidate, but compare
-        // the target using only this specific parser normalization. Code and
-        // unsupported syntax still require the original strict comparison.
-        let trimmed = without_trailing_spaces(schema, target);
-        if trimmed != *target && to_markdown(schema, &parsed) == to_markdown(schema, &trimmed) {
-            return Ok(source);
-        }
-        // An empty paragraph is typing in progress — Return at the start of a
-        // block, with nothing yet on the new line. The file holds nothing for
-        // it, so a document that differs from its reading only by empty
-        // paragraphs is the same note. Only the ones whose going changes
-        // nothing else are let go; see `without_empty_paragraphs`.
-        let bare = without_empty_paragraphs(schema, &trimmed);
-        let read = without_empty_paragraphs(schema, &parsed);
-        if bare != trimmed
-            && (read == bare || to_markdown(schema, &read) == to_markdown(schema, &bare))
-        {
+        if reads_as(schema, &parsed, target) {
             Ok(source)
         } else {
             Err(SourceError::UnsupportedEdit)
         }
     }
+
+    /// [`SourceDocument::validate`], reading only as much of `source` as the
+    /// edit can have changed when that is enough to tell.
+    ///
+    /// The blocks outside `changed` are the baseline's own, in its own bytes,
+    /// and read back as they did — unless the edit reached past its blocks. It
+    /// can do that at its edges, where an unclosed fence or a lazy line takes
+    /// in the block beside it, and through the definitions a link anywhere
+    /// resolves against. So the blocks it changed are read with an untouched
+    /// block either side, against the whole document's definitions; when
+    /// that stretch reads as the document's same stretch and the edit neither
+    /// added nor removed a definition, the whole file reads back too. Anything
+    /// else is read whole.
+    fn validate_near(
+        &self,
+        schema: &Schema,
+        target: &Node,
+        source: String,
+        changed: &Changed,
+    ) -> Result<String, SourceError> {
+        let window = self.window(changed);
+        // The edit only moved what follows it by what it added or took away.
+        let stop = (window.end + source.len()).checked_sub(self.source.len());
+        let stretch = stop.and_then(|stop| source.get(window.start..stop));
+        if stretch.is_some_and(|stretch| self.stretch_reads(schema, target, stretch, changed)) {
+            return Ok(source);
+        }
+        self.validate(schema, target, source)
+    }
+
+    /// The baseline's bytes an edit of the blocks `changed` is checked in:
+    /// from the start of the untouched block before them, or of the body, to
+    /// the end of the untouched block after them, or of the file.
+    fn window(&self, changed: &Changed) -> Range<usize> {
+        let start = changed
+            .old
+            .start
+            .checked_sub(1)
+            .map_or(self.body_start, |before| self.blocks[before].start);
+        let stop = self
+            .blocks
+            .get(changed.old.end)
+            .map_or(self.source.len(), |after| after.end);
+        start..stop
+    }
+
+    /// Whether `stretch`, the candidate's text in place of the baseline's
+    /// [`SourceDocument::window`] of `changed`, reads as the edited document's
+    /// same blocks. `false` too when the edit added, removed or changed a
+    /// definition, which any link in the file may read.
+    fn stretch_reads(
+        &self,
+        schema: &Schema,
+        target: &Node,
+        stretch: &str,
+        changed: &Changed,
+    ) -> bool {
+        let old: Vec<&Node> = self.document.children().collect();
+        let new: Vec<&Node> = target.children().collect();
+        let defines = |block: &&Node| {
+            !crate::textblock::definition_candidates(
+                schema,
+                &target.copy(Fragment::from_nodes([(*block).clone()])),
+            )
+            .is_empty()
+        };
+        if old[changed.old.clone()]
+            .iter()
+            .chain(&new[changed.new.clone()])
+            .any(defines)
+        {
+            return false;
+        }
+        let from = changed.new.start - usize::from(changed.old.start > 0);
+        let to = (changed.new.end + usize::from(changed.old.end < old.len())).min(new.len());
+        let expected = target.copy(Fragment::from_nodes(
+            new[from..to].iter().map(|&n| n.clone()),
+        ));
+        let Ok(read) = from_markdown(schema, stretch) else {
+            return false;
+        };
+        reads_as(schema, &read, &expected)
+            || reads_as(
+                schema,
+                &crate::textblock::resolve_references_from(schema, &read, target),
+                &expected,
+            )
+    }
+
+    /// The file for `document` when its changes are islands of blocks apart
+    /// from each other, each spelled and checked on its own — `None` when there
+    /// is one island, or when an island cannot be told apart from its
+    /// surroundings that way, for the edit to be written as one.
+    ///
+    /// CommonMark reads blocks line by line against the blocks still open, and
+    /// a block once closed never opens again. An untouched block therefore
+    /// reads the same wherever the lines before it came from, once the block
+    /// itself reads the same; so does everything after it. An island checked
+    /// with an untouched block either side stands on its own, and islands are
+    /// kept at least two untouched blocks apart, so no block is the edge of two.
+    ///
+    /// `old` and `new` are the blocks between the edit's first change and its
+    /// last, which both documents hold from index `first`.
+    fn render_islands(
+        &self,
+        schema: &Schema,
+        document: &Node,
+        old: &[Node],
+        new: &[Node],
+        first: usize,
+    ) -> Option<String> {
+        let islands = islands(old, new)?;
+        if islands.len() < 2 {
+            return None;
+        }
+        let old: Vec<Node> = self.document.children().cloned().collect();
+        let new: Vec<Node> = document.children().cloned().collect();
+        let mut patches = Vec::with_capacity(islands.len());
+        for island in &islands {
+            let island = Changed {
+                old: first + island.old.start..first + island.old.end,
+                new: first + island.new.start..first + island.new.end,
+            };
+            patches.push(self.patch_island(schema, document, &old, &new, &island)?);
+        }
+        let mut result = self.source.clone();
+        for (range, text) in patches.into_iter().rev() {
+            result.replace_range(range, &text);
+        }
+        Some(result)
+    }
+
+    /// The baseline's bytes to replace, and with what, for the island
+    /// `changed`: the first of the spellings a single edit would try that
+    /// reads back in the island's window.
+    fn patch_island(
+        &self,
+        schema: &Schema,
+        document: &Node,
+        old: &[Node],
+        new: &[Node],
+        changed: &Changed,
+    ) -> Option<(Range<usize>, String)> {
+        let window = self.window(changed);
+        let (first, end) = (changed.old.start, changed.old.end);
+        let after = block_markdown(schema, document, &new[changed.new.clone()]);
+        let separator = self.newline.repeat(2);
+        let blocks = self.with_newlines(&after);
+        let has_after = end < self.blocks.len();
+        let mut candidates: Vec<(Range<usize>, String)> = Vec::new();
+        let keep = window.start..window.start;
+        if after == block_markdown(schema, &self.document, &old[first..end]) {
+            candidates.push((keep.clone(), String::new()));
+        }
+        if first == end {
+            // New blocks between untouched ones; see `insert_blocks`.
+            match first.checked_sub(1) {
+                _ if after.is_empty() => candidates.push((keep, String::new())),
+                None => {
+                    let at = self
+                        .blocks
+                        .first()
+                        .map_or(self.body_start, |range| range.start);
+                    let tail = if has_after { separator.as_str() } else { "" };
+                    candidates.push((at..at, format!("{blocks}{tail}")));
+                }
+                Some(before) => {
+                    let before = self.blocks[before].end;
+                    let following = self
+                        .following(schema, document, &changed.new)
+                        .unwrap_or_else(|| format!("{separator}{blocks}"));
+                    candidates.push((before..before, following));
+                    if has_after {
+                        let gap = before..self.blocks[first].start;
+                        let range = if self.source[gap.clone()].trim().is_empty() {
+                            gap
+                        } else {
+                            gap.end..gap.end
+                        };
+                        candidates.push((range, format!("{separator}{blocks}{separator}")));
+                    }
+                }
+            }
+        } else if changed.new.is_empty() {
+            candidates.push((
+                self.dropped_range(first, end, usize::from(has_after)),
+                String::new(),
+            ));
+        } else {
+            let region = self.blocks[first].start..self.blocks[end - 1].end;
+            let pieces = self.pieces(
+                schema,
+                document,
+                &old[first..end],
+                &new[changed.new.clone()],
+                first,
+            );
+            candidates.push((region.clone(), pieces));
+            candidates.push((region, blocks));
+        }
+        candidates.into_iter().find(|(range, text)| {
+            let stretch = format!(
+                "{}{text}{}",
+                &self.source[window.start..range.start],
+                &self.source[range.end..window.end]
+            );
+            self.stretch_reads(schema, document, &stretch, changed)
+        })
+    }
+}
+
+/// A note's file across an editing session: the file as it was read, and the
+/// file as the last write spelled it.
+///
+/// Each document is written against the last one written, so a keystroke
+/// costs what it changed however far the note has come from the file it was
+/// read from; a document that is the one read, as undoing everything makes
+/// it, is written as the bytes read. The editor asks on every keystroke and
+/// the save writes what it was answered, so a keystroke the track took is one
+/// the save can write.
+#[derive(Debug)]
+pub struct SourceTrack {
+    origin: SourceDocument,
+    /// The file as last written; `None` while that is the file read, so a
+    /// note never edited holds one copy of its text.
+    current: std::sync::Mutex<Option<SourceDocument>>,
+}
+
+impl SourceTrack {
+    /// A track that starts at `origin`, the file as read.
+    pub fn new(origin: SourceDocument) -> Self {
+        Self {
+            origin,
+            current: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The file as it was read.
+    pub fn origin(&self) -> &SourceDocument {
+        &self.origin
+    }
+
+    /// The file for `document`, written against the last file this track
+    /// wrote, and read back as far as the change reached.
+    pub fn write(&self, schema: &Schema, document: &Node) -> Result<String, SourceError> {
+        let mut held = self
+            .current
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if document == &self.origin.document {
+            *held = None;
+            return Ok(self.origin.source.clone());
+        }
+        let current = held.as_ref().unwrap_or(&self.origin);
+        if document == &current.document {
+            return Ok(current.source.clone());
+        }
+        // What the file read could hold, the track holds too: an edit its
+        // last file cannot take from where it stands is written against the
+        // file read, as it would have been without the track.
+        let (base, rendered) = match current.step(schema, document) {
+            Ok(rendered) => (current, rendered),
+            Err(_) => (&self.origin, self.origin.step(schema, document)?),
+        };
+        *held = base
+            .advanced(schema, rendered.clone())
+            .map(|next| next.adopting(schema, document));
+        Ok(rendered)
+    }
+
+    /// [`SourceTrack::write`], for the file a save puts on disk: read back
+    /// whole, and refused rather than written when it would not read as
+    /// `document`.
+    pub fn save(&self, schema: &Schema, document: &Node) -> Result<String, SourceError> {
+        let rendered = self.write(schema, document)?;
+        if rendered == self.origin.source {
+            return Ok(rendered);
+        }
+        self.origin.validate(schema, document, rendered)
+    }
+}
+
+/// How many blocks, old and new together, one island may span. Finding where
+/// an island ends compares every pair of blocks within this reach, so the
+/// search costs its square; an edit that changes more blocks at once is
+/// written as one, as a keystroke never does.
+const ISLAND_REACH: usize = 64;
+
+/// The islands of top-level blocks `new` changed from `old`, in order: each
+/// the blocks between two runs of equal blocks, joined with the next when
+/// fewer than two equal blocks part them. `None` when an island reaches
+/// further than [`ISLAND_REACH`].
+fn islands(old: &[Node], new: &[Node]) -> Option<Vec<Changed>> {
+    let (mut i, mut j) = (0, 0);
+    let mut out: Vec<Changed> = Vec::new();
+    while i < old.len() || j < new.len() {
+        if i < old.len() && j < new.len() && old[i] == new[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        // The nearest pair of equal blocks past here, fewest blocks skipped;
+        // with none before the end, the island runs to it.
+        let left = (old.len() - i) + (new.len() - j);
+        let (a, b) =
+            match (1..=left.min(ISLAND_REACH)).find_map(|reach| equal_at(old, new, i, j, reach)) {
+                Some(skipped) => skipped,
+                None if left <= ISLAND_REACH => (old.len() - i, new.len() - j),
+                None => return None,
+            };
+        let island = Changed {
+            old: i..i + a,
+            new: j..j + b,
+        };
+        match out.last_mut() {
+            Some(last) if island.old.start - last.old.end < 2 => {
+                last.old.end = island.old.end;
+                last.new.end = island.new.end;
+            }
+            _ => out.push(island),
+        }
+        i += a;
+        j += b;
+    }
+    Some(out)
+}
+
+/// The blocks skipped, `(old, new)`, `reach` blocks in all past `i` and `j`,
+/// to a pair of equal blocks.
+fn equal_at(
+    old: &[Node],
+    new: &[Node],
+    i: usize,
+    j: usize,
+    reach: usize,
+) -> Option<(usize, usize)> {
+    (0..=reach).find_map(|a| {
+        let b = reach - a;
+        (i + a < old.len() && j + b < new.len() && old[i + a] == new[j + b]).then_some((a, b))
+    })
+}
+
+/// Blocks an edit changed: the baseline's top-level blocks `old` became the
+/// edited document's `new`, and the blocks either side are equal in both.
+#[derive(Clone, Debug, PartialEq)]
+struct Changed {
+    old: Range<usize>,
+    new: Range<usize>,
+}
+
+/// Whether `parsed`, read from a file, is `target`, the editor's document, up
+/// to what reading a file cannot give back.
+fn reads_as(schema: &Schema, parsed: &Node, target: &Node) -> bool {
+    if parsed == target || to_markdown(schema, parsed) == to_markdown(schema, target) {
+        return true;
+    }
+    // CommonMark discards spaces at a paragraph/heading's end. During
+    // typing those spaces are real editor content (the next keystroke can
+    // make them internal). Keep their bytes in the candidate, but compare
+    // the target using only this specific parser normalization. Code and
+    // unsupported syntax still require the original strict comparison.
+    let trimmed = without_trailing_spaces(schema, target);
+    if trimmed != *target && to_markdown(schema, parsed) == to_markdown(schema, &trimmed) {
+        return true;
+    }
+    // An empty paragraph is typing in progress — Return at the start of a
+    // block, with nothing yet on the new line. The file holds nothing for
+    // it, so a document that differs from its reading only by empty
+    // paragraphs is the same note. Only the ones whose going changes
+    // nothing else are let go; see `without_empty_paragraphs`.
+    let bare = without_empty_paragraphs(schema, &trimmed);
+    let read = without_empty_paragraphs(schema, parsed);
+    bare != trimmed && (read == bare || to_markdown(schema, &read) == to_markdown(schema, &bare))
 }
 
 /// Whether two spellings of a block read as the same block, each read on its
@@ -806,6 +1380,30 @@ fn continues(line: &str, text: &str) -> bool {
     line.ends_with(text) && line[..line.len() - text.len()].chars().all(is_prefix_char)
 }
 
+/// Whether `line` is a list item's marker and nothing else after the
+/// container prefix: `-`, `+`, `*`, `1.` or `1)`, with a task box or not.
+fn is_bare_marker(line: &str) -> bool {
+    let content = line.trim_start_matches(is_prefix_char).trim_end();
+    let rest = match content.strip_prefix(['-', '+', '*']) {
+        Some(rest) => rest,
+        None => {
+            let digits = content.len()
+                - content
+                    .trim_start_matches(|c: char| c.is_ascii_digit())
+                    .len();
+            if digits == 0 {
+                return false;
+            }
+            match content[digits..].strip_prefix(['.', ')']) {
+                Some(rest) => rest,
+                None => return false,
+            }
+        }
+    };
+    let rest = rest.trim_start();
+    rest.is_empty() || ["[ ]", "[x]", "[X]"].contains(&rest)
+}
+
 /// Whether `line` is a fence line: its content, after any container prefix,
 /// opens with a run of at least three backticks or tildes. Answers the run.
 fn fence_of(line: &str) -> Option<&str> {
@@ -833,7 +1431,29 @@ fn locate(
                 _ => None,
             };
             if n == 0 {
-                return Some(None);
+                // An item whose first block is empty is its marker alone on
+                // its line: that line is the leaf's, and text typed into the
+                // leaf goes there.
+                let next = (*cursor..lines.len())
+                    .find(|&index| !lines[index].0.chars().all(is_prefix_char));
+                return Some(
+                    next.filter(|&index| {
+                        leaf.opens_item.is_some() && is_bare_marker(&lines[index].0)
+                    })
+                    .map(|index| {
+                        *cursor = index + 1;
+                        let (line, end) = &lines[index];
+                        Located {
+                            first: index,
+                            count: 1,
+                            prefixes: vec![line.clone()],
+                            ends: vec![end.clone()],
+                            suffix: String::new(),
+                            base: line.clone(),
+                            close: None,
+                        }
+                    }),
+                );
             }
             for first in *cursor..lines.len() {
                 let Some(located) = locate_text(texts, kind, lines, first) else {
@@ -1112,6 +1732,9 @@ fn patch_block(
     let mut pending: &[(String, String)] = &[];
     let mut after_marker = false;
     let mut after_paired = false;
+    // Whether the last leaf emitted stands for a marker alone on its line in
+    // the source, which nothing parted from the item's next block.
+    let mut after_bare = false;
     let mut first = true;
     for (j, leaf) in after.iter().enumerate() {
         let paired = partner(j).map(|i| (&before[i], located[i].as_ref()));
@@ -1127,8 +1750,11 @@ fn patch_block(
         // item of a loose list, and before any other block but the one a
         // marker line alone opens.
         if !first {
-            let kept =
-                after_paired && paired.is_some_and(|(was, _)| was.opens_item == leaf.opens_item);
+            // Text typed onto a marker that stood alone needs the blank line
+            // its source never had before the item's next block.
+            let kept = after_paired
+                && (after_marker || !after_bare)
+                && paired.is_some_and(|(was, _)| was.opens_item == leaf.opens_item);
             if kept {
                 cur.out.extend_from_slice(pending);
             } else {
@@ -1158,7 +1784,14 @@ fn patch_block(
         pending = &[];
         match paired {
             Some((was, Some(place))) => {
-                let (old_lines, new_lines) = (&was.lines, &leaf.lines);
+                // A bare marker line is the one line of a leaf with no text.
+                let bare = [String::new()];
+                let old_lines: &[String] = if was.lines.is_empty() && place.count == 1 {
+                    &bare
+                } else {
+                    &was.lines
+                };
+                let new_lines = &leaf.lines;
                 let head = old_lines
                     .iter()
                     .zip(new_lines)
@@ -1170,18 +1803,13 @@ fn patch_block(
                     .zip(new_lines[head..].iter().rev())
                     .take_while(|(a, b)| a == b)
                     .count();
-                let texts: &[String] = if marker_only {
-                    &[String::new()]
-                } else {
-                    new_lines
-                };
+                let texts: &[String] = if marker_only { &bare[..] } else { new_lines };
+                let new_count = texts.len();
                 for (k, text) in texts.iter().enumerate() {
-                    let from_old = if marker_only {
-                        None
-                    } else if k < head {
+                    let from_old = if k < head {
                         Some(k)
-                    } else if k >= new_lines.len() - tail {
-                        Some(k + old_lines.len() - new_lines.len())
+                    } else if k >= new_count - tail {
+                        Some(k + old_lines.len() - new_count)
                     } else if k < old_lines.len() - tail {
                         Some(k)
                     } else {
@@ -1217,6 +1845,8 @@ fn patch_block(
         }
         after_marker = marker_only;
         after_paired = matches!(paired, Some((_, Some(_))));
+        after_bare =
+            matches!(paired, Some((was, Some(place))) if was.lines.is_empty() && place.count == 1);
     }
     // What followed the last leaf stays but for its blank lines: a setext
     // underline, not the gap a dropped leaf left.
@@ -1668,6 +2298,31 @@ pub fn without_empty_paragraphs(schema: &Schema, node: &Node) -> Node {
     node.copy(Fragment::from_nodes(children))
 }
 
+/// `body` read as a document, with the bytes each of its top-level blocks
+/// takes, counted from `offset`, and whether every block found its bytes.
+fn read_blocks(
+    schema: &Schema,
+    body: &str,
+    offset: usize,
+) -> Result<(Node, Vec<Range<usize>>, bool), ParseError> {
+    let document = from_markdown(schema, body)?;
+    let arena = Arena::new();
+    let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
+    let root = crate::parse::parse_ast(&arena, &normalized, &commonmark_options());
+    let lines = line_ranges(body);
+    let blocks = block_lines(schema, &document, root, &normalized)
+        .into_iter()
+        .filter_map(|(start, end)| {
+            let first = lines.get(start.checked_sub(1)?)?;
+            let last = lines.get(end.checked_sub(1)?)?;
+            Some(offset + first.start..offset + last.end)
+        })
+        .collect::<Vec<_>>();
+    let mapped = blocks.len() == document.child_count()
+        && blocks.windows(2).all(|pair| pair[0].end <= pair[1].start);
+    Ok((document, blocks, mapped))
+}
+
 fn block_markdown(schema: &Schema, document: &Node, nodes: &[Node]) -> String {
     if nodes.is_empty() {
         String::new()
@@ -1721,4 +2376,43 @@ fn line_ranges(source: &str) -> Vec<Range<usize>> {
         lines.push(start..source.len());
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SourceDocument;
+    use crate::commonmark_schema;
+
+    /// An edit inside one block, or between two, is read again only near
+    /// itself; one that reaches the front matter or a definition is not.
+    #[test]
+    fn a_baseline_moves_on_by_reading_near_its_edit() {
+        let schema = commonmark_schema();
+        let filler: String = (0..30).map(|i| format!("filler {i}\n\n")).collect();
+        let original = format!("---\na: b\n---\n{filler}# end\n");
+        let baseline = SourceDocument::parse(&schema, &original).unwrap();
+        for (edited, near) in [
+            (original.replace("filler 12", "filler twelve"), true),
+            (original.replace("filler 0\n", "filler 0 first\n"), true),
+            (original.replace("# end", "# the end"), true),
+            (
+                original.replace("filler 5\n\n", "filler 5\n\nnew\n\n"),
+                true,
+            ),
+            (original.replace("filler 5\n\n", ""), true),
+            (
+                original.replace("filler 5\n\n", "filler 5\n\n[r]: /x\n\n"),
+                false,
+            ),
+            (original.replace("a: b", "a: c"), false),
+        ] {
+            let next = baseline.advanced_near(&schema, &edited);
+            assert_eq!(next.is_some(), near, "{edited:?}");
+            if let Some(next) = next {
+                let whole = SourceDocument::parse(&schema, &edited).unwrap();
+                assert_eq!(next.document, whole.document, "{edited:?}");
+                assert_eq!(next.blocks, whole.blocks, "{edited:?}");
+            }
+        }
+    }
 }

@@ -2,13 +2,20 @@
 use crate::surface::LayoutLine;
 use gpui::{A11ySubtreeBuilder, App, Bounds, Entity, Pixels, Role, Window, accesskit};
 use markraft_core::kind::conceal::{self, Reveal};
-use markraft_core::projection::Projection;
+use markraft_core::projection::{Line, Projection};
 use markraft_core::{EditorState, Selection};
 use std::ops::Range;
+use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Default)]
 pub(crate) struct AccessibleText {
+    /// What the last update was built from; see [`AccessibleText::update`].
+    built: Option<Built>,
+    /// What each line no frame laid out reads as, for the projection they
+    /// line up with; see [`AccessibleText::push_unlaid`].
+    unlaid: Vec<Option<Unlaid>>,
+    unlaid_of: Option<Arc<Projection>>,
     runs: Vec<TextRun>,
     selection: (usize, usize),
     controls: Vec<AccessibleControl>,
@@ -84,6 +91,32 @@ impl AccessibleControl {
     }
 }
 
+/// A line no frame laid out, as a reader is told it: kept from one update to
+/// the next while the line keeps its body, since reading it means walking
+/// its text grapheme by grapheme. Positions are the line's own, from where
+/// it starts, so a line an edit only moved along keeps them.
+struct Unlaid {
+    text: String,
+    offsets: Vec<usize>,
+    positions: Vec<usize>,
+    /// Whether the text ends in the break to the next line, which the last
+    /// line has none of.
+    newline: bool,
+    cell: Option<(usize, usize)>,
+}
+
+/// What an update read that changes what a reader is told.
+#[derive(PartialEq)]
+struct Built {
+    projection: usize,
+    selection: (usize, usize),
+    composition: Option<(usize, usize)>,
+    rows: usize,
+    first: Option<(usize, gpui::Point<Pixels>)>,
+    last: Option<(usize, gpui::Point<Pixels>)>,
+    scale: f32,
+}
+
 struct TextRun {
     node_id: Option<accesskit::NodeId>,
     /// Document position of the run's first character.
@@ -155,23 +188,130 @@ fn character_offsets(text: &str) -> Vec<usize> {
     offsets
 }
 
+/// The document position before each unit boundary in `offsets`, of text
+/// `value` whose characters stand at the line offsets `before`: walked once,
+/// since a long line has many boundaries. Past the text is `end`.
+fn positions_of(
+    line: &Line,
+    value: &str,
+    before: &[usize],
+    offsets: &[usize],
+    end: usize,
+) -> Vec<usize> {
+    let mut chars = value
+        .char_indices()
+        .map(|(byte, _)| byte)
+        .enumerate()
+        .peekable();
+    offsets
+        .iter()
+        .map(|&byte| {
+            let mut at = before.len();
+            while let Some(&(index, start)) = chars.peek() {
+                if start >= byte {
+                    at = index;
+                    break;
+                }
+                chars.next();
+            }
+            let offset = before.get(at).copied().unwrap_or(end).min(end);
+            line.offset_to_pos(offset)
+                .expect("a visible offset inside the line")
+        })
+        .collect()
+}
+
+/// The run `read` stands for, with `line` starting where it starts now.
+fn unlaid_run(read: &Unlaid, line: &Line, bounds: Bounds<Pixels>, scale: f32) -> TextRun {
+    TextRun {
+        node_id: None,
+        from: line.from(),
+        content_end: line.to(),
+        offsets: read.offsets.clone(),
+        positions: read.positions.iter().map(|&at| line.abs(at)).collect(),
+        text: read.text.clone(),
+        bounds: accessible_bounds(bounds, scale),
+        cell: read.cell,
+    }
+}
+
+/// Line `index`, laid out as one run, as a reader is told it.
+fn read_unlaid(
+    projection: &Projection,
+    types: &crate::DocTypes,
+    reveal: &Reveal,
+    index: usize,
+    line: &Line,
+    newline: bool,
+) -> Unlaid {
+    let source = projection.line_text(index).unwrap_or_default();
+    let shown = conceal::shown(types.syntax, line, reveal);
+    let pieces = conceal::pieces(line, source, &shown);
+    let (mut text, mut before) = shown_row(&pieces, 0..line.len());
+    if newline {
+        text.push('\n');
+        before.push(line.len());
+    }
+    let offsets = character_offsets(&text);
+    let positions = positions_of(line, &text, &before, &offsets, line.len())
+        .into_iter()
+        .map(|pos| pos - line.from())
+        .collect();
+    Unlaid {
+        text,
+        offsets,
+        positions,
+        newline,
+        cell: types
+            .table_cell_of(line)
+            .map(|(_, row, column)| (row, column)),
+    }
+}
+
 impl AccessibleText {
     /// Give back what the last update built, for an editor that is not being
     /// drawn; the next update rebuilds it all anyway.
     pub(crate) fn release(&mut self) {
+        self.built = None;
+        self.unlaid = Vec::new();
+        self.unlaid_of = None;
         self.runs = Vec::new();
         self.controls = Vec::new();
     }
 
+    /// Rebuild what a reader is told from the document and the frame: every
+    /// line, as the visual rows it was laid out in where the frame laid it
+    /// out, and as one run standing where `place` says otherwise, so a reader
+    /// reaches the whole note however little of it is on screen.
     pub(crate) fn update(
         &mut self,
-        projection: &Projection,
+        projection: &Arc<Projection>,
         state: &EditorState,
         types: &crate::DocTypes,
         rows: &[LayoutLine],
+        place: &dyn Fn(usize) -> Bounds<Pixels>,
         scale: f32,
     ) {
         let doc = state.doc();
+        // Every frame asks, and most change nothing a reader is told: a caret
+        // blink, a line off screen measured. A line the frame did not lay out
+        // keeps the place it was given until something here moves, which only
+        // costs a reader how precisely an unseen line is outlined.
+        let built = Built {
+            projection: std::ptr::from_ref(projection) as usize,
+            selection: (state.selection().anchor(doc), state.selection().head(doc)),
+            composition: markraft_core::composition::composition_range(state)
+                .map(|range| (range.from, range.to)),
+            rows: rows.len(),
+            first: rows.first().map(|row| (row.index, row.origin)),
+            last: rows.last().map(|row| (row.index, row.origin)),
+            scale,
+        };
+        if self.built.as_ref() == Some(&built) {
+            return;
+        }
+        self.built = Some(built);
+        self.line_up_unlaid(projection);
         self.selection = (state.selection().anchor(doc), state.selection().head(doc));
         // What a reader hears is what the screen shows: a concealed span reads
         // as what it displays, and as its source while the caret reveals it.
@@ -182,8 +322,14 @@ impl AccessibleText {
         self.runs.clear();
         self.controls.clear();
         let last_line = projection.line_count().saturating_sub(1);
-        for row in rows {
-            let Some(line) = projection.line(row.index) else {
+        let mut laid = rows.iter().peekable();
+        for index in 0..projection.line_count() {
+            let Some(line) = projection.line(index) else {
+                continue;
+            };
+            while laid.next_if(|row| row.index < index).is_some() {}
+            let Some(row) = laid.next_if(|row| row.index == index) else {
+                self.push_unlaid(projection, types, &reveal, index, place(index), scale);
                 continue;
             };
             let source = projection.line_text(row.index).unwrap_or_default();
@@ -263,18 +409,7 @@ impl AccessibleText {
                 let x = f32::from(row.origin.x) * scale;
                 let y = f32::from(row.origin.y + row.line_height * visual as f32) * scale;
                 let offsets = character_offsets(&value);
-                let positions = offsets
-                    .iter()
-                    .map(|&byte| {
-                        let offset = before
-                            .get(value[..byte].chars().count())
-                            .copied()
-                            .unwrap_or(inner.end)
-                            .min(inner.end);
-                        line.offset_to_pos(offset)
-                            .expect("a visible offset inside the line")
-                    })
-                    .collect();
+                let positions = positions_of(line, &value, &before, &offsets, inner.end);
                 self.runs.push(TextRun {
                     node_id: None,
                     from: if inner.start == 0 {
@@ -301,6 +436,60 @@ impl AccessibleText {
                     cell: row.table.map(|cell| (cell.row, cell.column)),
                 });
             }
+        }
+    }
+
+    /// Line the kept readings of unlaid lines up with `projection`: a line the
+    /// edit handed over with its body keeps its reading, and every other line
+    /// is read again when it is asked for.
+    fn line_up_unlaid(&mut self, projection: &Arc<Projection>) {
+        let count = projection.line_count();
+        match self.unlaid_of.take() {
+            Some(held) if Arc::ptr_eq(&held, projection) => {}
+            Some(held) => {
+                self.unlaid = crate::surface::kept_ends(held.lines(), projection.lines())
+                    .carry(std::mem::take(&mut self.unlaid))
+                    .into_iter()
+                    .map(Option::flatten)
+                    .collect();
+            }
+            None => self.unlaid = (0..count).map(|_| None).collect(),
+        }
+        self.unlaid_of = Some(projection.clone());
+    }
+
+    /// Line `index`, which no frame laid out, as one run over `bounds`.
+    ///
+    /// A line the selection or the marked text touches shows its source as
+    /// they reveal it, so it is read afresh; any other line reads the same
+    /// until its body changes, and is read once.
+    fn push_unlaid(
+        &mut self,
+        projection: &Projection,
+        types: &crate::DocTypes,
+        reveal: &Reveal,
+        index: usize,
+        bounds: Bounds<Pixels>,
+        scale: f32,
+    ) {
+        let Some(line) = projection.line(index) else {
+            return;
+        };
+        let newline = index + 1 < projection.line_count();
+        let touched = reveal.touches(line.from(), line.to());
+        if touched {
+            let read = read_unlaid(projection, types, reveal, index, line, newline);
+            self.runs.push(unlaid_run(&read, line, bounds, scale));
+            return;
+        }
+        let Some(slot) = self.unlaid.get_mut(index) else {
+            return;
+        };
+        if slot.as_ref().is_none_or(|kept| kept.newline != newline) {
+            *slot = Some(read_unlaid(projection, types, reveal, index, line, newline));
+        }
+        if let Some(read) = slot.as_ref() {
+            self.runs.push(unlaid_run(read, line, bounds, scale));
         }
     }
 
@@ -515,6 +704,101 @@ impl crate::EditorView {
 mod tests {
     use super::*;
 
+    /// A reading kept from before an edit is what reading the edited note
+    /// afresh gives: the lines the edit moved along start where they now
+    /// start, and the line it changed reads as it now does.
+    #[test]
+    fn kept_readings_are_fresh_readings() {
+        use markraft_core::{Selection, TransactionSpec};
+        let source = "first **bold**\n\n| a | b |\n| - | - |\n| c | d |\n\n> quoted *text*\n\nlast";
+        let state = crate::typeahead::tests::state_of(source);
+        let types = crate::DocTypes::from_schema_names(
+            state.schema(),
+            &markraft_commonmark::commonmark_doc_type_names(),
+        );
+        let place = |_: usize| Bounds::default();
+        let read = |text: &AccessibleText| {
+            text.runs
+                .iter()
+                .map(|run| {
+                    (
+                        run.from,
+                        run.content_end,
+                        run.text.clone(),
+                        run.offsets.clone(),
+                        run.positions.clone(),
+                        run.cell,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut kept = AccessibleText::default();
+        let projection = markraft_core::projection::projection_of(&state);
+        kept.update(&projection, &state, &types, &[], &place, 1.);
+        // Typed at the start, so every line after the first moves along.
+        let edited = state
+            .update([TransactionSpec::new().selection(Selection::cursor(1))])
+            .expect("a caret")
+            .state()
+            .clone();
+        let edited = edited
+            .update([markraft_core::commands::insert_text("new ")(&edited).expect("an insertion")])
+            .expect("an edit")
+            .state()
+            .clone();
+        let projection = markraft_core::projection::projection_of(&edited);
+        kept.update(&projection, &edited, &types, &[], &place, 1.);
+        let mut fresh = AccessibleText::default();
+        fresh.update(&projection, &edited, &types, &[], &place, 1.);
+        assert_eq!(read(&kept), read(&fresh));
+        assert!(read(&kept)[0].2.starts_with("new first"));
+    }
+
+    /// A line the frame did not lay out still reaches a reader, as one run
+    /// standing where the lines say it is.
+    #[test]
+    fn lines_the_frame_did_not_lay_out_are_still_read() {
+        let state = crate::typeahead::tests::state_of("first\n\n**second**\n\nthird");
+        let projection = markraft_core::projection::projection_of(&state);
+        let types = crate::DocTypes::from_schema_names(
+            state.schema(),
+            &markraft_commonmark::commonmark_doc_type_names(),
+        );
+        let style = crate::EditorStyle::notes();
+        let images = crate::images::Images::default();
+        let text_system = gpui::WindowTextSystem::new(std::sync::Arc::new(gpui::TextSystem::new(
+            std::sync::Arc::new(gpui::NoopTextSystem::new()),
+        )));
+        let rows = crate::surface::shape(
+            &crate::surface::ShapeInput {
+                doc: state.doc(),
+                types: &types,
+                projection: &projection,
+                style: &style,
+                single_line: false,
+                images: &images,
+                wiki: None,
+                selection: 0..0,
+                spelling: None,
+                composition: None,
+            },
+            gpui::px(400.),
+            &text_system,
+        );
+        // Only the first line was laid out.
+        let place = |index: usize| {
+            Bounds::new(
+                gpui::point(gpui::px(0.), gpui::px(100. * index as f32)),
+                gpui::size(gpui::px(400.), gpui::px(20.)),
+            )
+        };
+        let mut text = AccessibleText::default();
+        text.update(&projection, &state, &types, &rows[..1], &place, 1.);
+        let read: Vec<&str> = text.runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(read, ["first\n", "second\n", "third"]);
+        assert_eq!(text.runs[2].bounds.y0, 200.);
+    }
+
     #[test]
     fn controls_expose_states_actions_and_document_targets() {
         let state = crate::typeahead::tests::state_of(
@@ -547,7 +831,14 @@ mod tests {
             &text_system,
         );
         let mut text = AccessibleText::default();
-        text.update(&projection, &state, &types, &rows, 2.);
+        text.update(
+            &projection,
+            &state,
+            &types,
+            &rows,
+            &|_| Bounds::default(),
+            2.,
+        );
         // Inline HTML is edited as text in place, so only the task boxes are
         // controls.
         assert_eq!(text.controls.len(), 2);
@@ -606,7 +897,14 @@ mod tests {
                 &text_system,
             );
             let mut text = AccessibleText::default();
-            text.update(&projection, state, &types, &rows, 1.);
+            text.update(
+                &projection,
+                state,
+                &types,
+                &rows,
+                &|_| Bounds::default(),
+                1.,
+            );
             let run = text.runs.remove(0);
             let line = &projection.lines()[0];
             let offsets: Vec<usize> = run
@@ -659,6 +957,9 @@ mod tests {
             .map(|&byte| line.offset_to_pos(value[..byte].chars().count()).unwrap())
             .collect();
         let text = AccessibleText {
+            built: None,
+            unlaid: Vec::new(),
+            unlaid_of: None,
             runs: vec![TextRun {
                 node_id: Some(accesskit::NodeId(1)),
                 from: line.from(),
@@ -697,6 +998,9 @@ mod tests {
         };
         // Two visual rows of one line holding "你好", then the next block.
         let text = AccessibleText {
+            built: None,
+            unlaid: Vec::new(),
+            unlaid_of: None,
             runs: vec![run(1, 1, 2, "你"), run(2, 2, 3, "好\n")],
             selection: (1, 1),
             controls: Vec::new(),

@@ -16,6 +16,7 @@ mod footnotes;
 mod format_state;
 mod images;
 pub mod ime;
+mod layout;
 mod links;
 mod shaping;
 mod single_line;
@@ -519,6 +520,15 @@ pub struct EditorView {
     /// What the last paint produced; see [`FrameLayout`].
     pub(crate) frame: FrameLayout,
     pub(crate) scroll: ScrollHandle,
+    /// The text system the last frame laid out with, which a key that moves
+    /// over lines no frame laid out lays them out with; see [`layout`].
+    text_system: RefCell<Option<Arc<gpui::WindowTextSystem>>>,
+    /// How far down the note the host needs its height exact; see
+    /// [`EditorView::set_exact_height`].
+    exact_height: Option<Pixels>,
+    /// Whether the last measuring pass left lines whose height is only an
+    /// estimate, so the frame asks for another to measure more of them.
+    pub(crate) unmeasured: std::cell::Cell<bool>,
     /// The caret's own view state: break side, kept column, pending reveal.
     pub(crate) caret: caret::CaretView,
     selecting: bool,
@@ -601,6 +611,9 @@ impl EditorView {
             focus: cx.focus_handle(),
             frame: FrameLayout::default(),
             scroll: ScrollHandle::new(),
+            text_system: RefCell::default(),
+            exact_height: None,
+            unmeasured: std::cell::Cell::new(false),
             caret: caret::CaretView::default(),
             selecting: false,
             published_revision: 0,
@@ -869,16 +882,31 @@ impl EditorView {
     }
 
     /// Height at the most recently laid-out width, including editor padding.
+    /// `None` before the first paint.
+    ///
+    /// Lines no frame has shaped yet count at an estimate; see
+    /// [`EditorView::set_exact_height`] for a host that sizes itself by this.
     pub fn content_height(&self) -> Option<Pixels> {
-        (!self.frame.rows().is_empty()).then(|| {
-            self.frame.rows().iter().fold(
-                (if self.single_line { px(0.) } else { px(40.) })
-                    + self.style().padding * 2.
-                    + self.style().top_overlay
-                    + self.style().bottom_overlay,
-                |height, row| height + row.top_gap + row.height,
-            )
-        })
+        self.frame.placed()?;
+        Some(
+            (if self.single_line { px(0.) } else { px(40.) })
+                + self.style().padding * 2.
+                + self.style().top_overlay
+                + self.style().bottom_overlay
+                + self.shaping.lines().total(),
+        )
+    }
+
+    /// Measure the note exactly from its top down to `limit`, for a host that
+    /// sizes its window by [`EditorView::content_height`] up to that height.
+    /// Past what is on screen a line's height is otherwise an estimate until
+    /// it is shaped, and a window sized by one would change size as the note
+    /// is read.
+    pub fn set_exact_height(&mut self, limit: Option<Pixels>, cx: &mut Context<Self>) {
+        if self.exact_height != limit {
+            self.exact_height = limit;
+            cx.notify();
+        }
     }
 
     /// Marks shared by all selected text, or the marks new text would get.
@@ -1400,7 +1428,10 @@ impl EditorView {
         let Some(last) = self.frame.rows().last() else {
             return 0;
         };
-        if point.y >= last.origin.y + last.height {
+        // Below the last row laid out is the document's end only where that
+        // row is the document's last line.
+        let at_end = last.index + 1 >= self.projection.line_count();
+        if at_end && point.y >= last.origin.y + last.height {
             return last.offset_to_pos(last.char_len);
         }
         let (row, local) = self.row_under(point);
@@ -1435,6 +1466,7 @@ impl EditorView {
     /// into the spelling. Where the spelling is not what was shown, the caret
     /// stays at the edge.
     fn caret_into_source(&mut self, point: Point<Pixels>, cx: &mut Context<Self>) {
+        self.lay_out_at(point);
         let Some(last) = self.frame.rows().last() else {
             return;
         };
@@ -1464,6 +1496,7 @@ impl EditorView {
     }
 
     fn select_point(&mut self, point: Point<Pixels>, extend: bool, cx: &mut Context<Self>) {
+        self.lay_out_at(point);
         let (position, upstream) = self.hit_upstream(point);
         self.caret.landed(upstream);
         self.select(position, extend, cx);
@@ -1614,6 +1647,7 @@ impl EditorView {
     }
 
     fn vertical(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
+        self.lay_out_near(self.motion_head(), delta.unsigned_abs() + 1);
         match self.vertical_target(delta, extend) {
             VerticalMove::Run(spec) => {
                 self.edit(cx, false, vec![spec]);
@@ -1638,6 +1672,7 @@ impl EditorView {
     /// At the edge already, or over a selection, the key does what Backspace or
     /// Delete does.
     fn delete_to_line_edge(&mut self, end: bool, cx: &mut Context<Self>) {
+        self.lay_out_near(self.head(), 0);
         let fallback = || {
             if end {
                 chains::delete_forward(&self.types)
@@ -1676,6 +1711,7 @@ impl EditorView {
     }
 
     fn line_edge(&mut self, end: bool, extend: bool, cx: &mut Context<Self>) {
+        self.lay_out_near(self.motion_head(), 0);
         if let Some((position, upstream)) = self.line_edge_target(end) {
             self.caret.forget_column();
             self.caret.landed(upstream);

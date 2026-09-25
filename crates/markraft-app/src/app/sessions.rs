@@ -1,5 +1,7 @@
 //! Editor session lifetimes and workspace replacement.
 use super::*;
+use markraft_commonmark::SourceTrack;
+use std::sync::Arc;
 
 pub(super) struct Session {
     editor: Entity<EditorView>,
@@ -133,24 +135,30 @@ impl MarkraftApp {
             .as_ref()
             .and_then(|path| path.parent().map(ToOwned::to_owned));
         let protected = note.read_only.clone();
+        // The editor checks each keystroke against the track the store saves
+        // through, so what it takes is what a save writes.
         let source = note
             .path
             .as_ref()
             .and(self.persistence.as_ref())
             .map(|persistence| {
-                persistence
-                    .markdown(note.clone())
-                    .map_err(|error| error.to_string())
-                    .and_then(|text| {
+                match persistence.source(note.clone()) {
+                    Ok(Some(track)) => Ok(track),
+                    // A file the store holds no copy of is written whole.
+                    Ok(None) => persistence.markdown(note.clone()).and_then(|text| {
                         markraft_commonmark::SourceDocument::parse(doc::schema(), &text)
-                            .map_err(|error| error.to_string())
-                    })
+                            .map(|source| Arc::new(SourceTrack::new(source)))
+                            .map_err(|error| error.to_string().into())
+                    }),
+                    Err(error) => Err(error),
+                }
+                .map_err(|error| error.to_string())
             });
         let image_root = source
             .as_ref()
             .and_then(|source| source.as_ref().ok())
             .zip(note.path.as_ref())
-            .map(|(source, path)| assets::image_root(source.source(), path))
+            .map(|(source, path)| assets::image_root(source.origin().source(), path))
             .unwrap_or(Ok(None));
         // A note not yet saved has no file for its edits to be written back through,
         // and its first save writes it whole. It is held to an empty source, which
@@ -159,6 +167,7 @@ impl MarkraftApp {
         let source = source.or_else(|| {
             (note.path.is_none() && self.persistence.is_some()).then(|| {
                 markraft_commonmark::SourceDocument::parse(doc::schema(), "")
+                    .map(|source| Arc::new(SourceTrack::new(source)))
                     .map_err(|error| error.to_string())
             })
         });
@@ -184,8 +193,8 @@ impl MarkraftApp {
                 }
                 match &source {
                     Some(Ok(source)) => source
-                        .render(doc::schema(), candidate)
-                        .map(|_| ())
+                        .write(doc::schema(), candidate)
+                        .map(drop)
                         .map_err(|_| EditRejection::Protected(UNSAVABLE_EDIT.to_owned())),
                     // The file was read but its Markdown could not be lined up with
                     // its source, so no keystroke could ever be written back.

@@ -534,11 +534,18 @@ pub(crate) fn reads_as_definitions(text: &str) -> bool {
 /// definitions, which [`build`] could not know while the document was being
 /// read.
 pub(crate) fn resolve_references(schema: &Schema, doc: &Node) -> Node {
-    let ctx = document_context(schema, doc);
+    resolve_references_from(schema, doc, doc)
+}
+
+/// `part`, a stretch of a document read on its own, with every textblock's
+/// marks derived against the definitions `whole` holds, as they would be had
+/// the whole document been read.
+pub(crate) fn resolve_references_from(schema: &Schema, part: &Node, whole: &Node) -> Node {
+    let ctx = document_context(schema, whole);
     if ctx.definitions().is_empty() {
-        return doc.clone();
+        return part.clone();
     }
-    rederive(schema, doc, &ctx)
+    rederive(schema, part, &ctx)
 }
 
 fn rederive(schema: &Schema, node: &Node, ctx: &DeriveContext) -> Node {

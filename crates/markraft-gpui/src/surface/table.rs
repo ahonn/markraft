@@ -4,35 +4,6 @@
 
 use super::*;
 
-/// Lay every table out as a grid.
-///
-/// Each cell has already been shaped unwrapped, so its `width` is what its
-/// content wants. Consecutive lines naming the same table form one grid: its
-/// columns are sized from those widths, each cell is reshaped inside the column
-/// it was given, and the cells of one row are placed on one band of y.
-pub(super) fn shape_tables(
-    input: &ShapeInput<'_>,
-    lines: &mut [LayoutLine],
-    width: Pixels,
-    text_system: &WindowTextSystem,
-) {
-    let mut start = 0usize;
-    while start < lines.len() {
-        let Some((table, _, _)) = table_cell(input, lines[start].index) else {
-            start += 1;
-            continue;
-        };
-        let mut end = start + 1;
-        while end < lines.len()
-            && table_cell(input, lines[end].index).map(|(at, _, _)| at) == Some(table)
-        {
-            end += 1;
-        }
-        shape_table(input, table, &mut lines[start..end], width, text_system);
-        start = end;
-    }
-}
-
 /// Size, reshape and place the cells of one table.
 pub(super) fn shape_table(
     input: &ShapeInput<'_>,

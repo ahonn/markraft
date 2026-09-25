@@ -644,8 +644,11 @@ fn assert_untouched_top_level_kept(
     new_doc: &crate::node::Node,
     context: &str,
 ) {
-    let (old_range, new_range) =
-        crate::node::unshared_middles(old_doc.content().as_slice(), new_doc.content().as_slice());
+    let kept = crate::ends::KeptEnds::by_identity(
+        old_doc.content().as_slice(),
+        new_doc.content().as_slice(),
+    );
+    let (old_range, new_range) = (kept.old_middle(), kept.new_middle());
     let top = |line: &Line| line.ancestors()[0].index;
     for (index, line) in old.lines().iter().enumerate() {
         if top(line) < old_range.start {

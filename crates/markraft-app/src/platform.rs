@@ -416,7 +416,17 @@ impl Platform {
     /// Use with GPUI's `WindowKind::Floating`, which creates an NSPanel.
     pub fn configure_window(&mut self, window: &mut gpui::Window) -> Result<(), String> {
         let native = native_window(window)?;
+        let view = native_view(window)?;
         unsafe {
+            // A window that grows to fit its note is resized before GPUI draws at
+            // the new size, and a frame drawn for one size can reach the screen
+            // in the other's bounds. Pinned under the title bar, such a frame
+            // shows its top at its own scale, which is what the note shows there
+            // either way, rather than squeezed or stretched to fit.
+            let _: () = msg_send![
+                view,
+                setLayerContentsPlacement: NS_VIEW_LAYER_CONTENTS_PLACEMENT_TOP
+            ];
             // NSWindowCollectionBehaviorCanJoinAllSpaces | FullScreenAuxiliary.
             let _: () = msg_send![native, setCollectionBehavior: (1_usize | (1 << 8))];
             let _: () = msg_send![native, setHidesOnDeactivate: Bool::NO];
@@ -582,6 +592,10 @@ fn menu_bar_failure(detail: impl std::fmt::Display) -> String {
         .to_owned()
 }
 
+/// NSViewLayerContentsPlacementTop: a frame of another size than the view is
+/// drawn at its own scale against the view's top edge.
+const NS_VIEW_LAYER_CONTENTS_PLACEMENT_TOP: isize = 4;
+
 /// A window's AppKit side, taken out of GPUI so it can be changed outside GPUI's own
 /// update. AppKit tells GPUI of every size a resize passes through, and GPUI can only
 /// hear it while nothing else is updating the app: a resize made inside an update
@@ -607,7 +621,6 @@ impl NativeWindow {
         unsafe {
             // Should a step of the animation come before GPUI has drawn at its size,
             // the last frame is pinned under the title bar rather than stretched.
-            const NS_VIEW_LAYER_CONTENTS_PLACEMENT_TOP: isize = 4;
             let _: () = msg_send![
                 self.view,
                 setLayerContentsPlacement: NS_VIEW_LAYER_CONTENTS_PLACEMENT_TOP

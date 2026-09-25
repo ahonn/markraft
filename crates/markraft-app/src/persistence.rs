@@ -45,6 +45,10 @@ enum Request {
     Save(u64, Library, Preferences),
     Recover(Note, Sender<Result<(), StoreError>>),
     Markdown(Note, Sender<Result<String, StoreError>>),
+    Source(
+        Note,
+        Sender<Result<Option<std::sync::Arc<markraft_commonmark::SourceTrack>>, StoreError>>,
+    ),
     OpenFile(std::path::PathBuf, Sender<Result<Note, StoreError>>),
     Rename(
         String,
@@ -88,6 +92,9 @@ impl Persistence {
                 match request {
                     Request::Markdown(note, response) => {
                         let _ = response.send(store.markdown(&note));
+                    }
+                    Request::Source(note, response) => {
+                        let _ = response.send(store.source(&note));
                     }
                     Request::Recover(note, response) => {
                         let _ = response.send(store.recover(&note));
@@ -190,6 +197,19 @@ impl Persistence {
         let (tx, rx) = mpsc::channel();
         self.requests
             .send(Request::Markdown(note, tx))
+            .map_err(|_| stopped())?;
+        receive(rx, REPLY_TIMEOUT)?
+    }
+    /// The track `note`'s edits are written through, shared with the store so
+    /// that what its editor takes is what a save writes; `None` for a note
+    /// with no file yet.
+    pub fn source(
+        &self,
+        note: Note,
+    ) -> Result<Option<std::sync::Arc<markraft_commonmark::SourceTrack>>, StoreError> {
+        let (tx, rx) = mpsc::channel();
+        self.requests
+            .send(Request::Source(note, tx))
             .map_err(|_| stopped())?;
         receive(rx, REPLY_TIMEOUT)?
     }

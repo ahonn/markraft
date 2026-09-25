@@ -2340,9 +2340,18 @@ thread_local! {
 /// code block.
 const REUSED: &str = "# Title\n\nA [[Target]] and a [[Missing]] link, `code` and ^sup^.\n\nSecond paragraph to edit.\n\n1. one\n2. two\n3. three\n4. four\n5. five\n6. six\n7. seven\n8. eight\n9. nine\n\n> [!note] Heads up\n> Callout body\n\n> quote one\n>\n> quote two\n\nOutside\n\n```rust\nlet x = 1;\n```\n\nLast paragraph.";
 
-/// `state` laid out, keeping what it can of `previous`, and how many lines
-/// were shaped to do it.
-fn shape_state(state: &EditorState, previous: &[LayoutLine]) -> (Vec<LayoutLine>, usize) {
+/// `state` laid out through `lines`, which keeps what it can of the document
+/// it laid out before, and how many lines were shaped to do it.
+fn shape_state(state: &EditorState, lines: &mut super::Lines) -> (Vec<LayoutLine>, usize) {
+    sync_state(state, lines, true)
+}
+
+/// `state` lined up in `lines`, and every line laid out when `lay_out` says.
+fn sync_state(
+    state: &EditorState,
+    lines: &mut super::Lines,
+    lay_out: bool,
+) -> (Vec<LayoutLine>, usize) {
     let projection = projection_of(state);
     let images = crate::images::Images::default();
     let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
@@ -2368,8 +2377,26 @@ fn shape_state(state: &EditorState, previous: &[LayoutLine]) -> (Vec<LayoutLine>
         composition: None,
     };
     let before = SHAPED_LINES.with(|count| count.get());
-    let lines = super::shape_reusing(&input, px(600.), previous, &text_system());
-    (lines, SHAPED_LINES.with(|count| count.get()) - before)
+    lines.sync(&input, &projection, px(600.), 0);
+    if !lay_out {
+        return (Vec::new(), 0);
+    }
+    lines.lay_out_range(&input, 0..lines.len(), &text_system());
+    (lines.all(), SHAPED_LINES.with(|count| count.get()) - before)
+}
+
+/// A grid reads nothing outside itself, so typing beside a table leaves its
+/// cells' heights measured, and only the line typed into is estimated again.
+#[test]
+fn an_edit_beside_a_table_keeps_its_cells_measured() {
+    let state = state_of("| a | b |\n|---|---|\n| 1 | 2 |\n\nOutside");
+    let state = at(&state, end_of(&state, "Outside"));
+    let mut lines = super::Lines::default();
+    shape_state(&state, &mut lines);
+    assert_eq!(lines.estimated(), 0);
+    let typed = run(&state, &insert_text("!"));
+    sync_state(&typed, &mut lines, false);
+    assert_eq!(lines.estimated(), 1, "only the line typed into");
 }
 
 /// Everything a laid-out line holds that can be compared, as text.
@@ -2499,11 +2526,11 @@ fn fingerprint(line: &LayoutLine) -> String {
     out
 }
 
-/// Shape `state` keeping what it can of `previous`, check the result is
+/// Shape `state` through `lines`, keeping what it can, check the result is
 /// what shaping it from nothing gives, and say how many lines it shaped.
-fn reshaped(state: &EditorState, previous: &[LayoutLine]) -> (Vec<LayoutLine>, usize) {
-    let (kept, shaped) = shape_state(state, previous);
-    let (fresh, _) = shape_state(state, &[]);
+fn reshaped(state: &EditorState, lines: &mut super::Lines) -> (Vec<LayoutLine>, usize) {
+    let (kept, shaped) = shape_state(state, lines);
+    let (fresh, _) = shape_state(state, &mut super::Lines::default());
     assert_eq!(kept.len(), fresh.len());
     for (kept, fresh) in kept.iter().zip(&fresh) {
         assert!(kept.source == fresh.source, "line {}", fresh.index);
@@ -2527,16 +2554,17 @@ fn end_of(state: &EditorState, text: &str) -> usize {
 fn typing_reshapes_only_the_line_it_types_into() {
     let state = state_of(REUSED);
     let state = at(&state, end_of(&state, "Outside"));
-    let (first, shaped) = reshaped(&state, &[]);
+    let mut lines = super::Lines::default();
+    let (first, shaped) = reshaped(&state, &mut lines);
     assert_eq!(shaped, first.len(), "nothing to keep yet");
 
     let caret = end_of(&state, "Second paragraph to edit.");
     let state = at(&state, caret);
-    let (moved, shaped) = reshaped(&state, &first);
+    let (moved, shaped) = reshaped(&state, &mut lines);
     assert_eq!(shaped, 2, "the line the caret left, and the one it entered");
 
     let state = run(&state, &insert_text("!"));
-    let (typed, shaped) = reshaped(&state, &moved);
+    let (typed, shaped) = reshaped(&state, &mut lines);
     assert_eq!(shaped, 1, "only the line typed into");
     // Every line after it moved one position along and was still kept.
     let edited = typed
@@ -2550,7 +2578,7 @@ fn typing_reshapes_only_the_line_it_types_into() {
         &state,
         &markraft_core::commands::delete_range(caret, caret + 1),
     );
-    let (_, shaped) = reshaped(&state, &typed);
+    let (_, shaped) = reshaped(&state, &mut lines);
     assert_eq!(shaped, 1);
 }
 
@@ -2562,15 +2590,16 @@ fn typing_reshapes_only_the_line_it_types_into() {
 fn a_line_is_reshaped_when_what_it_reads_around_it_changes() {
     let source = format!("{REUSED}\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n![alt](missing.png)");
     let state = state_of(&source);
-    let (first, _) = reshaped(&state, &[]);
+    let mut lines = super::Lines::default();
+    reshaped(&state, &mut lines);
 
     // Enter at the end of the ninth item makes a tenth.
     let types = callout_types();
     let state = at(&state, end_of(&state, "nine"));
-    let (before, _) = reshaped(&state, &first);
+    let (before, _) = reshaped(&state, &mut lines);
     let item = types.list_item.expect("a list item type");
     let state = run(&state, &markraft_core::commands::split_list_item(item));
-    let (after, shaped) = reshaped(&state, &before);
+    let (after, shaped) = reshaped(&state, &mut lines);
     // The two halves of the split item, the eight items before it whose
     // number widened, four cells shaped twice each and the picture.
     assert_eq!(shaped, 2 + 8 + 8 + 1);
@@ -2584,7 +2613,8 @@ fn a_line_is_reshaped_when_what_it_reads_around_it_changes() {
     // item becomes the list's own.
     let state = state_of("- a\n- b\n\npara");
     let state = at(&state, end_of(&state, "para"));
-    let (before, _) = reshaped(&state, &[]);
+    let mut lines = super::Lines::default();
+    let (before, _) = reshaped(&state, &mut lines);
     let list = state
         .schema()
         .node_id("bullet_list")
@@ -2593,7 +2623,7 @@ fn a_line_is_reshaped_when_what_it_reads_around_it_changes() {
         &state,
         &markraft_core::commands::wrap_in(list, Default::default()),
     );
-    let (after, _) = reshaped(&state, &before);
+    let (after, _) = reshaped(&state, &mut lines);
     let above = |lines: &[LayoutLine]| row_of(lines, "b").map(|line| line.height);
     assert!(above(&before).is_some());
     assert_ne!(above(&before), above(&after));
@@ -2611,19 +2641,20 @@ fn row_of<'a>(lines: &'a [LayoutLine], text: &str) -> Option<&'a LayoutLine> {
 #[test]
 fn kept_ends_meet_but_never_overlap() {
     let state = state_of("a\n\nb\n\nc");
-    let (lines, _) = shape_state(&state, &[]);
     let projection = projection_of(&state);
-    assert_eq!(super::kept_ends(&lines, projection.lines()), (3, 0));
-    assert_eq!(super::kept_ends(&[], projection.lines()), (0, 0));
+    let lines = projection.lines();
+    let kept_ends = |before, now| {
+        let kept = super::lines::kept_ends(before, now);
+        (kept.prefix(), kept.suffix())
+    };
+    assert_eq!(kept_ends(lines, projection.lines()), (3, 0));
+    assert_eq!(kept_ends(&[], projection.lines()), (0, 0));
     // A document of other lines altogether shares nothing.
     let other = projection_of(&state_of("a\n\nb\n\nc"));
-    assert_eq!(super::kept_ends(&lines, other.lines()), (0, 0));
+    assert_eq!(kept_ends(lines, other.lines()), (0, 0));
     // Typing into the middle line keeps one line at either end.
     let typed = run(&at(&state, end_of(&state, "b")), &insert_text("!"));
-    assert_eq!(
-        super::kept_ends(&lines, projection_of(&typed).lines()),
-        (1, 1)
-    );
+    assert_eq!(kept_ends(lines, projection_of(&typed).lines()), (1, 1));
 }
 
 fn shaped_revealing(

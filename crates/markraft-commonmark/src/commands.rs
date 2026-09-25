@@ -82,6 +82,7 @@ use crate::pending::{Layer, pending, pending_after, runs};
 use crate::schema as md;
 use crate::serialize::spell_run;
 use crate::textblock::{Item, Items, block_kind, document_context, style_mark, syntax_mark};
+use markraft_core::ends::KeptEnds;
 use markraft_core::protocol::event;
 
 /// Why a formatting command left the document alone.
@@ -692,16 +693,10 @@ fn replace_items(
     new: &[Item],
 ) -> Option<Change> {
     let old = &block.items.0[range.clone()];
-    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
-    let suffix = old[prefix..]
-        .iter()
-        .rev()
-        .zip(new[prefix..].iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let from = range.start + prefix;
-    let to = range.end - suffix;
-    let inserted = &new[prefix..new.len() - suffix];
+    let kept = KeptEnds::of(old, new, |a, b| a == b);
+    let from = range.start + kept.prefix();
+    let to = range.end - kept.suffix();
+    let inserted = &new[kept.new_middle()];
     if from == to && inserted.is_empty() {
         return None;
     }

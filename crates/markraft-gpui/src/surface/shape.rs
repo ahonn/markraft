@@ -1,6 +1,6 @@
-//! Shaping: one projection line into one [`LayoutLine`], reusing the rows
-//! of the previous frame where nothing about a line changed. Takes the
-//! [`ShapeInput`] the view assembles; hands [`LayoutLine`]s to tables and paint.
+//! Shaping: one projection line into one [`LayoutLine`]. Takes the
+//! [`ShapeInput`] the view assembles; hands [`LayoutLine`]s to
+//! [`Lines`](super::Lines), which keeps them, and to tables.
 
 use super::*;
 
@@ -38,47 +38,6 @@ pub(super) enum CellWidth {
     Column(Pixels),
 }
 
-/// The document's rows, shaped again only when shaping would answer differently.
-///
-/// Every frame asks for these twice — once to measure the note's height, once to
-/// draw it — and a redraw is usually about something shaping never reads: the
-/// caret blinked, the selection moved, a popup opened above. Shaping walks every
-/// line of the document and asks the platform to lay out its text, so repeating
-/// it for those frames is the single largest avoidable cost in the view.
-///
-/// What it reads is the projection (which stands for the document), the width,
-/// and the inputs [`Shaping`](crate::shaping::Shaping) holds. An image file that
-/// changed under the editor reaches those through
-/// [`EditorView::refresh_images`], which the host polls.
-///
-/// A redraw after an edit does shape again, but only the lines the edit
-/// reached: the rest are kept from the last shaping at this width; see
-/// [`shape_reusing`].
-pub(crate) fn shape_cached(
-    view: &crate::EditorView,
-    width: Pixels,
-    text_system: &WindowTextSystem,
-) -> Vec<LayoutLine> {
-    let projection = view.projection_arc();
-    let input = view.shape_input();
-    let reveal = reveal_key(&input);
-    let shaping = view.shaping();
-    if let Some(lines) = shaping.rows(projection, width, reveal) {
-        return lines;
-    }
-    let lines = {
-        let previous = shaping.previous(width);
-        shape_reusing(
-            &input,
-            width,
-            previous.as_deref().unwrap_or(&[]),
-            text_system,
-        )
-    };
-    shaping.keep(projection, width, reveal, &lines);
-    lines
-}
-
 /// The width the text is laid out in: the view's content width, or
 /// [`EditorStyle::max_line_width`] where that is narrower.
 pub(crate) fn column_width(width: Pixels, max: Option<Pixels>) -> Pixels {
@@ -103,110 +62,10 @@ pub(crate) fn shape(
     width: Pixels,
     text_system: &WindowTextSystem,
 ) -> Vec<LayoutLine> {
-    shape_reusing(input, width, &[], text_system)
-}
-
-/// Every line of the projection, keeping the rows of `previous` wherever they
-/// are what shaping the line again would produce.
-///
-/// `previous` has to have been shaped at `width` from the same inputs
-/// [`Shaping`](crate::shaping::Shaping) holds; the document and the selection
-/// it was shaped with may be any. A line of it is kept for a line of this
-/// projection when the two share a body ([`Line::same_body`]) and were shaped
-/// with the same [`LineKey`], and is then only moved to where the line now
-/// starts ([`LayoutLine::moved_to`]).
-///
-/// Lines are paired by position from either end: an edit rebuilds one run of
-/// lines and hands those before and after it over with their bodies, so the
-/// kept prefix and suffix are exactly what can be kept. A pairing that is wrong
-/// costs a reshape, never a stale row, since a kept row is checked against the
-/// line it is kept for.
-pub(crate) fn shape_reusing(
-    input: &ShapeInput<'_>,
-    width: Pixels,
-    previous: &[LayoutLine],
-    text_system: &WindowTextSystem,
-) -> Vec<LayoutLine> {
-    // The pictures the document shows: its atoms', and those of a picture the
-    // caret has spelled out, which is text now but still drawn under its
-    // source. Dropping the latter would throw away a remote fetch as soon as
-    // it started, and decode a local file again on every frame.
-    let spelled: Vec<Node> = input
-        .spelling
-        .map(|spelling| {
-            input
-                .projection
-                .lines()
-                .iter()
-                .filter(|line| line_focused(input, line))
-                .flat_map(|line| spelling.spelled_atoms(line))
-                .map(|(_, node)| node)
-                .collect()
-        })
-        .unwrap_or_default();
-    input.images.retain_sources(
-        input
-            .projection
-            .lines()
-            .iter()
-            .flat_map(|line| line.runs())
-            .filter_map(|run| match &run.content {
-                RunContent::Atom(node) => picture_source(input.types, node),
-                _ => None,
-            })
-            .chain(
-                spelled
-                    .iter()
-                    .filter_map(|node| picture_source(input.types, node)),
-            ),
-    );
-    let current = input.projection.lines();
-    let (prefix, suffix) = kept_ends(previous, current);
-    let mut lines: Vec<LayoutLine> = current
-        .iter()
-        .enumerate()
-        .map(|(index, line)| {
-            let key = line_key(input, index);
-            let kept = if index < prefix {
-                previous.get(index)
-            } else if current.len() - index <= suffix {
-                previous.get(previous.len() - (current.len() - index))
-            } else {
-                None
-            };
-            if let Some(kept) = kept
-                .filter(|kept| key.is_some() && kept.reuse == key && kept.source.same_body(line))
-            {
-                return kept.moved_to(line, index);
-            }
-            let cell = table_cell(input, index).map(|_| CellWidth::Natural);
-            let mut layout = shape_line(input, index, width, cell, text_system);
-            layout.reuse = key;
-            layout
-        })
-        .collect();
-    shape_tables(input, &mut lines, width, text_system);
-    lines
-}
-
-/// How many lines at the start and at the end of `current` have a line with
-/// the same body at the same place from that end of `previous`. The two never
-/// overlap in either list.
-pub(super) fn kept_ends(previous: &[LayoutLine], current: &[Line]) -> (usize, usize) {
-    let shorter = previous.len().min(current.len());
-    let prefix = previous
-        .iter()
-        .zip(current)
-        .take_while(|(kept, line)| kept.source.same_body(line))
-        .count();
-    let suffix = previous
-        .iter()
-        .rev()
-        .zip(current.iter().rev())
-        .take(shorter - prefix)
-        .take_while(|(kept, line)| kept.source.same_body(line))
-        .count();
-    (prefix, suffix)
+    let mut lines = super::Lines::default();
+    lines.sync(input, &Arc::new(input.projection.clone()), width, 0);
+    lines.lay_out_range(input, 0..lines.len(), text_system);
+    lines.all()
 }
 
 /// What shaping one line reads besides its own body, the width and the inputs

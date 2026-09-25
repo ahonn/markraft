@@ -357,6 +357,8 @@ impl<'a> EditorCx<'a> {
         if self.view.is_composing() {
             return false;
         }
+        let head = self.view.motion_head();
+        self.view.lay_out_near(head, rows.unsigned_abs() + 1);
         match self.view.vertical_target(rows, extend) {
             crate::VerticalMove::Run(spec) => {
                 let moved = self.dispatch([spec]).is_some();
@@ -391,6 +393,8 @@ impl<'a> EditorCx<'a> {
         if self.view.is_composing() {
             return false;
         }
+        let head = self.view.motion_head();
+        self.view.lay_out_near(head, 0);
         let Some((head, upstream)) = self.view.line_edge_target(end) else {
             return false;
         };

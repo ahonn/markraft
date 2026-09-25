@@ -307,6 +307,27 @@ fn vim_rows_go_to_the_document_end_from_the_last_row_as_the_arrow_does(cx: &mut 
     assert_eq!(vim.0, end);
 }
 
+/// A count moves as many rows as it says, however far past what the frame
+/// laid out that is: the rows it moves over are laid out first.
+#[gpui::test]
+fn vim_rows_reach_past_what_the_frame_laid_out(cx: &mut TestAppContext) {
+    let note = (0..3000)
+        .map(|index| format!("line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let (view, cx) = laid_out(cx, &note);
+    let start = view.read_with(cx, |view, _| line_start(view, "line 0"));
+    place_caret(&view, cx, start);
+    let moved = view.update(cx, |view, cx| {
+        EditorCx::new(view, "vim", Some(cx)).move_visual_rows(500, false)
+    });
+    assert!(moved);
+    let line = view.read_with(cx, |view, _| {
+        view.projection().line_at(view.head()).expect("a line")
+    });
+    assert_eq!(line, 500);
+}
+
 #[gpui::test]
 fn vim_rows_refuse_to_move_before_the_first_paint(cx: &mut TestAppContext) {
     let view = editor(cx, "one\n\ntwo");

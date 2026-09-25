@@ -115,6 +115,8 @@
 //!   from a state to a [`TransactionSpec`], plus input rules.
 //! * [`decorations`] — presentation attached to ranges, points and node types
 //!   without changing the document.
+//! * [`ends`] — how two versions of a list line up after an edit, for
+//!   whatever keeps what it built for the items an edit left alone.
 //! * [`projection`] — a flat, line-oriented view of a document for renderers
 //!   and for the platform text APIs that think in lines and UTF-16.
 //! * [`kind`] — what a view needs of a concrete document kind (see below):
@@ -162,6 +164,7 @@ pub mod commands;
 pub mod composition;
 pub mod corrections;
 pub mod decorations;
+pub mod ends;
 mod error;
 mod fit;
 mod fragment;

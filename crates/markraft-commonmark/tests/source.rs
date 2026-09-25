@@ -1,6 +1,6 @@
 //! Source-preserving persistence regression cases.
 
-use markraft_commonmark::{SourceDocument, SourceError, commonmark_schema};
+use markraft_commonmark::{SourceDocument, SourceError, SourceTrack, commonmark_schema};
 
 fn edit(original: &str, edited: &str) -> Result<String, SourceError> {
     let schema = commonmark_schema();
@@ -643,13 +643,14 @@ fn real_enter_commands_leave_an_existing_list_and_type_a_plain_paragraph() {
 #[test]
 fn real_enter_and_typing_commands_still_save() {
     // Empty paragraphs have no CommonMark spelling: the one the second Return
-    // leaves writes as a blank line, and never as a `<br>` marker. A save that
-    // could not keep the source is a failed save, so nothing falls back here.
+    // leaves writes as the writer writes it after the block before, and never
+    // as a `<br>` marker. A save that could not keep the source is a failed
+    // save, so nothing falls back here.
     let schema = commonmark_schema();
     for (original, expected) in [
         ("", "\ntyped"),
-        ("hello\n", "hello\n\n\ntyped\n"),
-        ("# Heading\n", "# Heading\n\n\ntyped\n"),
+        ("hello\n", "hello\n\ntyped\n"),
+        ("# Heading\n", "# Heading\n\ntyped\n"),
     ] {
         let source = SourceDocument::parse(&schema, original).unwrap();
         let mut state = editor_at_end(&source);
@@ -1263,4 +1264,269 @@ fn an_edited_ordered_list_counts_its_items_again() {
             "{original:?}"
         );
     }
+}
+
+/// A long note around an edit, so the stretch an edit is checked in is a small
+/// part of the file.
+fn padded(middle: &str) -> String {
+    let filler: Vec<String> = (0..40).map(|index| format!("filler {index}")).collect();
+    format!(
+        "{}\n\n{middle}\n\n{}\n",
+        filler[..20].join("\n\n"),
+        filler[20..].join("\n\n")
+    )
+}
+
+#[test]
+fn a_definition_added_far_from_its_reference_resolves_it() {
+    let original = format!("Read [the docs][r].\n\n{}", padded("middle"));
+    let edited = format!("Read [the docs][r].\n\n{}", padded("middle\n\n[r]: /docs"));
+    assert_eq!(edit(&original, &edited).unwrap(), edited);
+}
+
+#[test]
+fn a_reference_edited_far_from_its_definition_keeps_its_link() {
+    let original = format!("[r]: /docs\n\n{}", padded("Read [the docs][r] here."));
+    let edited = original.replace("here", "there");
+    assert_eq!(edit(&original, &edited).unwrap(), edited);
+}
+
+#[test]
+fn checking_answers_as_rendering_does() {
+    let schema = commonmark_schema();
+    for (original, edited) in [
+        (padded("one"), padded("one two")),
+        (padded("- a\n- b"), padded("- a\n- b\n- c")),
+        (padded("```\ncode\n```"), padded("```\ncode\nmore\n```")),
+        (padded("> quote"), padded("> quote\n>\n> more")),
+        (padded("1. a\n2. b"), padded("1. a\n2. b\n3. c")),
+    ] {
+        let source = SourceDocument::parse(&schema, &original).unwrap();
+        let target = SourceDocument::parse(&schema, &edited).unwrap();
+        assert_eq!(
+            source.check(&schema, target.document()).is_ok(),
+            source.render(&schema, target.document()).is_ok(),
+            "{edited:?}"
+        );
+        assert_eq!(source.render(&schema, target.document()).unwrap(), edited);
+    }
+}
+
+/// `padded` with the filler block that reads `filler {index}` in place of
+/// `text`, so several edits land far apart.
+fn replaced(note: &str, edits: &[(usize, &str)]) -> String {
+    edits.iter().fold(note.to_owned(), |note, (index, text)| {
+        note.replace(&format!("filler {index}\n"), &format!("{text}\n"))
+    })
+}
+
+#[test]
+fn edits_far_apart_are_each_written_in_place() {
+    let original = padded("middle");
+    let edited = replaced(
+        &original,
+        &[
+            (2, "filler 2 was here"),
+            (21, "- a list\n- of two"),
+            (38, "# a heading"),
+        ],
+    );
+    assert_eq!(edit(&original, &edited).unwrap(), edited);
+}
+
+#[test]
+fn a_definition_changed_far_from_other_edits_moves_its_links() {
+    let original = format!("[r]: /old\n\n{}\n\nRead [the docs][r].\n", padded("middle"));
+    let edited = replaced(&original.replace("/old", "/new"), &[(30, "filler moved")]);
+    assert_eq!(edit(&original, &edited).unwrap(), edited);
+}
+
+#[test]
+fn a_note_that_is_one_list_is_written_in_place() {
+    let items: Vec<String> = (0..200).map(|index| format!("- item {index}")).collect();
+    let original = format!("{}\n", items.join("\n"));
+    let edited = original
+        .replace("- item 10\n", "- item ten\n")
+        .replace("- item 150\n", "- item one fifty\n");
+    assert_eq!(edit(&original, &edited).unwrap(), edited);
+}
+
+/// A block whose text would read as other block syntax, or reach into the
+/// block beside it, in one of two edits far apart: whatever is answered, a
+/// check agrees with a write, and what is written reads back as the note.
+#[test]
+fn a_block_that_would_read_otherwise_is_answered_as_a_whole_read_would() {
+    let schema = commonmark_schema();
+    let original = padded("middle");
+    let source = SourceDocument::parse(&schema, &original).unwrap();
+    let blocks: Vec<markraft_core::Node> = source.document().children().cloned().collect();
+    let far = SourceDocument::parse(&schema, "far away edit").unwrap();
+    let far = far.document().children().next().unwrap().clone();
+    for text in [
+        "```",
+        "~~~",
+        "<!-- open",
+        "<script>",
+        "---",
+        "===",
+        "***",
+        "2. item",
+        "- item",
+        "> quote",
+        "    indented",
+        "| a | b |",
+        "[x]: /y",
+        "# heading",
+        "",
+    ] {
+        let content: Vec<markraft_core::Node> = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![schema.text(text)]
+        };
+        let paragraph = schema.node("paragraph", content).unwrap();
+        let mut edited = blocks.clone();
+        edited[10] = paragraph;
+        edited[35] = far.clone();
+        let target = source
+            .document()
+            .copy(markraft_core::Fragment::from_nodes(edited));
+        let checked = source.check(&schema, &target);
+        let written = source.render(&schema, &target);
+        assert_eq!(checked.is_ok(), written.is_ok(), "{text:?}");
+        if let Ok(written) = written {
+            let read = SourceDocument::parse(&schema, &written).unwrap();
+            assert_eq!(
+                markraft_commonmark::to_markdown(&schema, read.document()),
+                markraft_commonmark::to_markdown(&schema, &target),
+                "{text:?} wrote {written:?}"
+            );
+        }
+    }
+}
+
+/// An edit that changes more blocks than one island may span — every block,
+/// every other one — is written as one edit and reads back as the note.
+#[test]
+fn an_edit_of_many_blocks_is_written_whole() {
+    let original: String = (0..300).map(|i| format!("paragraph {i}\n\n")).collect();
+    for every in [1, 2, 3] {
+        let edited: String = (0..300)
+            .map(|i| match i % every {
+                0 => format!("paragraph {i}!\n\n"),
+                _ => format!("paragraph {i}\n\n"),
+            })
+            .collect();
+        assert_eq!(edit(&original, &edited).unwrap(), edited, "{every}");
+    }
+}
+
+/// `steps` written one after another through one track, each against the
+/// last: every file is the step's own text, as a write against the file read
+/// would give it.
+fn tracked(original: &str, steps: &[String]) -> SourceTrack {
+    let schema = commonmark_schema();
+    let track = SourceTrack::new(SourceDocument::parse(&schema, original).unwrap());
+    for step in steps {
+        let document = SourceDocument::parse(&schema, step).unwrap();
+        assert_eq!(
+            track.write(&schema, document.document()).unwrap(),
+            *step,
+            "writing {step:?}"
+        );
+    }
+    track
+}
+
+/// A note typed into in one place after another, one character at a time,
+/// with a block split, a list grown and a quote extended on the way.
+#[test]
+fn a_track_writes_each_keystroke_as_the_note_reads() {
+    let original = format!(
+        "---\ntitle: kept\n---\n# Title\n\n{}\n\n> quoted\n\n1. one\n2. two\n\n| a | b |\n|---|---|\n| c | d |\n",
+        padded("middle *em*")
+    );
+    let mut steps = Vec::new();
+    let mut note = original.clone();
+    // Nothing typed ends a block in a space, which a file read back drops.
+    for (at, typed) in [
+        ("filler 3", "abc"),
+        ("middle *em*", "d_e*f"),
+        ("filler 30", "!"),
+    ] {
+        for character in typed.chars() {
+            let place = note.find(at).unwrap() + at.len();
+            note.insert(place, character);
+            steps.push(note.clone());
+        }
+    }
+    for (from, to) in [
+        ("filler 10\n", "filler\n\n10\n"),
+        ("2. two\n", "2. two\n3. three\n"),
+        ("> quoted\n", "> quoted\n> more\n"),
+        ("| c | d |\n", "| c | e |\n"),
+        ("\n\nfiller 39", ""),
+    ] {
+        note = note.replacen(from, to, 1);
+        steps.push(note.clone());
+    }
+    tracked(&original, &steps);
+}
+
+/// Undoing every edit gives back the file as read, byte for byte, whatever
+/// the track wrote on the way.
+#[test]
+fn a_track_undone_to_the_note_read_writes_the_file_read() {
+    let schema = commonmark_schema();
+    let original = padded("Setext heading\n==============\n\n*   loose  \n*   list");
+    let track = tracked(
+        &original,
+        &[
+            original.replace("filler 5\n", "filler five\n"),
+            original.replace("filler 5\n", "filler five and more\n"),
+        ],
+    );
+    let read = SourceDocument::parse(&schema, &original).unwrap();
+    assert_eq!(track.write(&schema, read.document()).unwrap(), original);
+}
+
+/// After an edit that changed every block, each keystroke is written against
+/// that edit, not against the file read.
+#[test]
+fn a_track_goes_on_from_an_edit_of_every_block() {
+    let original: String = (0..200).map(|i| format!("paragraph {i}\n\n")).collect();
+    let everywhere = original.replace("paragraph", "line");
+    let mut steps = vec![everywhere.clone()];
+    let mut note = everywhere;
+    for character in "typed".chars() {
+        let place = note.find("line 120").unwrap() + "line 120".len();
+        note.insert(place, character);
+        steps.push(note.clone());
+    }
+    tracked(&original, &steps);
+}
+
+/// A definition added or dropped reaches every link, so the track reads
+/// such a file whole, and its links follow.
+#[test]
+fn a_track_follows_definitions_through_the_note() {
+    let original = format!("Read [the docs][r].\n\n{}", padded("middle"));
+    let defined = format!("Read [the docs][r].\n\n{}", padded("middle\n\n[r]: /docs"));
+    let typed = defined.replace("filler 30", "filler 30 more");
+    let dropped = typed.replace("\n\n[r]: /docs", "");
+    tracked(&original, &[defined, typed, dropped]);
+}
+
+/// A save reads what it writes back whole, and writes the file read for the
+/// note read.
+#[test]
+fn a_track_saves_what_it_wrote() {
+    let schema = commonmark_schema();
+    let original = padded("middle");
+    let edited = original.replace("middle", "middle edited");
+    let track = tracked(&original, std::slice::from_ref(&edited));
+    let document = SourceDocument::parse(&schema, &edited).unwrap();
+    assert_eq!(track.save(&schema, document.document()).unwrap(), edited);
+    let read = SourceDocument::parse(&schema, &original).unwrap();
+    assert_eq!(track.save(&schema, read.document()).unwrap(), original);
 }

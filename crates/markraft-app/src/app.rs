@@ -126,6 +126,10 @@ pub struct MarkraftApp {
     trashed: Vec<PathBuf>,
     /// The formatting toolbar over the note, and what the footer counts.
     toolbar: Toolbar,
+    /// What the footer counts, kept from frame to frame: every frame draws the
+    /// footer, a caret blink's as much as an edit's, and an edit changes only
+    /// a block or two of the note.
+    counted: std::cell::RefCell<doc::Counter>,
     /// The format menu's list.
     format: Cursor,
     dark: bool,
@@ -282,6 +286,7 @@ impl MarkraftApp {
             shortcuts,
             pairs,
             toolbar: Toolbar::default(),
+            counted: Default::default(),
             format: Cursor::default(),
             dark,
             presence: Presence::new(pointer_inside, window.is_window_active()),
@@ -650,42 +655,50 @@ impl MarkraftApp {
         if self.feedback.tick() {
             cx.notify();
         }
-        if self.interaction.panel() == Panel::Editor
+        let auto_height = self.interaction.panel() == Panel::Editor
             && self.preferences.auto_height
-            && self.persistence.is_some()
-        {
-            let Some(height) = self.editor().read(cx).content_height() else {
-                return;
-            };
-            // Growing is all this does: `resize` keeps the origin, so the window
-            // only ever extends downwards. Its room is therefore what is left
-            // below its own top edge, not a share of the whole display — a window
-            // sitting low would otherwise grow straight past the bottom of the
-            // screen, and since it is sized to its content there is no overflow
-            // left to scroll the hidden part back into view.
-            let maximum = window
-                .display(cx)
-                .map(|d| {
-                    let visible = d.visible_bounds();
-                    (visible.bottom() - window.bounds().origin.y).min(visible.size.height * 0.8)
-                })
-                .unwrap_or(px(720.))
-                .max(MINIMUM_HEIGHT);
-            // The toolbar and footer float over the editor and are already part of its
-            // content height; only an error banner adds to it.
-            let chrome = if self.feedback.error().is_some() {
-                px(64.)
-            } else {
-                px(0.)
-            };
-            let desired = px(f32::from((height + chrome).max(MINIMUM_HEIGHT).min(maximum)).round());
-            let size = size(window.bounds().size.width, desired);
-            if (size.height - window.bounds().size.height).abs() > px(2.)
-                && !self.window_size.waiting()
-            {
-                self.window_size.expect(size);
-                window.resize(size);
+            && self.persistence.is_some();
+        if !auto_height {
+            if self.sessions.get(&self.library.active_id).is_some() {
+                self.editor()
+                    .update(cx, |editor, cx| editor.set_exact_height(None, cx));
             }
+            return;
+        }
+        // Growing is all this does: `resize` keeps the origin, so the window
+        // only ever extends downwards. Its room is therefore what is left
+        // below its own top edge, not a share of the whole display — a window
+        // sitting low would otherwise grow straight past the bottom of the
+        // screen, and since it is sized to its content there is no overflow
+        // left to scroll the hidden part back into view.
+        let maximum = window
+            .display(cx)
+            .map(|d| {
+                let visible = d.visible_bounds();
+                (visible.bottom() - window.bounds().origin.y).min(visible.size.height * 0.8)
+            })
+            .unwrap_or(px(720.))
+            .max(MINIMUM_HEIGHT);
+        // The window takes the note's height up to `maximum`, so the note is
+        // measured exactly that far rather than estimated past the screen.
+        let editor = self.editor();
+        editor.update(cx, |editor, cx| editor.set_exact_height(Some(maximum), cx));
+        let Some(height) = editor.read(cx).content_height() else {
+            return;
+        };
+        // The toolbar and footer float over the editor and are already part of its
+        // content height; only an error banner adds to it.
+        let chrome = if self.feedback.error().is_some() {
+            px(64.)
+        } else {
+            px(0.)
+        };
+        let desired = px(f32::from((height + chrome).max(MINIMUM_HEIGHT).min(maximum)).round());
+        let size = size(window.bounds().size.width, desired);
+        if (size.height - window.bounds().size.height).abs() > px(2.) && !self.window_size.waiting()
+        {
+            self.window_size.expect(size);
+            window.resize(size);
         }
     }
     fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -7,13 +7,14 @@ use crate::{
     },
     storage::{Library, Note, Notices, Preferences, Settings, WorkspaceSettings},
 };
-use markraft_commonmark::SourceDocument;
+use markraft_commonmark::{SourceDocument, SourceTrack};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Component, Path, PathBuf},
+    sync::Arc,
     time::UNIX_EPOCH,
 };
 use uuid::Uuid;
@@ -22,8 +23,11 @@ use uuid::Uuid;
 struct Saved {
     path: PathBuf,
     bytes: Vec<u8>,
-    /// Keep the original source throughout this session, including after saves/undo.
-    source: Vec<u8>,
+    /// The file as first read, and as the editor last wrote it: kept for the
+    /// whole session, across saves and undo, and shared with the note's
+    /// editor so that what it takes on a keystroke is what a save writes.
+    /// `None` for a file that is not Markdown this store can read.
+    track: Option<Arc<SourceTrack>>,
     note: Note,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -270,9 +274,14 @@ impl Store {
         let identity = self.manifest.paths.get(path);
         let mut read_only = unsafe_file(path)?;
         let text = std::str::from_utf8(&bytes);
+        let mut track = None;
         let document = match text {
             Ok(text) => match SourceDocument::parse(doc::schema(), text) {
-                Ok(source) => source.document().clone(),
+                Ok(source) => {
+                    let document = source.document().clone();
+                    track = Some(Arc::new(SourceTrack::new(source)));
+                    document
+                }
                 Err(error) => {
                     read_only = Some(format!("Markdown could not be parsed: {error}"));
                     doc::empty()
@@ -299,7 +308,7 @@ impl Store {
         };
         Ok(Some(Saved {
             path: path.to_owned(),
-            source: bytes.clone(),
+            track,
             bytes,
             note,
         }))
@@ -588,21 +597,33 @@ impl Store {
         }
     }
     pub fn markdown(&self, note: &Note) -> Result<String, StoreError> {
-        // A note that already says what the file on disk says — the disk version
-        // an external change was just adopted as — takes those bytes as its
-        // baseline. The pre-change copy is kept only for edits made against it
-        // until the change is acknowledged.
+        render(self.baseline(note), note, &self.house)
+    }
+    /// The track `note`'s edits are written through, for its editor to check
+    /// each keystroke against: `None` for a note with no file yet.
+    pub fn source(&self, note: &Note) -> Result<Option<Arc<SourceTrack>>, StoreError> {
+        match self.baseline(note) {
+            Some(saved) => saved
+                .track
+                .clone()
+                .map(Some)
+                .ok_or_else(|| "This file is not Markdown Markraft can read.".into()),
+            None => Ok(None),
+        }
+    }
+    /// The file `note`'s edits are written against. A note that already says
+    /// what the file on disk says — the disk version an external change was
+    /// just adopted as — takes those bytes as its baseline. The pre-change
+    /// copy is kept only for edits made against it until the change is
+    /// acknowledged.
+    fn baseline(&self, note: &Note) -> Option<&Saved> {
         let current = self
             .files
             .get(&note.id)
             .filter(|saved| saved.note.document == note.document);
-        render(
-            current
-                .or_else(|| self.previous.get(&note.id))
-                .or_else(|| self.files.get(&note.id)),
-            note,
-            &self.house,
-        )
+        current
+            .or_else(|| self.previous.get(&note.id))
+            .or_else(|| self.files.get(&note.id))
     }
     /// Keep the note's local text as a conflicted copy beside the file. Used when disk wins.
     pub fn recover(&mut self, note: &Note) -> Result<(), StoreError> {
@@ -746,11 +767,11 @@ impl Store {
                 note.id.clone(),
                 Saved {
                     path: file_path,
-                    source: if record.source.is_empty() {
-                        bytes.clone()
+                    track: track_of(if record.source.is_empty() {
+                        &bytes
                     } else {
-                        record.source
-                    },
+                        &record.source
+                    }),
                     bytes,
                     note: note.clone(),
                 },
@@ -981,9 +1002,10 @@ impl Store {
             note.id.clone(),
             Saved {
                 path,
-                source: saved
-                    .map(|s| s.source.clone())
-                    .unwrap_or_else(|| bytes.clone()),
+                track: match saved {
+                    Some(saved) => saved.track.clone(),
+                    None => track_of(&bytes),
+                },
                 bytes,
                 note: stored,
             },
@@ -1033,20 +1055,27 @@ fn render(
     house: &markraft_commonmark::HouseStyleHandle,
 ) -> Result<String, StoreError> {
     match saved {
-        Some(saved) => SourceDocument::parse(
-            doc::schema(),
-            std::str::from_utf8(&saved.source).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?
-        .render(doc::schema(), &note.document)
-        .map_err(|e| {
-            StoreError::from(format!(
-                "This edit cannot preserve the original Markdown safely: {e}"
-            ))
-        }),
+        Some(saved) => saved
+            .track
+            .as_ref()
+            .ok_or_else(|| StoreError::from("This file is not Markdown Markraft can read."))?
+            .save(doc::schema(), &note.document)
+            .map_err(|e| {
+                StoreError::from(format!(
+                    "This edit cannot preserve the original Markdown safely: {e}"
+                ))
+            }),
         None => Ok(format!("{}\n", doc::to_markdown_in(&note.document, house))),
     }
 }
+
+/// A track for a file whose bytes are `bytes`, when they are Markdown.
+fn track_of(bytes: &[u8]) -> Option<Arc<SourceTrack>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let source = SourceDocument::parse(doc::schema(), text).ok()?;
+    Some(Arc::new(SourceTrack::new(source)))
+}
+
 fn collect_markdown(folder: &Path, paths: &mut Vec<PathBuf>) -> Result<(), StoreError> {
     for entry in fs::read_dir(folder).map_err(|e| describe(folder, &e))? {
         let entry = entry.map_err(|e| describe(folder, &e))?;

@@ -15,6 +15,7 @@ use markraft_commonmark::{
     schema as md,
 };
 use markraft_core::commands::{Command, command, replace_selection};
+use markraft_core::ends::KeptEnds;
 use markraft_core::kind::{
     CalloutAttrs, Codecs, DocTypes, DocumentKind, Formatting, SourceSpelling,
 };
@@ -232,6 +233,12 @@ pub fn plain_text(doc: &Node) -> String {
     markraft_commonmark::to_plain_text(schema(), doc)
 }
 
+/// [`counted_lines`]'s count alone, for a test that counts a whole note.
+#[cfg(test)]
+fn count(doc: &Node, projection: &Projection, words: bool) -> usize {
+    counted_lines(doc, projection, words).0
+}
+
 /// How many characters — or, with `words`, words — `doc` holds as a reader
 /// sees it, laid out as `projection` lays it out.
 ///
@@ -241,7 +248,9 @@ pub fn plain_text(doc: &Node) -> String {
 /// anything anyone typed, so they are not characters — they still part words,
 /// as the break between two blocks does. Link reference definitions are
 /// where links go rather than anything read, so their blocks count nothing.
-pub fn count(doc: &Node, projection: &Projection, words: bool) -> usize {
+///
+/// Returns the count and how many lines it counted.
+fn counted_lines(doc: &Node, projection: &Projection, words: bool) -> (usize, usize) {
     // Only the text flavour is read, which no house style touches.
     let codecs = codecs(&HouseStyleHandle::default());
     let units = |text: &str| {
@@ -252,6 +261,7 @@ pub fn count(doc: &Node, projection: &Projection, words: bool) -> usize {
         }
     };
     let mut total = 0;
+    let mut lines = 0;
     let mut previous: Option<Option<usize>> = None;
     for line in projection.lines() {
         // Reference definitions are where links go, not text a reader sees,
@@ -274,8 +284,63 @@ pub fn count(doc: &Node, projection: &Projection, words: bool) -> usize {
             total += 1;
         }
         previous = Some(table);
+        lines += 1;
     }
-    total
+    (total, lines)
+}
+
+/// [`counted_lines`] kept from one document to the next, for a count shown on every
+/// frame of a note being edited.
+///
+/// A note's count is its top-level blocks' own counts and, counting
+/// characters, one break between each two blocks with a line counted: no
+/// table spans two blocks, so the break between them is always one. An edit
+/// hands most blocks over as the same nodes, whose counts are kept; only the
+/// blocks it built are counted again.
+#[derive(Default)]
+pub struct Counter {
+    words: bool,
+    /// Each top-level block of the last document counted, with its own count
+    /// and whether it holds a counted line.
+    blocks: Vec<(Node, usize, bool)>,
+    last: Option<(Node, usize)>,
+}
+
+impl Counter {
+    pub fn count(&mut self, doc: &Node, words: bool) -> usize {
+        if words != self.words {
+            self.words = words;
+            self.blocks.clear();
+            self.last = None;
+        }
+        if let Some((held, total)) = &self.last
+            && held.ptr_eq(doc)
+        {
+            return *total;
+        }
+        let before = std::mem::take(&mut self.blocks);
+        let now: Vec<Node> = doc.children().cloned().collect();
+        let held: Vec<Node> = before.iter().map(|(block, ..)| block.clone()).collect();
+        let kept = KeptEnds::by_identity(&held, &now);
+        self.blocks = kept
+            .carry(before)
+            .into_iter()
+            .zip(now)
+            .map(|(kept, block)| {
+                kept.unwrap_or_else(|| {
+                    let alone = doc.copy(Fragment::from_nodes([block.clone()]));
+                    let projection = Projection::of(&alone, schema());
+                    let (units, lines) = counted_lines(&alone, &projection, words);
+                    (block, units, lines > 0)
+                })
+            })
+            .collect();
+        let units: usize = self.blocks.iter().map(|(_, units, _)| units).sum();
+        let counted = self.blocks.iter().filter(|(.., lines)| *lines).count();
+        let total = units + if words { 0 } else { counted.saturating_sub(1) };
+        self.last = Some((doc.clone(), total));
+        total
+    }
 }
 
 /// The line a note is named after: the first one that reads as text.
@@ -772,5 +837,43 @@ mod tests {
         assert_eq!(count_of(referenced, false), "a b\nc".len());
         assert_eq!(count_of(referenced, true), 3);
         assert_eq!(count_of("[r]: https://x.y", false), 0);
+    }
+
+    /// Counting block by block, and keeping the blocks an edit left alone,
+    /// comes to what counting the whole note does, whichever blocks changed.
+    #[test]
+    fn a_kept_count_is_the_whole_count() {
+        let source = "# Title\n\nA **bold** line\nand a break\n\n- one\n- two\n\n| a | b |\n| - | - |\n| c | d |\n\n> quoted *text*\n\n```\ncode\n```\n\n[r]: https://x.y\n\nend [b][r]";
+        let doc = from_markdown(source);
+        let whole = |doc: &Node, words: bool| count(doc, &Projection::of(doc, schema()), words);
+        for words in [false, true] {
+            let mut counter = Counter::default();
+            assert_eq!(counter.count(&doc, words), whole(&doc, words));
+            let blocks: Vec<Node> = doc.children().cloned().collect();
+            // Each block in turn replaced by another, then one dropped and one
+            // added, so every place in the note is recounted once.
+            for index in 0..blocks.len() {
+                let mut edited = blocks.clone();
+                edited[index] = from_markdown("changed *text* here")
+                    .children()
+                    .next()
+                    .expect("a block")
+                    .clone();
+                let edited = doc.copy(Fragment::from_nodes(edited));
+                assert_eq!(
+                    counter.count(&edited, words),
+                    whole(&edited, words),
+                    "{index}"
+                );
+            }
+            let mut fewer = blocks.clone();
+            fewer.remove(2);
+            let fewer = doc.copy(Fragment::from_nodes(fewer));
+            assert_eq!(counter.count(&fewer, words), whole(&fewer, words));
+            let mut more = blocks.clone();
+            more.insert(0, from_markdown("new").children().next().unwrap().clone());
+            let more = doc.copy(Fragment::from_nodes(more));
+            assert_eq!(counter.count(&more, words), whole(&more, words));
+        }
     }
 }

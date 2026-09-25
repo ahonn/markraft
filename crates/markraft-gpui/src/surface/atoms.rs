@@ -208,7 +208,18 @@ pub(crate) fn reveal_key(input: &ShapeInput<'_>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let reveal = reveal_of(input);
-    for line in input.projection.lines() {
+    // Only the lines the selection or the marked text stand on, and one either
+    // side of them, can be touched; a note's other lines never need a look.
+    let lines = input.projection.lines();
+    let index = |pos: usize| input.projection.line_at(pos).unwrap_or(0);
+    let ends = std::iter::once(&input.selection)
+        .chain(input.composition.as_ref())
+        .flat_map(|range| [index(range.start), index(range.end)]);
+    let (first, last) = ends.fold((usize::MAX, 0), |(first, last), at| {
+        (first.min(at), last.max(at))
+    });
+    let near = first.saturating_sub(1)..(last + 2).min(lines.len());
+    for line in &lines[near] {
         // Only a line the selection or the marked text reaches can have
         // anything revealed on it.
         if reveal.touches(line.from(), line.to()) {

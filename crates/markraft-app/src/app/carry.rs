@@ -6,23 +6,14 @@
 //! keeps its place and one after it moves with the text around it; a caret in
 //! the part that changed goes to where that part starts.
 
+use markraft_core::ends::KeptEnds;
 use markraft_core::{Node, Schema, Selection};
 
 /// `selection` in `old`, carried into `new`.
 pub(super) fn carry(schema: &Schema, old: &Node, new: &Node, selection: &Selection) -> Selection {
     let (before, after) = (keys(old), keys(new));
-    let prefix = before
-        .iter()
-        .zip(&after)
-        .take_while(|(a, b)| a == b)
-        .count();
-    let suffix = before
-        .iter()
-        .rev()
-        .zip(after.iter().rev())
-        .take(before.len().min(after.len()) - prefix)
-        .take_while(|(a, b)| a == b)
-        .count();
+    let kept = KeptEnds::of(&before, &after, |a, b| a == b);
+    let (prefix, suffix) = (kept.prefix(), kept.suffix());
     let map = |pos: usize| {
         if pos <= prefix {
             pos

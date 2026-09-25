@@ -1384,14 +1384,13 @@ impl MarkraftApp {
             )
         }
     }
-    /// What the footer counts: the note as a reader sees it. See [`doc::count`].
+    /// What the footer counts: the note as a reader sees it. See [`doc::Counter`].
     fn note_count(&self, cx: &App) -> String {
         let editor = self.editor().read(cx);
-        let units = doc::count(
-            editor.state().doc(),
-            &editor.projection(),
-            self.toolbar.counts_words(),
-        );
+        let units = self
+            .counted
+            .borrow_mut()
+            .count(editor.state().doc(), self.toolbar.counts_words());
         self.count_of(units)
     }
     fn filtered_actions(&self, cx: &App) -> Vec<Command> {

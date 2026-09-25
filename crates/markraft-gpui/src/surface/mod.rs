@@ -33,6 +33,7 @@ mod atoms;
 mod breaking;
 mod chrome;
 mod layout_line;
+mod lines;
 mod paint;
 mod runs;
 mod shape;
@@ -41,6 +42,7 @@ mod table;
 mod tests;
 
 pub(crate) use self::layout_line::{LayoutLine, selection_anchor_row};
+pub(crate) use self::lines::{Lines, kept_ends};
 pub(crate) use self::shape::ShapeInput;
 #[cfg(test)]
 pub(crate) use self::shape::shape;
@@ -168,9 +170,26 @@ pub(crate) struct FrameLayout {
     /// is clipped to and what the table toolbar anchors inside.
     content_bounds: Bounds<Pixels>,
     single_line_scroll_x: Pixels,
+    /// Where the last paint put the top of the document, in the window, and
+    /// the scroll offset it was put there under. A later frame predicts what
+    /// the viewport shows from these and how far the scroll has moved since.
+    placed: Option<(Pixels, Pixels)>,
 }
 
 impl FrameLayout {
+    /// Where the last paint put the top of the document, and the scroll offset
+    /// it did so under. `None` before the first paint.
+    pub(crate) fn placed(&self) -> Option<(Pixels, Pixels)> {
+        self.placed
+    }
+
+    /// Take the rows a key laid out between two paints, placed as the last
+    /// paint would have placed them.
+    pub(crate) fn replace_rows(&mut self, mut rows: Vec<LayoutLine>) {
+        shift_sideways(&mut rows, &self.tables, self.single_line_scroll_x);
+        self.rows = rows;
+    }
+
     /// The laid-out rows, in document order.
     pub(crate) fn rows(&self) -> &[LayoutLine] {
         &self.rows
@@ -249,13 +268,10 @@ impl Element for EditorSurface {
                     _ => px(600.),
                 });
                 let column = column_width(width, view.style().max_line_width);
-                let rows = shape_cached(view, column, window.text_system());
-                let height = rows
-                    .iter()
-                    .fold(if view.single_line { px(0.) } else { px(40.) }, |h, row| {
-                        h + row.top_gap + row.height
-                    });
-                size(width, height)
+                let (height, unmeasured) = view.lay_out(column, None, true, window);
+                view.unmeasured.set(unmeasured);
+                let base = if view.single_line { px(0.) } else { px(40.) };
+                size(width, base + height)
             }),
             (),
         )
@@ -274,12 +290,20 @@ impl Element for EditorSurface {
         // inside it, and every row is placed there. Hit testing, the caret,
         // the selection and every popup read the rows, so they follow.
         let bounds = column_bounds(bounds, view.style().max_line_width);
-        let mut rows = shape_cached(view, bounds.size.width, window.text_system());
-        let mut y = bounds.top();
-        for row in &mut rows {
-            y += row.top_gap;
-            row.origin += point(bounds.left(), y);
-            y += row.height;
+        // Where the viewport stands is known now rather than predicted, so
+        // whatever of it the measuring pass did not lay out is laid out here.
+        let viewport = view.scroll.bounds();
+        let visible = (viewport.size.height > px(0.)).then(|| {
+            let start = (viewport.top() - bounds.top()).max(px(0.));
+            start..start + viewport.size.height
+        });
+        view.lay_out(bounds.size.width, visible, false, window);
+        let mut rows = view.placed_lines(bounds);
+        // Lines not yet shaped are only estimates; a few more are measured
+        // every frame until none is left, so the note's length settles without
+        // any one frame paying for all of it.
+        if view.unmeasured.get() {
+            window.request_animation_frame();
         }
         let head = view.head();
         let single_line_scroll_x = if view.single_line {
@@ -302,10 +326,26 @@ impl Element for EditorSurface {
         };
         // Where each grid stands before it is moved: a grid that does not fit
         // keeps whatever the reader scrolled it to, clamped to what is left of
-        // it, and one this frame does not draw loses its entry.
+        // it. A grid this frame draws that fits loses its entry, and so does
+        // one the document no longer holds; one only scrolled out of view
+        // keeps it.
         let overflows = table_overflows(&rows, bounds);
         let mut scroll = view.frame.tables().clone();
-        scroll.retain(|table, _| overflows.contains_key(table));
+        if !scroll.is_empty() {
+            let drawn: std::collections::HashSet<usize> = rows
+                .iter()
+                .filter_map(|row| Some(row.table?.table))
+                .collect();
+            let held: std::collections::HashSet<usize> = view
+                .projection()
+                .lines()
+                .iter()
+                .filter_map(|line| Some(view.types.table_cell_of(line)?.0))
+                .collect();
+            scroll.retain(|table, _| {
+                overflows.contains_key(table) || (!drawn.contains(table) && held.contains(table))
+            });
+        }
         for (table, overflow) in &overflows {
             let entry = scroll.entry(*table).or_default();
             entry.overflow = *overflow;
@@ -326,20 +366,26 @@ impl Element for EditorSurface {
         }
         // Every consumer uses these translated rows: paint, hit testing,
         // selection, input-method rectangles, and accessible text bounds.
-        for row in &mut rows {
-            row.origin.x -= single_line_scroll_x;
-            if let Some(cell) = row.table
-                && let Some(entry) = scroll.get(&cell.table)
-            {
-                row.origin.x -= entry.offset;
-            }
-        }
+        shift_sideways(&mut rows, &scroll, single_line_scroll_x);
         if window.is_a11y_active() {
+            let mut lines = view.shaping().lines();
+            let place = |index: usize| {
+                let top = lines.top(index);
+                let height = lines.top(index + 1) - top;
+                Bounds::new(
+                    point(bounds.left(), bounds.top() + top),
+                    size(bounds.size.width, height),
+                )
+            };
+            // `place` needs the lines mutably, to settle where each starts, and
+            // is only ever called one line at a time.
+            let place = std::cell::RefCell::new(place);
             view.accessible_text.borrow_mut().update(
-                &view.projection(),
+                view.projection_arc(),
                 view.state(),
                 &view.types,
                 &rows,
+                &|index| (place.borrow_mut())(index),
                 window.scale_factor(),
             );
         }
@@ -347,11 +393,13 @@ impl Element for EditorSurface {
             if editor.shaping().images().has_requests() {
                 editor.fetch_remote_images(cx);
             }
+            let scroll_y = editor.scroll.offset().y;
             editor.set_frame(FrameLayout {
                 rows: rows.clone(),
                 tables: scroll,
                 content_bounds: bounds,
                 single_line_scroll_x,
+                placed: Some((bounds.top(), scroll_y)),
             });
             if editor.caret.take_reveal() {
                 if editor.single_line {
@@ -737,6 +785,23 @@ impl Element for EditorSurface {
                 }
             }
         });
+    }
+}
+
+/// Move each row by how far its sideways scroll has taken it: the single-line
+/// field's, and a scrolled grid's for its cells.
+fn shift_sideways(
+    rows: &mut [LayoutLine],
+    tables: &HashMap<usize, TableScroll>,
+    single_line_scroll_x: Pixels,
+) {
+    for row in rows {
+        row.origin.x -= single_line_scroll_x;
+        if let Some(cell) = row.table
+            && let Some(entry) = tables.get(&cell.table)
+        {
+            row.origin.x -= entry.offset;
+        }
     }
 }
 

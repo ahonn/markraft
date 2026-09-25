@@ -1,48 +1,24 @@
-//! What laying the document out reads, besides the document itself.
+//! What laying the document out reads, besides the document itself, and the
+//! lines laid out from it.
 //!
-//! Shaping walks every line and asks the platform to lay out its text, and a
-//! frame asks for that twice: once to measure the note's height, once to draw
-//! it. Most redraws change nothing it reads — the caret blinked, the selection
-//! moved, a popup opened above — so the rows it produced are kept and handed
-//! back until one of the inputs here moves.
+//! Shaping a line asks the platform to lay out its text, so the view keeps
+//! what it shaped — and how tall every line is — until something it read
+//! changes; see [`crate::surface::Lines`]. That only holds while nothing can
+//! change an input without saying so, which is why they live in their own
+//! module: the fields are private to it, so every change goes through a method
+//! that marks the lines stale. A field on the view would be writable from every
+//! one of the view's sibling modules, and one assignment that forgot would
+//! leave the editor drawing a document it no longer holds.
 //!
-//! That only holds while nothing can change an input without saying so, which
-//! is why they live in their own module: the fields are private to it, so every
-//! change goes through a method that marks the rows stale. A field on the view
-//! would be writable from every one of the view's sibling modules, and one
-//! assignment that forgot would leave the editor drawing a document it no
-//! longer holds.
-//!
-//! A document that did change still mostly did not: an edit rebuilds the lines
-//! it reached and hands every other line of the projection over with the same
-//! body. So a shaping that misses here is not started from nothing — the rows
-//! of the last shaping at the same width and the same inputs are handed to it
-//! through [`Shaping::previous`], and it keeps each line whose body and
-//! surroundings it can show are unchanged; see
-//! `surface::shape::shape_reusing`.
+//! Most changes here reach every line — a new style sets every line in a new
+//! size — and bump [`Shaping::revision`], which starts every line over. A
+//! picture arriving only reaches the lines that draw one.
 
 use crate::WikiResolver;
 use crate::images::Images;
 use crate::style::EditorStyle;
-use crate::surface::LayoutLine;
-use gpui::Pixels;
-use markraft_core::projection::Projection;
-use std::cell::{Ref, RefCell};
-use std::sync::Arc;
-
-/// The rows one shaping produced, beside what it read to produce them.
-///
-/// Identity, not equality: the projection is the one the rows were shaped from,
-/// and a document that has not changed hands back the very same `Arc`.
-struct Shaped {
-    projection: Arc<Projection>,
-    width: Pixels,
-    revision: u64,
-    /// Which delimiter runs stood open when the rows were shaped; see
-    /// `surface::atoms::reveal_key`.
-    reveal: u64,
-    lines: Vec<LayoutLine>,
-}
+use crate::surface::Lines;
+use std::cell::{RefCell, RefMut};
 
 #[derive(Default)]
 pub(crate) struct Shaping {
@@ -54,21 +30,11 @@ pub(crate) struct Shaping {
     wiki: Option<WikiResolver>,
     /// How the host fetches remote images; absent, none is fetched.
     remote_images: Option<crate::RemoteImageFetcher>,
-    /// Bumped by every change above. The rows of a shaping that read an older
-    /// revision are not the rows this one would produce.
+    /// Bumped by every change above that reaches every line. Lines laid out
+    /// under an older revision are laid out again.
     revision: u64,
-    /// The last [`KEPT`] shapings, most recent first, one per width. More than
-    /// one because a frame measures before it draws, and a measuring pass is
-    /// free to ask for a width the drawing pass does not use; keeping only the
-    /// last would let the two evict each other every frame and cache nothing
-    /// at all. Only the newest at a width is kept: [`Shaping::previous`] reads
-    /// no other, and an older document's rows are never asked for again. None
-    /// outlives a change to the inputs, which no later lookup would match.
-    shaped: RefCell<Vec<Shaped>>,
+    lines: RefCell<Lines>,
 }
-
-/// How many shapings are kept: the measuring pass's and the drawing pass's.
-const KEPT: usize = 2;
 
 impl Shaping {
     pub(crate) fn style(&self) -> &EditorStyle {
@@ -76,7 +42,7 @@ impl Shaping {
     }
 
     /// A style equal to the one held changes nothing shaping reads, so the
-    /// rows stay; the host restyles every editor whenever the appearance may
+    /// lines stay; the host restyles every editor whenever the appearance may
     /// have moved, and most of those calls hand back the same style.
     pub(crate) fn set_style(&mut self, style: EditorStyle) {
         if self.style == style {
@@ -102,11 +68,11 @@ impl Shaping {
 
     /// Drop the decoded copy of every image file that changed on disk, and say
     /// whether any had. The host polls this several times a second, so a poll
-    /// that finds nothing must leave the laid-out rows alone.
+    /// that finds nothing must leave the lines alone.
     pub(crate) fn refresh_images(&mut self) -> bool {
         let changed = self.images.refresh();
         if changed {
-            self.changed();
+            self.lines.get_mut().forget_pictures();
         }
         changed
     }
@@ -121,8 +87,8 @@ impl Shaping {
         self.changed();
     }
 
-    /// Keep a remote image the background fetch delivered, and say whether the
-    /// rows have to be shaped again.
+    /// Keep a remote image the background fetch delivered, and say whether
+    /// the lines drawing pictures have to be laid out again.
     pub(crate) fn finish_remote_image(
         &mut self,
         source: &str,
@@ -130,7 +96,7 @@ impl Shaping {
     ) -> bool {
         let changed = self.images.finish_remote(source, result);
         if changed {
-            self.changed();
+            self.lines.get_mut().forget_pictures();
         }
         changed
     }
@@ -144,233 +110,72 @@ impl Shaping {
         self.changed();
     }
 
-    /// The rows shaped from `projection` at `width`, when the last shaping read
-    /// the same document, the same width and the same inputs. `None` is the
-    /// caller's cue to shape and to hand the result to [`Shaping::keep`].
-    pub(crate) fn rows(
-        &self,
-        projection: &Arc<Projection>,
-        width: Pixels,
-        reveal: u64,
-    ) -> Option<Vec<LayoutLine>> {
-        self.shaped
-            .borrow()
-            .iter()
-            .find(|shaped| self.matches(shaped, projection, width, reveal))
-            .map(|shaped| shaped.lines.clone())
+    /// Which revision of the inputs here the lines have to be laid out under.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
     }
 
-    /// The rows of the most recent shaping at `width` that read the same inputs
-    /// held here, whatever document and caret it shaped. A shaping that missed
-    /// [`Shaping::rows`] reuses what it can of these; nothing else about them
-    /// is known to still hold, so each line has to show it applies.
-    pub(crate) fn previous(&self, width: Pixels) -> Option<Ref<'_, [LayoutLine]>> {
-        Ref::filter_map(self.shaped.borrow(), |shaped| {
-            shaped
-                .iter()
-                .find(|shaped| shaped.width == width && shaped.revision == self.revision)
-                .map(|shaped| shaped.lines.as_slice())
-        })
-        .ok()
+    /// The document's lines, as far as they are laid out.
+    pub(crate) fn lines(&self) -> RefMut<'_, Lines> {
+        self.lines.borrow_mut()
     }
 
-    /// Keep `lines` as the rows of `projection` at `width`.
-    pub(crate) fn keep(
-        &self,
-        projection: &Arc<Projection>,
-        width: Pixels,
-        reveal: u64,
-        lines: &[LayoutLine],
-    ) {
-        let mut shaped = self.shaped.borrow_mut();
-        shaped.retain(|kept| kept.revision == self.revision && kept.width != width);
-        shaped.insert(
-            0,
-            Shaped {
-                projection: projection.clone(),
-                width,
-                revision: self.revision,
-                reveal,
-                lines: lines.to_vec(),
-            },
-        );
-        shaped.truncate(KEPT);
-    }
-
-    fn matches(
-        &self,
-        shaped: &Shaped,
-        projection: &Arc<Projection>,
-        width: Pixels,
-        reveal: u64,
-    ) -> bool {
-        shaped.width == width
-            && shaped.revision == self.revision
-            && shaped.reveal == reveal
-            && Arc::ptr_eq(&shaped.projection, projection)
-    }
-
-    /// Drop every kept shaping, for an editor that is not being drawn. The next
-    /// frame shapes from nothing.
+    /// Give back every line's rows, for an editor that is not being drawn.
+    /// The heights stay; the next frame shapes what it shows.
     pub(crate) fn release(&self) {
-        self.shaped.borrow_mut().clear();
+        self.lines.borrow_mut().release();
     }
 
     fn changed(&mut self) {
         self.revision += 1;
-        self.shaped.get_mut().clear();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::single_line;
     use gpui::px;
-    use markraft_core::Node;
 
-    fn projection_of(text: &str) -> Arc<Projection> {
-        let schema = single_line::schema();
-        let paragraph = schema
-            .node("paragraph", [schema.text(text)])
-            .expect("a paragraph of text");
-        let doc: Node = schema
-            .doc([paragraph])
-            .expect("one paragraph is a document");
-        Arc::new(Projection::of(&doc, schema))
-    }
-
-    /// The rows come back for the redraws that change nothing: same document,
-    /// same width, same inputs.
+    /// Every input that reaches every line starts the lines over.
     #[test]
-    fn rows_are_kept_for_a_redraw_that_changes_nothing() {
-        let shaping = Shaping::default();
-        let projection = projection_of("hello");
-        assert!(
-            shaping.rows(&projection, px(600.), 0).is_none(),
-            "nothing kept yet"
-        );
-        shaping.keep(&projection, px(600.), 0, &[]);
-        assert!(shaping.rows(&projection, px(600.), 0).is_some());
-        // A second handle on the same projection is the same document.
-        assert!(shaping.rows(&projection.clone(), px(600.), 0).is_some());
-    }
-
-    /// Every input shaping reads drops them: a different document, a different
-    /// width, or anything reached through a setter here.
-    #[test]
-    fn changing_what_shaping_reads_drops_the_rows() {
-        let projection = projection_of("hello");
-        let kept = || {
-            let shaping = Shaping::default();
-            shaping.keep(&projection, px(600.), 0, &[]);
-            shaping
+    fn changing_what_shaping_reads_bumps_the_revision() {
+        let bumped = |change: &dyn Fn(&mut Shaping)| {
+            let mut shaping = Shaping::default();
+            let before = shaping.revision();
+            change(&mut shaping);
+            shaping.revision() != before
         };
-
-        // A document that changed is a new projection, whatever it holds.
-        let shaping = kept();
-        assert!(shaping.rows(&projection_of("hello"), px(600.), 0).is_none());
-        assert!(shaping.rows(&projection_of("other"), px(600.), 0).is_none());
-
-        // A window that resized.
-        assert!(shaping.rows(&projection, px(599.), 0).is_none());
-
-        // And each setter in turn.
-        let mut shaping = kept();
-        shaping.set_style(EditorStyle {
+        assert!(bumped(&|shaping| shaping.set_style(EditorStyle {
             body_size: EditorStyle::default().body_size + px(1.),
             ..EditorStyle::default()
-        });
-        assert!(shaping.rows(&projection, px(600.), 0).is_none(), "style");
-
-        let mut shaping = kept();
-        shaping.set_wiki(Box::new(|_| true));
-        assert!(shaping.rows(&projection, px(600.), 0).is_none(), "wiki");
-
-        let mut shaping = kept();
-        shaping.set_image_base(Some("/tmp".into()));
-        assert!(
-            shaping.rows(&projection, px(600.), 0).is_none(),
-            "image base"
-        );
-
-        let mut shaping = kept();
-        shaping.set_image_root(Ok(Some("/tmp".into())));
-        assert!(
-            shaping.rows(&projection, px(600.), 0).is_none(),
-            "image root"
-        );
-    }
-
-    /// A frame measures at one width and draws at another, over and over. Both
-    /// have to keep hitting, or the caching buys nothing.
-    #[test]
-    fn a_measuring_and_a_drawing_width_do_not_evict_each_other() {
-        let shaping = Shaping::default();
-        let projection = projection_of("hello");
-        for _ in 0..3 {
-            shaping.keep(&projection, px(600.), 0, &[]);
-            shaping.keep(&projection, px(584.), 0, &[]);
-            assert!(shaping.rows(&projection, px(600.), 0).is_some(), "measured");
-            assert!(shaping.rows(&projection, px(584.), 0).is_some(), "drawn");
-        }
-        // A third width is one too many, and the oldest goes.
-        shaping.keep(&projection, px(320.), 0, &[]);
-        assert!(shaping.rows(&projection, px(600.), 0).is_none());
-        assert!(shaping.rows(&projection, px(584.), 0).is_some());
-        assert!(shaping.rows(&projection, px(320.), 0).is_some());
+        })));
+        assert!(bumped(&|shaping| shaping.set_wiki(Box::new(|_| true))));
+        assert!(bumped(
+            &|shaping| shaping.set_image_base(Some("/tmp".into()))
+        ));
+        assert!(bumped(
+            &|shaping| shaping.set_image_root(Ok(Some("/tmp".into())))
+        ));
     }
 
     /// The host restyles every editor when the appearance may have changed,
     /// and a style equal to the one held must not cost a relayout.
     #[test]
-    fn restyling_to_the_same_style_keeps_the_rows() {
+    fn restyling_to_the_same_style_keeps_the_revision() {
         let mut shaping = Shaping::default();
-        let projection = projection_of("hello");
-        shaping.keep(&projection, px(600.), 0, &[]);
+        let before = shaping.revision();
         shaping.set_style(EditorStyle::default());
-        assert!(shaping.rows(&projection, px(600.), 0).is_some());
-    }
-
-    /// Rows no lookup can reach again are not held: those shaped before an
-    /// input changed, and an older document's at a width shaped since.
-    #[test]
-    fn rows_no_lookup_can_reach_are_dropped() {
-        let mut shaping = Shaping::default();
-        let first = projection_of("hello");
-        shaping.keep(&first, px(600.), 0, &[]);
-        shaping.set_wiki(Box::new(|_| true));
-        assert!(shaping.shaped.borrow().is_empty(), "a changed input");
-
-        let second = projection_of("hello again");
-        shaping.keep(&first, px(600.), 0, &[]);
-        shaping.keep(&second, px(600.), 0, &[]);
-        assert_eq!(shaping.shaped.borrow().len(), 1, "one per width");
-        assert!(shaping.rows(&second, px(600.), 0).is_some());
-    }
-
-    /// An editor that is not drawn gives its rows back and shapes again when
-    /// it is.
-    #[test]
-    fn releasing_drops_every_shaping() {
-        let shaping = Shaping::default();
-        let projection = projection_of("hello");
-        shaping.keep(&projection, px(600.), 0, &[]);
-        shaping.keep(&projection, px(584.), 0, &[]);
-        shaping.release();
-        assert!(shaping.rows(&projection, px(600.), 0).is_none());
-        assert!(shaping.rows(&projection, px(584.), 0).is_none());
+        assert_eq!(shaping.revision(), before);
     }
 
     /// The host polls for changed image files several times a second; a poll
-    /// that finds nothing must leave the rows alone, or the polling itself
+    /// that finds nothing must leave the lines alone, or the polling itself
     /// would cost a relayout.
     #[test]
-    fn polling_for_unchanged_images_keeps_the_rows() {
+    fn polling_for_unchanged_images_keeps_the_revision() {
         let mut shaping = Shaping::default();
-        let projection = projection_of("hello");
-        shaping.keep(&projection, px(600.), 0, &[]);
+        let before = shaping.revision();
         assert!(!shaping.refresh_images(), "nothing is cached to change");
-        assert!(shaping.rows(&projection, px(600.), 0).is_some());
+        assert_eq!(shaping.revision(), before);
     }
 }

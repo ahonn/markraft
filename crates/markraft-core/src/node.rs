@@ -6,6 +6,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::attr::Attrs;
+use crate::ends::KeptEnds;
 use crate::error::NodeError;
 use crate::fragment::{Fragment, check_range};
 use crate::mark::{Mark, MarkSet};
@@ -576,9 +577,9 @@ impl Node {
         self.check_local(schema)?;
         let new_children = self.content().as_slice();
         let old_children = old.content().as_slice();
-        let (old_range, new_range) = unshared_middles(old_children, new_children);
-        let new_middle = &new_children[new_range];
-        let old_middle = &old_children[old_range];
+        let kept = KeptEnds::by_identity(old_children, new_children);
+        let new_middle = &new_children[kept.new_middle()];
+        let old_middle = &old_children[kept.old_middle()];
         for (index, child) in new_middle.iter().enumerate() {
             match old_middle.get(index) {
                 Some(previous) => child.check_from(previous, schema)?,
@@ -826,21 +827,6 @@ fn nodes_between_inner(
     }
 }
 
-/// The unmatched middles of two child lists, as ranges into `old` and `new`:
-/// what is left once the children both lists share by identity
-/// ([`Node::ptr_eq`]) are matched from the front and then from the back. Both
-/// ranges start at the same index, since everything before it is shared.
-pub(crate) fn unshared_middles(old: &[Node], new: &[Node]) -> (Range<usize>, Range<usize>) {
-    let prefix = old.iter().zip(new).take_while(|(a, b)| a.ptr_eq(b)).count();
-    let suffix = old[prefix..]
-        .iter()
-        .rev()
-        .zip(new[prefix..].iter().rev())
-        .take_while(|(a, b)| a.ptr_eq(b))
-        .count();
-    (prefix..old.len() - suffix, prefix..new.len() - suffix)
-}
-
 /// A pair of children [`diff_region`] walked into.
 #[derive(Debug, Clone)]
 pub(crate) struct DiffStep {
@@ -873,7 +859,7 @@ pub(crate) struct DiffRegion {
 /// that holds every difference.
 ///
 /// At each level, starting from the tops, the children are matched from both
-/// ends by identity ([`unshared_middles`]). When the unmatched middle is
+/// ends by identity ([`KeptEnds::by_identity`]). When the unmatched middle is
 /// exactly one child on each side, and that child is a block container that
 /// is not a textblock and keeps its markup, the walk enters the pair and goes
 /// on. Otherwise it stops, and the middles are the region: a change of type or
@@ -884,8 +870,8 @@ pub(crate) fn diff_region(old: &Node, new: &Node, schema: &Schema) -> DiffRegion
     let mut path = Vec::new();
     let (mut old, mut new) = (old.clone(), new.clone());
     loop {
-        let (old_range, new_range) =
-            unshared_middles(old.content().as_slice(), new.content().as_slice());
+        let kept = KeptEnds::by_identity(old.content().as_slice(), new.content().as_slice());
+        let (old_range, new_range) = (kept.old_middle(), kept.new_middle());
         let pair = match (old_range.len(), new_range.len()) {
             (1, 1) => {
                 let next_old = old.child(old_range.start).clone();
