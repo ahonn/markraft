@@ -63,7 +63,7 @@ pub(super) struct PendingAtom {
     /// `char` range of the placeholder within the display text.
     pub(super) chars: Range<usize>,
     pub(super) label: Rc<ShapedLine>,
-    pub(super) image: Option<(Arc<RenderImage>, Size<Pixels>)>,
+    pub(super) image: Option<(Arc<crate::animation::Picture>, Size<Pixels>)>,
     pub(super) frame: Option<Size<Pixels>>,
     pub(super) note: bool,
 }
@@ -285,7 +285,7 @@ pub(super) struct Atom {
     pub(super) text: String,
     pub(super) label: Rc<ShapedLine>,
     pub(super) width: Pixels,
-    pub(super) image: Option<(Arc<RenderImage>, Size<Pixels>)>,
+    pub(super) image: Option<(Arc<crate::animation::Picture>, Size<Pixels>)>,
     /// A picture still being fetched, drawn as a frame of this size.
     pub(super) frame: Option<Size<Pixels>>,
     /// A wiki link leading nowhere; see [`Widening::broken`].
@@ -597,9 +597,9 @@ pub(super) fn drawn_image(
     src: &str,
     declared: (Option<f32>, Option<f32>),
     column: Pixels,
-) -> Option<(Arc<RenderImage>, Size<Pixels>)> {
+) -> Option<(Arc<crate::animation::Picture>, Size<Pixels>)> {
     let image = images.load(src).ok()?;
-    let intrinsic = image.size(0);
+    let intrinsic = image.size();
     let (native_width, native_height) = (intrinsic.width.0 as f32, intrinsic.height.0 as f32);
     if native_width <= 0. || native_height <= 0. {
         return None;
@@ -624,9 +624,9 @@ pub(super) fn inline_image(
     src: &str,
     height: Pixels,
     column: Pixels,
-) -> Option<(Arc<RenderImage>, Size<Pixels>)> {
+) -> Option<(Arc<crate::animation::Picture>, Size<Pixels>)> {
     let image = images.load(src).ok()?;
-    let intrinsic = image.size(0);
+    let intrinsic = image.size();
     let (native_width, native_height) = (intrinsic.width.0 as f32, intrinsic.height.0 as f32);
     if native_width <= 0. || native_height <= 0. || height <= px(0.) {
         return None;

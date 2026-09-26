@@ -92,7 +92,7 @@ impl Shaping {
     pub(crate) fn finish_remote_image(
         &mut self,
         source: &str,
-        result: Result<std::sync::Arc<gpui::RenderImage>, crate::images::ImageError>,
+        result: crate::images::ImageResult,
     ) -> bool {
         let changed = self.images.finish_remote(source, result);
         if changed {

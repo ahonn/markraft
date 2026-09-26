@@ -1099,7 +1099,7 @@ impl SettingsView {
             row(Some("Tab in code"), vec![line(vec![tab_key])], p),
             group_gap(),
             row(
-                Some("Web images"),
+                Some("Images"),
                 vec![
                     checkbox(
                         "remote-images",
@@ -1108,6 +1108,15 @@ impl SettingsView {
                         false,
                         p,
                         self.sender(|value| Change::Pref(Pref::RemoteImages(value))),
+                    )
+                    .into_any_element(),
+                    checkbox(
+                        "animate-images",
+                        "Play animated images under the pointer",
+                        s.preferences.animate_images,
+                        false,
+                        p,
+                        self.sender(|value| Change::Pref(Pref::AnimateImages(value))),
                     )
                     .into_any_element(),
                 ],

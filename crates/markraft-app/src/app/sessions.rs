@@ -232,6 +232,7 @@ impl MarkraftApp {
         let extensions = editor.update(cx, |editor, cx| {
             editor.set_wiki_resolver(resolver, cx);
             editor.set_remote_images(self.remote_image_fetcher(), cx);
+            editor.set_animate_images(self.preferences.animate_images, cx);
             editor.set_indent_text(self.preferences.tab_key.text(), cx);
             [
                 editor.add_extension(menu, cx),

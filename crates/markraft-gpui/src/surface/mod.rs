@@ -178,7 +178,41 @@ pub(crate) struct FrameLayout {
     placed: Option<(Pixels, Pixels)>,
 }
 
+/// The lines a frame draws. A rendered verbatim line is drawn as its page: the
+/// page's lines, placed under the line's origin, stand in for its source rows,
+/// or follow them while the caret is in the source. They picture the source,
+/// so each says it is inert: no caret, selection or composition is drawn on it.
+fn painted_lines(rows: &[LayoutLine]) -> Vec<(std::borrow::Cow<'_, LayoutLine>, bool)> {
+    rows.iter()
+        .flat_map(|row| match &row.rendered {
+            Some(page) => page
+                .under_source()
+                .then_some((std::borrow::Cow::Borrowed(row), false))
+                .into_iter()
+                .chain(page.lines.iter().map(|(at, line)| {
+                    let mut line = line.clone();
+                    line.origin = row.origin + *at + point(px(0.), page.top);
+                    (std::borrow::Cow::Owned(line), true)
+                }))
+                .collect::<Vec<_>>(),
+            None => vec![(std::borrow::Cow::Borrowed(row), false)],
+        })
+        .collect()
+}
+
 impl FrameLayout {
+    /// The picture the last frame drew under `point`.
+    pub(crate) fn picture_at(
+        &self,
+        point: Point<Pixels>,
+    ) -> Option<Arc<crate::animation::Picture>> {
+        painted_lines(&self.rows).iter().find_map(|(line, _)| {
+            line.pictures()
+                .find(|(bounds, _)| bounds.contains(&point))
+                .map(|(_, picture)| picture.clone())
+        })
+    }
+
     /// Where the last paint put the top of the document, and the scroll offset
     /// it did so under. `None` before the first paint.
     pub(crate) fn placed(&self) -> Option<(Pixels, Pixels)> {
@@ -489,6 +523,11 @@ impl Element for EditorSurface {
         let scroll = editor.frame.tables().clone();
         let placeholder = (projection.line_count() == 1 && projection.plain_text().is_empty())
             .then(|| editor.placeholder.clone());
+        let shown = editor.player.shown();
+        for frame in editor.player.take_retired() {
+            let _ = window.drop_image(frame);
+        }
+        let mut shown_painted = false;
         window.handle_input(
             &focus,
             ElementInputHandler::new(bounds, self.editor.clone()),
@@ -506,31 +545,13 @@ impl Element for EditorSurface {
             // The grids first: their bands and lines sit under everything a cell
             // draws, including the selection.
             paint_tables(rows, &style, caret_pos, &scroll, window);
-            // A rendered verbatim line is drawn as its page: the page's lines,
-            // placed under the line's origin, stand in for its source rows, or
-            // follow them while the caret is in the source. They picture the
-            // source, so no caret, selection or composition is drawn on them.
-            let painted: Vec<(std::borrow::Cow<'_, LayoutLine>, bool)> = rows
-                .iter()
-                .flat_map(|row| match &row.rendered {
-                    Some(page) => page
-                        .under_source()
-                        .then_some((std::borrow::Cow::Borrowed(row), false))
-                        .into_iter()
-                        .chain(page.lines.iter().map(|(at, line)| {
-                            let mut line = line.clone();
-                            line.origin = row.origin + *at + point(px(0.), page.top);
-                            (std::borrow::Cow::Owned(line), true)
-                        }))
-                        .collect::<Vec<_>>(),
-                    None => vec![(std::borrow::Cow::Borrowed(row), false)],
-                })
-                .collect();
+            let painted = painted_lines(rows);
             for (row, inert) in &painted {
                 let (row, inert): (&LayoutLine, bool) = (row, *inert);
                 for atom in &row.atoms {
                     paint_atom(row, atom, &style, window, cx);
                 }
+                shown_painted |= paint_pictures(row, &shown, &style, window);
                 match row.decoration {
                     Some(Decoration::Quote {
                         levels,
@@ -725,20 +746,6 @@ impl Element for EditorSurface {
                 if let Some(marker) = &row.marker {
                     paint_marker(row, marker, &style, window, cx);
                 }
-                if let Some((image, size)) = &row.preview {
-                    let bounds = Bounds::new(
-                        row.origin + point(px(0.), row.text_height() + PREVIEW_GAP),
-                        *size,
-                    );
-                    let _ = window.paint_image(
-                        bounds,
-                        bounds,
-                        Corners::all(style.code_radius),
-                        image.clone(),
-                        0,
-                        false,
-                    );
-                }
                 if row.index == 0
                     && !inert
                     && let Some(text) = placeholder.as_ref().filter(|text| !text.is_empty())
@@ -840,6 +847,12 @@ impl Element for EditorSurface {
                 }
             }
         });
+        // The picture playing has scrolled away or left the document: it
+        // stops rather than repaint what no one sees.
+        if shown.any() && !shown_painted {
+            self.editor
+                .update(cx, |editor, cx| editor.hover_picture(None, cx));
+        }
     }
 }
 

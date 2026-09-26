@@ -8,6 +8,7 @@
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 mod accessibility;
+mod animation;
 mod callout;
 mod caret;
 mod clipboard;
@@ -581,6 +582,11 @@ pub struct EditorView {
     // The overlay scrollbar shows while scrolling and fades once scrolling stops.
     scrollbar_active: bool,
     scrollbar_task: Option<gpui::Task<()>>,
+    /// The animated picture playing under the pointer; see [`animation`].
+    pub(crate) player: animation::Player,
+    animation_task: Option<gpui::Task<()>>,
+    /// See [`EditorView::set_animate_images`].
+    animate_images: bool,
 }
 
 impl EventEmitter<EditorEvent> for EditorView {}
@@ -672,6 +678,9 @@ impl EditorView {
             caret_blink_task: None,
             scrollbar_active: false,
             scrollbar_task: None,
+            player: animation::Player::default(),
+            animation_task: None,
+            animate_images: true,
             shaping: shaping::Shaping::default(),
         }
     }
@@ -774,6 +783,60 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.shaping.set_remote_images(fetcher);
+        cx.notify();
+    }
+
+    /// Whether an animated picture plays while the pointer rests on it. On by
+    /// default; off, every one shows only its first frame.
+    pub fn set_animate_images(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.animate_images = on;
+        if !on {
+            self.hover_picture(None, cx);
+        }
+    }
+
+    /// Play the animated picture the last frame drew under `point`, stopping
+    /// whichever played before. `None` stops it: the pointer left, or the
+    /// picture is no longer drawn.
+    pub(crate) fn hover_picture(
+        &mut self,
+        point: Option<gpui::Point<Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        let target = point
+            .filter(|_| self.animate_images && !cx.reduce_motion())
+            .and_then(|point| self.frame.picture_at(point))
+            .filter(|picture| picture.is_animated());
+        let unchanged = match (&target, self.player.playing()) {
+            (Some(target), Some(playing)) => Arc::ptr_eq(target, playing),
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
+            return;
+        }
+        // Dropping the task cancels its pending timer.
+        self.animation_task = None;
+        self.player.stop();
+        if let Some(picture) = target
+            && let Some(first) = self.player.play(&picture)
+        {
+            self.animation_task = Some(cx.spawn(async move |this, cx| {
+                let mut delay = first;
+                loop {
+                    cx.background_executor().timer(delay).await;
+                    let next = this.update(cx, |this, cx| {
+                        let next = this.player.advance();
+                        cx.notify();
+                        next
+                    });
+                    match next {
+                        Ok(Some(next)) => delay = next,
+                        _ => break,
+                    }
+                }
+            }));
+        }
         cx.notify();
     }
 
@@ -2140,6 +2203,7 @@ impl EditorView {
         if self.selecting {
             self.select_point(event.position, true, cx);
         }
+        self.hover_picture(Some(event.position), cx);
     }
     fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.selecting = false;
@@ -2199,6 +2263,11 @@ impl Render for EditorView {
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.hover_picture(None, cx);
+                }
+            }))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up));
         root = self.bind_accessibility_actions(root, cx);

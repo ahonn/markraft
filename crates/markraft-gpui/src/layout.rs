@@ -438,6 +438,68 @@ mod tests {
         assert!(after > before, "one source row further on");
     }
 
+    /// An animated picture plays while the pointer rests on it and nowhere
+    /// else, and never once the host turns playing off.
+    #[gpui::test]
+    fn an_animated_picture_plays_only_under_the_pointer(cx: &mut TestAppContext) {
+        let directory = std::env::temp_dir().join(format!(
+            "markraft-animation-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("clip.gif"),
+            crate::animation::tests::gif(4, 40, 50),
+        )
+        .unwrap();
+        let (view, cx) = laid_out(cx, "Above\n\n![clip](clip.gif)\n\nBelow");
+        view.update(cx, |view, cx| {
+            view.set_image_base(Some(directory.clone()), cx)
+        });
+        cx.run_until_parked();
+        let (on, off) = view.read_with(cx, |view, _| {
+            let picture = view
+                .frame
+                .rows()
+                .iter()
+                .flat_map(|row| row.pictures().map(|(bounds, _)| bounds))
+                .next()
+                .expect("the picture is drawn");
+            (
+                picture.center(),
+                picture.bottom_right() + gpui::point(gpui::px(200.), gpui::px(0.)),
+            )
+        });
+        let playing = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| view.player.playing().is_some())
+        };
+        assert!(!playing(cx), "a picture shows its first frame");
+
+        cx.simulate_mouse_move(on, None, gpui::Modifiers::default());
+        assert!(playing(cx));
+        // Frames drawn while it plays keep it playing.
+        for _ in 0..4 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(60));
+            cx.run_until_parked();
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        }
+        assert!(playing(cx));
+        cx.simulate_mouse_move(off, None, gpui::Modifiers::default());
+        assert!(!playing(cx), "the pointer left it");
+
+        cx.simulate_mouse_move(on, None, gpui::Modifiers::default());
+        assert!(playing(cx));
+        view.update(cx, |view, cx| view.set_animate_images(false, cx));
+        assert!(!playing(cx), "turning playing off stops it");
+        cx.simulate_mouse_move(off, None, gpui::Modifiers::default());
+        cx.simulate_mouse_move(on, None, gpui::Modifiers::default());
+        assert!(!playing(cx), "and keeps it still");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn ranges_are_sorted_and_joined() {
         assert_eq!(

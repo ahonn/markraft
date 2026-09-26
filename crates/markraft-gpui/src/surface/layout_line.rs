@@ -119,7 +119,7 @@ pub(super) struct InlineAtom {
     pub(super) label: Rc<ShapedLine>,
     /// A decoded image drawn in place of the pill, at the size it was measured
     /// for.
-    pub(super) image: Option<(Arc<RenderImage>, Size<Pixels>)>,
+    pub(super) image: Option<(Arc<crate::animation::Picture>, Size<Pixels>)>,
     /// A picture still being fetched: a frame of this size stands where it will
     /// be drawn, with the label in it.
     pub(super) frame: Option<Size<Pixels>>,
@@ -307,7 +307,7 @@ pub(crate) struct LayoutLine {
     pub(super) marker_inset: Pixels,
     /// The picture a line spelling one out draws under its text, keeping
     /// the picture in view while the caret edits its source.
-    pub(super) preview: Option<(Arc<RenderImage>, Size<Pixels>)>,
+    pub(super) preview: Option<(Arc<crate::animation::Picture>, Size<Pixels>)>,
     /// How far left of the text each quote the line sits in draws its bar,
     /// outermost first. See [`quote_bar_distances`].
     pub(super) quote_bars: Vec<Pixels>,
@@ -495,6 +495,26 @@ impl LayoutLine {
 
     pub(super) fn text_height(&self) -> Pixels {
         self.line_height * self.visual_rows() as f32
+    }
+
+    /// Every picture the line draws and where: its inline atoms', each centred
+    /// in its row, then the preview under its text.
+    pub(crate) fn pictures(
+        &self,
+    ) -> impl Iterator<Item = (Bounds<Pixels>, &Arc<crate::animation::Picture>)> {
+        let atoms = self.atoms.iter().filter_map(|atom| {
+            let (picture, drawn) = atom.image.as_ref()?;
+            let top = self.origin.y
+                + self.line_height * atom.visual_row as f32
+                + ((self.line_height - drawn.height) * 0.5).max(px(0.));
+            let left = self.origin.x + atom.left + self.row_shift(atom.visual_row);
+            Some((Bounds::new(point(left, top), *drawn), picture))
+        });
+        let preview = self.preview.as_ref().map(|(picture, drawn)| {
+            let origin = self.origin + point(px(0.), self.text_height() + PREVIEW_GAP);
+            (Bounds::new(origin, *drawn), picture)
+        });
+        atoms.chain(preview)
     }
 
     /// The x of the bar drawn for `level` of the innermost `levels` quotes the

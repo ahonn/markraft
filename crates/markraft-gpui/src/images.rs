@@ -5,7 +5,8 @@
 //! Layout never waits for one: the first [`Images::load`] of a source answers
 //! [`ImageError::Loading`] and queues it, the view fetches the queue in the background,
 //! and the result is kept here until the source leaves the document.
-use gpui::{Image, ImageFormat, RenderImage, SvgRenderer};
+use crate::animation::{AnimatedFormat, Picture};
+use gpui::{Image, ImageFormat, SvgRenderer};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -47,7 +48,7 @@ impl ImageError {
     }
 }
 
-type ImageResult = Result<Arc<RenderImage>, ImageError>;
+pub(crate) type ImageResult = Result<Arc<Picture>, ImageError>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Stamp {
@@ -306,9 +307,17 @@ fn decode(path: &Path) -> ImageResult {
     decode_bytes(format, bytes)
 }
 
+/// An animated file keeps its first frame decoded and its bytes to play from; gpui's
+/// own decoding would hold every frame.
 fn decode_bytes(format: ImageFormat, bytes: Vec<u8>) -> ImageResult {
+    if let Some(animated) = AnimatedFormat::of(format, &bytes) {
+        return Picture::animated(animated, bytes)
+            .map(Arc::new)
+            .ok_or(ImageError::Unreadable);
+    }
     Image::from_bytes(format, bytes)
         .to_image_data(SvgRenderer::new(Arc::new(())))
+        .map(|image| Arc::new(Picture::still(image)))
         .map_err(|_| ImageError::Unreadable)
 }
 
@@ -540,7 +549,7 @@ mod tests {
         )
         .unwrap();
         assert!(images.invalidate_changed());
-        let original_width = images.load("late.svg").unwrap().size(0).width.0;
+        let original_width = images.load("late.svg").unwrap().size().width.0;
         assert!(original_width > 0);
         std::fs::write(
             &path,
@@ -549,7 +558,7 @@ mod tests {
         .unwrap();
         assert!(images.invalidate_changed());
         assert_eq!(
-            images.load("late.svg").unwrap().size(0).width.0,
+            images.load("late.svg").unwrap().size().width.0,
             original_width * 20
         );
         std::fs::remove_file(&path).unwrap();

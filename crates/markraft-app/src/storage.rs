@@ -81,6 +81,9 @@ pub struct Preferences {
     /// Whether notes fetch the remote images they show. Settings files written
     /// before it existed deserialize to the default, on.
     pub remote_images: bool,
+    /// Whether an animated image plays while the pointer rests on it. Settings
+    /// files written before it existed deserialize to the default, on.
+    pub animate_images: bool,
     /// The note's body text size in points; headings and spacing scale with it.
     pub text_size: f32,
     /// Hide the note when another app becomes active, for quick capture.
@@ -321,6 +324,7 @@ impl Default for Preferences {
             window_bounds: None,
             vim_mode: false,
             remote_images: true,
+            animate_images: true,
             text_size: Self::DEFAULT_TEXT_SIZE,
             hide_on_deactivate: false,
             always_on_top: true,
@@ -357,6 +361,7 @@ pub enum Pref {
     VimMode(bool),
     EmojiCharacters(bool),
     RemoteImages(bool),
+    AnimateImages(bool),
     /// The global shortcut that shows the note. Empty turns it off.
     Hotkey(String),
     /// The global shortcut that opens a new note. Empty turns it off.
@@ -393,6 +398,7 @@ impl Pref {
             Pref::VimMode(on) => preferences.vim_mode = on,
             Pref::EmojiCharacters(on) => preferences.emoji_characters = on,
             Pref::RemoteImages(on) => preferences.remote_images = on,
+            Pref::AnimateImages(on) => preferences.animate_images = on,
             Pref::Hotkey(shortcut) => preferences.hotkey = shortcut,
             Pref::NewNoteHotkey(shortcut) => preferences.new_note_hotkey = shortcut,
             Pref::TextSize(size) => {
@@ -1122,6 +1128,7 @@ mod tests {
             window_bounds: Some([1., 2., 3., 4.]),
             vim_mode: true,
             remote_images: false,
+            animate_images: false,
             text_size: Preferences::DEFAULT_TEXT_SIZE + 3.,
             hide_on_deactivate: true,
             always_on_top: false,
@@ -1174,6 +1181,7 @@ mod tests {
             Pref::VimMode(changed.vim_mode),
             Pref::EmojiCharacters(changed.emoji_characters),
             Pref::RemoteImages(changed.remote_images),
+            Pref::AnimateImages(changed.animate_images),
             Pref::Hotkey(changed.hotkey.clone()),
             Pref::NewNoteHotkey(changed.new_note_hotkey.clone()),
             Pref::TextSize(changed.text_size),

@@ -187,6 +187,29 @@ pub(super) fn caret_cell_frame(cell: TableCell, bounds: Bounds<Pixels>) -> Bound
     )
 }
 
+/// Draw the line's pictures, each as `shown` says, and say whether the one
+/// playing was among them.
+pub(super) fn paint_pictures(
+    row: &LayoutLine,
+    shown: &crate::animation::Shown,
+    style: &EditorStyle,
+    window: &mut Window,
+) -> bool {
+    let mut playing = false;
+    for (bounds, picture) in row.pictures() {
+        playing |= shown.is_playing(picture);
+        let _ = window.paint_image(
+            bounds,
+            bounds,
+            Corners::all(style.code_radius.min(bounds.size.height * 0.2)),
+            shown.image(picture),
+            0,
+            false,
+        );
+    }
+    playing
+}
+
 /// Draw one inline atom over the fillers reserving its slot.
 pub(super) fn paint_atom(
     row: &LayoutLine,
@@ -198,18 +221,8 @@ pub(super) fn paint_atom(
     let top = row.origin.y + row.line_height * atom.visual_row as f32;
     // An aligned row moves its atoms with its text.
     let left = row.origin.x + atom.left + row.row_shift(atom.visual_row);
-    if let Some((image, drawn)) = &atom.image {
-        // Centred in its row: a picture sharing the line is shorter than it.
-        let top = top + ((row.line_height - drawn.height) * 0.5).max(px(0.));
-        let bounds = Bounds::new(point(left, top), *drawn);
-        let _ = window.paint_image(
-            bounds,
-            bounds,
-            Corners::all(style.code_radius.min(drawn.height * 0.2)),
-            image.clone(),
-            0,
-            false,
-        );
+    // A picture is drawn with the line's others; see `paint_pictures`.
+    if atom.image.is_some() {
         return;
     }
     if let Some(frame) = atom.frame {

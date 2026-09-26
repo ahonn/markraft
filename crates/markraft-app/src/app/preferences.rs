@@ -53,6 +53,13 @@ impl MarkraftApp {
                 });
             }
         }
+        if before.animate_images != now.animate_images {
+            for editor in self.editors() {
+                editor.update(cx, |editor, cx| {
+                    editor.set_animate_images(now.animate_images, cx)
+                });
+            }
+        }
         if before.hotkey != now.hotkey {
             self.apply_shortcut(Shortcut::Toggle, before);
         }
