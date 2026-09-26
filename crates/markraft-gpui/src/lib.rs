@@ -14,6 +14,7 @@ mod clipboard;
 mod completion;
 mod emoji;
 mod extension;
+mod find;
 mod footnotes;
 mod format_state;
 mod images;
@@ -21,6 +22,7 @@ pub mod ime;
 mod layout;
 mod links;
 mod shaping;
+mod shown;
 mod single_line;
 mod style;
 mod surface;
@@ -33,6 +35,7 @@ pub use extension::{
     ActionHandler, CaretShape, EXTENSION_ORIGIN_PREFIX, EditorCx, Extension, ExtensionHandle,
     ExtensionPayload, InputPolicy, Overlay, Update,
 };
+pub use find::FindStatus;
 pub use markraft_core::commands::ColumnAlignment;
 pub use markraft_core::kind::{CalloutAttrs, DocTypes, DocumentKind, Formatting, PlainKind};
 use markraft_core::kind::{chains, conceal};
@@ -525,6 +528,8 @@ pub struct EditorView {
     file_paste: bool,
     state: EditorState,
     projection: Arc<Projection>,
+    /// The find query and its hits. See [`find`].
+    find: markraft_core::StateField<find::Find>,
     pub(crate) types: DocTypes,
     /// The host's document kind; see [`Setup::kind`].
     kind: Arc<dyn DocumentKind>,
@@ -597,19 +602,26 @@ fn base_extensions() -> markraft_core::Extension {
     ])
 }
 
-fn build_state(schema: &Schema, host: &markraft_core::Extension, doc: Option<Node>) -> EditorState {
-    let extensions = markraft_core::Extension::all([base_extensions(), host.clone()]);
+fn build_state(
+    schema: &Schema,
+    host: &markraft_core::Extension,
+    doc: Option<Node>,
+    types: &DocTypes,
+) -> (EditorState, markraft_core::StateField<find::Find>) {
+    let (search, field) = find::extension(types.clone());
+    let extensions = markraft_core::Extension::all([base_extensions(), search, host.clone()]);
     let config = EditorStateConfig::new(schema.clone()).extensions(extensions.clone());
     let config = match doc {
         Some(doc) => config.doc(doc),
         None => config,
     };
-    EditorState::create(config).unwrap_or_else(|_| {
+    let state = EditorState::create(config).unwrap_or_else(|_| {
         // A document the schema rejects is a host bug; an empty one keeps the
         // view usable rather than taking the process down.
         EditorState::create(EditorStateConfig::new(schema.clone()).extensions(extensions))
             .expect("the schema describes a valid empty document")
-    })
+    });
+    (state, field)
 }
 
 impl EditorView {
@@ -621,13 +633,14 @@ impl EditorView {
             kind,
             doc,
         } = setup;
-        let state = build_state(&schema, &extensions, doc);
+        let (state, find) = build_state(&schema, &extensions, doc, &types);
         let projection = projection_of(&state);
         Self {
             document_guard: None,
             transaction_guard: None,
             edit_error: None,
             file_paste: false,
+            find,
             types,
             codecs: kind.codecs(),
             spelling: kind.spelling(),
@@ -845,6 +858,60 @@ impl EditorView {
     pub fn state(&self) -> &EditorState {
         &self.state
     }
+
+    /// Where finding stands: the query, which hit is current, and how many
+    /// there are. The current hit is the selection; the others are decorations.
+    pub fn find_status(&self) -> FindStatus {
+        match self.state.field(&self.find) {
+            Some(found) => FindStatus {
+                query: found.query().to_owned(),
+                current: found.current(),
+                total: found.total(),
+            },
+            None => FindStatus {
+                query: String::new(),
+                current: None,
+                total: 0,
+            },
+        }
+    }
+
+    /// The selection as the reader sees it, when it stays on one line. What
+    /// ⌘F puts in the field.
+    pub fn find_selection_query(&self) -> Option<String> {
+        let doc = self.state.doc();
+        let selection = self.state.selection();
+        shown::ShownText::build(&self.projection, &self.types, &conceal::Reveal::nothing())
+            .text_inside(selection.from(doc)..selection.to(doc))
+    }
+
+    /// Find `query` and select the first hit at or after the caret. An empty
+    /// query clears the hits and leaves the caret where it is.
+    pub fn set_find_query(&mut self, query: String, cx: &mut Context<Self>) {
+        self.run_find(find::Command::Query(query), cx);
+    }
+
+    /// Select the next hit, wrapping to the first.
+    pub fn find_next(&mut self, cx: &mut Context<Self>) {
+        self.run_find(find::Command::Next, cx);
+    }
+
+    /// Select the previous hit, wrapping to the last.
+    pub fn find_previous(&mut self, cx: &mut Context<Self>) {
+        self.run_find(find::Command::Previous, cx);
+    }
+
+    fn run_find(&mut self, command: find::Command, cx: &mut Context<Self>) {
+        let previous = self.state.field(&self.find).cloned().unwrap_or_default();
+        let next = find::apply(&previous, &self.state, &self.types, &command);
+        let mut spec = TransactionSpec::new()
+            .effect(find::effect(command.clone()))
+            .add_to_history(false);
+        if let Some(range) = find::selection_for(&next, &command) {
+            spec = spec.selection(Selection::text(range.start, range.end));
+        }
+        let _ = self.edit(cx, false, vec![spec]);
+    }
     pub fn doc(&self) -> &Node {
         self.state.doc()
     }
@@ -975,11 +1042,14 @@ impl EditorView {
             doc
         };
         self.frame.clear();
-        self.state = build_state(
+        let (state, find) = build_state(
             &self.state.schema().clone(),
             &self.host_extensions,
             Some(doc),
+            &self.types,
         );
+        self.find = find;
+        self.state = state;
         self.projection = projection_of(&self.state);
         self.extension_selection = self.state.selection().clone();
         self.undo_group_depth = 0;
@@ -2544,6 +2614,7 @@ mod document_guard_tests {
     use super::{DocumentGuard, EditRejection, apply_guarded, build_state, clipboard, ime};
     use crate::typeahead::tests::{at, state_of, types_of};
     use markraft_commonmark::{CommonMarkCodecs, commonmark_schema, from_markdown};
+    use markraft_core::kind::DocTypes;
     use markraft_core::{
         Attrs, EditorState, Selection, TransactionAppenderFn, TransactionSpec, commands,
         composition::{
@@ -2667,7 +2738,12 @@ mod document_guard_tests {
             }
             commands::insert_text("!")(transaction.state())
         });
-        let mut state = build_state(&schema, &transaction_appender().of(appender), Some(doc));
+        let (mut state, _) = build_state(
+            &schema,
+            &transaction_appender().of(appender),
+            Some(doc),
+            &DocTypes::none(),
+        );
         let before = state.clone();
         let guard_schema = schema.clone();
         let forbid_exclamation: DocumentGuard = Box::new(move |doc| {
@@ -2707,10 +2783,11 @@ mod document_guard_tests {
             }
             commands::insert_text("!")(transaction.state())
         });
-        let mut state = build_state(
+        let (mut state, _) = build_state(
             &schema,
             &transaction_appender().of(appender),
             Some(source.document().clone()),
+            &DocTypes::none(),
         );
         let before = state.clone();
         let guard_track = track.clone();

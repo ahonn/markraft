@@ -30,6 +30,7 @@ use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
 mod atoms;
+pub(crate) use atoms::shown_atom_label;
 mod breaking;
 mod chrome;
 mod layout_line;
@@ -465,6 +466,13 @@ impl Element for EditorSurface {
         let selection = state.selection();
         let (a, b) = (selection.from(doc), selection.to(doc));
         let caret_pos = selection.head(doc);
+        // Other find hits. The current one is the selection, painted below.
+        let find_hits: Vec<(usize, usize)> = markraft_core::decorations::collect_decorations(state)
+            .all()
+            .into_iter()
+            .filter(|decoration| decoration.spec().attrs.get(crate::find::ROLE).is_some())
+            .filter_map(|decoration| decoration.range())
+            .collect();
         let marked = markraft_core::composition::composition_range(state)
             .map(|range| (range.from, range.to));
         let focused = editor.focus.is_focused(window);
@@ -645,6 +653,21 @@ impl Element for EditorSurface {
                             fill(pill, style.inline_code_background)
                                 .corner_radii(style.code_radius),
                         );
+                    }
+                }
+                // Under the selection, over the block's own fills: a selected
+                // hit still reads as selected, and the rest stay visible beside it.
+                if !inert {
+                    for &(from_doc, to_doc) in &find_hits {
+                        if to_doc <= row.from || from_doc > row.to() {
+                            continue;
+                        }
+                        let from = row.pos_to_offset(from_doc);
+                        let to = row.pos_to_offset(to_doc);
+                        let spans_next = to_doc > row.to();
+                        for rect in row.rectangles(from..to.min(row.char_len), spans_next) {
+                            window.paint_quad(fill(rect, style.find));
+                        }
                     }
                 }
                 if a != b && !inert {

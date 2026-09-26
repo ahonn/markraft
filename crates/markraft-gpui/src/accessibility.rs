@@ -1,7 +1,8 @@
 //! AccessKit text coordinates are selectable units, not UTF-16 offsets.
+use crate::shown::{ShownPiece, line_pieces};
 use crate::surface::LayoutLine;
 use gpui::{A11ySubtreeBuilder, App, Bounds, Entity, Pixels, Role, Window, accesskit};
-use markraft_core::kind::conceal::{self, Reveal};
+use markraft_core::kind::conceal::Reveal;
 use markraft_core::projection::{Line, Projection};
 use markraft_core::{EditorState, Selection};
 use std::ops::Range;
@@ -145,7 +146,7 @@ struct TextRun {
 /// A concealed run the row hides adds nothing; one it substitutes adds what it
 /// displays, every character of which stands before the whole run, so a
 /// selection can only take or leave it whole.
-fn shown_row(pieces: &[conceal::Piece<'_>], inner: Range<usize>) -> (String, Vec<usize>) {
+fn shown_row(pieces: &[ShownPiece], inner: Range<usize>) -> (String, Vec<usize>) {
     let mut value = String::new();
     let mut before = Vec::new();
     for piece in pieces {
@@ -244,9 +245,7 @@ fn read_unlaid(
     line: &Line,
     newline: bool,
 ) -> Unlaid {
-    let source = projection.line_text(index).unwrap_or_default();
-    let shown = conceal::shown(types.syntax, line, reveal);
-    let pieces = conceal::pieces(line, source, &shown);
+    let pieces = line_pieces(projection, types, index, reveal);
     let (mut text, mut before) = shown_row(&pieces, 0..line.len());
     if newline {
         text.push('\n');
@@ -332,16 +331,11 @@ impl AccessibleText {
                 self.push_unlaid(projection, types, &reveal, index, place(index), scale);
                 continue;
             };
-            let source = projection.line_text(row.index).unwrap_or_default();
-            let shown = conceal::shown(types.syntax, line, &reveal);
-            let pieces = conceal::pieces(line, source, &shown);
-            let prose: String = {
-                let shown = conceal::shown(types.syntax, line, &Reveal::nothing());
-                conceal::pieces(line, source, &shown)
-                    .iter()
-                    .map(|piece| piece.text)
-                    .collect()
-            };
+            let pieces = line_pieces(projection, types, row.index, &reveal);
+            let prose: String = line_pieces(projection, types, row.index, &Reveal::nothing())
+                .iter()
+                .map(|piece| piece.text.as_str())
+                .collect();
             for run in line.runs() {
                 let markraft_core::projection::RunContent::Atom(node) = &run.content else {
                     continue;

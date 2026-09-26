@@ -381,6 +381,7 @@ impl MarkraftApp {
                     .update(cx, |editor, cx| editor.replace_doc(document, cx));
             }
         }
+        self.sync_find(cx);
         self.notes_changed(cx);
         self.refresh_link_targets();
         // The title bar names the renamed file; only what happened to the links

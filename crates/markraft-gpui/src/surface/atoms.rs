@@ -304,10 +304,15 @@ pub(super) fn attr<'a>(node: &'a Node, name: &str) -> &'a str {
         .trim()
 }
 
+/// The text an atom shows, without the shape the row uses to draw it.
+pub(crate) fn shown_atom_label<'a>(types: &DocTypes, node: &'a Node) -> Option<&'a str> {
+    atom_label(types, node).map(|(_, label)| label)
+}
+
 /// What an inline atom is drawn as, for the atoms the view draws itself: an
 /// image's label, the verbatim source of an inline HTML primitive, a wiki
-/// link's label, or the emoji a shortcode names. Every other atom keeps the object-replacement character the
-/// projection gave it, which is blank.
+/// link's label, or the emoji a shortcode names. Every other atom keeps the
+/// object-replacement character the projection gave it, which is blank.
 pub(super) fn atom_label<'a>(types: &DocTypes, node: &'a Node) -> Option<(AtomShape, &'a str)> {
     let ty = node.type_id();
     if Some(ty) == types.image {

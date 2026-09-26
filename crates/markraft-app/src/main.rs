@@ -244,6 +244,9 @@ fn main() {
                 forward_menu_action::<app::Save>(handle, cx);
                 forward_menu_action::<app::OpenMarkdown>(handle, cx);
                 forward_menu_action::<app::Export>(handle, cx);
+                forward_menu_action::<app::Find>(handle, cx);
+                forward_menu_action::<app::FindNext>(handle, cx);
+                forward_menu_action::<app::FindPrevious>(handle, cx);
                 forward_menu_action::<markraft_gpui::Undo>(handle, cx);
                 forward_menu_action::<markraft_gpui::Redo>(handle, cx);
                 forward_menu_action::<markraft_gpui::Cut>(handle, cx);

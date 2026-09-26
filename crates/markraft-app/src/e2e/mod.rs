@@ -20,6 +20,7 @@ pub(crate) mod harness;
 mod blocks;
 mod disk;
 mod faults;
+mod find;
 mod ime;
 mod inline;
 mod input;

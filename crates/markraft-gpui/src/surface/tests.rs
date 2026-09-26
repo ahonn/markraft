@@ -2904,3 +2904,89 @@ fn the_caret_cell_frame_covers_the_grid_lines_it_borders() {
     );
     assert_eq!(frame(2, 2), (left, top, px(140.), px(70.)), "over both");
 }
+
+/// The index search reads is the line the reader sees, once the fillers a
+/// pill reserves are taken back out.
+#[test]
+fn shown_text_matches_the_shaped_line_apart_from_pill_fillers() {
+    let source = "x **ab** &amp; [[a/b|Alias]] :smile:\n";
+    let types = callout_types();
+    let rows = shaped_in(source, types.clone(), px(600.), 0..0);
+    let state = state_of(source);
+    let projection = projection_of(&state);
+    let shown = crate::shown::ShownText::build(
+        &projection,
+        &types,
+        &markraft_core::kind::conceal::Reveal::nothing(),
+    );
+    let displayed = rows
+        .iter()
+        .map(|row| {
+            row.rows
+                .iter()
+                .map(|inner| inner.text().replace('\u{00a0}', ""))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(displayed, shown.text());
+}
+
+/// A hit's rectangles land on the line that holds it, and a later cell's
+/// hit sits to the right of an earlier one.
+#[test]
+fn a_find_hit_has_a_rectangle_on_its_line() {
+    let source = "alpha **bold** and bold\n\n| left | right |\n| - | - |\n| bold | other |\n";
+    let types = callout_types();
+    let rows = shaped_in(source, types.clone(), px(420.), 0..0);
+    let state = state_of(source);
+    let projection = projection_of(&state);
+    let hits = crate::shown::ShownText::build(
+        &projection,
+        &types,
+        &markraft_core::kind::conceal::Reveal::nothing(),
+    )
+    .matches("bold");
+    assert!(hits.len() >= 2);
+    let mut origins = Vec::new();
+    for hit in &hits {
+        let row = rows
+            .iter()
+            .find(|row| hit.start < row.to() && hit.end > row.from)
+            .expect("a row holds the hit");
+        let from = row.pos_to_offset(hit.start);
+        let to = row.pos_to_offset(hit.end);
+        let rects = row.rectangles(from..to.min(row.char_len), hit.end > row.to());
+        assert!(!rects.is_empty(), "the hit is drawn");
+        origins.push(rects[0].origin);
+    }
+    let paragraph = origins[0];
+    let cell = origins
+        .iter()
+        .find(|origin| origin.y > paragraph.y)
+        .copied();
+    if let Some(cell) = cell {
+        assert!(cell.y > paragraph.y);
+    }
+    let others = crate::shown::ShownText::build(
+        &projection,
+        &types,
+        &markraft_core::kind::conceal::Reveal::nothing(),
+    )
+    .matches("other");
+    let other = others.first().expect("the other cell");
+    let row = rows
+        .iter()
+        .find(|row| other.start < row.to() && other.end > row.from)
+        .expect("a row holds the other cell");
+    let from = row.pos_to_offset(other.start);
+    let to = row.pos_to_offset(other.end);
+    let rects = row.rectangles(from..to.min(row.char_len), other.end > row.to());
+    let bold_cell = origins
+        .iter()
+        .find(|origin| (origin.y - rects[0].origin.y).abs() < px(1.))
+        .copied();
+    if let Some(bold_cell) = bold_cell {
+        assert!(rects[0].origin.x > bold_cell.x);
+    }
+}

@@ -844,6 +844,108 @@ impl MarkraftApp {
             )
             .child(self.query().clone())
     }
+    /// The bar under the title. Return steps forward and Shift-Return back,
+    /// the same keys the field would otherwise hand to the note.
+    fn find_bar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let status = self.editor().read(cx).find_status();
+        let query_style = self.find_editor.read(cx).style();
+        let query_height = query_style.body_size * query_style.line_height_ratio;
+        let label = if status.query.is_empty() {
+            String::new()
+        } else if status.total == 0 {
+            "No results".to_owned()
+        } else {
+            let current = status.current.map(|index| index + 1).unwrap_or(0);
+            format!("{current} of {}", status.total)
+        };
+        div()
+            .id("find-bar")
+            .absolute()
+            .top(TOOLBAR_HEIGHT + px(6.))
+            .left(px(16.))
+            .right(px(16.))
+            .h(px(32.))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(px(10.))
+            .bg(self.surface_color())
+            .border_1()
+            .border_color(self.border_color())
+            .shadow(popover_shadow())
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.ring.release();
+                    window.focus(&this.find_editor.focus_handle(cx), cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_action(cx.listener(|this, _: &markraft_gpui::Enter, window, cx| {
+                this.find_next(window, cx);
+                cx.stop_propagation();
+            }))
+            .on_action(
+                cx.listener(|this, _: &markraft_gpui::LineBreak, window, cx| {
+                    this.find_previous(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .w_0()
+                    // Center the text line, rather than a full-height editor viewport.
+                    .h(query_height)
+                    .child(self.find_editor.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .min_w(px(72.))
+                    .text_size(px(12.))
+                    .text_color(self.muted())
+                    .child(label),
+            )
+            .child(self.find_step("find-previous", "↑", "Find previous", false, cx))
+            .child(self.find_step("find-next", "↓", "Find next", true, cx))
+    }
+    fn find_step(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        aria: &'static str,
+        next: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        div()
+            .id(id)
+            .role(Role::Button)
+            .aria_label(aria)
+            .w(px(22.))
+            .h(px(22.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.))
+            .cursor_pointer()
+            .text_size(px(12.))
+            .text_color(self.muted())
+            .hover(|style| style.bg(self.hover_color()).text_color(self.control_text()))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if next {
+                    this.find_next(window, cx);
+                } else {
+                    this.find_previous(window, cx);
+                }
+                window.focus(&this.find_editor.focus_handle(cx), cx);
+            }))
+            .child(label)
+    }
     /// What stands in the document area for a file Markraft could not read.
     ///
     /// Its text never became a document, so the editor below would offer "Start
@@ -1750,14 +1852,14 @@ impl Render for MarkraftApp {
             // Tab walks the open surface's controls. With nothing open it falls through,
             // so the note still indents.
             .capture_action(cx.listener(|this, _: &markraft_gpui::Indent, w, cx| {
-                if this.focus_step(true, w, cx) {
+                if this.find_focused(w, cx) || this.focus_step(true, w, cx) {
                     cx.stop_propagation();
                 } else {
                     cx.propagate();
                 }
             }))
             .capture_action(cx.listener(|this, _: &markraft_gpui::Outdent, w, cx| {
-                if this.focus_step(false, w, cx) {
+                if this.find_focused(w, cx) || this.focus_step(false, w, cx) {
                     cx.stop_propagation();
                 } else {
                     cx.propagate();
@@ -1833,9 +1935,14 @@ impl Render for MarkraftApp {
                     cx,
                 )
             }))
-            .on_action(cx.listener(|this, _: &OpenMarkdown, w, cx| {
-                this.intent(Intent::OpenMarkdown, w, cx)
-            }));
+            .on_action(
+                cx.listener(|this, _: &OpenMarkdown, w, cx| {
+                    this.intent(Intent::OpenMarkdown, w, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &Find, w, cx| this.open_find(w, cx)))
+            .on_action(cx.listener(|this, _: &FindNext, w, cx| this.find_next(w, cx)))
+            .on_action(cx.listener(|this, _: &FindPrevious, w, cx| this.find_previous(w, cx)));
         let actions = self
             .chrome_capsule()
             .p(px(4.))
@@ -2041,6 +2148,10 @@ impl Render for MarkraftApp {
             .child(fade(px(128.), false))
             .child(fade(px(64.), false))
             .child(toolbar)
+            .when(
+                self.find_open && self.interaction.panel() == Panel::Editor,
+                |body| body.child(self.find_bar(cx)),
+            )
             .child(
                 div()
                     .id("footer-band")

@@ -54,6 +54,10 @@ pub struct EditorStyle {
     /// The fill behind highlighted text. Body text is drawn over it, so it
     /// answers to the body text's floor.
     pub highlight: Hsla,
+    /// The fill behind a find hit that is not the current one. The current
+    /// hit is the selection. Translucent, and quieter than [`EditorStyle::selection`],
+    /// so the two stay apart when they sit on the same line.
+    pub find: Hsla,
     /// The fill behind a table's header row, which is its first row.
     ///
     /// A band rather than a tint of the text: the grid lines are drawn in
@@ -114,6 +118,7 @@ impl Default for EditorStyle {
             inline_code_text: rgb(0x24282e).into(),
             code_radius: px(0.),
             highlight: rgb(0xf8e5a0).into(),
+            find: rgba(0xf8e5a080).into(),
             table_header_background: rgb(0xf4f2ec).into(),
             rule: rgb(0xd9d7d0).into(),
             callout_tones: [
@@ -175,6 +180,7 @@ impl EditorStyle {
             inline_code_text: rgb(0x55575c).into(),
             code_radius: px(6.),
             highlight: rgb(0xf5df8e).into(),
+            find: rgba(0xf5df8e99).into(),
             table_header_background: rgb(0xe6e6e7).into(),
             rule: rgb(0x86888d).into(),
             callout_tones: [
@@ -212,6 +218,7 @@ impl EditorStyle {
             inline_code_background: rgb(0x3c3e44).into(),
             inline_code_text: rgb(0xb9bcc2).into(),
             highlight: rgb(0x5b4a17).into(),
+            find: rgba(0xc4a15a73).into(),
             table_header_background: rgb(0x1d1e21).into(),
             rule: rgb(0x6e717a).into(),
             callout_tones: [
@@ -361,6 +368,12 @@ mod tests {
                 "callout quote",
                 style.callout_tones[6],
                 style.background,
+                4.5,
+            ),
+            (
+                "text on a find hit",
+                body,
+                over(style.find, style.background),
                 4.5,
             ),
             (

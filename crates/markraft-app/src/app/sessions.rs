@@ -126,9 +126,10 @@ impl MarkraftApp {
                 .update(cx, |editor, _| editor.release_layout());
         }
         if self.sessions.activate(&id) {
-            if restore_focus {
+            if restore_focus && !self.find_open {
                 self.focus_editor(window, cx);
             }
+            self.sync_find(cx);
             return;
         }
         let restore_focus = self.close_popover(cx) || restore_focus;
@@ -336,9 +337,10 @@ impl MarkraftApp {
                 vim_mode: markraft_vim::Mode::default(),
             },
         );
-        if restore_focus {
+        if restore_focus && !self.find_open {
             self.focus_editor(window, cx);
         }
+        self.sync_find(cx);
     }
     pub(super) fn sync_documents(&mut self, cx: &App) {
         for (id, session) in self.sessions.iter() {

@@ -1,6 +1,7 @@
 mod assets;
 mod carry;
 mod feedback;
+mod find;
 mod interaction;
 mod io;
 mod lists;
@@ -62,6 +63,9 @@ actions!(
         Link,
         Export,
         OpenMarkdown,
+        Find,
+        FindNext,
+        FindPrevious,
         IncreaseTextSize,
         DecreaseTextSize,
         ResetTextSize
@@ -134,6 +138,11 @@ pub struct MarkraftApp {
     trashed: Vec<PathBuf>,
     /// The formatting toolbar over the note, and what the footer counts.
     toolbar: Toolbar,
+    /// Whether the find bar is over the note. Closing it clears the note's
+    /// hits and leaves this field's text, so the next ⌘F offers the same query.
+    find_open: bool,
+    find_editor: Entity<EditorView>,
+    _find_watch: Subscription,
     /// What the footer counts, kept from frame to frame: every frame draws the
     /// footer, a caret blink's as much as an edit's, and an edit changes only
     /// a block or two of the note.
@@ -277,6 +286,20 @@ impl MarkraftApp {
         let pairs = std::sync::Arc::new(preferences.auto_pair.into());
         let house = markraft_commonmark::HouseStyleHandle::default();
         apply_markdown_style(&house, &preferences);
+        let find_editor = cx.new(|cx| {
+            let mut editor = EditorView::single_line(cx).with_style(query_style(dark));
+            editor.set_placeholder("Find", cx);
+            editor.set_aria_label("Find in note", cx);
+            editor
+        });
+        // The note is told on the way through, while the bar is open. A change
+        // while it is closed only waits in the field.
+        let find_watch = cx.subscribe(&find_editor, |this, _editor, event: &EditorEvent, cx| {
+            if !this.find_open || !matches!(event, EditorEvent::Changed { .. }) {
+                return;
+            }
+            this.sync_find(cx);
+        });
         let mut app = Self {
             library,
             preferences,
@@ -309,6 +332,9 @@ impl MarkraftApp {
             shortcuts,
             pairs,
             toolbar: Toolbar::default(),
+            find_open: false,
+            find_editor,
+            _find_watch: find_watch,
             counted: Default::default(),
             format: Cursor::default(),
             dark,
@@ -956,6 +982,8 @@ impl MarkraftApp {
         if had_popover {
             self.focus_editor(window, cx);
             cx.notify();
+        } else if self.close_find(true, window, cx) {
+            // Closing the bar is the whole of this Escape.
         } else if self.interaction.panel() != Panel::Editor {
             self.set_panel(Panel::Editor, cx);
             self.focus_editor(window, cx);
@@ -987,7 +1015,9 @@ impl MarkraftApp {
         self.library.new_note(doc::empty());
         self.ensure_session(window, cx);
         self.set_panel(Panel::Editor, cx);
-        self.focus_editor(window, cx);
+        if !self.find_open {
+            self.focus_editor(window, cx);
+        }
         self.notes_changed(cx);
     }
     fn select_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -999,7 +1029,9 @@ impl MarkraftApp {
             self.io.opening += 1;
             self.ensure_session(window, cx);
             self.set_panel(Panel::Editor, cx);
-            self.focus_editor(window, cx);
+            if !self.find_open {
+                self.focus_editor(window, cx);
+            }
             self.notes_changed(cx);
         }
     }
@@ -1049,6 +1081,9 @@ impl MarkraftApp {
         }
     }
     fn open_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
+        // The panel takes the keyboard for its own field. Find stays out of
+        // the way, and ⌘F from the panel comes back to the note first.
+        self.close_find(false, window, cx);
         self.close_popover(cx);
         if self.persistence.is_none() {
             return;
@@ -1386,6 +1421,11 @@ impl MarkraftApp {
             .line_width
             .ems()
             .map(|ems| px((ems * preferences.text_size).round()));
+        if self.find_open {
+            // The bar floats under the toolbar, so the first line starts clear
+            // of it the way it starts clear of the toolbar.
+            style.top_overlay += find::CLEARANCE;
+        }
         style
     }
     fn restyle_editors(&self, cx: &mut Context<Self>) {
@@ -1395,6 +1435,9 @@ impl MarkraftApp {
                 .editor()
                 .update(cx, |e, cx| e.set_style(style.clone(), cx));
         }
+        self.find_editor.update(cx, |editor, cx| {
+            editor.set_style(query_style(self.dark), cx);
+        });
     }
     /// ⌘L: a link under the caret shows its actions, anything else asks for an address.
     fn open_link_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2416,6 +2459,9 @@ pub fn bind_app_keys(cx: &mut App) {
         KeyBinding::new("cmd-l", Link, Some("MarkraftApp")),
         KeyBinding::new("cmd-shift-e", Export, Some("MarkraftApp")),
         KeyBinding::new("cmd-o", OpenMarkdown, Some("MarkraftApp")),
+        KeyBinding::new("cmd-f", Find, Some("MarkraftApp")),
+        KeyBinding::new("cmd-g", FindNext, Some("MarkraftApp")),
+        KeyBinding::new("cmd-shift-g", FindPrevious, Some("MarkraftApp")),
         KeyBinding::new("cmd-=", IncreaseTextSize, Some("MarkraftApp")),
         KeyBinding::new("cmd-shift-=", IncreaseTextSize, Some("MarkraftApp")),
         KeyBinding::new("cmd--", DecreaseTextSize, Some("MarkraftApp")),
@@ -2450,6 +2496,10 @@ pub fn bind_app_keys(cx: &mut App) {
             MenuItem::action("Paste as Plain Text", markraft_gpui::PastePlain),
             MenuItem::action("Paste as Markdown", markraft_gpui::PasteMarkdown),
             MenuItem::action("Select All", markraft_gpui::SelectAll),
+            MenuItem::separator(),
+            MenuItem::action("Find…", Find),
+            MenuItem::action("Find Next", FindNext),
+            MenuItem::action("Find Previous", FindPrevious),
         ]),
     ]);
 }
