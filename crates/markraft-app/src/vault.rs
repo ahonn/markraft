@@ -2457,25 +2457,43 @@ mod tests {
         assert_eq!(fs::read_to_string(path).unwrap(), "Exact place\n");
         assert_eq!(fs::read_dir(root.path().join("notes")).unwrap().count(), 0);
     }
+    /// Calls the attribute functions directly: a spawned child would share the
+    /// open folder locks of tests running beside it until it execs.
     #[cfg(target_os = "macos")]
     #[test]
     fn atomic_replacement_preserves_extended_attributes() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
         let root = tempfile::tempdir().unwrap();
         let path = fixture(root.path(), "note.md", b"Original");
-        let status = std::process::Command::new("/usr/bin/xattr")
-            .args(["-w", "com.markraft.test", "retained"])
-            .arg(&path)
-            .status()
-            .unwrap();
-        assert!(status.success());
+        let file = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let name = c"com.markraft.test";
+        let value = b"retained";
+        let written = unsafe {
+            libc::setxattr(
+                file.as_ptr(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+                0,
+            )
+        };
+        assert_eq!(written, 0);
         write_document(&path, b"Edited", Some(b"Original")).unwrap();
-        let output = std::process::Command::new("/usr/bin/xattr")
-            .args(["-p", "com.markraft.test"])
-            .arg(path)
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert_eq!(output.stdout, b"retained\n");
+        let mut read = [0u8; 16];
+        let length = unsafe {
+            libc::getxattr(
+                file.as_ptr(),
+                name.as_ptr(),
+                read.as_mut_ptr().cast(),
+                read.len(),
+                0,
+                0,
+            )
+        };
+        assert_eq!(usize::try_from(length).ok(), Some(value.len()));
+        assert_eq!(&read[..value.len()], value);
     }
     #[test]
     fn a_new_note_takes_the_permissions_of_the_folder_it_lands_in() {
