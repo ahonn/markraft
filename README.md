@@ -71,8 +71,9 @@ Turn on **Vim mode** in Settings → Editor. The editor starts in Normal mode an
 - **Text objects:** `iw` `aw`, `i"` `a"` (and `'`, `` ` ``), `i(` `a(` (or `b`), `i[` `a[`, `i{` `a{` (or `B`), `i<` `a<`, `ip` `ap`, after an operator or in Visual mode.
 - **Markdown blocks:** `dd` and `yy` take a whole block, so a list item keeps its nesting when pasted and a code block is taken whole. In a table, a line is a table row.
 - **Commands:** `:` opens the action list as a command line. `:w` saves, `:q` hides the window, `:wq` and `:x` save and hide, `:qa` quits Markraft, `:wqa` saves and quits, `:e` reloads the note from disk, `:enew` starts a new note, `:ls` lists notes, and `:u` and `:red` undo and redo. In Normal mode <kbd>Esc</kbd> does not hide the window; use `:q`.
+- **Search:** in Normal mode, `/` opens find with a live preview. Return confirms and returns to the note; Escape restores the original position and query. `n` finds the next match from the cursor and `N` the previous one, wrapping at either end. Search matches visible text literally, ignoring case, and shares its query with <kbd>⌘F</kbd>.
 
-Search, `f` and `t`, `.` repeat, registers and other `:` commands are not supported.
+Search counts, operator or Visual-mode search, `?`, regular expressions, `f` and `t`, `.` repeat, registers and other `:` commands are not supported.
 
 ## Your notes
 

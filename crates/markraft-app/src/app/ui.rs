@@ -884,7 +884,7 @@ impl MarkraftApp {
                 }),
             )
             .on_action(cx.listener(|this, _: &markraft_gpui::Enter, window, cx| {
-                this.find_next(window, cx);
+                this.submit_find(window, cx);
                 cx.stop_propagation();
             }))
             .on_action(
@@ -1941,6 +1941,11 @@ impl Render for MarkraftApp {
                 }),
             )
             .on_action(cx.listener(|this, _: &Find, w, cx| this.open_find(w, cx)))
+            .on_action(cx.listener(|this, _: &VimFind, w, cx| this.open_vim_find(w, cx)))
+            .on_action(cx.listener(|this, _: &VimFindNext, _, cx| this.repeat_vim_find(true, cx)))
+            .on_action(
+                cx.listener(|this, _: &VimFindPrevious, _, cx| this.repeat_vim_find(false, cx)),
+            )
             .on_action(cx.listener(|this, _: &FindNext, w, cx| this.find_next(w, cx)))
             .on_action(cx.listener(|this, _: &FindPrevious, w, cx| this.find_previous(w, cx)));
         let actions = self

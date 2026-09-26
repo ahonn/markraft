@@ -40,7 +40,7 @@ impl MarkraftApp {
             self.apply_theme(window, cx);
         }
         if before.vim_mode != now.vim_mode {
-            self.apply_vim(now.vim_mode, cx);
+            self.apply_vim(now.vim_mode, window, cx);
         }
         if before.emoji_characters != now.emoji_characters {
             self.emoji.set_characters(now.emoji_characters);

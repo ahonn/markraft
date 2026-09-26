@@ -860,7 +860,8 @@ impl EditorView {
     }
 
     /// Where finding stands: the query, which hit is current, and how many
-    /// there are. The current hit is the selection; the others are decorations.
+    /// there are. Cursor-based find decorates all hits; ordinary find selects
+    /// the current hit and decorates the others.
     pub fn find_status(&self) -> FindStatus {
         match self.state.field(&self.find) {
             Some(found) => FindStatus {
@@ -901,14 +902,51 @@ impl EditorView {
         self.run_find(find::Command::Previous, cx);
     }
 
+    /// Save the current selection and query for an incremental search session.
+    /// Calling this again during a preview preserves the original snapshot.
+    pub fn begin_find_preview(&mut self, cx: &mut Context<Self>) {
+        self.run_find(find::Command::BeginPreview, cx);
+    }
+
+    /// Preview the first hit strictly after the saved caret, wrapping. An empty
+    /// query or no matches restores the saved selection. Requires an open preview.
+    pub fn preview_find_query(&mut self, query: String, cx: &mut Context<Self>) {
+        self.run_find(find::Command::Preview(query), cx);
+    }
+
+    /// Keep the preview's query and caret without taking another search step.
+    pub fn accept_find_preview(&mut self, cx: &mut Context<Self>) {
+        self.run_find(find::Command::AcceptPreview, cx);
+    }
+
+    /// Restore the selection and search state from before the preview, mapped
+    /// through document edits that occurred while the preview was open.
+    pub fn cancel_find_preview(&mut self, cx: &mut Context<Self>) {
+        self.run_find(find::Command::CancelPreview, cx);
+    }
+
+    pub fn has_find_preview(&self) -> bool {
+        self.state
+            .field(&self.find)
+            .is_some_and(|find| find.has_preview())
+    }
+
+    /// Place the caret at the next/previous hit start strictly beyond the
+    /// current caret, wrapping. A selected range uses its start as the origin,
+    /// including a hit left selected by ordinary find. No matches leave the
+    /// selection unchanged.
+    pub fn find_from_cursor(&mut self, query: String, forward: bool, cx: &mut Context<Self>) {
+        self.run_find(find::Command::FromCursor { query, forward }, cx);
+    }
+
     fn run_find(&mut self, command: find::Command, cx: &mut Context<Self>) {
         let previous = self.state.field(&self.find).cloned().unwrap_or_default();
         let next = find::apply(&previous, &self.state, &self.types, &command);
         let mut spec = TransactionSpec::new()
             .effect(find::effect(command.clone()))
             .add_to_history(false);
-        if let Some(range) = find::selection_for(&next, &command) {
-            spec = spec.selection(Selection::text(range.start, range.end));
+        if let Some(selection) = find::selection_for(&previous, &next, &command) {
+            spec = spec.selection(selection);
         }
         let _ = self.edit(cx, false, vec![spec]);
     }

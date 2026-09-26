@@ -122,9 +122,10 @@
 //!
 //! # Not implemented
 //!
-//! `.`, `J`, marks, macros, named registers and search. `:` is left to the host, which
-//! binds it to a command list of its own. Nothing joins two lines, so nothing can join
-//! two table rows either.
+//! `.`, `J`, marks, macros and named registers. `:` and search are left to the host,
+//! which binds its command list and find controls in idle Normal mode. Search is
+//! not an operator motion. Nothing joins two lines, so nothing can join two table
+//! rows either.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 

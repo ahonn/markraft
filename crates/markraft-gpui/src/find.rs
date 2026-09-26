@@ -1,8 +1,9 @@
 //! Finding text in the note the reader sees.
 //!
 //! The query lives in a state field, and every other hit is an inline
-//! decoration. The current hit is the selection, so it is drawn once, by the
-//! selection, above the other hits. The field is not part of the undo history:
+//! decoration. Ordinary find selects the current hit, while cursor-based find
+//! decorates every hit and places the caret at the current hit's start.
+//! The field is not part of the undo history:
 //! a find transaction is marked out of it, and an edit recomputes the hits
 //! from the document it produced, keeping the current one when the edit only
 //! moved it.
@@ -17,8 +18,8 @@ use markraft_core::kind::DocTypes;
 use markraft_core::kind::conceal::Reveal;
 use markraft_core::projection::{Projection, projection_of};
 use markraft_core::{
-    Attrs, EditorState, Extension, Node, Schema, StateEffect, StateEffectType, StateField,
-    StateFieldConfig, Transaction,
+    Attrs, EditorState, Extension, Node, Schema, Selection, StateEffect, StateEffectType,
+    StateField, StateFieldConfig, Transaction,
 };
 
 use crate::shown::ShownText;
@@ -38,6 +39,14 @@ pub(crate) enum Command {
     Next,
     /// The previous hit, wrapping.
     Previous,
+    BeginPreview,
+    Preview(String),
+    AcceptPreview,
+    CancelPreview,
+    FromCursor {
+        query: String,
+        forward: bool,
+    },
 }
 
 /// The query and the hits it has in the current document.
@@ -47,6 +56,18 @@ pub(crate) struct Find {
     hits: Vec<Range<usize>>,
     /// Index into [`Find::hits`].
     current: Option<usize>,
+    cursor_mode: bool,
+    preview: Option<Preview>,
+}
+
+/// A non-recursive snapshot of the state to restore on cancellation. Positions
+/// track edits while the preview is open; hits are rebuilt from the live doc.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Preview {
+    selection: Selection,
+    query: String,
+    current: Option<Range<usize>>,
+    cursor_mode: bool,
 }
 
 impl Find {
@@ -60,6 +81,10 @@ impl Find {
 
     pub(crate) fn total(&self) -> usize {
         self.hits.len()
+    }
+
+    pub(crate) fn has_preview(&self) -> bool {
+        self.preview.is_some()
     }
 
     fn current_range(&self) -> Option<Range<usize>> {
@@ -111,19 +136,89 @@ pub(crate) fn apply(
                 query,
                 hits,
                 current,
+                ..Find::default()
             }
         }
         Command::Next => step(previous, 1),
         Command::Previous => step(previous, -1),
+        Command::BeginPreview => {
+            let mut next = previous.clone();
+            next.preview.get_or_insert_with(|| Preview {
+                selection: state.selection().clone(),
+                query: previous.query.clone(),
+                current: previous.current_range(),
+                cursor_mode: previous.cursor_mode,
+            });
+            next
+        }
+        Command::Preview(query) => {
+            let Some(preview) = &previous.preview else {
+                return previous.clone();
+            };
+            let hits = hits_of(state, types, query);
+            let current = from_cursor(&hits, preview.selection.head(state.doc()), true);
+            Find {
+                query: query.clone(),
+                hits,
+                current,
+                cursor_mode: true,
+                preview: previous.preview.clone(),
+            }
+        }
+        Command::AcceptPreview => Find {
+            preview: None,
+            ..previous.clone()
+        },
+        Command::CancelPreview => {
+            let Some(preview) = &previous.preview else {
+                return previous.clone();
+            };
+            let hits = hits_of(state, types, &preview.query);
+            let current = preview.current.as_ref().and_then(|range| {
+                hits.iter()
+                    .position(|hit| hit == range)
+                    .or_else(|| place(&hits, preview.selection.head(state.doc())))
+            });
+            Find {
+                query: preview.query.clone(),
+                hits,
+                current,
+                cursor_mode: preview.cursor_mode,
+                preview: None,
+            }
+        }
+        Command::FromCursor { query, forward } => {
+            let hits = hits_of(state, types, query);
+            // Ordinary find leaves a selected range behind when its bar closes.
+            // Treat that range's start as the hit's caret in either direction.
+            let current = from_cursor(&hits, state.selection().from(state.doc()), *forward);
+            Find {
+                query: query.clone(),
+                hits,
+                current,
+                cursor_mode: true,
+                preview: previous.preview.clone(),
+            }
+        }
     }
 }
 
-/// The document range `command` selects, when it selects one. An empty query
-/// clears the hits and leaves the caret where it is.
-pub(crate) fn selection_for(next: &Find, command: &Command) -> Option<Range<usize>> {
+/// The selection change requested by the command. Preview cancellation also
+/// restores non-text selections instead of reducing them to a character range.
+pub(crate) fn selection_for(previous: &Find, next: &Find, command: &Command) -> Option<Selection> {
     match command {
         Command::Query(query) if query.is_empty() => None,
-        _ => next.current_range(),
+        Command::BeginPreview | Command::AcceptPreview => None,
+        Command::CancelPreview => previous.preview.as_ref().map(|p| p.selection.clone()),
+        Command::Preview(_) if previous.preview.is_none() => None,
+        Command::Preview(_) => next
+            .current_range()
+            .map(|hit| Selection::cursor(hit.start))
+            .or_else(|| previous.preview.as_ref().map(|p| p.selection.clone())),
+        Command::FromCursor { .. } => next.current_range().map(|hit| Selection::cursor(hit.start)),
+        _ => next
+            .current_range()
+            .map(|hit| Selection::text(hit.start, hit.end)),
     }
 }
 
@@ -135,19 +230,20 @@ fn update(previous: &Find, transaction: &Transaction, types: &DocTypes) -> Find 
     {
         return apply(previous, transaction.start_state(), types, command);
     }
-    if transaction.doc_changed() && !previous.query.is_empty() {
+    if transaction.doc_changed() && (!previous.query.is_empty() || previous.has_preview()) {
         return follow(previous, transaction, types);
     }
     previous.clone()
 }
 
 fn follow(previous: &Find, transaction: &Transaction, types: &DocTypes) -> Find {
-    let mapped = previous.current_range().and_then(|range| {
+    let map_range = |range: Range<usize>| {
         let desc = transaction.changes().desc();
         let start = desc.map_pos(range.start, -1, Default::default())?;
         let end = desc.map_pos(range.end, 1, Default::default())?;
         (start < end).then_some(start..end)
-    });
+    };
+    let mapped = previous.current_range().and_then(map_range);
     // The new state is the one this update is building, so the hits are read
     // from the document the transaction already produced.
     let doc = transaction.new_doc();
@@ -170,6 +266,16 @@ fn follow(previous: &Find, transaction: &Transaction, types: &DocTypes) -> Find 
         query: previous.query.clone(),
         hits,
         current,
+        cursor_mode: previous.cursor_mode,
+        preview: previous.preview.as_ref().map(|preview| Preview {
+            selection: preview.selection.map(
+                transaction.start_state().schema(),
+                doc,
+                transaction.changes().desc(),
+            ),
+            current: preview.current.clone().and_then(map_range),
+            ..preview.clone()
+        }),
     }
 }
 
@@ -181,16 +287,24 @@ fn step(previous: &Find, delta: isize) -> Find {
     });
     Find {
         current,
+        cursor_mode: false,
+        preview: None,
         ..previous.clone()
     }
 }
 
 fn hits_of(state: &EditorState, types: &DocTypes, query: &str) -> Vec<Range<usize>> {
+    if query.is_empty() {
+        return Vec::new();
+    }
     let projection = projection_of(state);
     ShownText::build(&projection, types, &Reveal::nothing()).matches(query)
 }
 
 fn hits_in(doc: &Node, schema: &Schema, types: &DocTypes, query: &str) -> Vec<Range<usize>> {
+    if query.is_empty() {
+        return Vec::new();
+    }
     let projection = Projection::of(doc, schema);
     ShownText::build(&projection, types, &Reveal::nothing()).matches(query)
 }
@@ -208,8 +322,21 @@ fn place(hits: &[Range<usize>], caret: usize) -> Option<usize> {
     Some(hits.iter().position(|hit| hit.end > caret).unwrap_or(0))
 }
 
+fn from_cursor(hits: &[Range<usize>], caret: usize, forward: bool) -> Option<usize> {
+    if hits.is_empty() {
+        return None;
+    }
+    Some(if forward {
+        hits.iter().position(|hit| hit.start > caret).unwrap_or(0)
+    } else {
+        hits.iter()
+            .rposition(|hit| hit.start < caret)
+            .unwrap_or(hits.len() - 1)
+    })
+}
+
 fn decoration_source(find: &Find) -> DecorationSource {
-    let skip = find.current;
+    let skip = if find.cursor_mode { None } else { find.current };
     let spec = DecorationSpec::new(Attrs::from_pairs([(ROLE, "hit")]));
     DecorationSource::Static(DecorationSet::from_decorations(
         find.hits
@@ -254,6 +381,34 @@ mod tests {
             .effect(effect(command))
             .add_to_history(false);
         state.update([spec]).unwrap().state().clone()
+    }
+
+    fn run_selected(
+        state: &EditorState,
+        field: &StateField<Find>,
+        types: &DocTypes,
+        command: Command,
+    ) -> EditorState {
+        let previous = state.field(field).unwrap();
+        let next = apply(previous, state, types, &command);
+        let selection = selection_for(previous, &next, &command);
+        let mut spec = TransactionSpec::new()
+            .effect(effect(command))
+            .add_to_history(false);
+        if let Some(selection) = selection {
+            spec = spec.selection(selection);
+        }
+        state.update([spec]).unwrap().state().clone()
+    }
+
+    fn move_to(state: &EditorState, pos: usize) -> EditorState {
+        state
+            .update([TransactionSpec::new()
+                .selection(Selection::cursor(pos))
+                .add_to_history(false)])
+            .unwrap()
+            .state()
+            .clone()
     }
 
     #[test]
@@ -311,5 +466,175 @@ mod tests {
         assert_eq!(state.field(&field).unwrap().current(), Some(0));
         let state = run(&state, &field, Command::Previous);
         assert_eq!(state.field(&field).unwrap().current(), Some(1));
+    }
+
+    #[test]
+    fn cursor_search_uses_the_live_caret_and_wraps_in_both_directions() {
+        let (state, field, types) = open("你好 one 你好 one 你好");
+        let hits = hits_of(&state, &types, "你好");
+        let search = |state: &EditorState, forward| {
+            run_selected(
+                state,
+                &field,
+                &types,
+                Command::FromCursor {
+                    query: "你好".into(),
+                    forward,
+                },
+            )
+        };
+        let state = move_to(&state, hits[0].start);
+        let state = search(&state, true);
+        assert_eq!(state.selection(), &Selection::cursor(hits[1].start));
+        assert_eq!(collect_decorations(&state).all().len(), hits.len());
+        let state = search(&state, false);
+        assert_eq!(state.selection(), &Selection::cursor(hits[0].start));
+        let state = search(&state, false);
+        assert_eq!(state.selection(), &Selection::cursor(hits[2].start));
+        let state = search(&state, true);
+        assert_eq!(state.selection(), &Selection::cursor(hits[0].start));
+        // Moving manually invalidates the cached index as a navigation origin.
+        let state = move_to(&state, hits[2].start);
+        let state = search(&state, false);
+        assert_eq!(state.selection(), &Selection::cursor(hits[1].start));
+        assert_eq!(markraft_core::history::undo_depth(&state), 0);
+    }
+
+    #[test]
+    fn cursor_search_steps_past_the_range_left_by_ordinary_find() {
+        let (state, field, types) = open("needle one needle two needle");
+        let hits = hits_of(&state, &types, "needle");
+        let run = |state: &EditorState, command| run_selected(state, &field, &types, command);
+        let state = run(&state, Command::Query("needle".into()));
+        let state = run(&state, Command::Next);
+        let state = run(&state, Command::Query(String::new()));
+        assert_eq!(
+            state.selection(),
+            &Selection::text(hits[1].start, hits[1].end)
+        );
+        for (forward, expected) in [(false, 0), (true, 2)] {
+            let stepped = run(
+                &state,
+                Command::FromCursor {
+                    query: "needle".into(),
+                    forward,
+                },
+            );
+            assert_eq!(
+                stepped.selection(),
+                &Selection::cursor(hits[expected].start)
+            );
+        }
+    }
+
+    #[test]
+    fn preview_uses_a_fixed_origin_and_accept_does_not_advance() {
+        let (state, field, types) = open("😀 alpha alpha");
+        let hits = hits_of(&state, &types, "alpha");
+        let origin = state.selection().clone();
+        let run = |state: &EditorState, command| run_selected(state, &field, &types, command);
+        let state = run(&state, Command::BeginPreview);
+        let state = run(&state, Command::Preview("a".into()));
+        let state = run(&state, Command::Preview("alpha".into()));
+        assert_eq!(state.selection(), &Selection::cursor(hits[0].start));
+        let state = run(&state, Command::Preview("missing".into()));
+        assert_eq!(state.selection(), &origin);
+        assert_eq!(state.field(&field).unwrap().total(), 0);
+        let state = run(&state, Command::Preview("alpha".into()));
+        let state = run(&state, Command::Preview(String::new()));
+        assert_eq!(state.selection(), &origin);
+        let state = run(&state, Command::Preview("alpha".into()));
+        let state = run(&state, Command::AcceptPreview);
+        assert_eq!(state.selection(), &Selection::cursor(hits[0].start));
+        assert!(!state.field(&field).unwrap().has_preview());
+        assert_eq!(state.field(&field).unwrap().query(), "alpha");
+        assert_eq!(collect_decorations(&state).all().len(), hits.len());
+        assert_eq!(markraft_core::history::undo_depth(&state), 0);
+    }
+
+    #[test]
+    fn cancel_restores_selection_query_and_decoration_mode_after_preview_steps() {
+        let (state, field, types) = open("old new old new");
+        let run = |state: &EditorState, command| run_selected(state, &field, &types, command);
+        let state = run(&state, Command::Query("old".into()));
+        let original_find = state.field(&field).unwrap().clone();
+        let original_selection = state.selection().clone();
+        let state = run(&state, Command::BeginPreview);
+        let state = run(&state, Command::Preview("new".into()));
+        // A repeated open must not overwrite the cancellation snapshot.
+        let state = run(&state, Command::BeginPreview);
+        let state = run(
+            &state,
+            Command::FromCursor {
+                query: "new".into(),
+                forward: true,
+            },
+        );
+        assert!(state.field(&field).unwrap().has_preview());
+        let state = run(&state, Command::CancelPreview);
+        assert_eq!(state.selection(), &original_selection);
+        assert_eq!(state.field(&field).unwrap(), &original_find);
+        assert_eq!(collect_decorations(&state).all().len(), 1);
+        // Closed-session operations are harmless, including a stale input event.
+        let state = run(&state, Command::CancelPreview);
+        let state = run(&state, Command::AcceptPreview);
+        let state = run(&state, Command::Preview("new".into()));
+        assert_eq!(state.selection(), &original_selection);
+        assert_eq!(state.field(&field).unwrap(), &original_find);
+    }
+
+    #[test]
+    fn edits_map_the_preview_origin_and_saved_search_even_with_an_empty_query() {
+        let (state, field, types) = open("old new old");
+        let run = |state: &EditorState, command| run_selected(state, &field, &types, command);
+        let state = run(&state, Command::Query("old".into()));
+        let state = run(&state, Command::Next);
+        let original_selection = state.selection().clone();
+        let state = run(&state, Command::BeginPreview);
+        let state = run(&state, Command::Preview(String::new()));
+        let state = move_to(&state, 1);
+        let insert: EditCommand = markraft_core::commands::insert_text("😀 ");
+        let transaction = state.update([insert(&state).unwrap()]).unwrap();
+        let mapped = original_selection.map(
+            state.schema(),
+            transaction.new_doc(),
+            transaction.changes().desc(),
+        );
+        let state = transaction.state().clone();
+        let state = run(&state, Command::Preview("missing".into()));
+        assert_eq!(state.selection(), &mapped);
+        let state = run(&state, Command::CancelPreview);
+        assert_eq!(state.selection(), &mapped);
+        let find = state.field(&field).unwrap();
+        assert_eq!(find.query(), "old");
+        assert_eq!(find.current(), Some(1));
+        assert_eq!(find.hits, hits_of(&state, &types, "old"));
+        assert!(!find.has_preview());
+    }
+
+    #[test]
+    fn cursor_search_without_matches_keeps_the_caret_and_single_hits_wrap() {
+        let (state, field, types) = open("one 😀");
+        let run = |state: &EditorState, query: &str, forward| {
+            run_selected(
+                state,
+                &field,
+                &types,
+                Command::FromCursor {
+                    query: query.into(),
+                    forward,
+                },
+            )
+        };
+        let state = run(&state, "😀", true);
+        let at_hit = state.selection().clone();
+        let state = run(&state, "😀", true);
+        assert_eq!(state.selection(), &at_hit);
+        let state = run(&state, "😀", false);
+        assert_eq!(state.selection(), &at_hit);
+        let state = run(&state, "missing", true);
+        assert_eq!(state.selection(), &at_hit);
+        let state = run(&state, "", false);
+        assert_eq!(state.selection(), &at_hit);
     }
 }

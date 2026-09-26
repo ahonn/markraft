@@ -18,7 +18,16 @@ impl MarkraftApp {
 
     /// Turn modal editing on or off for every open note editor at once, rather than on
     /// the next launch. The query field never gets it: it is a single-line host control.
-    pub(in crate::app) fn apply_vim(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    pub(in crate::app) fn apply_vim(
+        &mut self,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focus_note = self.find_focused(window, cx);
+        if !enabled && self.cancel_vim_find(cx) && focus_note {
+            self.focus_editor(window, cx);
+        }
         let editors: Vec<_> = self
             .sessions
             .iter()

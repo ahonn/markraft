@@ -113,6 +113,9 @@ impl MarkraftApp {
     }
     pub(super) fn ensure_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.library.active_id.clone();
+        if self.find_vim.as_ref().is_some_and(|find| find.note != id) {
+            self.cancel_vim_find(cx);
+        }
         let restore_focus = self.interaction.note_changed(&id);
         if restore_focus {
             self.leave_input(cx);
@@ -126,6 +129,7 @@ impl MarkraftApp {
                 .update(cx, |editor, _| editor.release_layout());
         }
         if self.sessions.activate(&id) {
+            self.reconcile_vim_find(window, cx);
             if restore_focus && !self.find_open {
                 self.focus_editor(window, cx);
             }
@@ -300,6 +304,7 @@ impl MarkraftApp {
                     this.close_popover(cx);
                 }
                 let document = editor.read(cx).committed_document().clone();
+                this.reconcile_vim_find(window, cx);
                 let title = this.library.note(&note_id).map(|note| note.title());
                 if this.library.set_document(&note_id, document) {
                     this.links.invalidate_if(
@@ -337,6 +342,7 @@ impl MarkraftApp {
                 vim_mode: markraft_vim::Mode::default(),
             },
         );
+        self.reconcile_vim_find(window, cx);
         if restore_focus && !self.find_open {
             self.focus_editor(window, cx);
         }

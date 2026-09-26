@@ -66,6 +66,9 @@ actions!(
         Find,
         FindNext,
         FindPrevious,
+        VimFind,
+        VimFindNext,
+        VimFindPrevious,
         IncreaseTextSize,
         DecreaseTextSize,
         ResetTextSize
@@ -138,9 +141,10 @@ pub struct MarkraftApp {
     trashed: Vec<PathBuf>,
     /// The formatting toolbar over the note, and what the footer counts.
     toolbar: Toolbar,
-    /// Whether the find bar is over the note. Closing it clears the note's
-    /// hits and leaves this field's text, so the next ⌘F offers the same query.
+    /// Whether the find bar is over the note. Vim can retain its highlights
+    /// after confirming the query and returning focus to the note.
     find_open: bool,
+    find_vim: Option<find::VimFind>,
     find_editor: Entity<EditorView>,
     _find_watch: Subscription,
     /// What the footer counts, kept from frame to frame: every frame draws the
@@ -333,6 +337,7 @@ impl MarkraftApp {
             pairs,
             toolbar: Toolbar::default(),
             find_open: false,
+            find_vim: None,
             find_editor,
             _find_watch: find_watch,
             counted: Default::default(),
@@ -958,6 +963,11 @@ impl MarkraftApp {
         }
     }
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_open && self.find_editor.read(cx).is_composing() {
+            self.find_editor
+                .update(cx, |editor, cx| editor.cancel_composition(cx));
+            return;
+        }
         if self.input_composing(cx) {
             self.cancel_input(cx);
             return;
@@ -1397,6 +1407,11 @@ impl MarkraftApp {
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_editor(&self) -> Entity<EditorView> {
         self.editor().clone()
+    }
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn test_find_editor(&self) -> Entity<EditorView> {
+        self.find_editor.clone()
     }
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -2460,6 +2475,21 @@ pub fn bind_app_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-e", Export, Some("MarkraftApp")),
         KeyBinding::new("cmd-o", OpenMarkdown, Some("MarkraftApp")),
         KeyBinding::new("cmd-f", Find, Some("MarkraftApp")),
+        KeyBinding::new(
+            "/",
+            VimFind,
+            Some("Markraft && vim_mode == normal && !vim_pending"),
+        ),
+        KeyBinding::new(
+            "n",
+            VimFindNext,
+            Some("Markraft && vim_mode == normal && !vim_pending"),
+        ),
+        KeyBinding::new(
+            "shift-n",
+            VimFindPrevious,
+            Some("Markraft && vim_mode == normal && !vim_pending"),
+        ),
         KeyBinding::new("cmd-g", FindNext, Some("MarkraftApp")),
         KeyBinding::new("cmd-shift-g", FindPrevious, Some("MarkraftApp")),
         KeyBinding::new("cmd-=", IncreaseTextSize, Some("MarkraftApp")),
