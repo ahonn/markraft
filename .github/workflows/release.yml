@@ -60,11 +60,33 @@ jobs:
     uses: ./.github/workflows/ci.yml
     with:
       ref: ${{ needs.tag.outputs.sha }}
-  release:
-    needs: [tag, validate]
+  # Each architecture builds on a machine of its own, alongside validate: only
+  # publishing waits for the tests.
+  compile:
+    needs: tag
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
     runs-on: macos-15
-    permissions:
-      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.tag.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      # No Rust cache: caches saved from a tag or pull request ref are never seen by
+      # the next release, so every release compiles from scratch anyway.
+      - run: cargo xtask compile --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binary-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/markraft-app
+          if-no-files-found: error
+          retention-days: 7
+  package:
+    needs: [tag, compile]
+    runs-on: macos-15
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.tag.outputs.tag }}
@@ -84,13 +106,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
+      # A prebuilt binary; building it from source took minutes.
+      - uses: taiki-e/install-action@v2
         with:
-          key: release-universal
-      # rust-cache prunes non-Cargo files but can restore their empty directories.
-      - name: Discard incomplete cached Sparkle installation
-        run: rm -rf target/sparkle
-      - run: cargo install cargo-bundle --version 0.11.0 --locked
+          tool: cargo-bundle@0.11.0
+      - uses: actions/download-artifact@v8
+        with:
+          name: binary-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release
+      - uses: actions/download-artifact@v8
+        with:
+          name: binary-x86_64-apple-darwin
+          path: target/x86_64-apple-darwin/release
+      # Artifacts do not keep the executable bit.
+      - run: chmod +x target/*-apple-darwin/release/markraft-app
       - name: Set temporary credential paths
         run: |
           echo "SPARKLE_PRIVATE_KEY_FILE=$RUNNER_TEMP/sparkle-private-key" >> "$GITHUB_ENV"
@@ -115,10 +144,38 @@ jobs:
           security import "$RUNNER_TEMP/signing.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$SIGNING_KEYCHAIN"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$SIGNING_KEYCHAIN"
           security list-keychains -d user -s "$SIGNING_KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db"
-      - name: Build, sign, notarize and generate appcast
-        run: cargo xtask release "$TAG"
+      - name: Bundle, sign, notarize and generate appcast
+        run: cargo xtask release "$TAG" --prebuilt
       - name: Verify embedded framework without development paths
         run: env -u DYLD_FRAMEWORK_PATH 'target/universal-apple-darwin/release/bundle/osx/Markraft.app/Contents/MacOS/markraft-app' --help
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-artifacts
+          path: target/release-artifacts/
+          if-no-files-found: error
+      - name: Remove signing credentials
+        if: always()
+        run: |
+          security delete-keychain "$SIGNING_KEYCHAIN" || true
+          rm -f "$RUNNER_TEMP/signing.p12" "$SPARKLE_PRIVATE_KEY_FILE"
+  # Publishes the artifacts package made, so re-running it never rebuilds: a new
+  # build would be signed and notarized anew and no longer match its appcast.
+  publish:
+    needs: [tag, package, validate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.tag.outputs.sha }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-artifacts
+          path: target/release-artifacts
       - name: Publish all artifacts together
         run: |
           set -euo pipefail
@@ -138,15 +195,10 @@ jobs:
           fi
           gh release upload "$TAG" "target/release-artifacts/Markraft-${TAG#v}-universal.dmg" "target/release-artifacts/Markraft-${TAG#v}-universal.zip" target/release-artifacts/appcast.xml target/release-artifacts/SHA256SUMS --clobber
           gh release edit "$TAG" --draft=false --latest
-      - name: Remove signing credentials
-        if: always()
-        run: |
-          security delete-keychain "$SIGNING_KEYCHAIN" || true
-          rm -f "$RUNNER_TEMP/signing.p12" "$SPARKLE_PRIVATE_KEY_FILE"
   # A separate job so "Re-run failed jobs" retries only the feed: rebuilding would
   # produce a different archive whose signature no longer matches the release.
   publish-feed:
-    needs: [tag, release]
+    needs: [tag, publish]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}

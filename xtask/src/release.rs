@@ -101,7 +101,7 @@ impl Notary {
     }
 }
 
-pub fn release(root: &Path, tag: &str) -> Result<()> {
+pub fn release(root: &Path, tag: &str, prebuilt: bool) -> Result<()> {
     let identity = required_env("MARKRAFT_SIGN_IDENTITY")?;
     ensure!(
         identity.starts_with("Developer ID Application:"),
@@ -142,6 +142,7 @@ pub fn release(root: &Path, tag: &str) -> Result<()> {
             release: true,
             universal: true,
             mock_updates: false,
+            prebuilt,
         },
     )?;
     // Keep the submission ZIP outside the appcast source directory. Only the

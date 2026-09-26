@@ -29,9 +29,22 @@ enum Task {
         /// Also package the bundle as a disk image, signed only with a Developer ID.
         #[arg(long)]
         dmg: bool,
+        /// Bundle the binaries `compile` already built instead of building them.
+        #[arg(long)]
+        prebuilt: bool,
+    },
+    /// Build the release binary for one architecture of the universal app.
+    Compile {
+        #[arg(long)]
+        target: String,
     },
     /// Build signed, notarized artifacts without uploading them.
-    Release { tag: String },
+    Release {
+        tag: String,
+        /// Bundle the binaries `compile` already built instead of building them.
+        #[arg(long)]
+        prebuilt: bool,
+    },
     /// Prepare or serve isolated local update fixtures.
     Mock {
         #[command(subcommand)]
@@ -122,6 +135,7 @@ fn main() -> Result<()> {
             universal,
             mock_updates,
             dmg,
+            prebuilt,
         } => {
             let app = macos::bundle(
                 &root,
@@ -129,6 +143,7 @@ fn main() -> Result<()> {
                     release,
                     universal,
                     mock_updates,
+                    prebuilt,
                 },
             )?;
             println!("Built {} (not installed).", app.display());
@@ -145,7 +160,12 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Task::Release { tag } => release::release(&root, &tag),
+        Task::Compile { target } => {
+            let binary = macos::compile(&root, &target)?;
+            println!("Built {}.", binary.display());
+            Ok(())
+        }
+        Task::Release { tag, prebuilt } => release::release(&root, &tag, prebuilt),
         Task::Mock {
             command:
                 MockTask::Prepare {

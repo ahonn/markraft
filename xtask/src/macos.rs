@@ -14,12 +14,17 @@ const VOLUME_NAME: &str = "Markraft";
 // Served from an R2 bucket on our own domain rather than a GitHub release asset,
 // so hosting can move and prereleases can get a feed without rebuilding old apps.
 const FEED_URL: &str = "https://updates.markraft.app/appcast.xml";
+/// The architectures a universal app joins, the first one's bundle being the base.
+pub const UNIVERSAL_TARGETS: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
 
 #[derive(Default)]
 pub struct BundleOptions {
     pub release: bool,
     pub universal: bool,
     pub mock_updates: bool,
+    /// Bundle binaries already built, one per target, by [`compile`] on other
+    /// machines, rather than building them here.
+    pub prebuilt: bool,
 }
 
 fn cargo(root: &Path) -> Command {
@@ -68,6 +73,45 @@ fn icon(root: &Path) -> Result<()> {
         .arg(root.join("target/Markraft.icns")))
 }
 
+fn download_sparkle(root: &Path) -> Result<()> {
+    run(Command::new("bash")
+        .arg(root.join("scripts/download-sparkle.sh"))
+        .current_dir(root))
+}
+
+fn build(root: &Path, options: &BundleOptions, target: Option<&str>) -> Result<()> {
+    let mut command = cargo(root);
+    command.args(["build", "--locked"]);
+    build_options(&mut command, options, target);
+    run(&mut command)
+}
+
+fn binary(root: &Path, profile: &str, target: Option<&str>) -> PathBuf {
+    let directory = match target {
+        Some(target) => format!("target/{target}/{profile}"),
+        None => format!("target/{profile}"),
+    };
+    root.join(directory).join("markraft-app")
+}
+
+/// Build the release binary for one of [`UNIVERSAL_TARGETS`]. A release builds each
+/// on a machine of its own and bundles them together with `--prebuilt`.
+pub fn compile(root: &Path, target: &str) -> Result<PathBuf> {
+    ensure!(cfg!(target_os = "macos"), "Building the app requires macOS");
+    ensure!(
+        UNIVERSAL_TARGETS.contains(&target),
+        "Expected one of {}, got {target}",
+        UNIVERSAL_TARGETS.join(", ")
+    );
+    download_sparkle(root)?;
+    let options = BundleOptions {
+        release: true,
+        ..Default::default()
+    };
+    build(root, &options, Some(target))?;
+    Ok(binary(root, "release", Some(target)))
+}
+
 pub fn bundle(root: &Path, options: BundleOptions) -> Result<PathBuf> {
     ensure!(cfg!(target_os = "macos"), "App bundling requires macOS");
     let version = output(cargo(root).args(["bundle", "--version"]))?;
@@ -75,22 +119,26 @@ pub fn bundle(root: &Path, options: BundleOptions) -> Result<PathBuf> {
         version.trim() == "cargo-bundle v0.11.0",
         "Install cargo-bundle: cargo install cargo-bundle --version 0.11.0 --locked"
     );
-    run(Command::new("bash")
-        .arg(root.join("scripts/download-sparkle.sh"))
-        .current_dir(root))?;
+    download_sparkle(root)?;
     icon(root)?;
 
     let profile = if options.release { "release" } else { "debug" };
-    let targets: &[Option<&str>] = if options.universal {
-        &[Some("aarch64-apple-darwin"), Some("x86_64-apple-darwin")]
+    let targets: Vec<Option<&str>> = if options.universal {
+        UNIVERSAL_TARGETS.iter().copied().map(Some).collect()
     } else {
-        &[None]
+        vec![None]
     };
-    for target in targets {
-        let mut command = cargo(root);
-        command.args(["build", "--locked"]);
-        build_options(&mut command, &options, *target);
-        run(&mut command)?;
+    for target in &targets {
+        if options.prebuilt {
+            let binary = binary(root, profile, *target);
+            ensure!(
+                binary.is_file(),
+                "Missing prebuilt {}; build it with cargo xtask compile",
+                binary.display()
+            );
+        } else {
+            build(root, &options, *target)?;
+        }
     }
 
     let mut command = cargo(root);
@@ -109,15 +157,13 @@ pub fn bundle(root: &Path, options: BundleOptions) -> Result<PathBuf> {
         }
         run(Command::new("ditto")
             .arg(root.join(format!(
-                "target/aarch64-apple-darwin/{profile}/bundle/osx/{APP_NAME}"
+                "target/{}/{profile}/bundle/osx/{APP_NAME}",
+                UNIVERSAL_TARGETS[0]
             )))
             .arg(&app))?;
         run(Command::new("lipo")
             .arg("-create")
-            .arg(root.join(format!(
-                "target/aarch64-apple-darwin/{profile}/markraft-app"
-            )))
-            .arg(root.join(format!("target/x86_64-apple-darwin/{profile}/markraft-app")))
+            .args(targets.iter().map(|target| binary(root, profile, *target)))
             .arg("-output")
             .arg(app.join("Contents/MacOS/markraft-app")))?;
         app

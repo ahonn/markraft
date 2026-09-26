@@ -40,6 +40,7 @@ pub fn prepare(
                 release: false,
                 universal: false,
                 mock_updates: true,
+                prebuilt: false,
             },
         )?
     };
