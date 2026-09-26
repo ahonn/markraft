@@ -47,7 +47,7 @@ jobs:
           knope prepare-release
           version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
           test -n "$version"
-          git commit -m "chore(release): prepare $version"
+          git commit -m "chore(release): version $version"
           git push --force origin release
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Open or update the release PR
