@@ -3,6 +3,15 @@ use std::time::Duration;
 use gpui::Pixels;
 
 pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(500);
+/// How long a caret keeps blinking without input before it settles visible.
+/// Every blink repaints the window, and the GPU driver keeps ~110 MB of working
+/// pools resident until it has been idle for about ten seconds.
+pub(crate) const BLINK_TIMEOUT: Duration = Duration::from_secs(10);
+const BLINK_TICKS: u32 = (BLINK_TIMEOUT.as_millis() / BLINK_INTERVAL.as_millis()) as u32;
+const _: () = assert!(
+    BLINK_TICKS.is_multiple_of(2),
+    "blinking must settle on a visible caret"
+);
 
 /// The caret as the view shows it, beyond where the selection puts it: which
 /// side of a wrapped row's break it stands on, the column a run of vertical
@@ -97,11 +106,13 @@ impl CaretView {
 /// modal editor's cursor, which is steady, and blinking one hides the character
 /// under it. `steady` also carries the reduced-motion setting, which holds every
 /// caret shape still. Restarting an input session always exposes the caret before
-/// waiting for the first timer tick.
+/// waiting for the first timer tick, and restarts the [`BLINK_TIMEOUT`] after
+/// which an idle caret stops blinking.
 #[derive(Default)]
 pub(crate) struct CaretBlink {
     pub(crate) visible: bool,
     enabled: bool,
+    ticks_left: u32,
 }
 
 impl CaretBlink {
@@ -114,12 +125,19 @@ impl CaretBlink {
     ) -> bool {
         self.visible = true;
         self.enabled = focused && !composing && selection_empty && !steady;
+        self.ticks_left = BLINK_TICKS;
         self.enabled
     }
 
+    /// Toggle the caret, or report that the timer should stop: when blinking is
+    /// paused, or once [`BLINK_TIMEOUT`] has passed and the caret is visible again.
     pub(crate) fn tick(&mut self) -> bool {
+        if self.ticks_left == 0 {
+            self.enabled = false;
+        }
         if self.enabled {
             self.visible = !self.visible;
+            self.ticks_left -= 1;
         }
         self.enabled
     }
@@ -128,7 +146,7 @@ impl CaretBlink {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::CaretBlink;
+    use super::{BLINK_INTERVAL, BLINK_TIMEOUT, CaretBlink};
 
     #[test]
     fn input_reveals_a_hidden_caret_before_blinking_resumes() {
@@ -162,6 +180,28 @@ mod tests {
                 assert!(caret.visible);
             }
         }
+        assert!(caret.reset(true, false, true, false));
+        assert!(caret.tick());
+        assert!(!caret.visible);
+    }
+
+    #[test]
+    fn an_idle_caret_settles_visible_until_the_next_reset() {
+        let mut caret = CaretBlink::default();
+        assert!(caret.reset(true, false, true, false));
+        let mut ticks = 0;
+        while caret.tick() {
+            ticks += 1;
+            assert!(ticks <= 100, "blinking never settled");
+        }
+        assert_eq!(
+            ticks,
+            BLINK_TIMEOUT.as_millis() / BLINK_INTERVAL.as_millis()
+        );
+        assert!(caret.visible);
+        assert!(!caret.tick());
+        assert!(caret.visible);
+
         assert!(caret.reset(true, false, true, false));
         assert!(caret.tick());
         assert!(!caret.visible);
