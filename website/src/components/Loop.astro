@@ -1,0 +1,28 @@
+---
+interface Props {
+  name: string;
+  label: string;
+  width: number;
+  height: number;
+  /** Load at once; only for the clip above the fold. */
+  eager?: boolean;
+  class?: string;
+}
+
+const { name, label, width, height, eager = false, class: className } = Astro.props;
+---
+
+<video
+  data-loop
+  class:list={['block h-auto w-full', className]}
+  muted
+  loop
+  playsinline
+  preload={eager ? 'auto' : 'none'}
+  poster={`/media/${name}.jpg`}
+  width={width}
+  height={height}
+  aria-label={label}
+>
+  <source src={`/media/${name}.mp4`} type="video/mp4" />
+</video>

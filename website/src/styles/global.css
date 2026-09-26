@@ -1,0 +1,146 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+  --color-ink: #1d1d1f;
+  --color-muted: #515154;
+  --color-subtle: #6e6e73;
+  --color-line: #e8e8ed;
+  --color-edge: #d2d2d7;
+  --color-surface: #f5f5f7;
+  /* The blue of the app icon. White text on it needs the large, bold button type. */
+  --color-brand: #2f7cf6;
+  --color-brand-strong: #1f66dd;
+  --color-link: #1d6fe0;
+  /* The desktop behind the app in the recorded clips, so a clip meets its frame without a seam. */
+  --color-backdrop: #dee6e9;
+}
+
+@layer base {
+  html {
+    @apply bg-white font-sans text-ink antialiased;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    html {
+      scroll-behavior: smooth;
+    }
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  p,
+  li {
+    text-wrap: pretty;
+  }
+
+  [id] {
+    scroll-margin-top: 2rem;
+  }
+
+  ::selection {
+    background-color: color-mix(in oklab, var(--color-brand) 22%, transparent);
+  }
+
+  a {
+    @apply text-link transition-colors duration-150 hover:text-ink;
+  }
+
+  a:focus-visible {
+    @apply rounded-md outline-2 outline-offset-2 outline-brand;
+  }
+
+  kbd {
+    @apply inline-flex min-w-6 items-center justify-center rounded-md border border-edge bg-white px-1.5 font-sans text-[0.8125rem] leading-5 text-ink shadow-[0_1px_0_var(--color-edge)];
+  }
+}
+
+/* Buttons. Press feedback starts on pointer-down; hover only where a pointer can hover. */
+@layer components {
+  .btn {
+    @apply inline-flex min-h-12 items-center justify-center gap-2 rounded-xl px-6 text-[17px] font-semibold select-none;
+    -webkit-tap-highlight-color: transparent;
+    transition:
+      background-color 150ms ease-out,
+      border-color 150ms ease-out,
+      box-shadow 150ms ease-out,
+      transform 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  .btn:active {
+    transform: scale(0.97);
+  }
+
+  .btn:focus-visible {
+    @apply outline-2 outline-offset-3 outline-brand;
+  }
+
+  .btn-primary {
+    @apply bg-brand text-[19px] font-bold text-white;
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.18),
+      0 1px 2px rgb(31 102 221 / 0.3),
+      0 6px 16px -6px rgb(47 124 246 / 0.55);
+  }
+
+  .btn-primary svg {
+    transition: transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  .btn-secondary {
+    @apply border border-edge bg-white text-ink;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+  }
+
+  .btn-small {
+    @apply min-h-9 rounded-[10px] px-3.5 text-sm font-medium;
+  }
+
+  @media (pointer: coarse) {
+    .btn-small {
+      @apply min-h-11;
+    }
+  }
+
+  @media (hover: hover) {
+    .btn-primary:hover {
+      @apply bg-brand-strong text-white;
+      box-shadow:
+        inset 0 1px 0 rgb(255 255 255 / 0.18),
+        0 1px 2px rgb(31 102 221 / 0.35),
+        0 10px 22px -8px rgb(47 124 246 / 0.6);
+    }
+
+    .btn-primary:hover svg {
+      transform: translateY(1.5px);
+    }
+
+    .btn-secondary:hover {
+      @apply border-[#c7c7cc] bg-surface text-ink;
+    }
+  }
+
+  .btn-primary:active {
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.12),
+      0 1px 2px rgb(31 102 221 / 0.3);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .btn,
+    .btn-primary svg {
+      transition: background-color 150ms ease-out, border-color 150ms ease-out;
+    }
+
+    .btn:active,
+    .btn-primary:hover svg {
+      transform: none;
+    }
+  }
+}
