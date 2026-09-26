@@ -1,0 +1,38 @@
+# Versions and CHANGELOG.md come only from change files in .changeset/, never
+# from commit messages. Write one with `knope document-change` or by hand:
+#
+#     ---
+#     default: patch
+#     ---
+#
+#     What changed, written for people who use Markraft.
+#
+# Below 1.0, `major` bumps the minor version and `minor` bumps the patch.
+# The Release PR workflow runs `prepare-release`; merging that PR tags and
+# ships the release.
+
+[package]
+versioned_files = [
+    "Cargo.toml",
+    { path = "Cargo.lock", dependency = "markraft-app" },
+    { path = "Cargo.lock", dependency = "markraft-commonmark" },
+    { path = "Cargo.lock", dependency = "markraft-core" },
+    { path = "Cargo.lock", dependency = "markraft-gpui" },
+    { path = "Cargo.lock", dependency = "markraft-vim" },
+]
+changelog = "CHANGELOG.md"
+
+[changes]
+ignore_conventional_commits = true
+
+[[workflows]]
+name = "document-change"
+
+[[workflows.steps]]
+type = "CreateChangeFile"
+
+[[workflows]]
+name = "prepare-release"
+
+[[workflows.steps]]
+type = "PrepareRelease"

@@ -1,22 +1,73 @@
 name: Release
 on:
+  # A pushed tag releases that commit as is.
   push:
     tags: ['v*']
+  # Merging the release PR tags the merge commit and releases it.
+  pull_request:
+    types: [closed]
+    branches: [master]
 permissions:
   contents: read
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 jobs:
+  tag:
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.pull_request.merged &&
+       github.event.pull_request.head.ref == 'release' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      sha: ${{ steps.tag.outputs.sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+      - name: Resolve the release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          test -n "$version"
+          tag="v$version"
+          # A tag created with the workflow token does not start another run.
+          if existing=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null); then
+            if [ "$existing" != "$MERGE_SHA" ]; then
+              echo "$tag already points at $existing" >&2
+              exit 1
+            fi
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$tag" -f "sha=$MERGE_SHA" > /dev/null
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
   validate:
+    needs: tag
     uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.tag.outputs.sha }}
   release:
-    needs: validate
+    needs: [tag, validate]
     runs-on: macos-15
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.tag.outputs.tag }}
       MARKRAFT_SIGN_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
       SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
       APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -24,6 +75,8 @@ jobs:
       APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.tag.outputs.sha }}
       - name: Validate public distribution repository
         run: |
           test "$GITHUB_REPOSITORY" = 'ahonn/markraft'
@@ -63,22 +116,28 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$SIGNING_KEYCHAIN"
           security list-keychains -d user -s "$SIGNING_KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db"
       - name: Build, sign, notarize and generate appcast
-        run: cargo xtask release "$GITHUB_REF_NAME"
+        run: cargo xtask release "$TAG"
       - name: Verify embedded framework without development paths
         run: env -u DYLD_FRAMEWORK_PATH 'target/universal-apple-darwin/release/bundle/osx/Markraft.app/Contents/MacOS/markraft-app' --help
       - name: Publish all artifacts together
         run: |
           set -euo pipefail
-          if is_draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft); then
+          if is_draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
             if [ "$is_draft" != true ]; then
               echo 'Release is already published; do not overwrite it' >&2
               exit 1
             fi
           else
-            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Markraft $GITHUB_REF_NAME" --generate-notes
+            # Prefer the CHANGELOG.md section written from change files.
+            if bash scripts/changelog-section.sh "${TAG#v}" > "$RUNNER_TEMP/notes.md"; then
+              notes=(--notes-file "$RUNNER_TEMP/notes.md")
+            else
+              notes=(--generate-notes)
+            fi
+            gh release create "$TAG" --verify-tag --draft --title "Markraft $TAG" "${notes[@]}"
           fi
-          gh release upload "$GITHUB_REF_NAME" "target/release-artifacts/Markraft-${GITHUB_REF_NAME#v}-universal.dmg" "target/release-artifacts/Markraft-${GITHUB_REF_NAME#v}-universal.zip" target/release-artifacts/appcast.xml target/release-artifacts/SHA256SUMS --clobber
-          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+          gh release upload "$TAG" "target/release-artifacts/Markraft-${TAG#v}-universal.dmg" "target/release-artifacts/Markraft-${TAG#v}-universal.zip" target/release-artifacts/appcast.xml target/release-artifacts/SHA256SUMS --clobber
+          gh release edit "$TAG" --draft=false --latest
       - name: Remove signing credentials
         if: always()
         run: |
@@ -87,15 +146,16 @@ jobs:
   # A separate job so "Re-run failed jobs" retries only the feed: rebuilding would
   # produce a different archive whose signature no longer matches the release.
   publish-feed:
-    needs: release
+    needs: [tag, release]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.tag.outputs.tag }}
       FEED_URL: https://updates.markraft.app/appcast.xml
       FEED_OBJECT: markraft-updates/appcast.xml
     steps:
       - name: Download the published appcast
-        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern appcast.xml --dir feed
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern appcast.xml --dir feed
       - name: Refuse to replace a newer feed
         run: |
           set -euo pipefail

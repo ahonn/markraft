@@ -1,0 +1,69 @@
+name: Release PR
+on:
+  push:
+    branches: [master]
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: release-pr
+  cancel-in-progress: true
+jobs:
+  release-pr:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Look for change files
+        id: changes
+        run: |
+          if compgen -G '.changeset/*.md' > /dev/null; then
+            echo pending=true >> "$GITHUB_OUTPUT"
+          else
+            echo pending=false >> "$GITHUB_OUTPUT"
+          fi
+      # Merging the release PR consumes every change file and closes the PR, so
+      # this only matters when pending change files were deleted by hand.
+      - name: Close a release PR with nothing left to release
+        if: steps.changes.outputs.pending == 'false'
+        run: |
+          number=$(gh pr list --head release --base master --state open --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh pr close "$number" --delete-branch --comment 'No change files are pending.'
+          fi
+      - uses: knope-dev/action@v2.1.2
+        if: steps.changes.outputs.pending == 'true'
+        with:
+          version: 0.23.0
+      - name: Prepare the release commit
+        id: prepare
+        if: steps.changes.outputs.pending == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -C release
+          knope prepare-release
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          test -n "$version"
+          git commit -m "chore(release): prepare $version"
+          git push --force origin release
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Open or update the release PR
+        if: steps.changes.outputs.pending == 'true'
+        env:
+          VERSION: ${{ steps.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Merging this PR tags v$VERSION and publishes the release."
+            echo
+            bash scripts/changelog-section.sh "$VERSION"
+          } > "$RUNNER_TEMP/body.md"
+          number=$(gh pr list --head release --base master --state open --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --title "Release v$VERSION" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create --head release --base master --title "Release v$VERSION" --body-file "$RUNNER_TEMP/body.md"
+          fi
