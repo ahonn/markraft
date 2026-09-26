@@ -759,6 +759,23 @@ fn a_wrapped_code_span_is_pilled_to_its_glyphs() {
     assert_eq!(second.line.text.as_ref(), "span here");
 }
 
+/// A paragraph's line breaks start rows of their own, and a code span after
+/// one is drawn on the visual row its text sits on, not one row lower per
+/// break before it.
+#[test]
+fn code_spans_after_a_line_break_keep_their_row() {
+    let lines = shaped("one `a`\ntwo `b`\nthree `c`");
+    assert_eq!(lines[0].rows.len(), 3, "one row per line");
+    assert_eq!(
+        pills(&lines[0]),
+        [
+            (0, "a".to_owned()),
+            (1, "b".to_owned()),
+            (2, "c".to_owned())
+        ]
+    );
+}
+
 /// With the caret inside a code span its backticks are revealed as runs
 /// of their own, in the quieter markup ink. They still sit in the one pill
 /// the code is drawn in, rather than in pills of their own abutting it.

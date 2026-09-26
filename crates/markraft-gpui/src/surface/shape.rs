@@ -537,8 +537,9 @@ pub(super) fn shape_inline_code(
                 &piece_runs(range.start, runs, absolute),
                 None,
             );
-            let visual = layout.rows[index].visual_start
-                + ((slot.origin.y - layout.origin.y) / layout.line_height).round() as usize;
+            // The slot comes from the whole line's rectangles, so its row
+            // already counts the rows before this one.
+            let visual = ((slot.origin.y - layout.origin.y) / layout.line_height).round() as usize;
             layout.rows[index].inline_code.push(InlineCode {
                 range: part,
                 visual_row: visual,
