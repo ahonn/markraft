@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn updates_require_https_feed_and_signing_key() {
         assert!(configured(
-            Some("https://github.com/ahonn/markraft/releases/latest/download/appcast.xml"),
+            Some("https://updates.markraft.app/appcast.xml"),
             Some("public-key")
         ));
         assert!(!configured(None, Some("public-key")));

@@ -11,7 +11,9 @@ use crate::{output, run};
 
 const APP_NAME: &str = "Markraft.app";
 const VOLUME_NAME: &str = "Markraft";
-const FEED_URL: &str = "https://github.com/ahonn/markraft/releases/latest/download/appcast.xml";
+// Served from an R2 bucket on our own domain rather than a GitHub release asset,
+// so hosting can move and prereleases can get a feed without rebuilding old apps.
+const FEED_URL: &str = "https://updates.markraft.app/appcast.xml";
 
 #[derive(Default)]
 pub struct BundleOptions {
