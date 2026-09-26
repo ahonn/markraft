@@ -507,12 +507,14 @@ impl MarkraftApp {
         self.links.invalidate();
         self.schedule_save(cx);
     }
-    /// ⌘S writes the current snapshot.
+    /// ⌘S writes the current snapshot. Notes save as they are typed, so it says
+    /// nothing: a save that fails lights the file status, and one that works
+    /// changes nothing to see.
     fn save_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_reloading() {
             return;
         }
-        self.flush_then(window, cx, |this, _, cx| this.inform("Saved", cx));
+        self.flush_then(window, cx, |_, _, _| {});
     }
     /// Hand the latest snapshot to the notes folder without waiting for it.
     ///
@@ -1617,9 +1619,9 @@ impl MarkraftApp {
                                     this.library.delete(&original.id);
                                     this.sessions.remove(&original.id);
                                 }
+                                // The title bar names the new file.
                                 this.ensure_session(window, cx);
                                 this.notes_changed(cx);
-                                this.inform("Saved", cx);
                             }
                             Err(error) => this.feedback.set_error(error),
                         },
@@ -1805,7 +1807,8 @@ impl MarkraftApp {
                 (name, persistence.open_file_async(path))
             })
             .collect();
-        self.inform("Opening…", cx);
+        // A file opens in the time it takes to read it; the note on screen says
+        // it did.
         self.run_io(
             async move {
                 let mut results = Vec::new();

@@ -179,7 +179,6 @@ impl MarkraftApp {
         let Some(path) = note.path.clone() else {
             if !note.document_is_empty() {
                 let id = note.id.clone();
-                self.inform("Saving the note first…", cx);
                 self.flush_then(window, cx, move |this, window, cx| {
                     if this.library.active_id == id
                         && this
@@ -384,6 +383,11 @@ impl MarkraftApp {
         }
         self.notes_changed(cx);
         self.refresh_link_targets();
+        // The title bar names the renamed file; only what happened to the links
+        // pointing at it is news.
+        if updated == 0 && kept == 0 {
+            return;
+        }
         let mut message = format!("Renamed to “{stem}”");
         if updated > 0 {
             message.push_str(&format!(

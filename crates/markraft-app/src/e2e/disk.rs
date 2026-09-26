@@ -442,3 +442,18 @@ fn a_file_written_by_another_program_reaches_its_note(cx: &mut TestAppContext) {
         "theirs\n"
     );
 }
+
+// Notes save as they are typed and a file opens in the time it takes to read, so
+// neither ⌘S nor opening a file says anything when nothing went wrong.
+#[gpui::test]
+fn saving_and_opening_a_file_say_nothing_when_all_is_well(cx: &mut TestAppContext) {
+    let mut h = open_with(cx, &[("a.md", "alpha\n")], |_| {});
+    let notice =
+        |h: &mut super::harness::Harness<'_>| h.app.update(h.cx, |app, _| app.test_notice());
+    h.save();
+    assert_eq!(notice(&mut h), None);
+    let outside = h.root().join("outside.md");
+    std::fs::write(&outside, "beta\n").expect("a writable temp directory");
+    h.open_path(&outside);
+    assert_eq!(notice(&mut h), None);
+}
