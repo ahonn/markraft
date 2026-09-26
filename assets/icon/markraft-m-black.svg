@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <title>Markraft parallel-cut M</title>
-  <!-- Both slit edges have slope 1: y=x-250 and y=x-340.
+  <!-- Both slit edges have slope 1: y=x-220 and y=x-310.
        Their perpendicular separation is 90/sqrt(2) master units.
        Artwork is centered on a 1024-point canvas without a background or mask. -->
-  <path fill="#202020" transform="translate(182 266.48) scale(0.66)" d="M 20 0 H 250 L 650 400 L 506 544 Q 490 560 474 544 L 275 345 V 724 Q 275 744 255 744 H 20 Q 0 744 0 724 V 20 Q 0 0 20 0 Z
-M 700 0 H 980 Q 1000 0 1000 20 V 724 Q 1000 744 980 744 H 745 Q 725 744 725 724 V 385 L 520 180 Z"/>
+  <path fill="#202020" transform="translate(201.8 266.48) scale(0.66)" d="M 20 0 H 220 L 620 400 L 495 525 Q 479 541 463 525 L 245 307 V 724 Q 245 744 225 744 H 20 Q 0 744 0 724 V 20 Q 0 0 20 0 Z
+M 670 0 H 920 Q 940 0 940 20 V 724 Q 940 744 920 744 H 715 Q 695 744 695 724 V 385 L 490 180 Z"/>
 </svg>
