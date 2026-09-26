@@ -179,6 +179,7 @@ impl MarkSet {
 
     /// Whether both sets are the very same allocation, not only equal.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn shares(&self, other: &MarkSet) -> bool {
         match (&self.0, &other.0) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),

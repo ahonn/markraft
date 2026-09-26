@@ -488,6 +488,7 @@ fn accept(state: &Rc<RefCell<State>>, provider: &Rc<dyn TypeaheadProvider>, cx: 
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) mod tests {
     use super::{Open, State, TriggerMatch, Update, open_match, track_dismissed, trigger_match};
     use crate::typeahead::TypeaheadItem;

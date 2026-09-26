@@ -313,6 +313,7 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> 
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

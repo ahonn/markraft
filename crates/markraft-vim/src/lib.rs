@@ -118,6 +118,8 @@
 //! `.`, `J`, text objects, marks, macros, named registers, search and `:` commands.
 //! Nothing joins two lines, so nothing can join two table rows either.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 mod command;
 mod edit;
 mod host;
@@ -125,6 +127,7 @@ mod motion;
 mod state;
 mod table;
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 
 use command::InsertAt;

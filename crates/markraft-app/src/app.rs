@@ -1218,10 +1218,12 @@ impl MarkraftApp {
     }
     /// The failure the note is showing — the one "Not saved" stands for.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn shown_error(&self) -> Option<String> {
         self.feedback.error().cloned()
     }
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn set_workspace_naming(
         &mut self,
         notes: crate::storage::NoteNaming,
@@ -1233,6 +1235,7 @@ impl MarkraftApp {
     /// A new note holding `markdown`, not yet saved: what a note is before its first
     /// save, with no file for the guard to hold it to.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_new_note(
         &mut self,
         markdown: &str,
@@ -1247,12 +1250,14 @@ impl MarkraftApp {
     }
     /// Give the keyboard back to the note, as clicking into it does.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_editor(window, cx);
     }
     /// Reconcile `changes` as if the watcher had reported them; the headless tests
     /// cannot time a file system event.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_apply_external(
         &mut self,
         changes: Vec<External>,
@@ -1262,28 +1267,34 @@ impl MarkraftApp {
         self.apply_external(changes, window, cx);
     }
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_active_note(&self) -> crate::storage::Note {
         self.library.active_note().clone()
     }
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_note(&self, id: &str) -> Option<crate::storage::Note> {
         self.library.note(id).cloned()
     }
     /// The notices waiting to be shown.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_queued_notices(&self) -> Vec<String> {
         self.feedback.queued().map(str::to_owned).collect()
     }
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_editor(&self) -> Entity<EditorView> {
         self.editor().clone()
     }
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn active_path(&self) -> Option<PathBuf> {
         self.library.active_note().path.clone()
     }
     /// The active note's document as its editor holds it.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn active_document(&self, cx: &App) -> markraft_core::Node {
         self.editor().read(cx).committed_document().clone()
     }
@@ -2360,6 +2371,7 @@ pub fn bind_app_keys(cx: &mut App) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     // Not a glob: `gpui::prelude` carries a `test` attribute of its own, and these
     // are ordinary unit tests.

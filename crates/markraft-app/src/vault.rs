@@ -834,6 +834,7 @@ impl Store {
         self.update_source(id);
     }
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn acknowledge(&mut self, ids: &[String]) {
         for id in ids {
             self.clear_pending(id);
@@ -1644,6 +1645,7 @@ fn conflicted_copy_path(original: &Path) -> PathBuf {
 
 /// [`Store::open`] over the settings file as it stands, the way a launch reads it.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn open_reading_settings(
     directory: PathBuf,
     settings_path: PathBuf,
@@ -1653,6 +1655,7 @@ pub(crate) fn open_reading_settings(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     fn open(root: &Path) -> (Store, Library) {

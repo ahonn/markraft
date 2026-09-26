@@ -69,6 +69,7 @@ pub(super) enum SaveCompletion {
 
 impl SaveState {
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn revision(&self) -> u64 {
         self.revision
     }
@@ -146,6 +147,7 @@ impl QuitState {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

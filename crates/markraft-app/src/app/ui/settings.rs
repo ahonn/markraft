@@ -1515,6 +1515,7 @@ impl Render for SettingsView {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{Page, placement};
     use gpui::{Bounds, point, px, size};

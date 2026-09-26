@@ -387,6 +387,7 @@ pub(crate) fn visual_range(projection: &Projection, anchor: usize, cursor: usize
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use markraft_commonmark::{

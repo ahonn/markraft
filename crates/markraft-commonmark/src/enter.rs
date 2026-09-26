@@ -318,6 +318,7 @@ fn header_cells(text: &str) -> Option<usize> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{header_cells, is_thematic_break};
 

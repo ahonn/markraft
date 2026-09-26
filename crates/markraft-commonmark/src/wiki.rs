@@ -141,6 +141,7 @@ fn component_end(source: &str, from: usize) -> Option<usize> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

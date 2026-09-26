@@ -265,6 +265,7 @@ fn respell_fragment(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::schema::commonmark_schema;

@@ -399,6 +399,7 @@ impl MarkraftApp {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     // Named rather than globbed: `super::*` carries gpui's own `test` attribute.
     use super::{map_wiki_targets, renamed_target, retarget};

@@ -5,6 +5,8 @@
 //! [`markraft_core::commands::Command`] from the catalogue; nothing here
 //! touches the tree. Everything drawn comes from the state's
 //! [`markraft_core::projection::Projection`].
+
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 mod accessibility;
 mod callout;
 mod caret;
@@ -448,6 +450,7 @@ pub type RemoteImageFetcher = Arc<dyn Fn(&str) -> Result<Vec<u8>, String> + Send
 /// Build all transactions before publishing any state. Unlike a transaction
 /// filter, this boundary also covers no-filter edits, undo and appender output.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn apply_guarded(
     state: &mut EditorState,
     specs: impl IntoIterator<Item = TransactionSpec>,
@@ -2481,6 +2484,7 @@ fn list(types: &DocTypes, ty: Option<NodeTypeId>, item: Option<NodeTypeId>) -> C
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod link_tests {
     use super::openable_url;
 
@@ -2508,6 +2512,7 @@ mod link_tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod key_binding_tests {
     use super::list_key_bindings;
     use gpui::{Keystroke, Modifiers};
@@ -2533,6 +2538,7 @@ mod key_binding_tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod document_guard_tests {
     use super::{DocumentGuard, EditRejection, apply_guarded, build_state, clipboard, ime};
     use crate::typeahead::tests::{at, state_of, types_of};

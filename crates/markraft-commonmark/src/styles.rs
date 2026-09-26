@@ -134,6 +134,7 @@ pub(crate) fn by_tag(name: &str) -> Option<&'static StyleSpec> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

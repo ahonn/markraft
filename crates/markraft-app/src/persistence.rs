@@ -238,6 +238,7 @@ impl Persistence {
         let _ = self.requests.send(Request::Refresh);
     }
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn new_unwatched(mut store: Store, house: markraft_commonmark::HouseStyleHandle) -> Self {
         store.set_house(house);
         Self::start(store, false)
@@ -356,12 +357,14 @@ impl Persistence {
         let _ = self.requests.send(Request::AcknowledgeChanges(changes));
     }
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn acknowledge(&self, ids: Vec<String>) {
         let _ = self.requests.send(Request::Acknowledge(ids));
     }
     /// Reload after all earlier save requests finish. The caller must confirm discarding
     /// local changes and invalidate their revision acknowledgments before adopting the result.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn reload(&self) -> Result<Library, StoreError> {
         let (response, result) = mpsc::channel();
         self.requests
@@ -389,6 +392,7 @@ impl Persistence {
     /// A timeout leaves the request queued; callers retain unsaved state until a later
     /// snapshot confirms it. No result queries are needed after this call.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn flush(
         &self,
         revision: u64,
@@ -398,6 +402,7 @@ impl Persistence {
         self.flush_with_timeout(revision, library, preferences, REPLY_TIMEOUT)
     }
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn flush_with_timeout(
         &self,
         revision: u64,
@@ -497,6 +502,7 @@ fn stopped() -> StoreError {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn receive<T>(receiver: Receiver<T>, timeout: Duration) -> Result<T, StoreError> {
     receiver.recv_timeout(timeout).map_err(|error| match error {
         RecvTimeoutError::Timeout => StoreError::Worker(
@@ -599,6 +605,7 @@ fn watch(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::doc;

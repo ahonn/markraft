@@ -268,6 +268,7 @@ impl MarkraftApp {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     #[::core::prelude::v1::test]

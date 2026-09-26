@@ -371,6 +371,7 @@ fn handle_request(work: &Path, request: tiny_http::Request) -> Result<()> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use std::io::{Read, Write};

@@ -1,7 +1,9 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 mod app;
 mod crash;
 mod doc;
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod e2e;
 mod fs;
 mod instance;

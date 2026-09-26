@@ -100,6 +100,7 @@ pub(crate) fn touched_lines<'a>(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use markraft_commonmark::{commonmark_schema, from_markdown, schema as md};

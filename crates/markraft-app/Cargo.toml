@@ -56,3 +56,6 @@ icon = ["target/Markraft.icns"]
 category = "Productivity"
 osx_minimum_system_version = "13.0"
 osx_frameworks = ["target/sparkle/Sparkle.framework"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }

@@ -193,6 +193,7 @@ impl MarkraftApp {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     // Not `use super::*`: that would bring gpui's `test` macro in over the built-in one.
     use super::{Command, Intent, SlashEffect, SlashProvider, TypeaheadProvider};

@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 mod crypto;
 mod macos;
 mod mock;
@@ -162,6 +163,7 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     #[test]
     fn only_stable_versions_can_be_published() {

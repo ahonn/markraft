@@ -148,6 +148,7 @@ pub(super) fn sized_icon(kind: Icon, color: Hsla, extent: f32) -> impl IntoEleme
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use gpui::rgb;

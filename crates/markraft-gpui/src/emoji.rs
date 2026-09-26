@@ -293,6 +293,7 @@ fn matches_at(shortcode: &str, query: &[u8], start: usize) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
 
     use super::*;

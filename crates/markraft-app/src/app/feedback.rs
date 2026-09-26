@@ -162,6 +162,7 @@ impl Feedback {
     /// Queued sentences still pending or already being displayed. Immediate
     /// acknowledgments are excluded, so polling cannot change what tests observe.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn queued(&self) -> impl Iterator<Item = &str> {
         self.notice
             .iter()
@@ -232,6 +233,7 @@ impl Feedback {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

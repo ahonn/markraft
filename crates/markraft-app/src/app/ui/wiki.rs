@@ -269,6 +269,7 @@ impl MarkraftApp {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{LinkTarget, TRIGGERS, WikiProvider};
     use markraft_gpui::TypeaheadProvider;

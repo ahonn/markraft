@@ -172,6 +172,7 @@ fn attr<'a>(ancestor: &'a Ancestor, name: &str) -> &'a str {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

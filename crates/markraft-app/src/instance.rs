@@ -238,6 +238,7 @@ fn canonical_target(file: &Path) -> Result<PathBuf, StoreError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};

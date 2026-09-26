@@ -173,6 +173,7 @@ pub(super) fn glyphs(shortcut: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use gpui::Modifiers;

@@ -85,6 +85,7 @@ pub(crate) fn definition_label_at(doc: &Node, types: &DocTypes, pos: usize) -> O
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use markraft_commonmark::{commonmark_doc_type_names, commonmark_schema, from_markdown};

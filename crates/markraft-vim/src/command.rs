@@ -755,6 +755,7 @@ pub(crate) fn settle(state: &mut State, cx: &mut impl Host, replaced: bool) -> O
 
 /// Insert text the way the platform delivers it, for a test that has no window.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn typed(cx: &mut impl Host, text: &str) {
     let command = chains::insert_plain(cx.types(), text);
     cx.run(&command);

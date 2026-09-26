@@ -57,6 +57,7 @@ pub(crate) fn column_bounds(bounds: Bounds<Pixels>, max: Option<Pixels>) -> Boun
 
 /// Every line of the projection, shaped afresh.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn shape(
     input: &ShapeInput<'_>,
     width: Pixels,

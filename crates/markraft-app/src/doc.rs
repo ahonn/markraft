@@ -211,6 +211,7 @@ pub fn empty() -> Node {
 
 /// Construct semantic test fixtures. File loading uses SourceDocument instead.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn from_markdown(source: &str) -> Node {
     markraft_commonmark::from_markdown(schema(), source).unwrap_or_else(|_| empty())
 }
@@ -220,6 +221,7 @@ pub fn from_markdown(source: &str) -> Node {
 /// [`to_markdown_in`]. A hard break not yet in the text is the one thing the
 /// style decides here.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn to_markdown(doc: &Node) -> String {
     markraft_commonmark::to_markdown(schema(), doc)
 }
@@ -235,6 +237,7 @@ pub fn plain_text(doc: &Node) -> String {
 
 /// [`counted_lines`]'s count alone, for a test that counts a whole note.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn count(doc: &Node, projection: &Projection, words: bool) -> usize {
     counted_lines(doc, projection, words).0
 }
@@ -623,6 +626,7 @@ impl Inline {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use markraft_core::projection::projection_of;

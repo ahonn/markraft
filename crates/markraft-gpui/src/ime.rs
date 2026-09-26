@@ -318,6 +318,7 @@ impl EntityInputHandler for EditorView {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::commit_specs;
     use crate::typeahead::tests::{at, state_of, types_of};

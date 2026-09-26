@@ -159,6 +159,7 @@ impl MarkraftApp {
     }
 
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_refresh_files(&self) {
         if let Some(persistence) = &self.persistence {
             persistence.refresh();
@@ -166,6 +167,7 @@ impl MarkraftApp {
     }
 
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_io_pending(&self) -> bool {
         self.io.pending > 0
     }

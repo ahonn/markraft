@@ -111,6 +111,7 @@
 //!   once the `<div>` is gone — and one emptied of its text writes nothing, so
 //!   the next parse finds no block there at all.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![forbid(unsafe_code)]
 
 mod autolink;

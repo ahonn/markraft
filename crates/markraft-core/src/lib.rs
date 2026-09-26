@@ -157,6 +157,8 @@
 //!   [`ChangeError::FitConflict`] rather than guessing how to merge the two;
 //!   put such changes in separate sets and [`ChangeSet::compose`] them.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 mod attr;
 mod build;
 mod change;
@@ -181,6 +183,7 @@ mod slice;
 mod state;
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 
 pub use attr::{AttrKind, AttrSpec, AttrValue, Attrs};

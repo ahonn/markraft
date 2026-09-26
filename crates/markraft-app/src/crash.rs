@@ -137,6 +137,7 @@ fn prune(directory: &Path) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

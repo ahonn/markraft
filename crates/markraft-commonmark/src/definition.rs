@@ -124,6 +124,7 @@ fn skip_blank(chars: &[char], mut at: usize, lines: bool) -> usize {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use SourceHighlight::*;

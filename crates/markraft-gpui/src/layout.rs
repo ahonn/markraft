@@ -229,6 +229,7 @@ fn merged(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::merged;
     use crate::{DocTypes, EditorView, Setup};

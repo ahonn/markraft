@@ -190,6 +190,7 @@ pub(crate) fn highlight(text: &str, language: &str, dark: bool) -> Rc<Highlighte
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

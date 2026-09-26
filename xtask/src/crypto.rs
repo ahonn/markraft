@@ -46,6 +46,7 @@ pub fn generate_key(path: &Path) -> Result<String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use ed25519_dalek::Signer;

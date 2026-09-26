@@ -97,6 +97,7 @@ impl Images {
     /// own through [`Shaping`](crate::shaping::Shaping); the tests build one
     /// directly.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn new(base: Option<PathBuf>) -> Self {
         Self {
             base: base.and_then(|directory| std::path::absolute(directory).ok()),
@@ -366,6 +367,7 @@ fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

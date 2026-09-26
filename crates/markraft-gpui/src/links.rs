@@ -153,6 +153,7 @@ fn insert_linked(state: &EditorState, ty: MarkTypeId, url: &str) -> Option<Trans
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use markraft_core::projection::projection_of;

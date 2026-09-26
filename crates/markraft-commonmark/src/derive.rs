@@ -1505,6 +1505,7 @@ fn decode_entity(reference: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 
 /// Whether an inline node's content holds whitespace or a line ending.

@@ -25,3 +25,6 @@ gpui = { workspace = true, features = ["test-support"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSPasteboard"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSString", "NSArray"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }

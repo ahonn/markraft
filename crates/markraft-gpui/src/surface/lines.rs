@@ -360,6 +360,7 @@ impl Lines {
 
     /// Every line's rows, for a test that shaped them all.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn all(&self) -> Vec<LayoutLine> {
         self.slots
             .iter()
@@ -369,6 +370,7 @@ impl Lines {
 
     /// How many lines still have only an estimated height.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn estimated(&self) -> usize {
         self.slots
             .iter()

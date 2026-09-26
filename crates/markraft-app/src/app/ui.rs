@@ -2158,6 +2158,7 @@ impl Render for Hint {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod shortcut_tests {
     // Not `use super::*`: that would bring gpui's `test` macro in over the built-in one.
     use super::{Command, Intent, TableEdit, shortcut_label};

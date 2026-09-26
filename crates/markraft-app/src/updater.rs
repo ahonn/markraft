@@ -89,6 +89,7 @@ impl Updater {
     /// An updater that never checks: for the headless tests, which run off the main
     /// thread and outside any bundle.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn disabled() -> Self {
         Self {
             native: None,
@@ -220,6 +221,7 @@ impl<T> PendingRelaunch<T> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

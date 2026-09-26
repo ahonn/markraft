@@ -331,6 +331,7 @@ impl DecorationSet {
     /// else asks [`DecorationSet::find`] or [`DecorationSet::all`], which
     /// answer in [`Decoration`]s.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn inline(&self) -> &RangeSet<DecorationSpec> {
         &self.inline
     }
@@ -340,6 +341,7 @@ impl DecorationSet {
     /// else asks [`DecorationSet::find`] or [`DecorationSet::all`], which
     /// answer in [`Decoration`]s.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn nodes(&self) -> &RangeSet<DecorationSpec> {
         &self.nodes
     }
@@ -349,6 +351,7 @@ impl DecorationSet {
     /// else asks [`DecorationSet::find`] or [`DecorationSet::all`], which
     /// answer in [`Decoration`]s.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn widgets(&self) -> &PointSet<DecorationSpec> {
         &self.widgets
     }
