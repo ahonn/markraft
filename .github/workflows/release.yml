@@ -193,7 +193,10 @@ jobs:
             fi
             gh release create "$TAG" --verify-tag --draft --title "Markraft $TAG" "${notes[@]}"
           fi
-          gh release upload "$TAG" "target/release-artifacts/Markraft-${TAG#v}-universal.dmg" "target/release-artifacts/Markraft-${TAG#v}-universal.zip" target/release-artifacts/appcast.xml target/release-artifacts/SHA256SUMS --clobber
+          # The same disk image under a name without the version, so
+          # releases/latest/download/Markraft.dmg always serves the newest one.
+          cp "target/release-artifacts/Markraft-${TAG#v}-universal.dmg" "$RUNNER_TEMP/Markraft.dmg"
+          gh release upload "$TAG" "target/release-artifacts/Markraft-${TAG#v}-universal.dmg" "target/release-artifacts/Markraft-${TAG#v}-universal.zip" target/release-artifacts/appcast.xml target/release-artifacts/SHA256SUMS "$RUNNER_TEMP/Markraft.dmg" --clobber
           gh release edit "$TAG" --draft=false --latest
   # A separate job so "Re-run failed jobs" retries only the feed: rebuilding would
   # produce a different archive whose signature no longer matches the release.
