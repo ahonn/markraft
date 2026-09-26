@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/summon.gif" alt="⌥N brings a Markraft note up over a web page, two lines are added, and ⌥N puts it away" width="640">
+  <img src="assets/screenshots/hero.gif" alt="A Markraft note formats its Markdown as three points are typed and checked off, then shows the plain .md source underneath" width="640">
 </p>
 
 Press <kbd>⌥N</kbd> in any app to write, and again to put it away. Notes are plain Markdown files in a folder you choose, so any other editor can open them too.
