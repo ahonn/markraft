@@ -868,7 +868,7 @@ impl EditorView {
         self.projection.plain_text()
     }
     /// The style rows are shaped and drawn with.
-    pub(crate) fn style(&self) -> &crate::style::EditorStyle {
+    pub fn style(&self) -> &crate::style::EditorStyle {
         self.shaping.style()
     }
     /// Everything shaping reads besides the document, the projection and the

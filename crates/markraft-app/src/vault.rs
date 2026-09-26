@@ -2,8 +2,10 @@
 use crate::{
     doc,
     fs::{
-        StoreError, atomic_write, copy_metadata, describe, inherit_folder_mode, move_to_trash,
-        move_without_replacing, read_optional, same_regular_file,
+        StoreError, atomic_write, copy_metadata, describe,
+        faults::{self, Stage},
+        inherit_folder_mode, move_to_trash, move_without_replacing, read_optional,
+        same_regular_file,
     },
     storage::{Library, Note, Notices, Preferences, Settings, WorkspaceSettings},
 };
@@ -1485,8 +1487,11 @@ fn write_document(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> Result<
         return Err(reason.into());
     }
     let parent = path.parent().ok_or("The file has no parent")?;
+    faults::check(path, Stage::Create).map_err(|e| describe(parent, &e))?;
     let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| describe(parent, &e))?;
-    temp.write_all(bytes).map_err(|e| describe(path, &e))?;
+    faults::check(path, Stage::Write)
+        .and_then(|_| temp.write_all(bytes))
+        .map_err(|e| describe(path, &e))?;
     if expected.is_some() {
         copy_metadata(path, temp.path())?;
         temp.as_file()
@@ -1507,6 +1512,7 @@ fn write_document(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> Result<
     {
         return Err("The file changed while saving. Your changes were not written.".into());
     }
+    faults::check(path, Stage::Persist).map_err(|e| describe(path, &e))?;
     if expected.is_some() {
         temp.persist(path).map_err(|e| describe(path, &e.error))?;
     } else {

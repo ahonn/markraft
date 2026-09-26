@@ -3,14 +3,6 @@
 use super::harness::{Harness, open_with};
 use gpui::TestAppContext;
 
-/// Open the note titled `title` from Browse, as a person does.
-fn browse_to(h: &mut Harness, title: &str) {
-    h.keys("cmd-p");
-    h.type_text(title);
-    h.keys("enter");
-    h.wait_for_io();
-}
-
 /// The file name of the note the window shows.
 fn active_file(h: &mut Harness) -> String {
     let path = h.active_note().path.expect("a note with a file");
@@ -26,12 +18,12 @@ fn switching_notes_keeps_each_notes_edits_and_undo(cx: &mut TestAppContext) {
         &[("alpha.md", "alpha\n"), ("beta.md", "beta\n")],
         |_| {},
     );
-    browse_to(&mut h, "alpha");
+    h.browse_to("alpha");
     assert_eq!(active_file(&mut h), "alpha.md");
     h.keys("cmd-down cmd-right");
     h.type_text("1");
 
-    browse_to(&mut h, "beta");
+    h.browse_to("beta");
     assert_eq!(active_file(&mut h), "beta.md");
     assert_eq!(h.markdown(), "beta");
     assert_eq!(
@@ -43,7 +35,7 @@ fn switching_notes_keeps_each_notes_edits_and_undo(cx: &mut TestAppContext) {
     h.keys("cmd-down cmd-right");
     h.type_text("2");
 
-    browse_to(&mut h, "alpha");
+    h.browse_to("alpha");
     assert_eq!(h.markdown(), "alpha1");
     h.keys("cmd-z");
     assert_eq!(h.markdown(), "alpha");
@@ -80,7 +72,7 @@ fn opening_an_external_file_preserves_edits_and_saves_to_the_opened_path(cx: &mu
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "outside changed\n");
     assert_eq!(h.files(), ["alpha.md"]);
 
-    browse_to(&mut h, "alpha");
+    h.browse_to("alpha");
     assert_eq!(h.markdown(), "alpha local");
     h.keys("cmd-z");
     assert_eq!(h.markdown(), "alpha");
@@ -99,8 +91,8 @@ fn rename_after_a_name_conflict_updates_open_backlinks_and_keeps_them_editable(
         |_| {},
     );
     // Keep the backlink's editor alive before the rename, including its source guard.
-    browse_to(&mut h, "Backlinks");
-    browse_to(&mut h, "Welcome.md");
+    h.browse_to("Backlinks");
+    h.browse_to("Welcome.md");
     h.keys("cmd-k");
     h.type_text("Rename");
     h.keys("enter");

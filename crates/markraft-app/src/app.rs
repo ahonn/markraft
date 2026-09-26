@@ -1282,6 +1282,47 @@ impl MarkraftApp {
     pub(crate) fn test_queued_notices(&self) -> Vec<String> {
         self.feedback.queued().map(str::to_owned).collect()
     }
+    /// Paths dropped on the window, as Finder drops them.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn test_drop_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.drop_paths(paths, window, cx);
+    }
+    /// Change one preference as the Settings window does.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn test_set_preference(
+        &mut self,
+        pref: crate::storage::Pref,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_preference(pref, window, cx);
+    }
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn test_preferences(&self) -> crate::storage::Preferences {
+        self.preferences.clone()
+    }
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn test_dark(&self) -> bool {
+        self.dark
+    }
+    /// Every open note's editor, the active one among them.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn test_editors(&self) -> Vec<Entity<EditorView>> {
+        self.sessions
+            .values()
+            .map(|session| session.editor().clone())
+            .collect()
+    }
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_editor(&self) -> Entity<EditorView> {

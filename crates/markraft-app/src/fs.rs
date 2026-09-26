@@ -296,12 +296,14 @@ pub(crate) fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     let parent = path.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent).map_err(|error| describe(parent, &error))?;
+    faults::check(path, faults::Stage::Create).map_err(|error| describe(parent, &error))?;
     let mut output =
         tempfile::NamedTempFile::new_in(parent).map_err(|error| describe(parent, &error))?;
-    output
-        .write_all(bytes)
+    faults::check(path, faults::Stage::Write)
+        .and_then(|_| output.write_all(bytes))
         .and_then(|_| output.as_file().sync_all())
         .map_err(|error| describe(path, &error))?;
+    faults::check(path, faults::Stage::Persist).map_err(|error| describe(path, &error))?;
     output
         .persist(path)
         .map_err(|error| describe(path, &error.error))?;
@@ -310,6 +312,82 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> 
         .and_then(|directory| directory.sync_all())
         .map_err(|error| describe(parent, &error))?;
     Ok(())
+}
+
+/// Where a write can be made to fail in tests: the disk filling up or a rename
+/// being refused cannot be staged on a real disk on demand. Outside tests every
+/// check passes.
+pub(crate) mod faults {
+    /// A step of a write through a temporary file.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Stage {
+        /// Creating the temporary file beside the target.
+        Create,
+        /// Writing and syncing its bytes.
+        Write,
+        /// Renaming it over the target.
+        Persist,
+    }
+
+    #[cfg(not(test))]
+    #[inline(always)]
+    pub(crate) fn check(_path: &std::path::Path, _stage: Stage) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) use injected::{check, inject};
+
+    /// Faults are kept by folder rather than by thread: the vault writes from a
+    /// thread of its own, and tests over other folders run beside each other.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    mod injected {
+        use super::Stage;
+        use std::{
+            io,
+            path::{Path, PathBuf},
+            sync::Mutex,
+        };
+
+        static FAULTS: Mutex<Vec<(PathBuf, Stage, io::ErrorKind)>> = Mutex::new(Vec::new());
+
+        /// Make every write under `folder` fail at `stage` with `kind` until the
+        /// returned value is dropped.
+        #[must_use]
+        pub(crate) fn inject(folder: &Path, stage: Stage, kind: io::ErrorKind) -> Fault {
+            let folder = folder.canonicalize().expect("an existing folder");
+            faults().push((folder.clone(), stage, kind));
+            Fault(folder)
+        }
+
+        pub(crate) struct Fault(PathBuf);
+
+        impl Drop for Fault {
+            fn drop(&mut self) {
+                faults().retain(|(folder, ..)| *folder != self.0);
+            }
+        }
+
+        pub(crate) fn check(path: &Path, stage: Stage) -> io::Result<()> {
+            let Some(parent) = path.parent().and_then(|parent| parent.canonicalize().ok()) else {
+                return Ok(());
+            };
+            match faults()
+                .iter()
+                .find(|(folder, at, _)| *at == stage && parent.starts_with(folder))
+            {
+                Some((.., kind)) => Err(io::Error::from(*kind)),
+                None => Ok(()),
+            }
+        }
+
+        fn faults() -> std::sync::MutexGuard<'static, Vec<(PathBuf, Stage, io::ErrorKind)>> {
+            FAULTS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+    }
 }
 
 #[cfg(test)]

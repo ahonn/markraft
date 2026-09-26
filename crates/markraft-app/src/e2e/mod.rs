@@ -19,9 +19,13 @@ pub(crate) mod harness;
 
 mod blocks;
 mod disk;
+mod faults;
+mod ime;
 mod inline;
 mod input;
+mod media;
 mod paste;
+mod preferences;
 mod sweep;
 mod switching;
 mod tables;

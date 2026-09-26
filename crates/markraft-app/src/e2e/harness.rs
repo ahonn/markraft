@@ -138,6 +138,45 @@ impl Harness<'_> {
         );
     }
 
+    /// The folder holding the notes folder, the settings file and the app's state.
+    pub(crate) fn root(&self) -> &std::path::Path {
+        self._root.path()
+    }
+
+    /// Change one preference as the Settings window does, while notes are open.
+    pub(crate) fn set_preference(&mut self, pref: crate::storage::Pref) {
+        let app = self.app.clone();
+        self.cx.update(|window, cx| {
+            app.update(cx, |app, cx| app.test_set_preference(pref, window, cx))
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// The preferences the next launch reads, once the settings file satisfies
+    /// `ready`, or what it last held when the wait ran out.
+    pub(crate) fn saved_preferences(
+        &mut self,
+        ready: impl Fn(&Preferences) -> bool,
+    ) -> Option<Preferences> {
+        let path = self._root.path().join("settings.json");
+        let mut read = None;
+        self.wait_until(|_| {
+            read = crate::storage::Settings::read(&path)
+                .ok()
+                .map(|settings| settings.preferences);
+            read.as_ref().is_some_and(&ready)
+        });
+        read
+    }
+
+    /// Open the note titled `title` from Browse, as a person does.
+    pub(crate) fn browse_to(&mut self, title: &str) {
+        self.keys("cmd-p");
+        self.type_text(title);
+        self.keys("enter");
+        self.wait_for_io();
+    }
+
     /// Deliver a folder change deterministically. Headless tests do not start
     /// an OS watcher; native watcher delivery is covered by its integration test.
     pub(crate) fn refresh_files(&mut self) {
