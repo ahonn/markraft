@@ -158,7 +158,7 @@ pub(super) fn paint_table(
     if let Some(bounds) = cells
         .iter()
         .find(|line| line.contains(caret))
-        .and_then(LayoutLine::cell_bounds)
+        .and_then(|line| Some(caret_cell_frame(line.table?, line.cell_bounds()?)))
     {
         window.paint_quad(quad(
             bounds,
@@ -169,6 +169,22 @@ pub(super) fn paint_table(
             BorderStyle::Solid,
         ));
     }
+}
+
+/// The border round the caret's cell, drawn over the grid lines it borders.
+///
+/// A quad's border lies inside its bounds, and a cell's own separators run
+/// along the inside of its right and bottom edges, so those two already line
+/// up. The line on its left and top belongs to the neighbouring cell and lies
+/// just outside it; the frame reaches out over it, or the two lines would sit
+/// side by side and read as one twice as thick.
+pub(super) fn caret_cell_frame(cell: TableCell, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+    let left = if cell.column > 0 { TABLE_LINE } else { px(0.) };
+    let top = if cell.row > 0 { TABLE_LINE } else { px(0.) };
+    Bounds::new(
+        point(bounds.left() - left, bounds.top() - top),
+        size(bounds.size.width + left, bounds.size.height + top),
+    )
 }
 
 /// Draw one inline atom over the fillers reserving its slot.

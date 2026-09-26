@@ -1,10 +1,11 @@
 use super::{
     AtomShape, CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_FONT, CODE_INSET, Decoration,
     LayoutLine, LayoutRow, Marker, PREVIEW_GAP, QUOTE_BAR, ROUNDED_FONT, Runs, ShapeInput,
-    TableScroll, UI_FONT, Widening, atom_label, cell_under, chrome_marker, column_demands,
-    column_widths, decoration_of, display_text, drawn_image, file_name, gap_below, max_indent,
-    merge_row_centers, picture_source, place_table, quote_bars, reveal_offset, shape,
-    table_overflows, text_runs, unbreakable_units, visible_strips,
+    TABLE_LINE, TableCell, TableScroll, UI_FONT, Widening, atom_label, caret_cell_frame,
+    cell_under, chrome_marker, column_demands, column_widths, decoration_of, display_text,
+    drawn_image, file_name, gap_below, max_indent, merge_row_centers, picture_source, place_table,
+    quote_bars, reveal_offset, shape, table_overflows, text_runs, unbreakable_units,
+    visible_strips,
 };
 use crate::style::EditorStyle;
 use crate::typeahead::tests::{at, run, state_of};
@@ -2698,4 +2699,45 @@ fn shaped_revealing(
         composition,
     };
     shape(&input, px(600.), &text_system())
+}
+
+/// The caret's cell frame lies on the grid lines round the cell: its own
+/// separators run inside its right and bottom edges, its neighbours' outside
+/// its left and top, and the outer border inside the grid's first row and
+/// column.
+#[test]
+fn the_caret_cell_frame_covers_the_grid_lines_it_borders() {
+    let cell = |row, column| TableCell {
+        table: 0,
+        row,
+        column,
+        rows: 3,
+        columns: 3,
+        alignment: ColumnAlignment::None,
+        quotes: 0,
+        offset: point(px(0.), px(0.)),
+        size: size(px(40.), px(20.)),
+    };
+    let bounds = Bounds::new(point(px(100.), px(50.)), size(px(40.), px(20.)));
+    let frame = |row, column| {
+        let frame = caret_cell_frame(cell(row, column), bounds);
+        (frame.left(), frame.top(), frame.right(), frame.bottom())
+    };
+    let (left, top) = (px(100.) - TABLE_LINE, px(50.) - TABLE_LINE);
+    assert_eq!(
+        frame(0, 0),
+        (px(100.), px(50.), px(140.), px(70.)),
+        "on the outer border"
+    );
+    assert_eq!(
+        frame(0, 1),
+        (left, px(50.), px(140.), px(70.)),
+        "over the line to its left"
+    );
+    assert_eq!(
+        frame(1, 0),
+        (px(100.), top, px(140.), px(70.)),
+        "over the line above"
+    );
+    assert_eq!(frame(2, 2), (left, top, px(140.), px(70.)), "over both");
 }

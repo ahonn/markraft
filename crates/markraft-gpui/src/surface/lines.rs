@@ -312,8 +312,36 @@ impl Lines {
     }
 
     /// The lines a frame shows from now on.
+    ///
+    /// A range that reaches a table cell takes in the whole grid, as shaping
+    /// does. The cells before the last of a row start where it does and have
+    /// no height, so a range found by y starts at the row's last cell, and
+    /// the cells before it would otherwise go undrawn.
     pub(crate) fn set_shown(&mut self, shown: Vec<Range<usize>>) {
-        self.shown = shown;
+        let table = |index: usize| {
+            let line = self.slots.get(index)?.line.as_ref()?;
+            Some(line.table?.table)
+        };
+        let grown = shown
+            .into_iter()
+            .filter(|range| !range.is_empty())
+            .map(|range| {
+                let (mut start, mut end) = (range.start, range.end);
+                if let Some(first) = table(start) {
+                    while start > 0 && table(start - 1) == Some(first) {
+                        start -= 1;
+                    }
+                }
+                if let Some(last) = table(end - 1) {
+                    while table(end) == Some(last) {
+                        end += 1;
+                    }
+                }
+                start..end
+            })
+            .collect();
+        // Grown ranges may now overlap, and a line in two would be drawn twice.
+        self.shown = crate::layout::merged(grown);
     }
 
     /// The shaped lines the last frame was asked to show, each with where it

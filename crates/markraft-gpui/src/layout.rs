@@ -215,7 +215,7 @@ fn anchor_at(lines: &mut crate::surface::Lines, visible: &Range<Pixels>) -> (usi
 }
 
 /// `ranges` sorted, with overlapping and touching ones joined.
-fn merged(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+pub(crate) fn merged(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
     ranges.retain(|range| !range.is_empty());
     ranges.sort_by_key(|range| range.start);
     let mut out: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
@@ -323,6 +323,31 @@ mod tests {
             cx.update(|window, _| window.refresh());
         }
         panic!("lines still estimated after 200 frames");
+    }
+
+    /// The cells before the last of a row start where it does and have no
+    /// height of their own, so the line the window's top falls in is the
+    /// row's last cell. A frame still draws the whole grid: with the caret
+    /// in a table that opens the note, the first cell is drawn too.
+    #[gpui::test]
+    fn a_frame_draws_every_cell_of_a_table_it_shows(cx: &mut TestAppContext) {
+        let (view, cx) = laid_out(
+            cx,
+            "| one | two | three |\n| --- | --- | --- |\n| a | b | c |",
+        );
+        view.update(cx, |view, cx| caret_to_line(view, 2, cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let drawn: Vec<(usize, usize)> = view
+                .frame
+                .rows()
+                .iter()
+                .filter_map(|line| line.table.map(|cell| (cell.row, cell.column)))
+                .collect();
+            assert_eq!(drawn, [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]);
+        });
     }
 
     #[test]
