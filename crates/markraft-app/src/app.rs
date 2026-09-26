@@ -130,6 +130,10 @@ pub struct MarkraftApp {
     feedback: Feedback,
     /// What the Settings window's rows say was refused.
     settings_errors: ui::settings::SettingsErrors,
+    /// Whether macOS will launch Markraft at login, as last asked. Asking takes a
+    /// round trip to a system service, too slow for every frame of the Settings
+    /// window, so it is asked when that window comes forward and after a change.
+    launch_at_login: Option<bool>,
     /// Whether Markraft was the active app at the last poll, so the note hides once
     /// when another app takes over rather than on every poll after.
     app_active: bool,
@@ -328,6 +332,7 @@ impl MarkraftApp {
             _persistence_wake: None,
             feedback,
             settings_errors: Default::default(),
+            launch_at_login: None,
             app_active: true,
             quitting: QuitState::default(),
             trashed: Vec::new(),

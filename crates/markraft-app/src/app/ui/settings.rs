@@ -98,6 +98,8 @@ pub(in crate::app) struct SettingsErrors {
 enum Change {
     /// A preference; see [`Pref`].
     Pref(Pref),
+    /// The window came forward: re-read what macOS keeps outside the app.
+    Refresh,
     LaunchAtLogin(bool),
     /// A recorder opening or closing: the running shortcuts are let go of meanwhile.
     Recording(bool),
@@ -150,6 +152,9 @@ impl MarkraftApp {
             app: cx.entity().downgrade(),
             main: window.window_handle(),
         };
+        if self.launch_at_login.is_none() {
+            self.refresh_launch_at_login();
+        }
         let near = window.bounds();
         let display = window
             .display(cx)
@@ -157,9 +162,9 @@ impl MarkraftApp {
         cx.defer(move |cx| present(link, near, display, cx));
     }
 
-    /// `login` asks macOS for the login item's state, which only the General page
-    /// shows; the window redraws whenever the note does, so it is not asked idly.
-    fn settings_snapshot(&self, login: bool) -> Snapshot {
+    /// Read every frame of the Settings window, including each step of its resize, so
+    /// it asks nothing of the system: what macOS keeps is cached by [`Change::Refresh`].
+    fn settings_snapshot(&self) -> Snapshot {
         let workspace = &self.library.workspace;
         let placed = |root: &PathBuf| {
             let new_notes = (
@@ -180,11 +185,7 @@ impl MarkraftApp {
         Snapshot {
             dark: self.dark,
             preferences: self.preferences.clone(),
-            login: self
-                .platform
-                .as_ref()
-                .filter(|_| login)
-                .map(|platform| platform.launch_at_login_enabled()),
+            login: self.launch_at_login,
             folder: self.path.clone(),
             new_notes,
             images,
@@ -196,13 +197,29 @@ impl MarkraftApp {
         }
     }
 
+    fn refresh_launch_at_login(&mut self) {
+        self.launch_at_login = self
+            .platform
+            .as_ref()
+            .map(|platform| platform.launch_at_login_enabled());
+    }
+
     fn apply_setting(&mut self, change: Change, window: &mut Window, cx: &mut Context<Self>) {
         match change {
+            // Only remembered for the next opening: nothing drawn reads it, so it
+            // redraws neither window while the Settings window is resizing.
+            Change::Pref(Pref::SettingsPage(page)) => {
+                self.preferences.settings_page = page;
+                self.save.schedule(Instant::now());
+                return;
+            }
             Change::Pref(pref) => self.set_preference(pref, window, cx),
+            Change::Refresh => self.refresh_launch_at_login(),
             Change::LaunchAtLogin(enabled) => {
                 if let Some(platform) = &mut self.platform {
                     self.settings_errors.login = platform.set_launch_at_login(enabled).err();
                 }
+                self.refresh_launch_at_login();
             }
             Change::Recording(true) => {
                 self.settings_errors.shortcuts = Default::default();
@@ -562,7 +579,9 @@ impl SettingsView {
                 }
             }),
             cx.observe_window_activation(window, |view, window, cx| {
-                if !window.is_window_active() {
+                if window.is_window_active() {
+                    view.link.send(Change::Refresh, cx);
+                } else {
                     view.stop_recording(cx);
                 }
             }),
@@ -1424,7 +1443,7 @@ impl Render for SettingsView {
             .link
             .app
             .upgrade()
-            .map(|app| app.read(cx).settings_snapshot(self.page == Page::General))
+            .map(|app| app.read(cx).settings_snapshot())
         else {
             return div();
         };
