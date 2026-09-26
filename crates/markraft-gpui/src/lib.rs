@@ -27,6 +27,7 @@ mod surface;
 mod syntax;
 mod typeahead;
 mod wiki;
+pub use clipboard::use_system_pasteboard;
 pub use emoji::{EmojiInsertion, EmojiShortcodes, emoji_menu};
 pub use extension::{
     ActionHandler, CaretShape, EXTENSION_ORIGIN_PREFIX, EditorCx, Extension, ExtensionHandle,
@@ -1892,7 +1893,7 @@ impl EditorView {
         } else if let Some(slice) = self
             .codecs
             .clone()
-            .and_then(|codecs| clipboard::read_fragment(&schema, codecs.as_ref(), &item, mode))
+            .and_then(|codecs| clipboard::read_fragment(&schema, codecs.as_ref(), &item, mode, cx))
         {
             // Only an item with no text reaches here in a cell: its blocks go in
             // one after another, a `<br/>` between them.

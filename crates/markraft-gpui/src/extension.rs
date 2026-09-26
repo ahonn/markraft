@@ -471,6 +471,7 @@ impl<'a> EditorCx<'a> {
             codecs.as_ref(),
             &item,
             clipboard::PasteMode::Formatted,
+            app,
         )
     }
 }
