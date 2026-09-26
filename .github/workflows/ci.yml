@@ -14,9 +14,12 @@ on:
         default: ''
 permissions:
   contents: read
+# A called workflow sees its caller's github context, so the release's check would
+# share a group with branch CI and a push to master would cancel the release. The
+# release passes a ref; its check gets a group of its own and runs to the end.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ inputs.ref && format('release-{0}', inputs.ref) || github.ref }}
+  cancel-in-progress: ${{ !inputs.ref }}
 jobs:
   macos:
     runs-on: macos-15
