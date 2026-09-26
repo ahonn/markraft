@@ -51,7 +51,7 @@ Markraft runs from the menu bar and has no Dock icon.
 | Shortcut | Action |
 | --- | --- |
 | <kbd>⌥N</kbd> | Show or hide the window |
-| <kbd>Esc</kbd> | Hide the window |
+| <kbd>Esc</kbd> | Hide the window (`:q` in vim mode) |
 | <kbd>⌘N</kbd> | New note |
 | <kbd>⌘P</kbd> | Find a note |
 | <kbd>⌘K</kbd> | All actions |
@@ -59,6 +59,20 @@ Markraft runs from the menu bar and has no Dock icon.
 | <kbd>⌘,</kbd> | Settings |
 | <kbd>/</kbd> | Insert a heading, list, table, code block and more |
 | <kbd>[[</kbd> | Link to another note |
+
+## Vim mode
+
+Turn on **Vim mode** in Settings → Editor. The editor starts in Normal mode and shows the current mode.
+
+- **Modes:** Normal, Insert, Visual and Visual Line. <kbd>Esc</kbd> returns to Normal mode.
+- **Motions:** `h` `j` `k` `l`, `w` `b` `e`, `0` `^` `$`, `gg` `G`. `j` and `k` move by visual row in wrapped lines.
+- **Editing:** `d`, `c` and `y` with a motion or doubled (`dd`, `cc`, `yy`), `D`, `C`, `x`, `p`, `P`, `u` and <kbd>Ctrl</kbd>+<kbd>R</kbd>. Counts work, as in `3j` or `2d3w`.
+- **Entering Insert mode:** `i`, `a`, `I`, `A`, `o`, `O`. Everything typed in one Insert session is undone in one step.
+- **Text objects:** `iw` `aw`, `i"` `a"` (and `'`, `` ` ``), `i(` `a(` (or `b`), `i[` `a[`, `i{` `a{` (or `B`), `i<` `a<`, `ip` `ap`, after an operator or in Visual mode.
+- **Markdown blocks:** `dd` and `yy` take a whole block, so a list item keeps its nesting when pasted and a code block is taken whole. In a table, a line is a table row.
+- **Commands:** `:` opens the action list as a command line. `:w` saves, `:q` hides the window, `:wq` and `:x` save and hide, `:qa` quits Markraft, `:wqa` saves and quits, `:e` reloads the note from disk, `:enew` starts a new note, `:ls` lists notes, and `:u` and `:red` undo and redo. In Normal mode <kbd>Esc</kbd> does not hide the window; use `:q`.
+
+Search, `f` and `t`, `.` repeat, registers and other `:` commands are not supported.
 
 ## Your notes
 

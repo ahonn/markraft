@@ -24,6 +24,12 @@ pub(super) struct Command {
     /// Whether the ⌘K panel marks the command as the one already in force, for the few
     /// that describe a state rather than an action. `None` for the rest.
     pub checked: Option<bool>,
+    /// The vim `:` commands that run it, each as its full name and the length of its
+    /// shortest abbreviation: `("write", 1)` is `:w`, `:wr` and on to `:write`.
+    pub ex: &'static [(&'static str, usize)],
+    /// Offered only to a `:` query, for a command that stands for vim's rather than
+    /// being one of the panel's own.
+    pub ex_only: bool,
 }
 
 /// How the `/` menu applies a command, once the trigger text has been deleted.
@@ -46,6 +52,8 @@ impl Command {
             intent: Some(intent),
             slash: None,
             checked: None,
+            ex: &[],
+            ex_only: false,
         }
     }
     /// A command only the editor's `/` menu offers.
@@ -62,6 +70,8 @@ impl Command {
             intent: None,
             slash: Some((rank, effect)),
             checked: None,
+            ex: &[],
+            ex_only: false,
         }
     }
     pub(super) fn slash(mut self, rank: u8, effect: SlashEffect) -> Self {
@@ -71,6 +81,31 @@ impl Command {
     pub(super) fn checked(mut self, checked: bool) -> Self {
         self.checked = Some(checked);
         self
+    }
+    pub(super) fn ex(mut self, names: &'static [(&'static str, usize)]) -> Self {
+        self.ex = names;
+        self
+    }
+    /// A command that answers a `:` query and nothing else.
+    pub(super) fn ex_only(mut self, names: &'static [(&'static str, usize)]) -> Self {
+        self.ex = names;
+        self.ex_only = true;
+        self
+    }
+    /// The shortest `:` command that runs it, as vim users write it.
+    pub(super) fn ex_label(&self) -> Option<String> {
+        let (name, shortest) = self.ex.first()?;
+        Some(format!(":{}", &name[..*shortest]))
+    }
+    /// How `typed`, the text after a `:`, reads as one of its names: `Some(true)` when
+    /// it runs the command, as a whole name or an abbreviation vim accepts, and
+    /// `Some(false)` when it is only on the way to one. `None` when it is neither.
+    pub(super) fn ex_match(&self, typed: &str) -> Option<bool> {
+        self.ex
+            .iter()
+            .filter(|(name, _)| name.starts_with(typed))
+            .map(|(_, shortest)| typed.len() >= *shortest)
+            .max()
     }
 }
 
@@ -322,5 +357,26 @@ mod tests {
         // An empty line becomes the rule itself rather than leaving a blank above it.
         let state = accept(&provider(), "/div", 0, "div");
         assert_eq!(doc::to_markdown(state.doc()), "---");
+    }
+
+    /// A `:` name runs its command typed whole or cut to any length vim accepts, and
+    /// a shorter start of it only leads there.
+    #[test]
+    fn ex_names_follow_vims_abbreviations() {
+        let write = Command::new("save", "Save", Intent::Save).ex(&[("write", 1)]);
+        assert_eq!(write.ex_label().as_deref(), Some(":w"));
+        assert_eq!(write.ex_match("w"), Some(true));
+        assert_eq!(write.ex_match("wri"), Some(true));
+        assert_eq!(write.ex_match("write"), Some(true));
+        assert_eq!(write.ex_match("writes"), None);
+        assert_eq!(write.ex_match("x"), None);
+        let all = Command::new("quit", "Quit", Intent::Quit).ex(&[("qall", 2), ("quitall", 5)]);
+        assert_eq!(all.ex_label().as_deref(), Some(":qa"));
+        assert_eq!(all.ex_match("q"), Some(false), "only on the way to `:qa`");
+        assert_eq!(all.ex_match("qa"), Some(true));
+        assert_eq!(all.ex_match("quit"), Some(false));
+        assert_eq!(all.ex_match("quita"), Some(true));
+        assert_eq!(all.ex_match(""), Some(false));
+        assert_eq!(Command::new("new", "New", Intent::New).ex_match(""), None);
     }
 }

@@ -6,6 +6,7 @@ use crate::host::{self, Host};
 use crate::{
     edit::{self, Register},
     motion::{self, Motion, Span},
+    object::{self, Selected, TextObject},
     state::{Mode, Operator, State},
     table,
 };
@@ -396,6 +397,43 @@ fn caret_in_table(cx: &mut impl Host, cell: &table::Cell) {
         Selection::cursor(motion::first_non_blank(&projection, line)),
         false,
     );
+}
+
+/// A text object after an operator, or in a visual mode, which it then selects. The
+/// count is consumed but not applied.
+pub(crate) fn text_object(state: &mut State, cx: &mut impl Host, object: TextObject, around: bool) {
+    let operator = state.pending.operator();
+    state.pending.take();
+    let projection = cx.projection();
+    let from = cursor(state, cx);
+    let hidden = motion::Hidden::at(cx.types().syntax, from);
+    let Some(selected) = object::find(&projection, &hidden, from, object, around) else {
+        return;
+    };
+    match (operator, selected) {
+        (Some(operator), Selected::Lines(lines)) => linewise(state, cx, operator, lines),
+        (Some(Operator::Change), Selected::Chars(range)) if range.is_empty() => {
+            // `ci(` between `()` has nothing to take but still types inside the pair.
+            enter_insert(state, cx);
+            cx.select(Selection::cursor(range.start), false);
+        }
+        (Some(operator), Selected::Chars(range)) => {
+            if !range.is_empty() {
+                charwise(state, cx, operator, range, false);
+            }
+        }
+        (None, Selected::Lines(lines)) if state.mode.is_visual() => {
+            state.mode = Mode::VisualLine;
+            state.visual_anchor = motion::line_start(&projection, lines.start);
+            move_cursor(state, cx, motion::line_start(&projection, lines.end - 1));
+        }
+        (None, Selected::Chars(range)) if state.mode.is_visual() && !range.is_empty() => {
+            state.mode = Mode::Visual;
+            state.visual_anchor = range.start;
+            move_cursor(state, cx, motion::previous_in_line(&projection, range.end));
+        }
+        (None, _) => {}
+    }
 }
 
 /// `d`, `c` and `y`: on the selection in a visual mode, doubled for a whole line, and

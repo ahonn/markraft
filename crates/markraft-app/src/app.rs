@@ -56,6 +56,8 @@ actions!(
         NewNote,
         Browse,
         Actions,
+        /// vim's `:`: the actions panel, with a `:` typed in it.
+        ExCommand,
         Settings,
         Link,
         Export,
@@ -958,6 +960,11 @@ impl MarkraftApp {
             cx.notify();
         } else if self.toolbar.dismiss() {
             cx.notify();
+        } else if self.preferences.vim_mode {
+            // In vim Escape is how every command is left, and pressed once too often
+            // it would put the note away mid-thought. vim itself answers a stray
+            // Escape by staying put; the way out is `:q`, which says so.
+            self.inform("Type :q and press Return to hide the window.", cx);
         } else {
             self.hide(window, cx);
         }
@@ -1065,6 +1072,24 @@ impl MarkraftApp {
         } else {
             self.focus_editor(window, cx);
         }
+        cx.notify();
+    }
+    /// vim's `:`: the actions panel as a command line, a `:` already typed and the
+    /// caret after it.
+    fn open_ex(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.interaction.panel() != Panel::Actions {
+            self.open_panel(Panel::Actions, window, cx);
+        }
+        if self.interaction.panel() != Panel::Actions {
+            return;
+        }
+        self.set_query(":".into(), "Search for actions…", "Search actions", cx);
+        let query = self.query().clone();
+        query.update(cx, |query, cx| {
+            let end = markraft_core::Selection::at_end(query.state().schema(), query.state().doc());
+            query.dispatch([markraft_core::TransactionSpec::new().selection(end)], cx);
+        });
+        window.focus(&query.focus_handle(cx), cx);
         cx.notify();
     }
     fn matching_notes(&self, query: &str) -> Vec<&crate::storage::Note> {
@@ -1281,6 +1306,14 @@ impl MarkraftApp {
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_queued_notices(&self) -> Vec<String> {
         self.feedback.queued().map(str::to_owned).collect()
+    }
+    /// The notice on screen now, whichever way it came.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn test_notice(&self) -> Option<String> {
+        self.feedback
+            .notice()
+            .map(|notice| notice.text.as_ref().to_owned())
     }
     /// Paths dropped on the window, as Finder drops them.
     #[cfg(test)]
@@ -2369,6 +2402,13 @@ pub fn bind_app_keys(cx: &mut App) {
         KeyBinding::new("cmd-n", NewNote, Some("MarkraftApp")),
         KeyBinding::new("cmd-p", Browse, Some("MarkraftApp")),
         KeyBinding::new("cmd-k", Actions, Some("MarkraftApp")),
+        // Only where vim reads keys as commands and has nothing half-typed, so `:` is
+        // still text in Insert mode and `d:` is no command line.
+        KeyBinding::new(
+            ":",
+            ExCommand,
+            Some("Markraft && vim_mode == normal && !vim_pending"),
+        ),
         KeyBinding::new("cmd-,", Settings, Some("MarkraftApp")),
         KeyBinding::new("cmd-l", Link, Some("MarkraftApp")),
         KeyBinding::new("cmd-shift-e", Export, Some("MarkraftApp")),

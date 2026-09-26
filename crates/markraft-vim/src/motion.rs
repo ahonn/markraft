@@ -199,7 +199,11 @@ pub(crate) fn clamp(projection: &Projection, pos: usize) -> usize {
 }
 
 /// The words of one whole line, as document position ranges.
-fn line_words(projection: &Projection, hidden: &Hidden, line: usize) -> Vec<Range<usize>> {
+pub(crate) fn line_words(
+    projection: &Projection,
+    hidden: &Hidden,
+    line: usize,
+) -> Vec<Range<usize>> {
     let line = line.min(last_line(projection));
     let entry = &projection.lines()[line];
     words(projection, hidden, entry.from(), entry.to())

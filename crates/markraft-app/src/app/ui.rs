@@ -76,6 +76,14 @@ enum Intent {
     ReportIssue,
     CopyDebugInfo,
     RevealLogs,
+    /// vim's `:q`, `:qa`, `:u` and `:red`: the window's and the editor's own
+    /// commands, which the panel otherwise leaves to their keys.
+    Hide,
+    Quit,
+    Undo,
+    Redo,
+    /// Several intents in turn, as `:wq` saves and then hides.
+    Then(Vec<Intent>),
 }
 
 /// The shortcut shown beside an intent, wherever it is offered: the ⌘K panel,
@@ -116,6 +124,9 @@ fn shortcut_label(intent: &Intent) -> &'static str {
         Intent::ChooseCodeLanguage => "⌥⌘L",
         Intent::CopyCodeBlock => "⌥⇧⌘C",
         Intent::Table(TableEdit::RowAfter) => "⌘↩",
+        Intent::Quit => "⌘Q",
+        Intent::Undo => "⌘Z",
+        Intent::Redo => "⇧⌘Z",
         _ => "",
     }
 }
@@ -136,7 +147,9 @@ impl Intent {
     fn action_group(&self) -> ActionGroup {
         match self {
             Self::New | Self::Browse | Self::Pin => ActionGroup::Notes,
-            Self::Copy | Self::PastePlain | Self::PasteMarkdown => ActionGroup::Editing,
+            Self::Copy | Self::PastePlain | Self::PasteMarkdown | Self::Undo | Self::Redo => {
+                ActionGroup::Editing
+            }
             Self::Mark(_) | Self::Block(_) | Self::Link | Self::InsertTable => {
                 ActionGroup::Formatting
             }
@@ -214,6 +227,36 @@ fn relative_day(updated: u64, now: u64) -> String {
     }
 }
 
+/// The vim `:` commands that are not already panel commands of their own, each named
+/// as vim spells it. They answer a `:` query only.
+fn ex_commands() -> Vec<Command> {
+    vec![
+        Command::new("ex-quit", "Hide Window", Intent::Hide).ex_only(&[("quit", 1)]),
+        Command::new(
+            "ex-write-quit",
+            "Save and Hide Window",
+            Intent::Then(vec![Intent::Save, Intent::Hide]),
+        )
+        .ex_only(&[("wq", 2), ("xit", 1), ("exit", 3)]),
+        Command::new("ex-quit-all", "Quit Markraft", Intent::Quit)
+            .ex_only(&[("qall", 2), ("quitall", 5)]),
+        Command::new(
+            "ex-write-quit-all",
+            "Save and Quit Markraft",
+            Intent::Then(vec![Intent::Save, Intent::Quit]),
+        )
+        .ex_only(&[("wqall", 3), ("xall", 2)]),
+        Command::new(
+            "ex-edit",
+            "Reload from Disk",
+            Intent::Then(vec![Intent::Back, Intent::Reload]),
+        )
+        .ex_only(&[("edit", 1)]),
+        Command::new("ex-undo", "Undo", Intent::Undo).ex_only(&[("undo", 1)]),
+        Command::new("ex-redo", "Redo", Intent::Redo).ex_only(&[("redo", 3)]),
+    ]
+}
+
 /// The icon a command shows in the ⌘K panel and in the `/` menu.
 fn intent_icon(intent: &Intent) -> Icon {
     match intent {
@@ -259,6 +302,11 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::Block(doc::Block::Divider) => Icon::Divider,
         Intent::InsertTable => Icon::Table,
         Intent::Table(edit) => edit.icon(),
+        Intent::Undo => Icon::Undo,
+        Intent::Redo => Icon::Redo,
+        Intent::Hide => Icon::Hide,
+        Intent::Quit => Icon::Quit,
+        Intent::Then(intents) => intents.last().map_or(Icon::Paragraph, intent_icon),
         _ => Icon::Paragraph,
     }
 }
@@ -333,6 +381,28 @@ impl MarkraftApp {
             Intent::Save => {
                 self.intent(Intent::Back, window, cx);
                 self.save_now(window, cx);
+            }
+            Intent::Hide => {
+                self.intent(Intent::Back, window, cx);
+                self.hide(window, cx);
+            }
+            Intent::Quit => {
+                self.intent(Intent::Back, window, cx);
+                self.quit(window, cx);
+            }
+            Intent::Undo | Intent::Redo => {
+                self.intent(Intent::Back, window, cx);
+                let action: Box<dyn Action> = if matches!(intent, Intent::Undo) {
+                    Box::new(markraft_gpui::Undo)
+                } else {
+                    Box::new(markraft_gpui::Redo)
+                };
+                window.dispatch_action(action, cx);
+            }
+            Intent::Then(intents) => {
+                for intent in intents {
+                    self.intent(intent, window, cx);
+                }
             }
             // The caret is already where these act, so the panel closes and the
             // editor's own action does the work.
@@ -708,6 +778,7 @@ impl MarkraftApp {
         id: &'static str,
         label: &'static str,
         hint: &'static str,
+        ex: Option<String>,
         intent: Intent,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -745,6 +816,10 @@ impl MarkraftApp {
             )
             .child(icon(kind, ink))
             .child(div().flex_1().min_w_0().truncate().child(label))
+            // The `:` command vim users know it by, quieter than the shortcut beside it.
+            .when_some(ex, |s, ex| {
+                s.child(div().text_size(px(12.)).text_color(self.muted()).child(ex))
+            })
             .child(self.shortcut(hint))
     }
     fn search_field(&self, cx: &mut Context<Self>) -> Div {
@@ -1137,7 +1212,7 @@ impl MarkraftApp {
     /// caret already is, so `caret` keeps them out of the panel everywhere else.
     fn action_items(&self, caret: Caret) -> Vec<Command> {
         let mut items = vec![
-            Command::new("new-action", "New Note", Intent::New),
+            Command::new("new-action", "New Note", Intent::New).ex(&[("enew", 3)]),
             Command::new(
                 "pin-note",
                 if self.library.active_note().pinned {
@@ -1147,8 +1222,12 @@ impl MarkraftApp {
                 },
                 Intent::Pin,
             ),
-            Command::new("browse-action", "Browse Notes", Intent::Browse),
-            Command::new("save-now", "Save Now", Intent::Save),
+            Command::new("browse-action", "Browse Notes", Intent::Browse).ex(&[
+                ("ls", 2),
+                ("buffers", 7),
+                ("files", 5),
+            ]),
+            Command::new("save-now", "Save Now", Intent::Save).ex(&[("write", 1)]),
             Command::new("copy-markdown", "Copy as Markdown", Intent::Copy),
             Command::new("paste-plain", "Paste as Plain Text", Intent::PastePlain),
             Command::new("paste-markdown", "Paste as Markdown", Intent::PasteMarkdown),
@@ -1372,6 +1451,7 @@ impl MarkraftApp {
             },
             Intent::ChooseFolder,
         ));
+        items.extend(ex_commands());
         items
     }
     fn count_of(&self, units: usize) -> String {
@@ -1397,6 +1477,17 @@ impl MarkraftApp {
             .count(editor.state().doc(), self.toolbar.counts_words());
         self.count_of(units)
     }
+    /// The labels the actions panel lists, in order, while it is open.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn test_action_labels(&self, cx: &App) -> Option<Vec<&'static str>> {
+        (self.interaction.panel() == Panel::Actions).then(|| {
+            self.filtered_actions(cx)
+                .into_iter()
+                .map(|command| command.label)
+                .collect()
+        })
+    }
     fn filtered_actions(&self, cx: &App) -> Vec<Command> {
         let query = self
             .query()
@@ -1416,11 +1507,27 @@ impl MarkraftApp {
             in_code: block == Some(doc::Block::Code),
             in_task: block == Some(doc::Block::Task),
         };
-        let mut items: Vec<_> = self
-            .action_items(caret)
-            .into_iter()
+        let items = self.action_items(caret).into_iter();
+        // A `:` query is a vim command line: it matches the commands' `:` names, and
+        // one it already names in full or as vim abbreviates it goes first, so Return
+        // runs `:w` rather than a longer command it is also the start of. The fullwidth
+        // colon a Chinese input method types counts as the same.
+        if let Some(typed) = query.strip_prefix(':').or_else(|| query.strip_prefix('：')) {
+            let typed = typed.trim();
+            let mut items: Vec<_> = items
+                .filter(|command| command.intent.is_some())
+                .filter_map(|command| Some((!command.ex_match(typed)?, command)))
+                .collect();
+            items.sort_by_key(|(partial, command)| {
+                (*partial, command.intent.as_ref().map(Intent::action_group))
+            });
+            return items.into_iter().map(|(_, command)| command).collect();
+        }
+        let mut items: Vec<_> = items
             .filter(|command| {
-                command.intent.is_some() && command.label.to_lowercase().contains(&query)
+                command.intent.is_some()
+                    && !command.ex_only
+                    && command.label.to_lowercase().contains(&query)
             })
             .collect();
         items.sort_by_key(|command| command.intent.as_ref().map(Intent::action_group));
@@ -1448,7 +1555,9 @@ impl MarkraftApp {
             );
         }
         let mut previous_group = None;
+        let vim = self.preferences.vim_mode;
         for (index, command) in items.into_iter().enumerate() {
+            let ex = vim.then(|| command.ex_label()).flatten();
             let Command {
                 id,
                 label,
@@ -1473,7 +1582,7 @@ impl MarkraftApp {
                         )
                     })
                     .child(
-                        self.row(id, label, shortcut, intent, cx)
+                        self.row(id, label, shortcut, ex, intent, cx)
                             .h(ACTION_ROW_HEIGHT)
                             .text_size(px(14.))
                             .role(Role::Button)
@@ -1705,6 +1814,7 @@ impl Render for MarkraftApp {
             .on_action(cx.listener(|this, _: &NewNote, w, cx| this.intent(Intent::New, w, cx)))
             .on_action(cx.listener(|this, _: &Browse, w, cx| this.intent(Intent::Browse, w, cx)))
             .on_action(cx.listener(|this, _: &Actions, w, cx| this.intent(Intent::Actions, w, cx)))
+            .on_action(cx.listener(|this, _: &ExCommand, w, cx| this.open_ex(w, cx)))
             .on_action(
                 cx.listener(|this, _: &Settings, w, cx| this.intent(Intent::Settings, w, cx)),
             )

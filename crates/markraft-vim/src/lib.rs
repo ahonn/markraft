@@ -108,15 +108,23 @@
 //! and `j`. Everything else the editor and the app bind keeps its meaning: the arrow
 //! keys, Tab and ⇧Tab still indent, and ⌘K, ⌘P, ⌘N, ⌘Z and the rest are untouched, vim
 //! binding no modified keys but ⌃R. Escape in Normal mode with nothing half-typed still
-//! reaches the app and dismisses the window, as it did before.
+//! reaches the app, which closes whatever it has open and otherwise points to `:q`
+//! rather than hiding the window.
 //!
 //! In Insert mode nothing here applies but Escape, so the typeahead menus, the emoji
 //! shortcodes and every editor binding behave exactly as they do with vim off.
 //!
+//! # Text objects
+//!
+//! `iw aw`, the quote pairs `i" i' i``, the bracket pairs `i( i[ i{ i<` with `b` and
+//! `B`, and `ip ap`, each with its `a` form, after an operator or in a visual mode; see
+//! [`object`]. The count before one is consumed but not applied.
+//!
 //! # Not implemented
 //!
-//! `.`, `J`, text objects, marks, macros, named registers, search and `:` commands.
-//! Nothing joins two lines, so nothing can join two table rows either.
+//! `.`, `J`, marks, macros, named registers and search. `:` is left to the host, which
+//! binds it to a command list of its own. Nothing joins two lines, so nothing can join
+//! two table rows either.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
@@ -124,6 +132,7 @@ mod command;
 mod edit;
 mod host;
 mod motion;
+mod object;
 mod state;
 mod table;
 #[cfg(test)]
@@ -134,6 +143,7 @@ use command::InsertAt;
 use gpui::{App, KeyBinding, KeyContext, actions};
 use markraft_gpui::{ActionHandler, CaretShape, EditorCx, Extension, InputPolicy, Update};
 use motion::Motion;
+use object::TextObject;
 use state::{Operator, State};
 use std::{cell::RefCell, rc::Rc};
 
@@ -180,6 +190,25 @@ actions!(
         VimPasteBefore,
         VimUndo,
         VimRedo,
+        // Text objects, after an operator or in a visual mode.
+        VimInnerWord,
+        VimAroundWord,
+        VimInnerDoubleQuote,
+        VimAroundDoubleQuote,
+        VimInnerSingleQuote,
+        VimAroundSingleQuote,
+        VimInnerBacktick,
+        VimAroundBacktick,
+        VimInnerParen,
+        VimAroundParen,
+        VimInnerBracket,
+        VimAroundBracket,
+        VimInnerBrace,
+        VimAroundBrace,
+        VimInnerAngle,
+        VimAroundAngle,
+        VimInnerParagraph,
+        VimAroundParagraph,
         // Counts. `0` is a count only after another digit; on its own it is the
         // line-start motion, which its handler performs instead.
         VimCount0,
@@ -203,6 +232,12 @@ actions!(
 /// disabled.
 const COMMAND: Option<&str> = Some("Markraft && vim_mode && vim_mode != insert");
 const NORMAL: Option<&str> = Some("Markraft && vim_mode == normal");
+/// `i` and `a` start a text object once an operator is waiting, so as commands of their
+/// own they stand aside then.
+const NORMAL_UNARMED: Option<&str> = Some("Markraft && vim_mode == normal && !vim_operator");
+/// Where a text object can follow: an operator waiting for its range, or a visual mode.
+const OBJECT: Option<&str> =
+    Some("Markraft && (vim_operator || vim_mode == visual || vim_mode == visual_line)");
 const VISUAL: Option<&str> = Some("Markraft && (vim_mode == visual || vim_mode == visual_line)");
 /// Escape leaves Insert mode only when it has nothing better to do: an open typeahead
 /// menu takes it first to close itself, and a live composition belongs to the input
@@ -233,8 +268,25 @@ pub fn bind_keys(cx: &mut App) {
         // The editor's own meanings would edit the document under a Normal-mode caret.
         "backspace" => VimLeft, "delete" => VimDeleteChar, "enter" => VimDown,
     });
+    bind!(NORMAL_UNARMED { "i" => VimInsert, "a" => VimInsertAfter });
+    bind!(OBJECT {
+        "i w" => VimInnerWord, "a w" => VimAroundWord,
+        "i \"" => VimInnerDoubleQuote, "a \"" => VimAroundDoubleQuote,
+        "i '" => VimInnerSingleQuote, "a '" => VimAroundSingleQuote,
+        "i `" => VimInnerBacktick, "a `" => VimAroundBacktick,
+        "i (" => VimInnerParen, "a (" => VimAroundParen,
+        "i )" => VimInnerParen, "a )" => VimAroundParen,
+        "i b" => VimInnerParen, "a b" => VimAroundParen,
+        "i [" => VimInnerBracket, "a [" => VimAroundBracket,
+        "i ]" => VimInnerBracket, "a ]" => VimAroundBracket,
+        "i {" => VimInnerBrace, "a {" => VimAroundBrace,
+        "i }" => VimInnerBrace, "a }" => VimAroundBrace,
+        "i shift-b" => VimInnerBrace, "a shift-b" => VimAroundBrace,
+        "i <" => VimInnerAngle, "a <" => VimAroundAngle,
+        "i >" => VimInnerAngle, "a >" => VimAroundAngle,
+        "i p" => VimInnerParagraph, "a p" => VimAroundParagraph,
+    });
     bind!(NORMAL {
-        "i" => VimInsert, "a" => VimInsertAfter,
         "shift-i" => VimInsertLineStart, "shift-a" => VimInsertLineEnd,
         "o" => VimOpenBelow, "shift-o" => VimOpenAbove,
         "v" => VimVisual, "shift-v" => VimVisualLine,
@@ -289,6 +341,12 @@ impl Vim {
 
     fn motion(&self, action: impl gpui::Action, motion: Motion) -> ActionHandler {
         self.handler(action, move |state, cx| command::motion(state, cx, motion))
+    }
+
+    fn object(&self, action: impl gpui::Action, object: TextObject, around: bool) -> ActionHandler {
+        self.handler(action, move |state, cx| {
+            command::text_object(state, cx, object, around)
+        })
     }
 
     fn count(&self, action: impl gpui::Action, digit: usize) -> ActionHandler {
@@ -365,6 +423,24 @@ impl Extension for Vim {
     fn actions(&self) -> Vec<ActionHandler> {
         let mut actions = vec![
             self.motion(VimLeft, Motion::Left),
+            self.object(VimInnerWord, TextObject::Word, false),
+            self.object(VimAroundWord, TextObject::Word, true),
+            self.object(VimInnerDoubleQuote, TextObject::Quote('"'), false),
+            self.object(VimAroundDoubleQuote, TextObject::Quote('"'), true),
+            self.object(VimInnerSingleQuote, TextObject::Quote('\''), false),
+            self.object(VimAroundSingleQuote, TextObject::Quote('\''), true),
+            self.object(VimInnerBacktick, TextObject::Quote('`'), false),
+            self.object(VimAroundBacktick, TextObject::Quote('`'), true),
+            self.object(VimInnerParen, TextObject::Pair('(', ')'), false),
+            self.object(VimAroundParen, TextObject::Pair('(', ')'), true),
+            self.object(VimInnerBracket, TextObject::Pair('[', ']'), false),
+            self.object(VimAroundBracket, TextObject::Pair('[', ']'), true),
+            self.object(VimInnerBrace, TextObject::Pair('{', '}'), false),
+            self.object(VimAroundBrace, TextObject::Pair('{', '}'), true),
+            self.object(VimInnerAngle, TextObject::Pair('<', '>'), false),
+            self.object(VimAroundAngle, TextObject::Pair('<', '>'), true),
+            self.object(VimInnerParagraph, TextObject::Paragraph, false),
+            self.object(VimAroundParagraph, TextObject::Paragraph, true),
             self.motion(VimRight, Motion::Right),
             self.motion(VimWordForward, Motion::WordForward),
             self.motion(VimWordBackward, Motion::WordBackward),

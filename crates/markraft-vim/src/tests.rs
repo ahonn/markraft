@@ -13,6 +13,7 @@ use crate::{
     command::{self, InsertAt},
     host::{self, Host},
     motion::Motion,
+    object::TextObject,
     state::{Mode, Operator, State},
 };
 use markraft_commonmark::{
@@ -251,6 +252,13 @@ impl Keys {
             if let Some(tail) = rest.strip_prefix("gg") {
                 let line = self.state.pending.count().map_or(0, |count| count - 1);
                 command::motion(&mut self.state, &mut self.host, Motion::Line(line));
+                rest = tail;
+                continue;
+            }
+            if (self.state.pending.operator().is_some() || self.state.mode.is_visual())
+                && let Some((object, around, tail)) = text_object(rest)
+            {
+                command::text_object(&mut self.state, &mut self.host, object, around);
                 rest = tail;
                 continue;
             }
@@ -1732,4 +1740,149 @@ fn a_yank_over_concealed_runs_keeps_their_source() {
     assert_eq!(keys.host.plain_text(&slice), "x a");
     keys.keys("$p");
     assert_eq!(keys.markdown(), "x **a** yx **a**");
+}
+
+/// A text object at the start of `keys` — `iw`, `a(` and the rest, as `bind_keys`
+/// spells them — and the keys after it.
+fn text_object(keys: &str) -> Option<(TextObject, bool, &str)> {
+    let mut chars = keys.chars();
+    let around = match chars.next()? {
+        'i' => false,
+        'a' => true,
+        _ => return None,
+    };
+    let object = match chars.next()? {
+        'w' => TextObject::Word,
+        quote @ ('"' | '\'' | '`') => TextObject::Quote(quote),
+        '(' | ')' | 'b' => TextObject::Pair('(', ')'),
+        '[' | ']' => TextObject::Pair('[', ']'),
+        '{' | '}' | 'B' => TextObject::Pair('{', '}'),
+        '<' | '>' => TextObject::Pair('<', '>'),
+        'p' => TextObject::Paragraph,
+        _ => return None,
+    };
+    Some((object, around, chars.as_str()))
+}
+
+#[test]
+fn iw_and_aw_take_a_word_and_the_blanks_beside_it() {
+    let mut keys = Keys::new("one two three").at(0, 5);
+    keys.keys("diw");
+    assert_eq!(keys.text(), "one  three");
+    let mut keys = Keys::new("one two three").at(0, 5);
+    keys.keys("daw");
+    assert_eq!(keys.text(), "one three");
+    // The last word has no blanks after it, so `aw` takes those before it.
+    let mut keys = Keys::new("one two three").at(0, 9);
+    keys.keys("daw");
+    assert_eq!(keys.text(), "one two");
+    // On blanks, `iw` is the blanks and `aw` the blanks and the next word.
+    let mut keys = Keys::new("one   two three").at(0, 4);
+    keys.keys("diw");
+    assert_eq!(keys.text(), "onetwo three");
+    let mut keys = Keys::new("one   two three").at(0, 4);
+    keys.keys("daw");
+    assert_eq!(keys.text(), "one three");
+}
+
+#[test]
+fn ciw_types_over_the_word_and_yiw_leaves_the_cursor_at_its_start() {
+    let mut keys = Keys::new("one two three").at(0, 6);
+    keys.keys("ciw");
+    assert_eq!(keys.state.mode, Mode::Insert);
+    keys.typed("2").keys("<esc>");
+    assert_eq!(keys.text(), "one 2 three");
+    let mut keys = Keys::new("one two three").at(0, 6);
+    keys.keys("yiw");
+    assert_eq!(keys.line_col(), (0, 4));
+    keys.keys("$p");
+    assert_eq!(keys.text(), "one two threetwo");
+}
+
+#[test]
+fn a_styled_word_goes_with_its_markup() {
+    let mut keys = Keys::new("x **bold** y").at(0, 5);
+    keys.keys("diw");
+    assert_eq!(keys.markdown(), "x  y");
+}
+
+#[test]
+fn quotes_pair_from_the_start_of_the_line() {
+    let mut keys = Keys::new("say \"hi there\" now").at(0, 7);
+    keys.keys("di\"");
+    assert_eq!(keys.text(), "say \"\" now");
+    let mut keys = Keys::new("say \"hi there\" now").at(0, 7);
+    keys.keys("da\"");
+    assert_eq!(keys.text(), "say now");
+    // Before the first pair, the pair after the cursor is taken.
+    let mut keys = Keys::new("say 'hi' now").at(0, 0);
+    keys.keys("ci'");
+    keys.typed("yo").keys("<esc>");
+    assert_eq!(keys.text(), "say 'yo' now");
+}
+
+#[test]
+fn brackets_take_the_innermost_pair_round_the_cursor() {
+    let mut keys = Keys::new("f(g(x), y)").at(0, 4);
+    keys.keys("di(");
+    assert_eq!(keys.text(), "f(g(), y)");
+    let mut keys = Keys::new("f(g(x), y)").at(0, 4);
+    keys.keys("da)");
+    assert_eq!(keys.text(), "f(g, y)");
+    // On a bracket, its own pair.
+    let mut keys = Keys::new("f(g(x), y)").at(0, 1);
+    keys.keys("dib");
+    assert_eq!(keys.text(), "f()");
+    let mut keys = Keys::new("f(g(x), y)").at(0, 9);
+    keys.keys("di)");
+    assert_eq!(keys.text(), "f()");
+    // Outside any pair nothing happens.
+    let mut keys = Keys::new("f(x) y").at(0, 5);
+    keys.keys("di(");
+    assert_eq!(keys.text(), "f(x) y");
+    assert_eq!(keys.state.mode, Mode::Normal);
+    assert!(keys.state.pending.is_empty());
+}
+
+#[test]
+fn ci_in_an_empty_pair_types_inside_it() {
+    let mut keys = Keys::new("call() now").at(0, 4);
+    keys.keys("ci(");
+    assert_eq!(keys.state.mode, Mode::Insert);
+    keys.typed("x").keys("<esc>");
+    assert_eq!(keys.text(), "call(x) now");
+}
+
+#[test]
+fn a_pair_reaches_across_the_lines_of_a_code_block() {
+    let mut keys = Keys::new("```\nfn main() {\n    run();\n}\n```").at(0, 20);
+    keys.keys("di{");
+    assert_eq!(keys.text(), "fn main() {}");
+}
+
+#[test]
+fn ip_and_ap_take_the_block_like_dd() {
+    let mut keys = Keys::new("# head\n\n- item\n\n> quote").at(1, 2);
+    keys.keys("dip");
+    assert_eq!(keys.markdown(), "# head\n\n> quote");
+    let mut keys = Keys::new("# head\n\n- item\n\n> quote").at(1, 2);
+    keys.keys("yap");
+    assert_eq!(keys.markdown(), "# head\n\n- item\n\n> quote");
+}
+
+#[test]
+fn a_visual_mode_selects_a_text_object() {
+    let mut keys = Keys::new("one two three").at(0, 5);
+    keys.keys("viw");
+    assert_eq!(keys.state.mode, Mode::Visual);
+    assert_eq!(keys.selected(), "two");
+    keys.keys("d");
+    assert_eq!(keys.text(), "one  three");
+    let mut keys = Keys::new("f(a, b)").at(0, 3);
+    keys.keys("va(");
+    assert_eq!(keys.selected(), "(a, b)");
+    let mut keys = Keys::new("one\n\ntwo").at(1, 1);
+    keys.keys("vip");
+    assert_eq!(keys.state.mode, Mode::VisualLine);
+    assert_eq!(keys.selected(), "two");
 }

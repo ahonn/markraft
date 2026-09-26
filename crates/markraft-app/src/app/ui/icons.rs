@@ -26,6 +26,11 @@ macro_rules! define_icons {
 // in the same file maps that year to a macOS version.
 define_icons! {
     Plus => "plus",
+    // vim's `:u`, `:red`, `:q` and `:qa`, offered to a `:` query.
+    Undo => "arrow.uturn.backward",
+    Redo => "arrow.uturn.forward",
+    Hide => "eye.slash",
+    Quit => "power",
     // Browse notes (⌘P): quick-open weight, same family as Plus / More.
     Notes => "magnifyingglass",
     // Actions (⌘K): macOS “more” rather than the ⌘ key glyph.

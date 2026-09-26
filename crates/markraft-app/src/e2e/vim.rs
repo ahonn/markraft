@@ -50,3 +50,97 @@ fn vim_j_leaves_a_final_code_block_and_table_as_the_arrow_does(cx: &mut TestAppC
     h.type_text("8");
     assert!(h.markdown().ends_with("|\n\n8"), "{:?}", h.markdown());
 }
+
+// Text objects are two-key bindings that only stand while an operator waits or a
+// visual mode is on, so `i` and `a` still enter Insert mode on their own.
+#[gpui::test]
+fn vim_text_objects_reach_the_note_through_the_real_bindings(cx: &mut TestAppContext) {
+    let mut h = open_with(cx, &[("o.md", "one two f(x, y) say \"hi\"\n")], |p| {
+        p.vim_mode = true
+    });
+    h.keys("cmd-up w d i w");
+    assert_eq!(h.markdown(), "one  f(x, y) say \"hi\"");
+    h.keys("w l l c i (");
+    h.type_text("z");
+    h.keys("escape");
+    assert_eq!(h.markdown(), "one  f(z) say \"hi\"");
+    h.keys("$ d a \"");
+    assert_eq!(h.markdown(), "one  f(z) say");
+    h.keys("0 w v i w d");
+    assert_eq!(h.markdown(), "one  (z) say");
+    h.keys("i");
+    h.type_text("a");
+    assert_eq!(h.markdown(), "one  a(z) say");
+    h.assert_round_trip("vim text objects");
+}
+
+/// The labels the actions panel lists, or `None` while it is closed.
+fn action_labels(h: &mut super::harness::Harness<'_>) -> Option<Vec<&'static str>> {
+    h.app.update(h.cx, |app, cx| app.test_action_labels(cx))
+}
+
+// `:` in Normal mode opens the actions panel as a command line: a `:` query lists
+// only the commands vim has names for, the one it names first, so Return runs it.
+#[gpui::test]
+fn vim_colon_runs_the_command_it_names(cx: &mut TestAppContext) {
+    let mut h = open_with(cx, &[("c.md", "one two\n")], |p| p.vim_mode = true);
+    h.keys("cmd-up :");
+    let all = action_labels(&mut h).expect("the panel is open");
+    assert!(all.contains(&"Save Now") && all.contains(&"Hide Window"));
+    assert!(!all.contains(&"Bold"), "only commands vim has a name for");
+    h.type_text("q");
+    assert_eq!(action_labels(&mut h).unwrap()[0], "Hide Window");
+    h.keys("escape");
+    assert_eq!(action_labels(&mut h), None);
+
+    // `:u` undoes and `:red` redoes, as the editor's own keys do.
+    h.keys("d w :");
+    h.type_text("u");
+    h.keys("enter");
+    assert_eq!(action_labels(&mut h), None);
+    assert_eq!(h.markdown(), "one two");
+    h.keys(":");
+    h.type_text("red");
+    h.keys("enter");
+    assert_eq!(h.markdown(), "two");
+
+    // `:w` names Save Now before the longer `:wq`, `:wqa` it begins.
+    h.keys(":");
+    h.type_text("w");
+    assert_eq!(action_labels(&mut h).unwrap()[0], "Save Now");
+    h.keys("enter");
+    h.wait_for_io();
+    assert_eq!(h.markdown(), "two");
+    h.assert_round_trip("vim colon commands");
+}
+
+// The commands that exist only for `:` stay out of the panel's own search, and
+// `:` is text, not a command line, in Insert mode.
+#[gpui::test]
+fn vim_colon_commands_keep_to_the_command_line(cx: &mut TestAppContext) {
+    let mut h = open_with(cx, &[("c.md", "one\n")], |p| p.vim_mode = true);
+    h.keys("cmd-k");
+    h.type_text("Hide Window");
+    assert_eq!(action_labels(&mut h), Some(Vec::new()));
+    // One Escape closes the panel; a second would hide the window.
+    h.keys("escape cmd-up A");
+    h.type_text(":");
+    assert_eq!(action_labels(&mut h), None);
+    assert_eq!(h.markdown(), "one:");
+}
+
+// In vim Escape leaves every command, so one pressed too often in Normal mode keeps
+// the window and says how to hide it; the test platform cannot hide a window, so a
+// hide here would fail the test outright.
+#[gpui::test]
+fn vim_escape_in_normal_mode_points_to_colon_q(cx: &mut TestAppContext) {
+    let mut h = open_with(cx, &[("e.md", "one\n")], |p| p.vim_mode = true);
+    h.keys("cmd-up i escape escape escape");
+    let notice = h.app.update(h.cx, |app, _| app.test_notice());
+    assert_eq!(
+        notice.as_deref(),
+        Some("Type :q and press Return to hide the window.")
+    );
+    h.type_text("x");
+    assert_eq!(h.markdown(), "ne");
+}
