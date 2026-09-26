@@ -49,6 +49,9 @@ fn probe(index: usize, line: &markraft_core::projection::Line) -> LayoutLine {
         atoms: Vec::new(),
         table: None,
         reuse: None,
+        rendered: None,
+        row_shifts: Vec::new(),
+        align: markraft_core::kind::Align::Start,
     }
 }
 
@@ -760,6 +763,63 @@ fn a_wrapped_code_span_is_pilled_to_its_glyphs() {
     assert_eq!(second.line.text.as_ref(), "span here");
 }
 
+/// An HTML block is drawn as its page while the caret is elsewhere: its own
+/// lines, aligned as the block asks, stand in for its source, and the line is as
+/// tall as the page. The caret reaching it brings the source back, with the
+/// page kept under it.
+#[test]
+fn an_html_block_is_drawn_as_its_page_and_under_its_source_with_the_caret_in_it() {
+    let source = "intro\n\n<p align=\"center\">\n  <b>Hi</b> there\n</p>\n\n[a]: /u";
+    let away = shaped_in(source, callout_types(), px(600.), 0..0);
+    let html = &away[1];
+    let page = html.rendered.as_ref().expect("drawn as its page");
+    assert_eq!(page.lines.len(), 1);
+    let (_, line) = &page.lines[0];
+    assert_eq!(line.align, markraft_core::kind::Align::Center);
+    let row = &line.rows[0];
+    assert_eq!(
+        line.row_shifts,
+        [(line.width - row.line.unwrapped_layout.width) / 2.],
+        "the row moves by the room gpui centres it in"
+    );
+    assert!(!page.under_source(), "the page stands in for the source");
+    assert!(
+        html.height >= page.height,
+        "the line is as tall as its page"
+    );
+    assert!(away[2].rendered.is_none(), "a link definition stays source");
+
+    let at = projection_of(&state_of(source)).lines()[1].from() + 1;
+    let near = shaped_in(source, callout_types(), px(600.), at..at);
+    let html = &near[1];
+    let page = html.rendered.as_ref().expect("the page stays in view");
+    assert_eq!(
+        page.top,
+        html.text_height() + super::PREVIEW_GAP,
+        "under the source rows"
+    );
+    assert!(html.height >= page.top + page.height);
+}
+
+/// What the page cannot hold whole keeps the block as source.
+#[test]
+fn an_html_block_the_page_cannot_hold_stays_source() {
+    let lines = shaped_in(
+        "intro\n\n<table><tr><td>a</td></tr></table>",
+        callout_types(),
+        px(600.),
+        0..0,
+    );
+    assert!(lines[1].rendered.is_none());
+}
+
+/// A key in `<kbd>` is drawn in a pill as a code span is.
+#[test]
+fn a_key_is_drawn_in_a_pill() {
+    let lines = shaped("press <kbd>K</kbd> and `c`");
+    assert_eq!(pills(&lines[0]), [(0, "K".to_owned()), (0, "c".to_owned())]);
+}
+
 /// A paragraph's line breaks start rows of their own, and a code span after
 /// one is drawn on the visual row its text sits on, not one row lower per
 /// break before it.
@@ -935,6 +995,109 @@ const PNG: &[u8] = &[
     0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ];
 
+/// An `<img>` tag's `width` and `height` size the picture as a browser would:
+/// one side keeps its proportions on the other, and the column still bounds it.
+#[test]
+fn a_picture_takes_the_size_its_tag_asks_for() {
+    let path = std::env::temp_dir().join("markraft-surface-declared.png");
+    std::fs::write(&path, PNG).expect("a writable temp directory");
+    let src = path.to_str().expect("a UTF-8 temp path");
+    let images = crate::images::Images::default();
+    let size = |declared| {
+        let (_, drawn) = drawn_image(&images, src, declared, px(100.)).expect("decodes");
+        (drawn.width, drawn.height)
+    };
+    assert_eq!(size((Some(40.), None)), (px(40.), px(20.)));
+    assert_eq!(size((None, Some(10.))), (px(20.), px(10.)));
+    assert_eq!(size((Some(30.), Some(30.))), (px(30.), px(30.)));
+    assert_eq!(
+        size((Some(400.), None)),
+        (px(100.), px(50.)),
+        "the column bounds it"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Pictures with a line to themselves are drawn at their own size, side by
+/// side, however many there are; beside text they shrink to the row.
+#[test]
+fn pictures_alone_on_a_line_keep_their_size_side_by_side() {
+    let path = std::env::temp_dir().join("markraft-surface-gallery.png");
+    std::fs::write(&path, PNG).expect("a writable temp directory");
+    let src = path.to_str().expect("a UTF-8 temp path");
+    let sizes = |source: &str| -> Vec<(Pixels, Pixels)> {
+        shaped(source)[0]
+            .atoms
+            .iter()
+            .filter_map(|atom| {
+                atom.image
+                    .as_ref()
+                    .map(|(_, size)| (size.width, size.height))
+            })
+            .collect()
+    };
+    assert_eq!(
+        sizes(&format!("![a]({src}) ![b]({src})")),
+        [(px(2.), px(1.)), (px(2.), px(1.))]
+    );
+    let beside_text = sizes(&format!("see ![a]({src}) here"));
+    assert!(
+        beside_text[0].1 > px(1.),
+        "beside text it is drawn to the row"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A picture as wide as the column reserves no more than the column: rounding
+/// its reserved width up to whole fillers would push the last of them onto a
+/// row of its own, as tall as the picture and empty.
+#[test]
+fn a_picture_as_wide_as_the_column_keeps_to_one_row() {
+    let path = std::env::temp_dir().join("markraft-surface-wide.png");
+    std::fs::write(&path, PNG).expect("a writable temp directory");
+    let src = path.to_str().expect("a UTF-8 temp path");
+    let source = format!(
+        "intro\n\n<p align=\"center\">\n  <img src=\"{src}\" alt=\"shot\" width=\"480\">\n</p>"
+    );
+    let lines = shaped_in(&source, callout_types(), px(432.), 0..0);
+    let page = lines[1].rendered.as_ref().expect("a page");
+    let (_, picture) = &page.lines[0];
+    assert_eq!(picture.visual_rows(), 1);
+    assert_eq!(
+        picture.atoms[0].image.as_ref().map(|(_, size)| size.width),
+        Some(px(432.))
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The size an `<img>` tag asks for is read from its attributes, as numbers,
+/// pixels or a share of the column; nonsense asks for nothing.
+#[test]
+fn a_tag_asks_for_a_size_in_numbers_or_pixels() {
+    let state = state_of(
+        "<img src=\"a.png\" width=\"96\" height=\"48px\"> <img src=\"b.png\" width=\"50%\"> <img src=\"c.png\" width=\"wide\">",
+    );
+    let image = state.schema().node_id("image").expect("an image type");
+    let mut images = Vec::new();
+    state.doc().descendants(&mut |node, _, _, _| {
+        if node.type_id() == image {
+            images.push(node.clone());
+        }
+        true
+    });
+    assert_eq!(images.len(), 3);
+    assert_eq!(
+        super::declared_size(&images[0], px(400.)),
+        (Some(96.), Some(48.))
+    );
+    assert_eq!(
+        super::declared_size(&images[1], px(400.)),
+        (Some(200.), None),
+        "a share of the column"
+    );
+    assert_eq!(super::declared_size(&images[2], px(400.)), (None, None));
+}
+
 /// Decoding runs on the layout pass, outside any window or app context, so
 /// it has to stand on its own. Only a file the note can actually read is
 /// drawn; everything else keeps the placeholder.
@@ -944,11 +1107,11 @@ fn a_local_file_is_decoded_and_fitted_to_the_column() {
     std::fs::write(&path, PNG).expect("a writable temp directory");
     let src = path.to_str().expect("a UTF-8 temp path");
     let images = crate::images::Images::default();
-    let (_, drawn) = drawn_image(&images, src, px(100.)).expect("the PNG decodes");
+    let (_, drawn) = drawn_image(&images, src, (None, None), px(100.)).expect("the PNG decodes");
     assert_eq!(drawn.width, px(2.), "a small image is not blown up");
     assert_eq!(drawn.height, px(1.));
-    assert!(drawn_image(&images, "https://host/a.png", px(100.)).is_none());
-    assert!(drawn_image(&images, "/no/such/file.png", px(100.)).is_none());
+    assert!(drawn_image(&images, "https://host/a.png", (None, None), px(100.)).is_none());
+    assert!(drawn_image(&images, "/no/such/file.png", (None, None), px(100.)).is_none());
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1118,12 +1281,12 @@ fn an_atom_placeholder_stays_one_caret_stop() {
     assert_eq!(row.to_display(5), 9, "text past the atom keeps its order");
 }
 
-/// HTML is never rendered: an inline primitive is drawn as the source it
-/// stands for, as the prose around it, so the row reserves the width of
+/// Inline HTML nothing reads is never rendered: the primitive is drawn as the
+/// source it stands for, as the prose around it, so the row reserves the width of
 /// exactly that text and nothing around it.
 #[test]
 fn a_raw_inline_atom_reserves_the_width_of_its_own_source() {
-    let state = state_of("press <kbd>K</kbd> twice");
+    let state = state_of("press <var>K</var> twice");
     let projection = projection_of(&state);
     let schema = commonmark_schema();
     let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
@@ -1137,7 +1300,7 @@ fn a_raw_inline_atom_reserves_the_width_of_its_own_source() {
         .collect();
     assert_eq!(
         drawn,
-        vec![(AtomShape::Text, "<kbd>"), (AtomShape::Text, "</kbd>")],
+        vec![(AtomShape::Text, "<var>"), (AtomShape::Text, "</var>")],
         "both tags read as they were written"
     );
     assert_eq!(
@@ -1147,8 +1310,8 @@ fn a_raw_inline_atom_reserves_the_width_of_its_own_source() {
     );
     // And the row shapes that source itself, so the text after a tag sits
     // against it exactly as it does after a wiki link.
-    let row = &shaped("press <kbd>K</kbd> twice")[0];
-    assert_eq!(row.rows[0].text(), "press <kbd>K</kbd> twice");
+    let row = &shaped("press <var>K</var> twice")[0];
+    assert_eq!(row.rows[0].text(), "press <var>K</var> twice");
     assert!(!row.rows[0].text().contains(super::PILL_FILLER));
 }
 
@@ -1157,15 +1320,15 @@ fn a_raw_inline_atom_reserves_the_width_of_its_own_source() {
 /// atom's own caret stops, and find nothing.
 #[test]
 fn a_point_inside_source_shown_as_text_finds_how_far_in_it_is() {
-    let line = &shaped("press <kbd>K</kbd> now")[0];
-    // `press ` is six characters; `<kbd>` is shown from there.
-    assert_eq!(line.source_text_in(8), Some((6, "<kbd>".to_owned(), 2)));
-    assert_eq!(line.source_text_in(10), Some((6, "<kbd>".to_owned(), 4)));
+    let line = &shaped("press <var>K</var> now")[0];
+    // `press ` is six characters; `<var>` is shown from there.
+    assert_eq!(line.source_text_in(8), Some((6, "<var>".to_owned(), 2)));
+    assert_eq!(line.source_text_in(10), Some((6, "<var>".to_owned(), 4)));
     assert_eq!(line.source_text_in(6), None, "the tag's left edge");
     assert_eq!(line.source_text_in(11), None, "the tag's right edge");
     assert_eq!(line.source_text_in(3), None, "plain text");
-    // `</kbd>` follows `K`: shown from 12, it is the third character's atom.
-    assert_eq!(line.source_text_in(14), Some((8, "</kbd>".to_owned(), 2)));
+    // `</var>` follows `K`: shown from 12, it is the third character's atom.
+    assert_eq!(line.source_text_in(14), Some((8, "</var>".to_owned(), 2)));
 }
 
 /// A `<br>` in a table cell is the cell's line break:

@@ -350,6 +350,54 @@ mod tests {
         });
     }
 
+    /// ↓ inside an HTML block the caret is in moves to the block's next source
+    /// row. The block above it is drawn as its page, shorter than its source,
+    /// and the source rows it does not draw are no rows for the arrow to stop
+    /// on: read as rows they would lie inside the block below, the arrow would
+    /// find no row past the caret's, and the caret would jump to the end.
+    #[gpui::test]
+    fn down_in_an_html_block_goes_to_its_next_source_row(cx: &mut TestAppContext) {
+        let source = concat!(
+            "<p align=\"center\">\n",
+            "  <img src=\"missing-1.png\" alt=\"one\">\n",
+            "  <img src=\"missing-2.png\" alt=\"two\">\n",
+            "  <img src=\"missing-3.png\" alt=\"three\">\n",
+            "</p>\n\n",
+            "<p align=\"center\">\n  x<br>\n  y\n</p>\n\n",
+            "end"
+        );
+        /// The CommonMark spelling, which is what renders an HTML block.
+        struct Spelled(std::sync::Arc<dyn markraft_core::kind::SourceSpelling>);
+        impl markraft_core::kind::DocumentKind for Spelled {
+            fn spelling(&self) -> Option<std::sync::Arc<dyn markraft_core::kind::SourceSpelling>> {
+                Some(self.0.clone())
+            }
+        }
+        let schema = commonmark_schema();
+        let doc = from_markdown(&schema, source).expect("valid Markdown");
+        let setup = Setup::new(schema.clone())
+            .types(DocTypes::from_schema_names(
+                &schema,
+                &commonmark_doc_type_names(),
+            ))
+            .extensions(commonmark_extensions(&schema))
+            .kind(std::sync::Arc::new(Spelled(std::sync::Arc::new(
+                markraft_commonmark::CommonMarkSpelling::new(schema.clone()),
+            ))))
+            .doc(doc);
+        let (view, cx) = cx.add_window_view(|_, cx| EditorView::new(setup, cx));
+        cx.run_until_parked();
+        view.update(cx, |view, cx| caret_to_line(view, 1, cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let before = view.read_with(cx, |view, _| view.head());
+        view.update(cx, |view, cx| view.vertical(1, false, cx));
+        let after = view.read_with(cx, |view, _| view.head());
+        assert_eq!(caret_line(&view, cx), 1, "still in the HTML block");
+        assert!(after > before, "one source row further on");
+    }
+
     #[test]
     fn ranges_are_sorted_and_joined() {
         assert_eq!(

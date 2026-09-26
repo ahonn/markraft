@@ -33,6 +33,14 @@ pub(crate) struct StyleSpec {
 /// not read back: the ones Markdown has least room for first.
 pub(crate) static STYLES: &[StyleSpec] = &[
     StyleSpec {
+        mark: md::KEYBOARD,
+        style: Style::Keyboard,
+        run: None,
+        underscore_run: None,
+        tags: ("<kbd>", "</kbd>"),
+        aliases: &[],
+    },
+    StyleSpec {
         mark: md::HIGHLIGHT,
         style: Style::Highlight,
         run: Some("=="),
@@ -126,11 +134,11 @@ pub(crate) fn by_style(style: &Style) -> Option<&'static StyleSpec> {
     STYLES.iter().find(|spec| spec.style == *style)
 }
 
-/// The paired style an HTML element name is written as — the written name
-/// only, not an alias, which is what a tag typed into Markdown source has to
-/// be to count as the style.
-pub(crate) fn by_tag(name: &str) -> Option<&'static StyleSpec> {
-    STYLES.iter().find(|spec| spec.tag() == name)
+/// The paired style an HTML element name reads as, its written name or an
+/// alias: `<b>` typed into the source is strong as `<strong>` is, and stays
+/// spelled `<b>`, since the text is the source.
+pub(crate) fn by_html_name(name: &str) -> Option<&'static StyleSpec> {
+    STYLES.iter().find(|spec| spec.html_names().contains(&name))
 }
 
 #[cfg(test)]
@@ -143,7 +151,9 @@ mod tests {
         for spec in STYLES {
             assert!(std::ptr::eq(by_mark(spec.mark).unwrap(), spec));
             assert!(std::ptr::eq(by_style(&spec.style).unwrap(), spec));
-            assert!(std::ptr::eq(by_tag(spec.tag()).unwrap(), spec));
+            for name in spec.html_names() {
+                assert!(std::ptr::eq(by_html_name(name).unwrap(), spec));
+            }
             assert_eq!(spec.style.mark_name(), spec.mark);
         }
     }

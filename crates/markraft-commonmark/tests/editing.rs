@@ -805,7 +805,7 @@ fn moved(state: &EditorState, pos: usize) -> EditorState {
 fn a_caret_reaching_a_picture_finds_its_source() {
     let source = "![alt](logo.png)\n\nafter";
     let (schema, state) = opened(source);
-    let picture = r#"image[alt=Str("alt"),source=Str(""),src=Str("logo.png"),title=Str("")]"#;
+    let picture = r#"image[alt=Str("alt"),height=Str(""),source=Str(""),src=Str("logo.png"),title=Str(""),width=Str("")]"#;
     let away = moved(&state, state.doc().content_size() - 1);
     assert_eq!(
         schema.describe(away.doc()),
@@ -836,7 +836,7 @@ fn a_caret_reaching_a_picture_finds_its_source() {
     let left = moved(&edited, edited.doc().content_size() - 1);
     assert_eq!(
         schema.describe(left.doc()),
-        r#"doc(paragraph(image[alt=Str("altt"),source=Str(""),src=Str("logo.png"),title=Str("")]), paragraph("after"))"#
+        r#"doc(paragraph(image[alt=Str("altt"),height=Str(""),source=Str(""),src=Str("logo.png"),title=Str(""),width=Str("")]), paragraph("after"))"#
     );
 
     // After the picture: the caret at the end of its spelling.

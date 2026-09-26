@@ -212,6 +212,7 @@ enum Seen {
     Mark,
     Sup,
     Sub,
+    Kbd,
     Math,
 }
 
@@ -270,6 +271,7 @@ fn derived_meaning(text: &str, derived: &Derived) -> Meaning {
                 Style::Highlight => vec![Seen::Mark],
                 Style::Superscript => vec![Seen::Sup],
                 Style::Subscript => vec![Seen::Sub],
+                Style::Keyboard => vec![Seen::Kbd],
                 Style::Math { .. } => vec![Seen::Math],
                 // comrak writes a reference as a link to the note, raised.
                 Style::FootnoteReference { label } => {
@@ -340,11 +342,13 @@ fn walk_html(node: scraper::ElementRef<'_>, styles: &mut Vec<Seen>, out: &mut Me
             HtmlNode::Element(element) => {
                 let style = match element.name() {
                     _ if element.attr("data-math-style").is_some() => Some(Seen::Math),
-                    "strong" => Some(Seen::Strong),
-                    "em" => Some(Seen::Em),
-                    "del" => Some(Seen::Del),
+                    // A raw tag reaches the rendering as written, alias and all.
+                    "strong" | "b" => Some(Seen::Strong),
+                    "em" | "i" => Some(Seen::Em),
+                    "del" | "s" | "strike" => Some(Seen::Del),
                     "code" => Some(Seen::Code),
-                    "u" => Some(Seen::U),
+                    "u" | "ins" => Some(Seen::U),
+                    "kbd" => Some(Seen::Kbd),
                     "mark" => Some(Seen::Mark),
                     "sup" => Some(Seen::Sup),
                     "sub" => Some(Seen::Sub),

@@ -321,6 +321,35 @@ pub(crate) struct LayoutLine {
     /// What the line was shaped from beyond its own body, when a later shaping
     /// may keep it; see [`LineKey`].
     pub(super) reuse: Option<LineKey>,
+    /// What a verbatim line draws of its source rendered: an HTML block's
+    /// page. While the caret is away the page stands in for the source, whose
+    /// rows stay unpainted so a click still lands on a position of the line;
+    /// with the caret in it the source is drawn and the page stays under it.
+    pub(super) rendered: Option<Rc<RenderedLayout>>,
+    /// How far each visual row is moved across the line to sit as a rendered
+    /// block's alignment asks; empty for a line that starts at its start.
+    pub(super) row_shifts: Vec<Pixels>,
+    /// The alignment `row_shifts` were measured for.
+    pub(super) align: Align,
+}
+
+/// A verbatim line's source rendered and laid out; see [`LayoutLine::rendered`].
+pub(crate) struct RenderedLayout {
+    /// Its lines, each placed relative to the page's top.
+    pub(super) lines: Vec<(Point<Pixels>, LayoutLine)>,
+    /// How far they reach below that top.
+    pub(super) height: Pixels,
+    /// Where the page's top sits below the verbatim line's origin: zero where
+    /// it stands in for the source, and past the source rows where it is drawn
+    /// under them.
+    pub(super) top: Pixels,
+}
+
+impl RenderedLayout {
+    /// Whether the page is drawn under the source rather than in their place.
+    pub(super) fn under_source(&self) -> bool {
+        self.top > px(0.)
+    }
 }
 
 /// Host popovers also anchor document and node selections, whose opening token can
@@ -357,6 +386,51 @@ impl LayoutLine {
             from: line.from(),
             code_pos: self.code_pos.and(line.block_before()),
             ..self.clone()
+        }
+    }
+
+    /// How far visual row `visual` is moved across the line; see `row_shifts`.
+    pub(super) fn row_shift(&self, visual: usize) -> Pixels {
+        self.row_shifts.get(visual).copied().unwrap_or_default()
+    }
+
+    /// The alignment gpui is asked to paint the rows with, and the width it
+    /// aligns them in; `None` for rows that start at the line's start.
+    pub(super) fn text_align(&self) -> (TextAlign, Option<Pixels>) {
+        match self.align {
+            Align::Start => (TextAlign::Left, None),
+            Align::Center => (TextAlign::Center, Some(self.width)),
+            Align::End => (TextAlign::Right, Some(self.width)),
+        }
+    }
+
+    /// Align every visual row across the line's width, measuring each row as
+    /// gpui does when it paints a wrapped line aligned — from the glyph a row
+    /// starts at to the one the next starts at — so what is placed by hand,
+    /// pills and pictures, moves exactly as the text does.
+    pub(super) fn align_rows(&mut self, align: Align) {
+        self.align = align;
+        self.row_shifts.clear();
+        if align == Align::Start {
+            return;
+        }
+        for row in &self.rows {
+            let layout = &row.line.unwrapped_layout;
+            let mut starts: Vec<Pixels> = row
+                .line
+                .wrap_boundaries()
+                .iter()
+                .map(|b| layout.runs[b.run_ix].glyphs[b.glyph_ix].position.x)
+                .collect();
+            starts.insert(0, px(0.));
+            for (visual, start) in starts.iter().enumerate() {
+                let end = starts.get(visual + 1).copied().unwrap_or(layout.width);
+                let room = self.width - (end - *start);
+                self.row_shifts.push(match align {
+                    Align::Center => room / 2.,
+                    _ => room,
+                });
+            }
         }
     }
 
@@ -400,6 +474,18 @@ impl LayoutLine {
     /// only ever answers for its own token range cannot.
     pub(crate) fn contains(&self, pos: usize) -> bool {
         pos >= self.from && pos <= self.to()
+    }
+
+    /// How many of the line's visual rows an arrow can stop on. A line drawn as
+    /// its rendered page draws none of its source rows, and they need not fit
+    /// in the page — read as rows they could lie inside the next line — so it
+    /// offers the one row the caret enters it by; once in, the source is drawn
+    /// and every row of it counts again.
+    pub(crate) fn navigable_rows(&self) -> usize {
+        match &self.rendered {
+            Some(page) if !page.under_source() => 1,
+            _ => self.visual_rows(),
+        }
     }
 
     /// How many visual rows the line occupies.

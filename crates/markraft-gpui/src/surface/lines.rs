@@ -240,7 +240,8 @@ impl Lines {
             self.tops_stale = true;
         }
         slot.measured = Measured::Shaped(line.reuse.clone());
-        slot.picture |= line.preview.is_some();
+        // A rendered page may hold pictures, whose sizes arrive with them.
+        slot.picture |= line.preview.is_some() || line.rendered.is_some();
         slot.line = Some(line);
     }
 
@@ -535,21 +536,35 @@ fn estimated(input: &ShapeInput<'_>, index: usize, width: Pixels) -> Slot {
 
 /// Keep the pictures the document shows, and drop the decoded copies of any
 /// it no longer does: its atoms', and those of a picture the caret has spelled
-/// out, which is text now but still drawn under its source. Dropping the
-/// latter would throw away a remote fetch as soon as it started, and decode a
-/// local file again on every frame.
+/// out, which is text now but still drawn under its source, and those of an
+/// HTML block drawn as its page. Dropping the latter would throw away a remote
+/// fetch as soon as it started, and decode a local file again on every frame.
 fn retain_pictures(input: &ShapeInput<'_>) {
     let spelled: Vec<Node> = input
         .spelling
         .map(|spelling| {
-            input
-                .projection
-                .lines()
+            let lines = input.projection.lines();
+            let spelled = lines
                 .iter()
                 .filter(|line| line_focused(input, line))
                 .flat_map(|line| spelling.spelled_atoms(line))
-                .map(|(_, node)| node)
-                .collect()
+                .map(|(_, node)| node);
+            let rendered = lines
+                .iter()
+                .filter(|line| !line_focused(input, line))
+                .filter_map(|line| spelling.rendered(line))
+                .flat_map(|page| {
+                    page.projection
+                        .lines()
+                        .iter()
+                        .flat_map(|line| line.runs().to_vec())
+                        .filter_map(|run| match run.content {
+                            RunContent::Atom(node) => Some(node),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                });
+            spelled.chain(rendered).collect()
         })
         .unwrap_or_default();
     input.images.retain_sources(

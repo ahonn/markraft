@@ -46,6 +46,7 @@
 //! | 50 | [`EM`] | `*…*` |
 //! | 55 | [`SUPERSCRIPT`] | `^…^` |
 //! | 56 | [`SUBSCRIPT`] | `~…~` |
+//! | 58 | [`KEYBOARD`] | `<kbd>…</kbd>` |
 //! | 60 | [`CODE`] | `` `…` `` — innermost, because its content is literal |
 //! | 65 | [`MATH`] | `$…$` or `$$…$$` — literal, as code is |
 //! | 70 | [`SYNTAX`] | never spelled: it marks spelling |
@@ -257,6 +258,8 @@ pub const SUPERSCRIPT: &str = "superscript";
 /// Subscript: `~…~`, or a paired `<sub>`…`</sub>`. A single tilde is
 /// subscript and a double one strikethrough.
 pub const SUBSCRIPT: &str = "subscript";
+/// A key or key combination: a paired `<kbd>`…`</kbd>` in the text.
+pub const KEYBOARD: &str = "keyboard";
 /// A code span.
 pub const CODE: &str = "code";
 /// A formula: `$…$`, `$$…$$` or `` $`…`$ ``, with [`MATH_DISPLAY_ATTR`]
@@ -281,8 +284,8 @@ pub const MATH_DISPLAY_ATTR: &str = "display";
 pub const SYNTAX: &str = "syntax";
 
 /// The group holding [`STRONG`], [`EM`], [`STRIKETHROUGH`], [`UNDERLINE`],
-/// [`HIGHLIGHT`], [`SUPERSCRIPT`] and [`SUBSCRIPT`]: the marks that have a delimiter run or a
-/// tag of their own.
+/// [`HIGHLIGHT`], [`SUPERSCRIPT`], [`SUBSCRIPT`] and [`KEYBOARD`]: the marks that have a
+/// delimiter run or a tag of their own.
 pub const STYLE_GROUP: &str = "style";
 /// The group holding every block node type.
 pub const BLOCK_GROUP: &str = "block";
@@ -456,7 +459,11 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
                 .attr(str_attr("title", ""))
                 // The `<img>` tag an image was read from, written back as it
                 // was; empty for a Markdown image.
-                .attr(str_attr("source", "")),
+                .attr(str_attr("source", ""))
+                // The size that tag asks for, as written; empty when it asks for
+                // none, and always for a Markdown image.
+                .attr(str_attr("width", ""))
+                .attr(str_attr("height", "")),
         )
         .node(
             NodeTypeSpec::leaf(LINE_BREAK)
@@ -483,6 +490,7 @@ pub fn commonmark_schema_spec() -> SchemaSpec {
         .mark(MarkTypeSpec::new(EM).rank(50).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(SUPERSCRIPT).rank(55).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(SUBSCRIPT).rank(56).group(STYLE_GROUP))
+        .mark(MarkTypeSpec::new(KEYBOARD).rank(58).group(STYLE_GROUP))
         .mark(MarkTypeSpec::new(CODE).rank(60))
         .mark(
             MarkTypeSpec::new(MATH)

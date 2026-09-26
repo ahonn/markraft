@@ -283,16 +283,16 @@ fn a_fragment_opens_the_same_way_markdown_does() {
 
 #[test]
 fn the_rule_table_can_be_replaced() {
-    // A consumer that wants `<kbd>` to mean something registers it, and one
+    // A consumer that wants `<var>` to mean something registers it, and one
     // that wants an element dropped says so.
     let house = HouseStyleHandle::default();
     let rules = commonmark_html_rules(&house)
-        .with("kbd", HtmlRule::mark("strong"))
+        .with("var", HtmlRule::mark("strong"))
         .with("aside", HtmlRule::Ignore);
     let parser = HtmlParser::new(commonmark_schema(), rules, house);
     let codec = Codec::new();
     let doc = parser
-        .parse("<p><kbd>hit</kbd></p><aside>gone</aside>")
+        .parse("<p><var>hit</var></p><aside>gone</aside>")
         .expect("parses");
     assert_eq!(
         codec.describe(&doc),

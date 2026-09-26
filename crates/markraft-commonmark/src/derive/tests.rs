@@ -375,6 +375,13 @@ fn an_img_tag_is_the_image_it_shows() {
             r#"src=Str("i.png") title=Str("t"))"#
         )]
     );
+    assert_eq!(
+        atoms("a <img src=i.png width=96>"),
+        [concat!(
+            r#"image(2..26 alt=Str("") source=Str("<img src=i.png width=96>") "#,
+            r#"src=Str("i.png") title=Str("") width=Str("96"))"#
+        )]
+    );
     // With nothing to show it stays the raw tag.
     assert_eq!(
         atoms("a <img alt=x>"),

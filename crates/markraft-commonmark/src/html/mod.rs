@@ -53,6 +53,7 @@
 //! text and nothing else: everything after this walks the tree recursively,
 //! and a page of nested `<div>`s would otherwise take the stack with it.
 
+pub(crate) mod preview;
 mod rules;
 mod serialize;
 

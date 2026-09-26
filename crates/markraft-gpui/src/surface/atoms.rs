@@ -84,9 +84,11 @@ pub(super) fn display_text(
     if source.is_empty() {
         return DisplayText::stand_in(" ".to_owned());
     }
-    // An image that has its line to itself is drawn at full size; one sharing
-    // its line with text has to stay within a row.
-    let alone = line.runs().len() == 1 && line.len() == 1;
+    // Pictures with a line to themselves — one, or several with only blanks
+    // between them, as a row of screenshots is written — are drawn at their
+    // size, side by side where they fit; one sharing its line with text has to
+    // stay within a row.
+    let alone = pictures_only(input, line);
     let shown = markraft_core::kind::conceal::shown(input.types.syntax, line, &reveal_of(input));
     let mut text = String::with_capacity(source.len());
     let mut run_bytes = Vec::with_capacity(line.runs().len());
@@ -117,16 +119,23 @@ pub(super) fn display_text(
                     // reserves the width in fillers. An atom with nothing to
                     // shape keeps one, which is its caret stop.
                     let unit = *filler.get_or_insert_with(|| filler_width(font_size, text_system));
-                    let count = (atom.width / unit).ceil().max(1.) as usize;
+                    let mut count = (atom.width / unit).ceil().max(1.) as usize;
+                    // A picture as wide as the column reserves no more than the
+                    // column: a filler rounded past its edge would wrap onto a
+                    // row of its own, as tall as the picture and empty.
+                    if atom.image.is_some() || atom.frame.is_some() {
+                        count = count.min(((column / unit).floor() as usize).max(1));
+                    }
                     text.extend(std::iter::repeat_n(PILL_FILLER, count));
                     run_bytes.push(count * PILL_FILLER.len_utf8());
-                    // A picture with the line to itself sets the row's height;
-                    // one sharing it with text fits inside the row it is in.
+                    // Pictures with the line to themselves set the row's height,
+                    // the tallest of them; one sharing it with text fits inside
+                    // the row it is in.
                     if alone
                         && let Some(size) =
                             atom.image.as_ref().map(|(_, size)| *size).or(atom.frame)
                     {
-                        line_height = Some(size.height);
+                        line_height = Some(line_height.unwrap_or(px(0.)).max(size.height));
                     }
                     atoms.push(PendingAtom {
                         chars: display..display + count,
@@ -354,6 +363,19 @@ pub(super) fn picture_source<'a>(types: &DocTypes, node: &'a Node) -> Option<&'a
     }
 }
 
+/// Whether `line` holds pictures and nothing else but the blanks between them.
+fn pictures_only(input: &ShapeInput<'_>, line: &Line) -> bool {
+    let mut pictures = 0;
+    for run in line.runs() {
+        match &run.content {
+            RunContent::Atom(node) if picture_source(input.types, node).is_some() => pictures += 1,
+            RunContent::Text(text) if text.trim().is_empty() => {}
+            _ => return false,
+        }
+    }
+    pictures > 0
+}
+
 /// The atom an inline run is drawn as, shaped and measured.
 pub(super) fn atom_of(
     input: &ShapeInput<'_>,
@@ -452,7 +474,7 @@ pub(super) fn atom_of(
     let row_height = font_size * style.line_height_ratio;
     let drawn = (!note).then_some(picture).flatten().and_then(|source| {
         if alone {
-            drawn_image(images, source, column)
+            drawn_image(images, source, declared_size(node, column), column)
         } else {
             inline_image(images, source, row_height - INLINE_IMAGE_INSET * 2., column)
         }
@@ -535,12 +557,40 @@ pub(super) fn atom_of(
     })
 }
 
-/// A decoded image and the size it is drawn at: its own, or the column's width
-/// where it is wider. A tall picture is drawn tall rather
+/// The size an image node asks for, from an `<img>` tag's `width` and `height`:
+/// plain numbers or pixels, or a share of `column` in percent, as a browser
+/// reads them. Anything else asks for nothing.
+pub(super) fn declared_size(node: &Node, column: Pixels) -> (Option<f32>, Option<f32>) {
+    let read = |name: &str, of: Option<f32>| {
+        let value = attr(node, name).trim();
+        let size = match value.strip_suffix('%') {
+            Some(share) => share
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .zip(of)
+                .map(|(share, of)| of * share / 100.),
+            None => value
+                .strip_suffix("px")
+                .unwrap_or(value)
+                .trim()
+                .parse::<f32>()
+                .ok(),
+        };
+        size.filter(|size| *size > 0.)
+    };
+    // A height in percent is of a box whose height is its content's, which
+    // gives it nothing to be a share of.
+    (read("width", Some(f32::from(column))), read("height", None))
+}
+
+/// A decoded image and the size it is drawn at: the size its tag asks for, or
+/// its own, but never wider than the column. A tall picture is drawn tall rather
 /// than shrunk into a thumbnail no one can read.
 pub(super) fn drawn_image(
     images: &crate::images::Images,
     src: &str,
+    declared: (Option<f32>, Option<f32>),
     column: Pixels,
 ) -> Option<(Arc<RenderImage>, Size<Pixels>)> {
     let image = images.load(src).ok()?;
@@ -549,9 +599,17 @@ pub(super) fn drawn_image(
     if native_width <= 0. || native_height <= 0. {
         return None;
     }
-    let width = column.min(px(native_width)).max(px(1.));
-    let height = width * (native_height / native_width);
-    Some((image, size(width, height)))
+    let ratio = native_height / native_width;
+    // A size the tag gives on one side keeps the picture's proportions on the
+    // other, as a browser draws it.
+    let (width, height) = match declared {
+        (Some(width), Some(height)) => (width, height),
+        (Some(width), None) => (width, width * ratio),
+        (None, Some(height)) => (height / ratio, height),
+        (None, None) => (native_width, native_height),
+    };
+    let drawn = column.min(px(width)).max(px(1.));
+    Some((image, size(drawn, drawn * (height / width))))
 }
 
 /// A decoded image fitted to a row: `height` tall, as wide as its proportions

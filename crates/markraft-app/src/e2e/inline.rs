@@ -42,22 +42,22 @@ fn the_emacs_keys_move_and_delete(cx: &mut TestAppContext) {
     }
 }
 
-// Inline HTML is text like any other: the caret reaching a tag finds its
+// Inline HTML nothing reads is text like any other: the caret reaching a tag finds its
 // source, which is edited character by character and saved as typed, and no
 // shortcut opens a separate HTML editor.
 #[gpui::test]
 fn inline_html_is_edited_as_text(cx: &mut TestAppContext) {
-    let mut h = open_with(cx, &[("h.md", "press <kbd>K</kbd> now\n")], |_| {});
+    let mut h = open_with(cx, &[("h.md", "press <var>K</var> now\n")], |_| {});
     h.select(7, 7);
     h.keys("right right");
-    h.type_text("b");
+    h.type_text("a");
     h.keys("cmd-down");
     h.save();
-    let expected = "press <kbbd>K</kbd> now\n";
+    let expected = "press <vaar>K</var> now\n";
     assert_eq!(h.wait_for_file("h.md", |text| text == expected), expected);
     // ⌥⌘R is bound to nothing.
     h.keys("alt-cmd-r");
-    assert_eq!(h.markdown(), "press <kbbd>K</kbd> now");
+    assert_eq!(h.markdown(), "press <vaar>K</var> now");
 }
 
 // ⌥← from the end of a line that ends in hidden markup reaches the

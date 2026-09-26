@@ -196,10 +196,12 @@ pub(super) fn paint_atom(
     cx: &mut App,
 ) {
     let top = row.origin.y + row.line_height * atom.visual_row as f32;
+    // An aligned row moves its atoms with its text.
+    let left = row.origin.x + atom.left + row.row_shift(atom.visual_row);
     if let Some((image, drawn)) = &atom.image {
         // Centred in its row: a picture sharing the line is shorter than it.
         let top = top + ((row.line_height - drawn.height) * 0.5).max(px(0.));
-        let bounds = Bounds::new(point(row.origin.x + atom.left, top), *drawn);
+        let bounds = Bounds::new(point(left, top), *drawn);
         let _ = window.paint_image(
             bounds,
             bounds,
@@ -211,7 +213,7 @@ pub(super) fn paint_atom(
         return;
     }
     if let Some(frame) = atom.frame {
-        let bounds = Bounds::new(point(row.origin.x + atom.left, top), frame);
+        let bounds = Bounds::new(point(left, top), frame);
         window
             .paint_quad(fill(bounds, style.inline_code_background).corner_radii(style.code_radius));
         let icon = PILL_ICON + PILL_ICON_GAP;
@@ -234,7 +236,7 @@ pub(super) fn paint_atom(
     }
     let inset = (row.line_height * 0.1).round();
     let bounds = Bounds::new(
-        point(row.origin.x + atom.left, top + inset),
+        point(left, top + inset),
         size(atom.slot, row.line_height - inset * 2.),
     );
     window.paint_quad(fill(bounds, style.inline_code_background).corner_radii(style.code_radius));

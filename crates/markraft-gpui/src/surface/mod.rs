@@ -18,9 +18,9 @@ use crate::style::EditorStyle;
 use crate::{CaretShape, EditorView};
 use gpui::{prelude::*, *};
 use markraft_core::commands::ColumnAlignment;
-use markraft_core::kind::DocTypes;
 use markraft_core::kind::SourceHighlight;
 use markraft_core::kind::conceal::{Reveal, Shown};
+use markraft_core::kind::{Align, DocTypes};
 use markraft_core::projection::{Line, LineKind, Projection, Run, RunContent};
 use markraft_core::{MarkSet, Node};
 use std::collections::HashMap;
@@ -491,7 +491,28 @@ impl Element for EditorSurface {
             // The grids first: their bands and lines sit under everything a cell
             // draws, including the selection.
             paint_tables(rows, &style, caret_pos, &scroll, window);
-            for row in rows.iter() {
+            // A rendered verbatim line is drawn as its page: the page's lines,
+            // placed under the line's origin, stand in for its source rows, or
+            // follow them while the caret is in the source. They picture the
+            // source, so no caret, selection or composition is drawn on them.
+            let painted: Vec<(std::borrow::Cow<'_, LayoutLine>, bool)> = rows
+                .iter()
+                .flat_map(|row| match &row.rendered {
+                    Some(page) => page
+                        .under_source()
+                        .then_some((std::borrow::Cow::Borrowed(row), false))
+                        .into_iter()
+                        .chain(page.lines.iter().map(|(at, line)| {
+                            let mut line = line.clone();
+                            line.origin = row.origin + *at + point(px(0.), page.top);
+                            (std::borrow::Cow::Owned(line), true)
+                        }))
+                        .collect::<Vec<_>>(),
+                    None => vec![(std::borrow::Cow::Borrowed(row), false)],
+                })
+                .collect();
+            for (row, inert) in &painted {
+                let (row, inert): (&LayoutLine, bool) = (row, *inert);
                 for atom in &row.atoms {
                     paint_atom(row, atom, &style, window, cx);
                 }
@@ -608,7 +629,7 @@ impl Element for EditorSurface {
                         let pill = Bounds::new(
                             row.origin
                                 + point(
-                                    code.left,
+                                    code.left + row.row_shift(code.visual_row),
                                     row.line_height * code.visual_row as f32 + inset,
                                 ),
                             size(code.slot, row.line_height - inset * 2.),
@@ -619,7 +640,7 @@ impl Element for EditorSurface {
                         );
                     }
                 }
-                if a != b {
+                if a != b && !inert {
                     let from = row.pos_to_offset(a);
                     let to = row.pos_to_offset(b);
                     if b > row.from && a <= row.to() {
@@ -644,14 +665,15 @@ impl Element for EditorSurface {
                         }
                     }
                 }
+                let (align, align_width) = row.text_align();
                 for inner in &row.rows {
                     let origin =
                         row.origin + point(px(0.), row.line_height * inner.visual_start as f32);
                     let _ = inner.line.paint(
                         origin,
                         row.line_height,
-                        TextAlign::Left,
-                        None,
+                        align,
+                        align_width.map(|width| Bounds::new(origin, size(width, row.line_height))),
                         window,
                         cx,
                     );
@@ -659,7 +681,7 @@ impl Element for EditorSurface {
                         let _ = code.line.paint(
                             row.origin
                                 + point(
-                                    code.text_left(),
+                                    code.text_left() + row.row_shift(code.visual_row),
                                     row.line_height * code.visual_row as f32 - code.lift,
                                 ),
                             row.line_height,
@@ -688,6 +710,7 @@ impl Element for EditorSurface {
                     );
                 }
                 if row.index == 0
+                    && !inert
                     && let Some(text) = placeholder.as_ref().filter(|text| !text.is_empty())
                 {
                     // Presentation only: the empty block still owns hit testing and IME coordinates.
@@ -719,6 +742,7 @@ impl Element for EditorSurface {
                     }
                 }
                 if let Some((start, end)) = marked
+                    && !inert
                     && end > row.from
                     && start <= row.to()
                 {
@@ -730,7 +754,7 @@ impl Element for EditorSurface {
                         window.paint_quad(fill(rect, style.marker));
                     }
                 }
-                if focused && caret_visible && a == b && row.contains(caret_pos) {
+                if focused && caret_visible && a == b && !inert && row.contains(caret_pos) {
                     let mut color = style.marker;
                     if caret_shape == CaretShape::Block {
                         color.a = BLOCK_CARET_ALPHA;

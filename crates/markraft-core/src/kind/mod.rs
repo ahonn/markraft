@@ -28,7 +28,7 @@ use std::sync::Arc;
 use crate::attr::Attrs;
 use crate::commands::Command;
 use crate::node::Node;
-use crate::projection::Line;
+use crate::projection::{Line, Projection};
 use crate::schema::MarkTypeId;
 use crate::slice::Slice;
 use crate::state::{EditorState, TransactionSpec};
@@ -196,6 +196,8 @@ pub struct DocTypeNames {
     pub strikethrough: Option<&'static str>,
     /// Underline.
     pub underline: Option<&'static str>,
+    /// A key or key combination.
+    pub keyboard: Option<&'static str>,
     /// Highlighted text.
     pub highlight: Option<&'static str>,
     /// Superscript.
@@ -312,6 +314,41 @@ pub trait SourceSpelling: Send + Sync {
         let _ = line;
         Vec::new()
     }
+
+    /// What a verbatim line shows while the caret is away from it, where the
+    /// kind can render its source — an HTML block as the page it describes —
+    /// as a document in the line's own schema. A view draws that document in
+    /// the line's place and goes back to the source as soon as the caret or the
+    /// selection reaches the line; the source is all the document holds. The
+    /// default renders nothing, and the line stays source.
+    fn rendered(&self, line: &Line) -> Option<Rendered> {
+        let _ = line;
+        None
+    }
+}
+
+/// What [`SourceSpelling::rendered`] shows in a verbatim line's place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rendered {
+    /// A document in the line's schema.
+    pub doc: Node,
+    /// `doc`'s projection, which the view lays out as it lays out the note's.
+    pub projection: Projection,
+    /// How each of `doc`'s top-level blocks is aligned, in order. A block past
+    /// the end starts at the line's start.
+    pub aligns: Vec<Align>,
+}
+
+/// Where a rendered block's rows sit across the column.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Align {
+    /// Against the column's start, as prose sits.
+    #[default]
+    Start,
+    /// Centred, each row on its own.
+    Center,
+    /// Against the column's end.
+    End,
 }
 
 /// A part of a verbatim line's source; see

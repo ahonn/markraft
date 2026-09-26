@@ -154,6 +154,8 @@ pub enum Style {
     Superscript,
     /// `~…~` or a paired `<sub>`…`</sub>`.
     Subscript,
+    /// A paired `<kbd>`…`</kbd>`.
+    Keyboard,
     /// `[^label]`, where the document defines `label`.
     FootnoteReference {
         /// The label, as written.
@@ -1206,9 +1208,10 @@ impl Reader<'_> {
         Some((start, last + 1))
     }
 
-    /// Style every pair of style tags among `parent`'s children: `<u>`,
-    /// `<em>`, `<strong>`, `<del>` and `<a href>`, each closed by its own
-    /// closing tag.
+    /// Style every pair of style tags among `parent`'s children — `<u>`,
+    /// `<em>`, `<strong>`, `<del>`, `<kbd>` and the rest of the style table,
+    /// under their written names or their aliases (`<b>`, `<i>`, `<s>`), and
+    /// `<a href>` — each closed by its own closing tag.
     ///
     /// Only tags that pair up within one parent are a style: `<u>*a</u>*` has
     /// its tags in different nodes, and guessing a tree for them would change
@@ -1344,7 +1347,7 @@ impl HtmlTag {
                 title: self.attr("title").unwrap_or_default().to_string(),
             });
         }
-        crate::styles::by_tag(&self.name).map(|spec| spec.style.clone())
+        crate::styles::by_html_name(&self.name).map(|spec| spec.style.clone())
     }
 
     /// The image atom's attributes, when this is an `<img>` with a source.
@@ -1353,12 +1356,19 @@ impl HtmlTag {
         if self.name != "img" || self.closing {
             return None;
         }
-        Some(attrs! {
+        let mut image = attrs! {
             "src" => self.attr("src")?.to_string(),
             "alt" => self.attr("alt").unwrap_or_default().to_string(),
             "title" => self.attr("title").unwrap_or_default().to_string(),
             "source" => source.to_string(),
-        })
+        };
+        // The size it asks for, only where it asks for one.
+        for side in ["width", "height"] {
+            if let Some(value) = self.attr(side) {
+                image = image.with(side, value.to_string());
+            }
+        }
+        Some(image)
     }
 }
 

@@ -122,6 +122,9 @@ pub struct DocTypes {
     pub strikethrough: Option<MarkTypeId>,
     /// Underline. Present for HTML paste; Markdown write strips it.
     pub underline: Option<MarkTypeId>,
+    /// A key or key combination, drawn as a pill in the prose face, as a code
+    /// span is in the code face. Without it the keys are drawn as prose.
+    pub keyboard: Option<MarkTypeId>,
     /// Highlighted text, drawn over the view's highlight colour.
     pub highlight: Option<MarkTypeId>,
     /// Superscript, drawn smaller and raised in the slot full-size text would
@@ -200,6 +203,7 @@ impl DocTypes {
             code: mark(names.code),
             strikethrough: mark(names.strikethrough),
             underline: mark(names.underline),
+            keyboard: mark(names.keyboard),
             highlight: mark(names.highlight),
             superscript: mark(names.superscript),
             subscript: mark(names.subscript),

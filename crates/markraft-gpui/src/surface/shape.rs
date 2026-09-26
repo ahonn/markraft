@@ -294,7 +294,12 @@ pub(super) fn shape_line(
                 .enumerate()
                 .all(|(at, c)| range.contains(&at) || c.is_whitespace());
             let source = picture_source(types, node).filter(|_| alone)?;
-            drawn_image(input.images, source, wrap_width)
+            drawn_image(
+                input.images,
+                source,
+                declared_size(node, wrap_width),
+                wrap_width,
+            )
         })
         .flatten();
     let above = index.checked_sub(1).map(|above| &projection.lines()[above]);
@@ -343,6 +348,9 @@ pub(super) fn shape_line(
         atoms: Vec::new(),
         table: None,
         reuse: None,
+        rendered: None,
+        row_shifts: Vec::new(),
+        align: Align::Start,
     };
     if single_line && let Some(row) = layout.rows.first() {
         layout.width = row.line.size(line_height).width.max(wrap_width);
@@ -367,7 +375,65 @@ pub(super) fn shape_line(
         + gap;
     shape_inline_code(&mut layout, &runs.code, font_size, text_system);
     place_atoms(&mut layout, text.atoms);
+    // A verbatim line the kind can render — an HTML block — is drawn as its page
+    // while the caret is away. The caret or the selection reaching it makes it a
+    // focused line, reshaped: its source is drawn to be edited and the page stays
+    // in view under it, as a picture does under its source.
+    if !single_line
+        && cell.is_none()
+        && let Some(rendered) = input.spelling.and_then(|spelling| spelling.rendered(line))
+    {
+        let mut page = shape_rendered(input, &rendered, wrap_width, text_system);
+        if focused {
+            page.top = layout.text_height() + PREVIEW_GAP;
+        }
+        layout.height = page.top + page.height + gap;
+        layout.rendered = Some(Rc::new(page));
+    }
     layout
+}
+
+/// A rendered verbatim line's page, laid out a line at a time as the note's own
+/// lines are, in `width`, each line aligned as its top-level block asks.
+fn shape_rendered(
+    input: &ShapeInput<'_>,
+    rendered: &markraft_core::kind::Rendered,
+    width: Pixels,
+    text_system: &WindowTextSystem,
+) -> RenderedLayout {
+    let page = ShapeInput {
+        images: input.images,
+        doc: &rendered.doc,
+        types: input.types,
+        projection: &rendered.projection,
+        style: input.style,
+        single_line: false,
+        wiki: input.wiki,
+        spelling: None,
+        // No caret is ever on the page, so every delimiter on it stays concealed.
+        selection: usize::MAX..usize::MAX,
+        composition: None,
+    };
+    let mut lines = Vec::new();
+    let mut y = px(0.);
+    for index in 0..rendered.projection.line_count() {
+        let mut line = shape_line(&page, index, width, None, text_system);
+        let block = line
+            .source
+            .ancestors()
+            .first()
+            .map_or(0, |block| block.index);
+        line.align_rows(rendered.aligns.get(block).copied().unwrap_or_default());
+        y += line.top_gap;
+        let at = point(line.origin.x, y);
+        y += line.height;
+        lines.push((at, line));
+    }
+    RenderedLayout {
+        lines,
+        height: y,
+        top: px(0.),
+    }
 }
 
 /// The decoration drawn behind or beside a line: a code block's panel, the rule

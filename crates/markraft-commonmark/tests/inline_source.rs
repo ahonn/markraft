@@ -759,7 +759,7 @@ fn inline_sources_strip_exactly_the_three_exceptions() {
         ["a \\| b", "c", "d", ""]
     );
     assert_eq!(
-        texts("[r]: /u\nx ![i](s) <b>y</b>"),
+        texts("[r]: /u\nx ![i](s) <span>y</span>"),
         ["x \u{fffc} \u{fffc}y\u{fffc}"]
     );
     assert_eq!(texts("a\r\nb"), ["a\nb"]);

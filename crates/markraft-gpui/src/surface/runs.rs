@@ -128,13 +128,14 @@ pub(super) fn text_runs(
             style.broken_link
         } else if is_link || (atom && !code_block && !glyph) {
             style.link
-        } else if has(types.code, marks) || is_math {
+        } else if has(types.code, marks) || has(types.keyboard, marks) || is_math {
             style.inline_code_text
         } else {
             text_color
         };
         // Inline code and scripts only reserve their space here; see `InlineCode`.
-        let inline_code = has(types.code, marks) && !code_block;
+        // A key is drawn in a pill as code is, in the prose face it keeps.
+        let inline_code = (has(types.code, marks) || has(types.keyboard, marks)) && !code_block;
         let script = !code_block && !raw && !atom;
         let lowered = has(types.subscript, marks) && script;
         let raised = ((has(types.superscript, marks) || footnote) && script) || lowered;

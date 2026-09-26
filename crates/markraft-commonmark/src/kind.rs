@@ -55,6 +55,7 @@ pub fn commonmark_doc_type_names() -> DocTypeNames {
         code: Some(schema::CODE),
         strikethrough: Some(schema::STRIKETHROUGH),
         underline: Some(schema::UNDERLINE),
+        keyboard: Some(schema::KEYBOARD),
         highlight: Some(schema::HIGHLIGHT),
         superscript: Some(schema::SUPERSCRIPT),
         subscript: Some(schema::SUBSCRIPT),
@@ -489,5 +490,27 @@ impl SourceSpelling for CommonMarkSpelling {
             return Vec::new();
         }
         crate::definition::highlights(&text)
+    }
+
+    /// An HTML block as the page it describes. A raw block that holds link
+    /// definitions, or anything else that is not HTML, stays source.
+    fn rendered(&self, line: &Line) -> Option<markraft_core::kind::Rendered> {
+        if line.node_type() != self.schema.node_id(schema::RAW_BLOCK) {
+            return None;
+        }
+        let mut text = String::new();
+        for run in line.runs() {
+            if let RunContent::Text(run) = &run.content {
+                text.push_str(run);
+            }
+        }
+        if !text.trim_start().starts_with('<') {
+            return None;
+        }
+        let parser = crate::html::HtmlParser::commonmark(
+            self.schema.clone(),
+            &crate::HouseStyleHandle::default(),
+        );
+        crate::html::preview::render(&parser, &text)
     }
 }

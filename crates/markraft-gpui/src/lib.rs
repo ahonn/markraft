@@ -1568,7 +1568,7 @@ impl EditorView {
                 .rows()
                 .iter()
                 .flat_map(|row| {
-                    (0..row.visual_rows())
+                    (0..row.navigable_rows())
                         .map(move |i| row.origin.y + row.line_height * (i as f32 + 0.5))
                 })
                 .collect(),

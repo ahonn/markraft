@@ -262,7 +262,7 @@ fn a_cell_holds_the_marks_links_and_images_a_paragraph_holds() {
         concat!(
             r#"doc(table[alignments=Str("none")](table_row(table_cell("#,
             r#""**"{strong,syntax}, "b"{strong}, "**"{strong,syntax}, " ", "*"{em,syntax}, "i"{em}, "*"{em,syntax}, " ", "`"{code,syntax}, "c"{code}, "`"{code,syntax}, " ", "["{link,syntax}, "l"{link}, "](u)"{link,syntax}, " ", "#,
-            r#"image[alt=Str("alt"),source=Str(""),src=Str("p"),title=Str("")])), "#,
+            r#"image[alt=Str("alt"),height=Str(""),source=Str(""),src=Str("p"),title=Str(""),width=Str("")])), "#,
             r#"table_row(table_cell("<u>"{underline,syntax}, "u"{underline}, "</u>"{underline,syntax}))))"#
         )
     );
@@ -599,6 +599,37 @@ fn underline_is_a_pair_of_u_tags() {
 }
 
 #[test]
+fn an_aliased_or_keyboard_tag_is_the_style_it_spells_and_keeps_its_spelling() {
+    // `<b>`, `<i>`, `<s>`, `<strike>` and `<ins>` typed into the source read as
+    // the styles the HTML importer reads them as, and `<kbd>` as a key; the file
+    // keeps each as written.
+    let codec = Codec::new();
+    assert_eq!(
+        shape("<b>a</b>"),
+        r#"doc(paragraph("<b>"{strong,syntax}, "a"{strong}, "</b>"{strong,syntax}))"#
+    );
+    assert_eq!(
+        shape("press <kbd>⌘K</kbd>"),
+        concat!(
+            r#"doc(paragraph("press ", "<kbd>"{keyboard,syntax}, "⌘K"{keyboard}, "#,
+            r#""</kbd>"{keyboard,syntax}))"#
+        )
+    );
+    for source in [
+        "<b>a</b>",
+        "<i>a</i>",
+        "<s>a</s> and <strike>b</strike>",
+        "<ins>a</ins>",
+        "press <kbd>⌘</kbd>+<kbd>K</kbd>",
+        "<b>a <i>b</i></b>",
+        "<b>a</strong>",
+    ] {
+        assert_eq!(round(source), source);
+        judge(&codec, source).unwrap_or_else(|message| panic!("{message}"));
+    }
+}
+
+#[test]
 fn paired_style_tags_are_the_styles_they_spell() {
     // `<em>`, `<strong>` and `<del>` pair the way `<u>` does: the tags are the
     // span's delimiters, concealed, and the file keeps them as written.
@@ -826,8 +857,9 @@ fn an_img_tag_is_an_image_that_writes_its_tag_again() {
     assert_eq!(
         shape("see <img src=\"x.png\" alt=\"img\"> here"),
         concat!(
-            r#"doc(paragraph("see ", image[alt=Str("img"),"#,
-            r#"source=Str("<img src=\"x.png\" alt=\"img\">"),src=Str("x.png"),title=Str("")], " here"))"#
+            r#"doc(paragraph("see ", image[alt=Str("img"),height=Str(""),"#,
+            r#"source=Str("<img src=\"x.png\" alt=\"img\">"),src=Str("x.png"),title=Str(""),"#,
+            r#"width=Str("")], " here"))"#
         )
     );
     for tag in [
@@ -849,7 +881,7 @@ fn an_img_tag_is_an_image_that_writes_its_tag_again() {
     // A Markdown image is the image atom, written back in one spelling.
     assert_eq!(
         shape("see ![img](x.png \"t\") here"),
-        r#"doc(paragraph("see ", image[alt=Str("img"),source=Str(""),src=Str("x.png"),title=Str("t")], " here"))"#
+        r#"doc(paragraph("see ", image[alt=Str("img"),height=Str(""),source=Str(""),src=Str("x.png"),title=Str("t"),width=Str("")], " here"))"#
     );
 }
 
@@ -1237,12 +1269,12 @@ fn images_carry_their_alt_and_title() {
     );
     assert_eq!(
         shape("![alt](src.png \"a title\")"),
-        r#"doc(paragraph(image[alt=Str("alt"),source=Str(""),src=Str("src.png"),title=Str("a title")]))"#
+        r#"doc(paragraph(image[alt=Str("alt"),height=Str(""),source=Str(""),src=Str("src.png"),title=Str("a title"),width=Str("")]))"#
     );
     // A label with markup flattens to the plain text CommonMark's `alt` holds.
     assert_eq!(
         shape("![*a*](s)"),
-        r#"doc(paragraph(image[alt=Str("a"),source=Str(""),src=Str("s"),title=Str("")]))"#
+        r#"doc(paragraph(image[alt=Str("a"),height=Str(""),source=Str(""),src=Str("s"),title=Str(""),width=Str("")]))"#
     );
 }
 

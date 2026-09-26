@@ -283,6 +283,7 @@ fn tag_of(html: &str) -> Option<(String, bool, bool)> {
 
 /// Whether an inline HTML node is read as something other than an atom: a
 /// style tag — `<u>`, `<em>`, `<strong>`, `<del>`, `<mark>`, `<sup>`, `<sub>`,
+/// `<kbd>`, the aliases `<ins>`, `<i>`, `<b>`, `<s>` and `<strike>`, and
 /// `<a href>` — paired with its partner among its siblings, or a `<br>` a soft
 /// break follows.
 ///
@@ -305,7 +306,10 @@ pub fn html_is_read<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
     let Some(parent) = node.parent() else {
         return false;
     };
-    let style = ["u", "em", "strong", "del", "mark", "sup", "sub", "a"];
+    let style = [
+        "u", "em", "strong", "del", "mark", "sup", "sub", "kbd", "ins", "i", "b", "s", "strike",
+        "a",
+    ];
     let mut open: Vec<(String, *const comrak::nodes::AstNode<'a>)> = Vec::new();
     for sibling in parent.children() {
         let Some((name, closing, href)) = tag(sibling) else {
