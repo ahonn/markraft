@@ -14,7 +14,7 @@
 //! other two flavours come from the host's [`Codecs`], so the view never learns
 //! which document kind it is editing.
 
-use gpui::{App, ClipboardItem};
+use gpui::{App, ClipboardItem, Global};
 use markraft_core::kind::DocTypes;
 use markraft_core::{EditorState, Fragment, Schema, Selection, Slice, kind::Codecs};
 
@@ -74,6 +74,20 @@ pub(crate) fn markup(codecs: &dyn Codecs, slice: &Slice) -> String {
         .unwrap_or_else(|| codecs.to_text(slice))
 }
 
+/// Marks an app whose clipboard is the system pasteboard, so copies carry an HTML
+/// flavour and pastes read one. It is only for the running app: AppKit's pasteboard
+/// is not thread-safe, `#[gpui::test]`s run on many threads at once, and a test
+/// must neither read nor overwrite what the person running it has copied.
+struct SystemPasteboard;
+
+impl Global for SystemPasteboard {}
+
+/// Let copies and pastes in `cx` use the system pasteboard's HTML flavour. Call it
+/// once from the app's startup; without it the clipboard carries text and metadata.
+pub fn use_system_pasteboard(cx: &mut App) {
+    cx.set_global(SystemPasteboard);
+}
+
 pub(crate) fn write(schema: &Schema, codecs: &dyn Codecs, slice: &Slice, cx: &mut App) {
     let metadata = metadata(schema, codecs, slice);
     cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(
@@ -81,7 +95,9 @@ pub(crate) fn write(schema: &Schema, codecs: &dyn Codecs, slice: &Slice, cx: &mu
         metadata,
     ));
     // The rich flavour goes on the same item, after it has been written.
-    if let Some(html) = codecs.to_html(slice) {
+    if cx.has_global::<SystemPasteboard>()
+        && let Some(html) = codecs.to_html(slice)
+    {
         platform::write_html(&html);
     }
 }
@@ -107,6 +123,7 @@ pub(crate) fn read_fragment(
     codecs: &dyn Codecs,
     item: &ClipboardItem,
     mode: PasteMode,
+    cx: &App,
 ) -> Option<Slice> {
     let text = item.text();
     if matches!(mode, PasteMode::Markdown) {
@@ -118,7 +135,8 @@ pub(crate) fn read_fragment(
     {
         return Some(slice);
     }
-    if let Some(html) = platform::read_html(text.as_deref())
+    if cx.has_global::<SystemPasteboard>()
+        && let Some(html) = platform::read_html(text.as_deref())
         && let Some(slice) = codecs.from_html(&html)
     {
         return Some(slice);
@@ -132,9 +150,9 @@ mod platform {
     use objc2_foundation::{NSArray, NSString};
 
     /// The HTML flavour on the pasteboard, when it belongs to the item being
-    /// pasted: the pasteboard's plain text is the item's `text`. An item that
-    /// did not come from the pasteboard — a test's, one a host built — is not
-    /// read through HTML someone else put there.
+    /// pasted: the pasteboard's plain text is the item's `text`. An item a host
+    /// built rather than read from the pasteboard is not read through HTML
+    /// someone else put there.
     pub(super) fn read_html(text: Option<&str>) -> Option<String> {
         let pasteboard = NSPasteboard::generalPasteboard();
         // AppKit's immutable type names are process-global; no owner is retained.

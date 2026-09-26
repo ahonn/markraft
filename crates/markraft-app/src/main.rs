@@ -154,6 +154,7 @@ fn main() {
         // leaves every editor and app binding free to answer where it applies.
         gpui_base::init(cx);
         markraft_gpui::bind_keys(cx);
+        markraft_gpui::use_system_pasteboard(cx);
         // After the editor's own bindings, so that at the editor's context depth vim's
         // win; its predicates stand aside for the typeahead where that matters.
         markraft_vim::bind_keys(cx);
