@@ -64,6 +64,8 @@ jobs:
           security list-keychains -d user -s "$SIGNING_KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db"
       - name: Build, sign, notarize and generate appcast
         run: cargo xtask release "$GITHUB_REF_NAME"
+      - name: Verify embedded framework without development paths
+        run: env -u DYLD_FRAMEWORK_PATH 'target/universal-apple-darwin/release/bundle/osx/Markraft.app/Contents/MacOS/markraft-app' --help
       - name: Publish all artifacts together
         run: |
           set -euo pipefail
