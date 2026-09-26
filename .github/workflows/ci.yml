@@ -7,6 +7,11 @@ on:
     paths-ignore: ['**.md', LICENSE, '.github/ISSUE_TEMPLATE/**']
   workflow_dispatch:
   workflow_call:
+    inputs:
+      ref:
+        description: Commit to check; defaults to the triggering ref
+        type: string
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -17,6 +22,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
