@@ -309,6 +309,46 @@ mod tests {
         assert_eq!(caret_line(&view, cx), 1999);
     }
 
+    /// A caret moved far out of view is brought into view by the next frame
+    /// on its own. The frame that finds it out of view scrolls, and the move
+    /// only shows in the frame after; nothing else may be coming to draw it —
+    /// a caret that does not blink, as vim's Normal-mode block does not, asks
+    /// for no frame of its own.
+    #[gpui::test]
+    fn a_caret_moved_out_of_view_is_scrolled_to_without_another_event(cx: &mut TestAppContext) {
+        let (view, cx) = laid_out(cx, &long_note(300));
+        // Lines still estimated ask for frames of their own, which would draw
+        // the scroll whatever the reveal asks for.
+        while view.read_with(cx, |view, _| view.shaping().lines().estimated()) > 0 {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        }
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            let pos = view.projection().line(250).expect("a line").from();
+            view.dispatch(
+                [TransactionSpec::new()
+                    .selection(Selection::cursor(pos))
+                    .scroll_into_view()],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        // The platform's frame loop, which a test has none of.
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let (_, drawn_at) = view.frame.placed().expect("a frame was drawn");
+            assert_ne!(view.scroll.offset().y, gpui::px(0.), "the view scrolled");
+            assert_eq!(
+                drawn_at,
+                view.scroll.offset().y,
+                "the last frame drawn is the scrolled one"
+            );
+        });
+    }
+
     /// The lines a frame did not show are measured a few at a time until none
     /// is left to estimate.
     #[gpui::test]

@@ -144,3 +144,75 @@ fn vim_escape_in_normal_mode_points_to_colon_q(cx: &mut TestAppContext) {
     h.type_text("x");
     assert_eq!(h.markdown(), "ne");
 }
+
+// Vim's own tests read its bindings on their own; here they sit in the app's whole
+// keymap, beside the editor's and the app's, under the context the focused editor
+// really has. In each mode every vim binding that applies must be what its keys
+// run — none taken by another binding first, none left waiting for a longer one.
+#[gpui::test]
+fn every_vim_binding_is_what_its_keys_run_in_each_mode(cx: &mut TestAppContext) {
+    let mut h = open_with(cx, &[("m.md", "one (two) \"three\"\n")], |p| {
+        p.vim_mode = true
+    });
+    h.keys("cmd-up");
+    for (enter, mode, operator) in [
+        ("", "normal", None),
+        ("d", "normal", Some("d")),
+        ("c", "normal", Some("c")),
+        ("v", "visual", None),
+        ("shift-v", "visual_line", None),
+        ("i", "insert", None),
+    ] {
+        if !enter.is_empty() {
+            h.keys(enter);
+        }
+        h.cx.update(|window, _| window.refresh());
+        h.cx.run_until_parked();
+        let (stack, keymap) =
+            h.cx.update(|window, cx| (window.context_stack(), cx.key_bindings()));
+        let read = |key: &str| {
+            stack
+                .iter()
+                .rev()
+                .find_map(|context| context.get(key).map(|value| value.to_string()))
+        };
+        assert_eq!(read("vim_mode").as_deref(), Some(mode), "after {enter:?}");
+        assert_eq!(read("vim_operator").as_deref(), operator, "after {enter:?}");
+        let keymap = keymap.borrow();
+        let mut checked = 0;
+        for binding in keymap
+            .bindings()
+            .filter(|binding| binding.action().name().starts_with("markraft_vim::"))
+            .filter(|binding| binding.predicate().is_some_and(|when| when.eval(&stack)))
+        {
+            let (found, pending) = keymap.bindings_for_input(binding.keystrokes(), &stack);
+            let keys = binding
+                .keystrokes()
+                .iter()
+                .map(|key| key.inner().unparse())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                !pending,
+                "after {enter:?}, {keys:?} waits for a longer binding"
+            );
+            assert!(
+                found
+                    .first()
+                    .is_some_and(|first| first.action().partial_eq(binding.action())),
+                "after {enter:?}, {keys:?} runs {:?} rather than {}",
+                found.first().map(|first| first.action().name()),
+                binding.action().name()
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "after {enter:?} no vim binding applies");
+        drop(keymap);
+        h.keys("escape");
+    }
+    assert_eq!(
+        h.markdown(),
+        "one (two) \"three\"",
+        "the sweep edits nothing"
+    );
+}

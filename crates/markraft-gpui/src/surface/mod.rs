@@ -390,7 +390,7 @@ impl Element for EditorSurface {
                 window.scale_factor(),
             );
         }
-        self.editor.update(cx, |editor, cx| {
+        let revealed = self.editor.update(cx, |editor, cx| {
             if editor.shaping().images().has_requests() {
                 editor.fetch_remote_images(cx);
             }
@@ -404,7 +404,7 @@ impl Element for EditorSurface {
             });
             if editor.caret.take_reveal() {
                 if editor.single_line {
-                    return;
+                    return false;
                 }
                 let head = editor.head();
                 if let Some((row, offset)) = rows.iter().find(|row| row.contains(head)).map(|row| {
@@ -428,11 +428,18 @@ impl Element for EditorSurface {
                         editor
                             .scroll
                             .set_offset(point(offset.x, offset.y + correction));
-                        cx.notify();
+                        return true;
                     }
                 }
             }
+            false
         });
+        // The scroll container placed this frame before the caret was found
+        // out of view, so the move shows in the next one. A notify here, in
+        // the middle of drawing, would not ask for it.
+        if revealed {
+            window.request_animation_frame();
+        }
         rows
     }
     fn paint(

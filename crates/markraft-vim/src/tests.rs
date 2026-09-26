@@ -1,19 +1,19 @@
 //! The whole of vim driven over a bare [`EditorState`].
 //!
-//! [`Keys`] implements the same [`Host`] the GPUI layer implements and dispatches a
-//! keystroke to the same `command` functions the action handlers call, so these tests
-//! exercise the real command layer rather than a copy of it. Only two inputs cannot be
-//! reproduced without a window: `j` and `k` outside a linewise context move by visual
-//! row, which here is one line, and a repaint.
+//! [`Keys`] implements the same [`Host`] the GPUI layer implements, and a keystroke
+//! goes where it goes live: through the bindings `bind_keys` registers, matched
+//! against the context vim gives the editor, to the command the extension's handler
+//! for that action runs. There is no second vim here, keymap included. Only two
+//! inputs cannot be reproduced without a window: `j` and `k` outside a linewise
+//! context move by visual row, which here is one line, and a repaint. How vim's
+//! bindings rank against the editor's and the app's is the app's e2e tests' to say.
 //!
 //! A cursor is a document position; the assertions spell it as a line and a `char`
 //! offset into that line, which inside a line is the same number.
 
 use crate::{
-    command::{self, InsertAt},
+    command,
     host::{self, Host},
-    motion::Motion,
-    object::TextObject,
     state::{Mode, Operator, State},
 };
 use markraft_commonmark::{
@@ -127,6 +127,7 @@ impl Host for Editing {
 struct Keys {
     host: Editing,
     state: State,
+    keymap: gpui::Keymap,
 }
 
 impl Keys {
@@ -151,6 +152,7 @@ impl Keys {
                 group_depth: 0,
             },
             state: State::default(),
+            keymap: gpui::Keymap::new(crate::bindings()),
         }
     }
 
@@ -239,94 +241,52 @@ impl Keys {
         self
     }
 
-    /// Type `keys`, one grapheme per keystroke. `<esc>` is the only named key; `gg` is
-    /// spelled `g` twice, as gpui's pending keystrokes deliver it.
+    /// Type `keys` as a person presses them, one keystroke per grapheme — a capital
+    /// is its shifted letter, `<esc>` is Escape and `<c-r>` is ⌃R — through the
+    /// bindings [`bind_keys`](crate::bind_keys) registers, matched against the context
+    /// vim gives the editor, into the commands its handlers run.
+    ///
+    /// Escape that no vim binding takes goes on to the app, and does nothing here.
     fn keys(&mut self, keys: &str) -> &mut Self {
+        let mut typed = Vec::new();
         let mut rest = keys;
-        while !rest.is_empty() {
-            if let Some(tail) = rest.strip_prefix("<esc>") {
-                self.escape();
-                rest = tail;
+        while let Some(key) = rest.chars().next() {
+            let (spelled, tail) = if let Some(tail) = rest.strip_prefix("<esc>") {
+                ("escape".to_owned(), tail)
+            } else if let Some(tail) = rest.strip_prefix("<c-r>") {
+                ("ctrl-r".to_owned(), tail)
+            } else if key.is_ascii_uppercase() {
+                (format!("shift-{}", key.to_ascii_lowercase()), &rest[1..])
+            } else {
+                (key.to_string(), &rest[key.len_utf8()..])
+            };
+            rest = tail;
+            typed.push(gpui::Keystroke::parse(&spelled).expect("a keystroke"));
+            let mut context = gpui::KeyContext::default();
+            context.add("Markraft");
+            crate::describe(&self.state, &mut context);
+            let (bindings, pending) = self.keymap.bindings_for_input(&typed, &[context]);
+            if pending {
+                assert!(
+                    bindings.is_empty(),
+                    "{spelled:?} both completes a binding and begins a longer one"
+                );
                 continue;
             }
-            if let Some(tail) = rest.strip_prefix("gg") {
-                let line = self.state.pending.count().map_or(0, |count| count - 1);
-                command::motion(&mut self.state, &mut self.host, Motion::Line(line));
-                rest = tail;
-                continue;
+            let pressed = std::mem::take(&mut typed);
+            match bindings.first() {
+                Some(binding) => {
+                    let command = crate::command_of(binding.action()).expect("a vim action");
+                    command.run(&mut self.state, &mut self.host);
+                    self.settle();
+                }
+                None if spelled == "escape" => {}
+                None => panic!("no vim binding for {pressed:?} in {keys:?}"),
             }
-            if (self.state.pending.operator().is_some() || self.state.mode.is_visual())
-                && let Some((object, around, tail)) = text_object(rest)
-            {
-                command::text_object(&mut self.state, &mut self.host, object, around);
-                rest = tail;
-                continue;
-            }
-            let key = rest.chars().next().expect("a key");
-            rest = &rest[key.len_utf8()..];
-            self.key(key);
         }
-        self.settle();
+        assert!(typed.is_empty(), "{keys:?} ends half-typed");
         self
     }
-
-    fn escape(&mut self) {
-        if self.state.pending.is_empty() {
-            command::normal(&mut self.state, &mut self.host);
-        } else {
-            command::clear_pending(&mut self.state, &mut self.host);
-        }
-    }
-
-    fn key(&mut self, key: char) {
-        let state = &mut self.state;
-        let host = &mut self.host;
-        let motion = |state: &mut State, host: &mut Editing, motion| {
-            command::motion(state, host, motion);
-        };
-        match key {
-            '0'..='9' => {
-                let digit = key as usize - '0' as usize;
-                if !state.pending.digit(digit) {
-                    motion(state, host, Motion::LineStart);
-                }
-            }
-            'h' => motion(state, host, Motion::Left),
-            'l' => motion(state, host, Motion::Right),
-            'w' => motion(state, host, Motion::WordForward),
-            'b' => motion(state, host, Motion::WordBackward),
-            'e' => motion(state, host, Motion::WordEnd),
-            '^' => motion(state, host, Motion::FirstNonBlank),
-            '$' => motion(state, host, Motion::LineEnd),
-            'j' => command::vertical(state, host, 1),
-            'k' => command::vertical(state, host, -1),
-            'G' => {
-                let last = host.projection().line_count() - 1;
-                let line = state.pending.count().map_or(last, |count| count - 1);
-                motion(state, host, Motion::Line(line));
-            }
-            'd' => command::operator(state, host, Operator::Delete),
-            'c' => command::operator(state, host, Operator::Change),
-            'y' => command::operator(state, host, Operator::Yank),
-            'x' => command::delete_chars(state, host),
-            'D' => command::to_line_end(state, host, Operator::Delete),
-            'C' => command::to_line_end(state, host, Operator::Change),
-            'p' => command::paste(state, host, true),
-            'P' => command::paste(state, host, false),
-            'u' => command::history(state, host, true),
-            'r' => command::history(state, host, false),
-            'i' => command::insert(state, host, InsertAt::Cursor),
-            'a' => command::insert(state, host, InsertAt::AfterCursor),
-            'I' => command::insert(state, host, InsertAt::FirstNonBlank),
-            'A' => command::insert(state, host, InsertAt::LineEnd),
-            'o' => command::open_line(state, host, true),
-            'O' => command::open_line(state, host, false),
-            'v' => command::visual(state, host, false),
-            'V' => command::visual(state, host, true),
-            key => panic!("no vim binding for {key:?} in these tests"),
-        }
-    }
-
     /// What the extension's `update` hook does after every editor update.
     fn settle(&mut self) {
         if self.state.mode != Mode::Insert {
@@ -868,7 +828,7 @@ fn an_insert_session_undoes_as_one_step() {
     assert_eq!(keys.markdown(), "- item one\n- two\n- # head");
     keys.keys("u");
     assert_eq!(keys.markdown(), "- item");
-    keys.keys("r");
+    keys.keys("<c-r>");
     assert_eq!(keys.markdown(), "- item one\n- two\n- # head");
 
     // The edit that opened the session belongs to it: `o` and `cw` with their text.
@@ -901,9 +861,9 @@ fn every_normal_mode_command_is_one_undo_step() {
     assert_eq!(keys.text(), "two three");
     keys.keys("u");
     assert_eq!(keys.text(), "one two three");
-    keys.keys("r");
+    keys.keys("<c-r>");
     assert_eq!(keys.text(), "two three");
-    keys.keys("r");
+    keys.keys("<c-r>");
     assert_eq!(keys.text(), "three");
 }
 
@@ -914,7 +874,7 @@ fn a_count_repeats_undo_and_redo() {
     assert_eq!(keys.text(), "def");
     keys.keys("3u");
     assert_eq!(keys.text(), "abcdef");
-    keys.keys("2r");
+    keys.keys("2<c-r>");
     assert_eq!(keys.text(), "cdef");
     // Undoing past the start stops rather than looping.
     keys.keys("9u");
@@ -1740,28 +1700,6 @@ fn a_yank_over_concealed_runs_keeps_their_source() {
     assert_eq!(keys.host.plain_text(&slice), "x a");
     keys.keys("$p");
     assert_eq!(keys.markdown(), "x **a** yx **a**");
-}
-
-/// A text object at the start of `keys` — `iw`, `a(` and the rest, as `bind_keys`
-/// spells them — and the keys after it.
-fn text_object(keys: &str) -> Option<(TextObject, bool, &str)> {
-    let mut chars = keys.chars();
-    let around = match chars.next()? {
-        'i' => false,
-        'a' => true,
-        _ => return None,
-    };
-    let object = match chars.next()? {
-        'w' => TextObject::Word,
-        quote @ ('"' | '\'' | '`') => TextObject::Quote(quote),
-        '(' | ')' | 'b' => TextObject::Pair('(', ')'),
-        '[' | ']' => TextObject::Pair('[', ']'),
-        '{' | '}' | 'B' => TextObject::Pair('{', '}'),
-        '<' | '>' => TextObject::Pair('<', '>'),
-        'p' => TextObject::Paragraph,
-        _ => return None,
-    };
-    Some((object, around, chars.as_str()))
 }
 
 #[test]

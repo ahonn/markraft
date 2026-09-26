@@ -251,8 +251,14 @@ const PENDING: Option<&str> = Some("Markraft && vim_pending");
 /// typeahead's — which matters only for the keys whose predicates deliberately stand
 /// aside, `escape` above all.
 pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys(bindings());
+}
+
+/// Every binding [`bind_keys`] registers, in the order it registers them.
+fn bindings() -> Vec<KeyBinding> {
+    let mut bindings = Vec::new();
     macro_rules! bind { ($context:ident { $($key:literal => $action:ident),* $(,)? }) => {
-        cx.bind_keys([$(KeyBinding::new($key, $action, $context)),*]);
+        bindings.extend([$(KeyBinding::new($key, $action, $context)),*]);
     }; }
     bind!(COMMAND {
         "h" => VimLeft, "l" => VimRight, "j" => VimDown, "k" => VimUp,
@@ -300,6 +306,173 @@ pub fn bind_keys(cx: &mut App) {
     bind!(INSERT { "escape" => VimNormal });
     // Last, so that in Normal mode a half-typed command takes escape back from the app.
     bind!(PENDING { "escape" => VimClearPending });
+    bindings
+}
+
+/// What one action does, over any [`host::Host`]: the extension runs it on the
+/// editor, and the tests run the very same on a bare state, so there is one vim.
+#[derive(Clone, Copy)]
+enum Command {
+    Motion(Motion),
+    Object(TextObject, bool),
+    /// A digit: part of a count, or on its own `0` the line-start motion.
+    Count(usize),
+    Vertical(isize),
+    DocumentStart,
+    DocumentEnd,
+    Operator(Operator),
+    DeleteChar,
+    ToLineEnd(Operator),
+    Paste {
+        after: bool,
+    },
+    History {
+        undo: bool,
+    },
+    Insert(InsertAt),
+    Open {
+        below: bool,
+    },
+    Visual {
+        linewise: bool,
+    },
+    Normal,
+    ClearPending,
+}
+
+impl Command {
+    fn run(self, state: &mut State, cx: &mut impl host::Host) {
+        match self {
+            Command::Motion(motion) => command::motion(state, cx, motion),
+            Command::Object(object, around) => command::text_object(state, cx, object, around),
+            Command::Count(digit) => {
+                if !state.pending.digit(digit) {
+                    // A leading `0` is the line-start motion rather than a count.
+                    command::motion(state, cx, Motion::LineStart);
+                }
+            }
+            Command::Vertical(delta) => command::vertical(state, cx, delta),
+            // `gg` and `G` read a count as the line to go to, counting from one, so it
+            // is not consumed as a repetition; `command::motion` takes the rest.
+            Command::DocumentStart => {
+                let line = state.pending.count().map_or(0, |count| count - 1);
+                command::motion(state, cx, Motion::Line(line));
+            }
+            Command::DocumentEnd => {
+                let last = cx.projection().line_count().saturating_sub(1);
+                let line = state.pending.count().map_or(last, |count| count - 1);
+                command::motion(state, cx, Motion::Line(line));
+            }
+            Command::Operator(operator) => command::operator(state, cx, operator),
+            Command::DeleteChar => command::delete_chars(state, cx),
+            Command::ToLineEnd(operator) => command::to_line_end(state, cx, operator),
+            Command::Paste { after } => command::paste(state, cx, after),
+            Command::History { undo } => command::history(state, cx, undo),
+            Command::Insert(at) => command::insert(state, cx, at),
+            Command::Open { below } => command::open_line(state, cx, below),
+            Command::Visual { linewise } => command::visual(state, cx, linewise),
+            Command::Normal => command::normal(state, cx),
+            Command::ClearPending => command::clear_pending(state, cx),
+        }
+    }
+}
+
+/// Every action and the command it runs. It makes the extension's handlers, and
+/// [`command_of`], which the tests read a bound action back through.
+macro_rules! commands { ($($action:ident => $command:expr),* $(,)?) => {
+    fn handlers(vim: &Vim) -> Vec<ActionHandler> {
+        vec![$(vim.handler($action, $command)),*]
+    }
+
+    /// The command `action` runs, when it is one of vim's.
+    #[cfg(test)]
+    fn command_of(action: &dyn gpui::Action) -> Option<Command> {
+        $(if gpui::Action::partial_eq(&$action, action) {
+            return Some($command);
+        })*
+        None
+    }
+}; }
+
+commands! {
+    VimLeft => Command::Motion(Motion::Left),
+    VimRight => Command::Motion(Motion::Right),
+    VimWordForward => Command::Motion(Motion::WordForward),
+    VimWordBackward => Command::Motion(Motion::WordBackward),
+    VimWordEnd => Command::Motion(Motion::WordEnd),
+    VimFirstNonBlank => Command::Motion(Motion::FirstNonBlank),
+    VimLineEnd => Command::Motion(Motion::LineEnd),
+    VimDown => Command::Vertical(1),
+    VimUp => Command::Vertical(-1),
+    VimDocumentStart => Command::DocumentStart,
+    VimDocumentEnd => Command::DocumentEnd,
+    VimInnerWord => Command::Object(TextObject::Word, false),
+    VimAroundWord => Command::Object(TextObject::Word, true),
+    VimInnerDoubleQuote => Command::Object(TextObject::Quote('"'), false),
+    VimAroundDoubleQuote => Command::Object(TextObject::Quote('"'), true),
+    VimInnerSingleQuote => Command::Object(TextObject::Quote('\''), false),
+    VimAroundSingleQuote => Command::Object(TextObject::Quote('\''), true),
+    VimInnerBacktick => Command::Object(TextObject::Quote('`'), false),
+    VimAroundBacktick => Command::Object(TextObject::Quote('`'), true),
+    VimInnerParen => Command::Object(TextObject::Pair('(', ')'), false),
+    VimAroundParen => Command::Object(TextObject::Pair('(', ')'), true),
+    VimInnerBracket => Command::Object(TextObject::Pair('[', ']'), false),
+    VimAroundBracket => Command::Object(TextObject::Pair('[', ']'), true),
+    VimInnerBrace => Command::Object(TextObject::Pair('{', '}'), false),
+    VimAroundBrace => Command::Object(TextObject::Pair('{', '}'), true),
+    VimInnerAngle => Command::Object(TextObject::Pair('<', '>'), false),
+    VimAroundAngle => Command::Object(TextObject::Pair('<', '>'), true),
+    VimInnerParagraph => Command::Object(TextObject::Paragraph, false),
+    VimAroundParagraph => Command::Object(TextObject::Paragraph, true),
+    VimDelete => Command::Operator(Operator::Delete),
+    VimChange => Command::Operator(Operator::Change),
+    VimYank => Command::Operator(Operator::Yank),
+    VimDeleteChar => Command::DeleteChar,
+    VimDeleteToLineEnd => Command::ToLineEnd(Operator::Delete),
+    VimChangeToLineEnd => Command::ToLineEnd(Operator::Change),
+    VimPasteAfter => Command::Paste { after: true },
+    VimPasteBefore => Command::Paste { after: false },
+    VimUndo => Command::History { undo: true },
+    VimRedo => Command::History { undo: false },
+    VimInsert => Command::Insert(InsertAt::Cursor),
+    VimInsertAfter => Command::Insert(InsertAt::AfterCursor),
+    VimInsertLineStart => Command::Insert(InsertAt::FirstNonBlank),
+    VimInsertLineEnd => Command::Insert(InsertAt::LineEnd),
+    VimOpenBelow => Command::Open { below: true },
+    VimOpenAbove => Command::Open { below: false },
+    VimVisual => Command::Visual { linewise: false },
+    VimVisualLine => Command::Visual { linewise: true },
+    VimNormal => Command::Normal,
+    VimClearPending => Command::ClearPending,
+    VimCount0 => Command::Count(0),
+    VimCount1 => Command::Count(1),
+    VimCount2 => Command::Count(2),
+    VimCount3 => Command::Count(3),
+    VimCount4 => Command::Count(4),
+    VimCount5 => Command::Count(5),
+    VimCount6 => Command::Count(6),
+    VimCount7 => Command::Count(7),
+    VimCount8 => Command::Count(8),
+    VimCount9 => Command::Count(9),
+}
+
+/// The keys vim adds to the editor's context for `state`; see [`Extension::key_context`].
+fn describe(state: &State, context: &mut KeyContext) {
+    context.set("vim_mode", state.mode.context());
+    // Outside insert mode keys are commands, which the editor's own
+    // text-editing bindings have to yield to.
+    if state.mode != crate::state::Mode::Insert {
+        context.add("modal");
+    }
+    if let Some(operator) = state.pending.operator() {
+        context.set("vim_operator", operator.context());
+    }
+    if !state.pending.is_empty() {
+        context.add("vim_pending");
+    }
+    if state.composing {
+        context.add("vim_composing");
+    }
 }
 
 /// Modal editing over one editor. Starts in Normal mode.
@@ -317,11 +490,7 @@ impl Vim {
     /// One vim command. A live composition belongs to the input method, so no command
     /// runs under one; every command redraws, because the mode, the pending operator and
     /// the caret's shape all reach the screen through the key context and the caret.
-    fn handler(
-        &self,
-        action: impl gpui::Action,
-        run: impl Fn(&mut State, &mut EditorCx<'_>) + 'static,
-    ) -> ActionHandler {
+    fn handler(&self, action: impl gpui::Action, command: Command) -> ActionHandler {
         let state = self.state.clone();
         ActionHandler::new(action, move |cx: &mut EditorCx<'_>| {
             if cx.is_composing() {
@@ -329,32 +498,13 @@ impl Vim {
             }
             let reported = {
                 let mut state = state.borrow_mut();
-                run(&mut state, cx);
+                command.run(&mut state, cx);
                 state.report()
             };
             if let Some(mode) = reported {
                 cx.emit(Rc::new(mode));
             }
             cx.notify();
-        })
-    }
-
-    fn motion(&self, action: impl gpui::Action, motion: Motion) -> ActionHandler {
-        self.handler(action, move |state, cx| command::motion(state, cx, motion))
-    }
-
-    fn object(&self, action: impl gpui::Action, object: TextObject, around: bool) -> ActionHandler {
-        self.handler(action, move |state, cx| {
-            command::text_object(state, cx, object, around)
-        })
-    }
-
-    fn count(&self, action: impl gpui::Action, digit: usize) -> ActionHandler {
-        self.handler(action, move |state, cx| {
-            if !state.pending.digit(digit) {
-                // A leading `0` is the line-start motion rather than a count.
-                command::motion(state, cx, Motion::LineStart);
-            }
         })
     }
 }
@@ -368,22 +518,7 @@ impl Extension for Vim {
     /// `vim_pending` marks any half-typed command, count included; `vim_composing` marks
     /// a live input-method composition, which keeps Escape away from vim.
     fn key_context(&self, context: &mut KeyContext) {
-        let state = self.state.borrow();
-        context.set("vim_mode", state.mode.context());
-        // Outside insert mode keys are commands, which the editor's own
-        // text-editing bindings have to yield to.
-        if state.mode != crate::state::Mode::Insert {
-            context.add("modal");
-        }
-        if let Some(operator) = state.pending.operator() {
-            context.set("vim_operator", operator.context());
-        }
-        if !state.pending.is_empty() {
-            context.add("vim_pending");
-        }
-        if state.composing {
-            context.add("vim_composing");
-        }
+        describe(&self.state.borrow(), context);
     }
 
     /// Outside Insert mode the editor takes no text, which is also what keeps `j`, `d`
@@ -421,97 +556,6 @@ impl Extension for Vim {
     }
 
     fn actions(&self) -> Vec<ActionHandler> {
-        let mut actions = vec![
-            self.motion(VimLeft, Motion::Left),
-            self.object(VimInnerWord, TextObject::Word, false),
-            self.object(VimAroundWord, TextObject::Word, true),
-            self.object(VimInnerDoubleQuote, TextObject::Quote('"'), false),
-            self.object(VimAroundDoubleQuote, TextObject::Quote('"'), true),
-            self.object(VimInnerSingleQuote, TextObject::Quote('\''), false),
-            self.object(VimAroundSingleQuote, TextObject::Quote('\''), true),
-            self.object(VimInnerBacktick, TextObject::Quote('`'), false),
-            self.object(VimAroundBacktick, TextObject::Quote('`'), true),
-            self.object(VimInnerParen, TextObject::Pair('(', ')'), false),
-            self.object(VimAroundParen, TextObject::Pair('(', ')'), true),
-            self.object(VimInnerBracket, TextObject::Pair('[', ']'), false),
-            self.object(VimAroundBracket, TextObject::Pair('[', ']'), true),
-            self.object(VimInnerBrace, TextObject::Pair('{', '}'), false),
-            self.object(VimAroundBrace, TextObject::Pair('{', '}'), true),
-            self.object(VimInnerAngle, TextObject::Pair('<', '>'), false),
-            self.object(VimAroundAngle, TextObject::Pair('<', '>'), true),
-            self.object(VimInnerParagraph, TextObject::Paragraph, false),
-            self.object(VimAroundParagraph, TextObject::Paragraph, true),
-            self.motion(VimRight, Motion::Right),
-            self.motion(VimWordForward, Motion::WordForward),
-            self.motion(VimWordBackward, Motion::WordBackward),
-            self.motion(VimWordEnd, Motion::WordEnd),
-            self.motion(VimFirstNonBlank, Motion::FirstNonBlank),
-            self.motion(VimLineEnd, Motion::LineEnd),
-            self.handler(VimDown, |state, cx| command::vertical(state, cx, 1)),
-            self.handler(VimUp, |state, cx| command::vertical(state, cx, -1)),
-            // `gg` and `G` read a count as the line to go to, counting from one, so it
-            // is not consumed as a repetition; `command::motion` takes the rest.
-            self.handler(VimDocumentStart, |state, cx| {
-                let line = state.pending.count().map_or(0, |count| count - 1);
-                command::motion(state, cx, Motion::Line(line));
-            }),
-            self.handler(VimDocumentEnd, |state, cx| {
-                let last = cx.projection().line_count().saturating_sub(1);
-                let line = state.pending.count().map_or(last, |count| count - 1);
-                command::motion(state, cx, Motion::Line(line));
-            }),
-            self.handler(VimDelete, |state, cx| {
-                command::operator(state, cx, Operator::Delete)
-            }),
-            self.handler(VimChange, |state, cx| {
-                command::operator(state, cx, Operator::Change)
-            }),
-            self.handler(VimYank, |state, cx| {
-                command::operator(state, cx, Operator::Yank)
-            }),
-            self.handler(VimDeleteChar, |state, cx| command::delete_chars(state, cx)),
-            self.handler(VimDeleteToLineEnd, |state, cx| {
-                command::to_line_end(state, cx, Operator::Delete)
-            }),
-            self.handler(VimChangeToLineEnd, |state, cx| {
-                command::to_line_end(state, cx, Operator::Change)
-            }),
-            self.handler(VimPasteAfter, |state, cx| command::paste(state, cx, true)),
-            self.handler(VimPasteBefore, |state, cx| command::paste(state, cx, false)),
-            self.handler(VimUndo, |state, cx| command::history(state, cx, true)),
-            self.handler(VimRedo, |state, cx| command::history(state, cx, false)),
-            self.handler(VimInsert, |state, cx| {
-                command::insert(state, cx, InsertAt::Cursor)
-            }),
-            self.handler(VimInsertAfter, |state, cx| {
-                command::insert(state, cx, InsertAt::AfterCursor)
-            }),
-            self.handler(VimInsertLineStart, |state, cx| {
-                command::insert(state, cx, InsertAt::FirstNonBlank)
-            }),
-            self.handler(VimInsertLineEnd, |state, cx| {
-                command::insert(state, cx, InsertAt::LineEnd)
-            }),
-            self.handler(VimOpenBelow, |state, cx| {
-                command::open_line(state, cx, true)
-            }),
-            self.handler(VimOpenAbove, |state, cx| {
-                command::open_line(state, cx, false)
-            }),
-            self.handler(VimVisual, |state, cx| command::visual(state, cx, false)),
-            self.handler(VimVisualLine, |state, cx| command::visual(state, cx, true)),
-            self.handler(VimNormal, |state, cx| command::normal(state, cx)),
-            self.handler(VimClearPending, |state, cx| {
-                command::clear_pending(state, cx)
-            }),
-        ];
-        macro_rules! counts { ($($action:ident => $digit:literal),* $(,)?) => {
-            $(actions.push(self.count($action, $digit));)*
-        }; }
-        counts! {
-            VimCount0 => 0, VimCount1 => 1, VimCount2 => 2, VimCount3 => 3, VimCount4 => 4,
-            VimCount5 => 5, VimCount6 => 6, VimCount7 => 7, VimCount8 => 8, VimCount9 => 9,
-        }
-        actions
+        handlers(self)
     }
 }
