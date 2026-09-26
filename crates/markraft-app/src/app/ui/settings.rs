@@ -111,7 +111,6 @@ enum Change {
     RevealFolder,
     NewNoteName(NoteNaming),
     AutomaticUpdates(bool),
-    AutomaticDownloads(bool),
     CheckForUpdates,
     ImageName(ImageNaming),
 }
@@ -137,7 +136,6 @@ struct Snapshot {
     new_note_name: NoteNaming,
     /// None where this copy has no updater to ask: unbundled, or not configured.
     automatic_updates: Option<bool>,
-    automatic_downloads: Option<bool>,
     image_name: ImageNaming,
     errors: SettingsErrors,
 }
@@ -191,7 +189,6 @@ impl MarkraftApp {
             images,
             new_note_name: workspace.new_note_name,
             automatic_updates: self.updater.automatically_checks(),
-            automatic_downloads: self.updater.automatically_downloads(),
             image_name: workspace.image_name,
             errors: self.settings_errors.clone(),
         }
@@ -264,11 +261,6 @@ impl MarkraftApp {
             }
             Change::AutomaticUpdates(enabled) => {
                 if let Err(error) = self.updater.set_automatically_checks(enabled) {
-                    self.settings_errors.updates = Some(error);
-                }
-            }
-            Change::AutomaticDownloads(enabled) => {
-                if let Err(error) = self.updater.set_automatically_downloads(enabled) {
                     self.settings_errors.updates = Some(error);
                 }
             }
@@ -1379,16 +1371,6 @@ impl SettingsView {
                 s.automatic_updates.is_none(),
                 p,
                 self.sender(Change::AutomaticUpdates),
-            )
-            .into_any_element(),
-            checkbox(
-                "automatic-downloads",
-                "Download updates automatically",
-                s.automatic_downloads.unwrap_or(false),
-                // Downloading on its own only follows from checking on its own.
-                !s.automatic_updates.unwrap_or(false),
-                p,
-                self.sender(Change::AutomaticDownloads),
             )
             .into_any_element(),
         ];

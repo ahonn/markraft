@@ -18,7 +18,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{ffi::CStr, path::Path, ptr, str::FromStr};
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
-    menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
 };
 
 // Minimal AppKit geometry for struct-returning messages; objc2 checks the encoding.
@@ -141,8 +141,6 @@ pub enum PlatformEvent {
     Settings,
     CheckForUpdates,
     ReportIssue,
-    CopyDebugInfo,
-    RevealLogs,
     Quit,
 }
 
@@ -167,22 +165,9 @@ impl Platform {
         let new_note = MenuItem::new("New Note", true, None);
         let settings = MenuItem::new("Settings…", true, None);
         let updates = MenuItem::new("Check for Updates…", true, None);
-        // An accessory app has no menu bar of its own, so what a menu bar's Help
-        // menu would hold lives here.
+        // An accessory app has no menu bar of its own, so a menu bar's Help menu
+        // comes down to this. Debug info and logs are in the command palette.
         let report = MenuItem::new("Report an Issue…", true, None);
-        let debug_info = MenuItem::new("Copy Debug Info", true, None);
-        let logs = MenuItem::new("Show Logs in Finder", true, None);
-        let help = Submenu::with_items(
-            "Help",
-            true,
-            &[
-                &report,
-                &debug_info,
-                &PredefinedMenuItem::separator(),
-                &logs,
-            ],
-        )
-        .map_err(menu_bar_failure)?;
         let quit = MenuItem::new("Quit Markraft", true, None);
         menu.append_items(&[
             &toggle,
@@ -190,7 +175,7 @@ impl Platform {
             &PredefinedMenuItem::separator(),
             &settings,
             &updates,
-            &help,
+            &report,
             &PredefinedMenuItem::separator(),
             &quit,
         ])
@@ -201,8 +186,6 @@ impl Platform {
             (settings.id().clone(), PlatformEvent::Settings),
             (updates.id().clone(), PlatformEvent::CheckForUpdates),
             (report.id().clone(), PlatformEvent::ReportIssue),
-            (debug_info.id().clone(), PlatformEvent::CopyDebugInfo),
-            (logs.id().clone(), PlatformEvent::RevealLogs),
             (quit.id().clone(), PlatformEvent::Quit),
         ];
         let tray = TrayIconBuilder::new()

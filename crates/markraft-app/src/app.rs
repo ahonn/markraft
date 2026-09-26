@@ -714,8 +714,6 @@ impl MarkraftApp {
                 PlatformEvent::Settings => self.open_settings(window, cx),
                 PlatformEvent::CheckForUpdates => self.check_for_updates(window, cx),
                 PlatformEvent::ReportIssue => self.report_issue(cx),
-                PlatformEvent::CopyDebugInfo => self.copy_debug_info(cx),
-                PlatformEvent::RevealLogs => self.reveal_logs(cx),
                 PlatformEvent::Quit => self.quit(window, cx),
             }
         }
