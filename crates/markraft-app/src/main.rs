@@ -7,6 +7,7 @@ mod doc;
 mod e2e;
 mod fs;
 mod instance;
+mod locale;
 mod logging;
 mod persistence;
 mod platform;
@@ -160,7 +161,7 @@ fn main() {
         markraft_vim::bind_keys(cx);
         bind_app_keys(cx);
         cx.set_reduce_motion(Platform::system_reduce_motion());
-        let platform = Platform::new();
+        let platform = Platform::new(preferences.language.locale());
         let size = size(px(480.), px(320.));
         let mut bounds = Bounds::centered(None, size, cx);
         if let Some([x, y, w, h]) = preferences.window_bounds {

@@ -15,7 +15,7 @@ use gpui_base::{Popup, Select};
 use std::rc::Rc;
 
 /// Every pop-up button the pages hold. Each has its own place in the focus order.
-const IDS: [&str; 15] = [
+const IDS: [&str; 16] = [
     "summon",
     "line-width",
     "ordered-delimiter",
@@ -31,6 +31,7 @@ const IDS: [&str; 15] = [
     "bullet-marker",
     "code-fence",
     "emphasis-marker",
+    "language",
 ];
 
 pub(super) struct Selects {
@@ -160,11 +161,18 @@ impl SettingsView {
             .find(|(_, v)| *v == value)
             .unwrap_or(&options[0])
             .0;
+        let face = crate::locale::legacy_text(face);
         let rows = options
             .iter()
-            .map(|(name, v)| MenuItem::choice(*name, Some(change(*v)), *v == value))
+            .map(|(name, v)| {
+                MenuItem::choice(
+                    crate::locale::legacy_text(name),
+                    Some(change(*v)),
+                    *v == value,
+                )
+            })
             .collect();
-        self.pop_up(id, label, face.into(), rows, p, cx)
+        self.pop_up(id, crate::locale::legacy_text(label), face, rows, p, cx)
     }
 
     /// A pop-up button showing `face`, whose menu holds `rows`.
@@ -172,12 +180,14 @@ impl SettingsView {
     pub(super) fn pop_up(
         &self,
         id: &'static str,
-        label: &'static str,
-        face: SharedString,
+        label: impl Into<SharedString>,
+        face: impl Into<SharedString>,
         rows: Vec<MenuRow>,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let label: SharedString = label.into();
+        let face: SharedString = face.into();
         let open = self.selects.open == Some(id);
         let chosen = rows
             .iter()

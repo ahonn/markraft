@@ -94,6 +94,9 @@ enum FormatMenu {
     List,
 }
 pub struct MarkraftApp {
+    /// The resolved interface locale for this launch. The preference remains
+    /// stored separately so switching it can be applied without rebuilding the app.
+    pub(crate) locale: crate::locale::Locale,
     library: Library,
     /// This Mac's preferences, kept in the settings file outside the notes folder;
     /// the settings window changes them and [`MarkraftApp::apply_preferences`]
@@ -197,6 +200,7 @@ impl MarkraftApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let path = path.map(|path| path.canonicalize().unwrap_or(path));
+        crate::locale::set_active(preferences.language.locale());
         let dark = preferences.dark_mode.unwrap_or(matches!(
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
@@ -309,6 +313,7 @@ impl MarkraftApp {
             this.sync_find(cx);
         });
         let mut app = Self {
+            locale: preferences.language.locale(),
             library,
             preferences,
             persistence: store.map(|store| Self::start_persistence(store, house.clone())),

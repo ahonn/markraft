@@ -22,8 +22,9 @@ mod shortcut;
 use super::*;
 use crate::platform::Shortcut;
 use crate::storage::{
-    BulletMarker, CodeFence, EditorFont, EmphasisMarker, HardBreakStyle, ImageNaming, LineHeight,
-    LineWidth, NoteNaming, OrderedDelimiter, Pref, Preferences, Summon, TabKey,
+    BulletMarker, CodeFence, EditorFont, EmphasisMarker, HardBreakStyle, ImageNaming,
+    LanguagePreference, LineHeight, LineWidth, NoteNaming, OrderedDelimiter, Pref, Preferences,
+    Summon, TabKey,
 };
 use controls::{
     ChordFace, Palette, button, checkbox, chord_face, error, group_gap, line, metrics::*, row,
@@ -864,6 +865,19 @@ impl SettingsView {
             p,
             self.sender(|value| Change::Pref(Pref::Theme(value))),
         );
+        let language = self.select(
+            "language",
+            "Language",
+            &[
+                ("System", LanguagePreference::System),
+                ("English", LanguagePreference::English),
+                ("简体中文", LanguagePreference::SimplifiedChinese),
+            ],
+            s.preferences.language,
+            |value| Change::Pref(Pref::Language(value)),
+            p,
+            cx,
+        );
 
         let (toggle, new_note) = (&s.preferences.hotkey, &s.preferences.new_note_hotkey);
         let summon = self.select(
@@ -974,6 +988,7 @@ impl SettingsView {
                 vec![line(vec![theme.into_any_element()])],
                 p,
             ),
+            row(Some("Language"), vec![line(vec![language])], p),
         ]
     }
 
@@ -1133,7 +1148,7 @@ impl SettingsView {
             let choose = self.pop_up(
                 "notes-folder",
                 "Notes folder",
-                "None".into(),
+                "None",
                 vec![MenuItem::action("Choose Folder…", Change::ChooseFolder)],
                 p,
                 cx,
@@ -1147,7 +1162,7 @@ impl SettingsView {
         let notes_folder = self.pop_up(
             "notes-folder",
             "Notes folder",
-            root_name.clone().into(),
+            root_name.clone(),
             vec![
                 MenuItem::choice(root_name.clone(), None, true),
                 MenuRow::Separator,
@@ -1179,7 +1194,7 @@ impl SettingsView {
             }
             rows.push(MenuRow::Separator);
             rows.push(MenuItem::action("Choose Folder…", choose));
-            self.pop_up(id, label, face.into(), rows, p, cx)
+            self.pop_up(id, label, face, rows, p, cx)
         };
 
         if let (Some(new_notes), Some(images)) = (&s.new_notes, &s.images) {

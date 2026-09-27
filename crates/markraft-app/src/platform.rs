@@ -4,6 +4,7 @@
 //! window; native pointers below are borrowed only for the duration of a call.
 pub(crate) mod symbols;
 
+use crate::locale::{Locale, Translator};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use objc2::{
     AllocAnyThread, MainThreadMarker, class,
@@ -48,6 +49,15 @@ unsafe impl Encode for NSRect {
 }
 
 const LOGIN_ITEMS: &str = "System Settings → General → Login Items & Extensions";
+
+fn menu_text(translator: &Translator, key: &str, english: &str) -> String {
+    let value = translator.text(key);
+    if value == key {
+        english.to_owned()
+    } else {
+        value
+    }
+}
 
 /// The version this copy says it is, and its build when that says something more:
 /// from the bundle, or from the crate when running outside one.
@@ -153,22 +163,48 @@ pub struct Platform {
     /// new one, so the chord being recorded is not taken by a running shortcut.
     suspended: bool,
     menu_actions: Vec<(MenuId, PlatformEvent)>,
+    menu_items: Vec<MenuItem>,
     // Retained NSRunningApplication; None when no previous app is known.
     previous_app: Option<Retained<AnyObject>>,
 }
 
 impl Platform {
-    pub fn new() -> Result<Self, String> {
+    pub fn new(locale: Locale) -> Result<Self, String> {
         let hotkeys = GlobalHotKeyManager::new().map_err(menu_bar_failure)?;
+        let translator = Translator::new(locale);
         let menu = Menu::new();
-        let toggle = MenuItem::new("Show / Hide Notes", true, None);
-        let new_note = MenuItem::new("New Note", true, None);
-        let settings = MenuItem::new("Settings…", true, None);
-        let updates = MenuItem::new("Check for Updates…", true, None);
+        let toggle = MenuItem::new(
+            menu_text(&translator, "menu.show-hide", "Show / Hide Notes"),
+            true,
+            None,
+        );
+        let new_note = MenuItem::new(
+            menu_text(&translator, "menu.new-note", "New Note"),
+            true,
+            None,
+        );
+        let settings = MenuItem::new(
+            menu_text(&translator, "menu.settings", "Settings…"),
+            true,
+            None,
+        );
+        let updates = MenuItem::new(
+            menu_text(&translator, "menu.updates", "Check for Updates…"),
+            true,
+            None,
+        );
         // An accessory app has no menu bar of its own, so a menu bar's Help menu
         // comes down to this. Debug info and logs are in the command palette.
-        let report = MenuItem::new("Report an Issue…", true, None);
-        let quit = MenuItem::new("Quit Markraft", true, None);
+        let report = MenuItem::new(
+            menu_text(&translator, "menu.report", "Report an Issue…"),
+            true,
+            None,
+        );
+        let quit = MenuItem::new(
+            menu_text(&translator, "menu.quit", "Quit Markraft"),
+            true,
+            None,
+        );
         menu.append_items(&[
             &toggle,
             &new_note,
@@ -201,6 +237,7 @@ impl Platform {
             shortcuts: [None; 2],
             suspended: false,
             menu_actions,
+            menu_items: vec![toggle, new_note, settings, updates, report, quit],
             previous_app: None,
         };
         platform.remember_frontmost_app();
@@ -211,6 +248,22 @@ impl Platform {
             let _: Bool = msg_send![app, setActivationPolicy: 1_isize];
         }
         Ok(platform)
+    }
+
+    /// Update the status item's menu after the interface language changes.
+    pub fn set_locale(&mut self, locale: Locale) {
+        let translator = Translator::new(locale);
+        let labels = [
+            ("menu.show-hide", "Show / Hide Notes"),
+            ("menu.new-note", "New Note"),
+            ("menu.settings", "Settings…"),
+            ("menu.updates", "Check for Updates…"),
+            ("menu.report", "Report an Issue…"),
+            ("menu.quit", "Quit Markraft"),
+        ];
+        for (item, (key, english)) in self.menu_items.iter().zip(labels) {
+            item.set_text(menu_text(&translator, key, english));
+        }
     }
 
     /// Register before replacing, so an unavailable shortcut preserves the old one.

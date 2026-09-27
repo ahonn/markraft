@@ -36,6 +36,13 @@ impl MarkraftApp {
         cx: &mut Context<Self>,
     ) {
         let now = self.preferences.clone();
+        if before.language != now.language {
+            self.locale = now.language.locale();
+            crate::locale::set_active(self.locale);
+            if let Some(platform) = &mut self.platform {
+                platform.set_locale(self.locale);
+            }
+        }
         if before.dark_mode != now.dark_mode {
             self.apply_theme(window, cx);
         }

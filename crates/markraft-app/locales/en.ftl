@@ -1,0 +1,14 @@
+language = Language
+language.system = System
+language.english = English
+language.simplified-chinese = Simplified Chinese
+greeting = Hello, {name}
+today = Today
+yesterday = Yesterday
+days-ago = {days} days ago
+menu.show-hide = Show / Hide Notes
+menu.new-note = New Note
+menu.settings = Settings…
+menu.updates = Check for Updates…
+menu.report = Report an Issue…
+menu.quit = Quit Markraft

@@ -1,0 +1,14 @@
+language = 语言
+language.system = 跟随系统
+language.english = English
+language.simplified-chinese = 简体中文
+greeting = 你好，{name}
+today = 今天
+yesterday = 昨天
+days-ago = {days} 天前
+menu.show-hide = 显示/隐藏笔记
+menu.new-note = 新建笔记
+menu.settings = 设置…
+menu.updates = 检查更新…
+menu.report = 报告问题…
+menu.quit = 退出 Markraft

@@ -13,6 +13,10 @@ use std::{
 use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
 
+// Kept in storage's public vocabulary because Preferences persists this value and
+// Settings controls use the same type when applying a change.
+pub use crate::locale::LanguagePreference;
+
 /// Folder name under `Documents` used when Settings has no notes folder yet.
 pub const DEFAULT_NOTES_FOLDER_NAME: &str = "Markraft";
 
@@ -71,6 +75,8 @@ const LIBRARY_VERSION: u32 = 2;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
+    /// Preferred interface language. `System` follows the operating system.
+    pub language: LanguagePreference,
     pub dark_mode: Option<bool>,
     pub auto_height: bool,
     pub hotkey: String,
@@ -318,6 +324,7 @@ impl Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            language: LanguagePreference::default(),
             dark_mode: None,
             auto_height: true,
             hotkey: "Alt+N".into(),
@@ -356,6 +363,7 @@ impl Default for Preferences {
 /// set, so they have no word here.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pref {
+    Language(LanguagePreference),
     Theme(Option<bool>),
     AutoHeight(bool),
     VimMode(bool),
@@ -393,6 +401,7 @@ impl Pref {
     /// Write this setting into `preferences`.
     pub fn apply(self, preferences: &mut Preferences) {
         match self {
+            Pref::Language(language) => preferences.language = language,
             Pref::Theme(mode) => preferences.dark_mode = mode,
             Pref::AutoHeight(on) => preferences.auto_height = on,
             Pref::VimMode(on) => preferences.vim_mode = on,
@@ -1122,6 +1131,7 @@ mod tests {
     /// shows up as a difference.
     fn every_preference_changed() -> Preferences {
         let preferences = Preferences {
+            language: crate::locale::LanguagePreference::SimplifiedChinese,
             dark_mode: Some(true),
             auto_height: false,
             hotkey: "Ctrl+Shift+M".into(),
@@ -1203,6 +1213,7 @@ mod tests {
             Pref::OrderedDelimiter(changed.ordered_delimiter),
             Pref::HardBreak(changed.hard_break),
             Pref::SettingsPage(changed.settings_page.clone()),
+            Pref::Language(changed.language),
         ];
         let mut applied = Preferences::default();
         for word in words {

@@ -203,7 +203,7 @@ fn local(milliseconds: u64) -> u64 {
 
 /// When a note was last written, as the user would say it. Past a week it is a date,
 /// and past this year the date carries it.
-fn relative_day(updated: u64, now: u64) -> String {
+fn relative_day(updated: u64, now: u64, locale: crate::locale::Locale) -> String {
     const DAY: u64 = 86_400_000;
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -211,9 +211,10 @@ fn relative_day(updated: u64, now: u64) -> String {
     let (updated, now) = (local(updated), local(now));
     // A note written with the clock ahead of this one still reads as today.
     match (now / DAY).saturating_sub(updated / DAY) {
-        0 => "Today".to_owned(),
-        1 => "Yesterday".to_owned(),
-        days @ 2..=6 => format!("{days} days ago"),
+        0 => crate::locale::Translator::new(locale).text("today"),
+        1 => crate::locale::Translator::new(locale).text("yesterday"),
+        days @ 2..=6 => crate::locale::Translator::new(locale)
+            .text_with("days-ago", &[("days", &days.to_string())]),
         _ => {
             let (year, month, date, ..) = crate::vault::civil(updated);
             let month = MONTHS[(month.clamp(1, 12) - 1) as usize];
@@ -776,12 +777,13 @@ impl MarkraftApp {
     fn row(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: impl Into<SharedString>,
         hint: &'static str,
         ex: Option<String>,
         intent: Intent,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let label: SharedString = crate::locale::legacy_text(label.into().as_ref()).into();
         let kind = intent_icon(&intent);
         let destructive = matches!(
             intent,
@@ -799,7 +801,7 @@ impl MarkraftApp {
         div()
             .id(id)
             .role(Role::Button)
-            .aria_label(label)
+            .aria_label(label.clone())
             .flex()
             .items_center()
             .gap(px(8.))
@@ -1038,7 +1040,7 @@ impl MarkraftApp {
                     .text_center()
                     .text_size(px(13.))
                     .text_color(self.muted())
-                    .child("No matching notes"),
+                    .child(crate::locale::legacy_text("No matching notes")),
             );
         }
         for (index, note) in notes.iter().enumerate() {
@@ -1046,14 +1048,10 @@ impl MarkraftApp {
             let current = note.id == self.library.active_id;
             let selected = index == self.picker.row();
             let status = if current {
-                "Current".to_owned()
+                crate::locale::legacy_text("Current")
             } else {
-                let date = relative_day(note.updated_at, now);
-                let date = match date.as_str() {
-                    "Today" | "Yesterday" => date.to_lowercase(),
-                    _ => date,
-                };
-                format!("Edited {date}")
+                let date = relative_day(note.updated_at, now, self.locale);
+                format!("{} {date}", crate::locale::legacy_text("Edited"))
             };
             let location = note.path.as_ref().map(|path| {
                 shorten_location(
@@ -1067,7 +1065,7 @@ impl MarkraftApp {
                 Some(_) => self.muted(),
                 None => notes_style(self.dark).marker,
             };
-            let location = location.unwrap_or_else(|| "No file yet".to_owned());
+            let location = location.unwrap_or_else(|| crate::locale::legacy_text("No file yet"));
             let meta = format!("{status} · {location}");
             let mut controls = div()
                 .absolute()
@@ -1629,7 +1627,10 @@ impl MarkraftApp {
             .filter(|command| {
                 command.intent.is_some()
                     && !command.ex_only
-                    && command.label.to_lowercase().contains(&query)
+                    && (command.label.to_lowercase().contains(&query)
+                        || crate::locale::legacy_text(command.label)
+                            .to_lowercase()
+                            .contains(&query))
             })
             .collect();
         items.sort_by_key(|command| command.intent.as_ref().map(Intent::action_group));
@@ -1653,7 +1654,7 @@ impl MarkraftApp {
                     .text_center()
                     .text_size(px(13.))
                     .text_color(self.muted())
-                    .child("No matching actions"),
+                    .child(crate::locale::legacy_text("No matching actions")),
             );
         }
         let mut previous_group = None;

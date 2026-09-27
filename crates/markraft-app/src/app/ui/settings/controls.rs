@@ -161,7 +161,7 @@ pub(super) fn row(label: Option<&'static str>, lines: Vec<AnyElement>, p: Palett
                 .justify_end()
                 .text_size(px(TEXT_SIZE))
                 .text_color(p.text)
-                .children(label.map(|label| format!("{label}:"))),
+                .children(label.map(|label| format!("{}:", crate::locale::legacy_text(label)))),
         )
         .child(
             div()
@@ -205,6 +205,8 @@ pub(super) fn button(
     p: Palette,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Button {
+    let label: SharedString = label.into();
+    let label: SharedString = crate::locale::legacy_text(label.as_ref()).into();
     Button::new(id)
         .flex_shrink_0()
         .h(px(CONTROL_HEIGHT))
@@ -216,7 +218,7 @@ pub(super) fn button(
         .cursor_pointer()
         .hover(move |style| style.bg(p.pressed))
         .active(move |style| style.bg(p.text.alpha(0.18)))
-        .child(label.into())
+        .child(label)
         .on_click(on_click)
 }
 
@@ -229,10 +231,11 @@ pub(super) fn checkbox(
     p: Palette,
     on_change: impl Fn(bool, &mut Window, &mut App) + 'static,
 ) -> Checkbox {
+    let label = crate::locale::legacy_text(label);
     Checkbox::new(id)
         .checked(checked)
         .disabled(disabled)
-        .accessibility_label(label)
+        .accessibility_label(label.clone())
         .flex()
         .items_center()
         .gap(px(CHECKBOX_GAP))
