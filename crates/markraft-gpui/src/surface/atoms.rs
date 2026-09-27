@@ -42,6 +42,8 @@ pub(super) struct DisplayText {
     pub(super) formulas: Vec<PendingFormula>,
     pub(super) math_previews: Vec<MathPreview>,
     pub(super) objects: Vec<InlineObject>,
+    /// A formula's render was still outstanding, so its source stood in.
+    pub(super) math_pending: bool,
 }
 
 impl DisplayText {
@@ -56,6 +58,7 @@ impl DisplayText {
             formulas: Vec::new(),
             math_previews: Vec::new(),
             objects: Vec::new(),
+            math_pending: false,
         }
     }
 }
@@ -88,6 +91,10 @@ pub(super) struct FormulaMetrics {
     descent: Pixels,
     width: Pixels,
 }
+
+/// The space kept between a formula and a number beside it, on both sides so
+/// the formula stays centered.
+const TAG_GAP: Pixels = px(12.);
 
 pub(super) fn formula_metrics(
     body: (f32, f32, f32),
@@ -123,7 +130,7 @@ pub(super) fn formula_metrics(
             px(tag_width * tag_scale),
             px((tag_ascent + tag_descent) * tag_scale),
         );
-        let fits = px(body_width) + (tag_size.width + px(12.)) * 2. <= column;
+        let fits = px(body_width) + (tag_size.width + TAG_GAP) * 2. <= column;
         let top = if fits {
             // Baseline alignment keeps a text tag natural beside a tall fraction.
             let ascent = metrics.ascent.max(px(tag_ascent * tag_scale));
@@ -156,6 +163,15 @@ fn rendered_metrics(
     )
 }
 
+/// The narrowest column that shows a formula at full size with its number
+/// beside it, as [`formula_metrics`] places one.
+fn natural_formula_width(
+    body: &crate::math::RenderedMath,
+    tag: Option<&crate::math::RenderedMath>,
+) -> Pixels {
+    px(body.width) + tag.map_or(px(0.), |tag| (px(tag.width) + TAG_GAP) * 2.)
+}
+
 fn push_formula(
     layout: &mut LayoutLine,
     rendered: crate::math::RenderedMath,
@@ -163,17 +179,20 @@ fn push_formula(
     target: Option<usize>,
     metrics: FormulaMetrics,
     origin: Point<Pixels>,
+    visual: Option<usize>,
 ) {
     layout.formulas.push(MathDecoration {
         bounds: Bounds::new(origin + metrics.body.origin, metrics.body.size),
         content: MathContent::Formula(rendered.image),
         target,
+        visual,
     });
     if let Some((tag, bounds)) = tag.zip(metrics.tag) {
         layout.formulas.push(MathDecoration {
             bounds: Bounds::new(origin + bounds.origin, bounds.size),
             content: MathContent::Formula(tag.image),
             target: None,
+            visual,
         });
     }
 }
@@ -205,6 +224,7 @@ pub(super) fn place_formulas(
             formula.target,
             formula.metrics,
             origin,
+            Some(visual),
         );
     }
     let mut top = layout.text_height()
@@ -223,7 +243,15 @@ pub(super) fn place_formulas(
                 display,
             } => {
                 let metrics = rendered_metrics(&rendered, tag.as_ref(), layout.width, display);
-                push_formula(layout, rendered, tag, target, metrics, point(px(0.), top));
+                push_formula(
+                    layout,
+                    rendered,
+                    tag,
+                    target,
+                    metrics,
+                    point(px(0.), top),
+                    None,
+                );
                 top += metrics.ascent + metrics.descent;
             }
             MathPreview::Error(label) => {
@@ -235,6 +263,7 @@ pub(super) fn place_formulas(
                     ),
                     content: MathContent::Error(label),
                     target: None,
+                    visual: None,
                 });
                 top += height;
             }
@@ -264,18 +293,31 @@ pub(super) fn display_text(
     column: Pixels,
     text_system: &WindowTextSystem,
 ) -> DisplayText {
-    display_text_mode(input, line, index, font_size, column, text_system, true)
+    display_text_mode(
+        input,
+        line,
+        index,
+        font_size,
+        column,
+        None,
+        text_system,
+        true,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn display_text_mode(
     input: &ShapeInput<'_>,
     line: &Line,
     index: usize,
     font_size: Pixels,
     column: Pixels,
+    cell: Option<super::shape::CellWidth>,
     text_system: &WindowTextSystem,
     render_objects: bool,
 ) -> DisplayText {
+    // A table row is as tall as its cells' text, so nothing may hang below it.
+    let previews = !input.single_line && cell.is_none();
     let projection = input.projection;
     if line.kind() == LineKind::LeafBlock {
         return DisplayText::stand_in(" ".to_owned());
@@ -325,6 +367,15 @@ pub(super) fn display_text_mode(
                 })
         })
         .collect();
+    let math_pending = input.maths.is_some()
+        && math_spans.iter().zip(&math_results).zip(&equations).any(
+            |((span, result), equation)| {
+                let source = equation.map_or(span.tex.as_str(), |equation| {
+                    equation.render_source.as_str()
+                });
+                result.is_none() && !source.trim().is_empty()
+            },
+        );
     let tag_results: Vec<_> = equations
         .iter()
         .map(|equation| {
@@ -372,7 +423,7 @@ pub(super) fn display_text_mode(
                     .and_then(|result| result.as_ref().ok())
                     .cloned();
                 let target = equation.and_then(|equation| equation.target);
-                if !input.single_line {
+                if previews {
                     if let Some(diagnostic) =
                         equation.and_then(|equation| equation.diagnostic.as_deref())
                     {
@@ -397,7 +448,18 @@ pub(super) fn display_text_mode(
                 match result {
                     Some(Ok(rendered)) if !revealed => {
                         let centered = span.display && span.is_standalone(source);
-                        let metrics = rendered_metrics(rendered, tag.as_ref(), column, centered);
+                        let metrics = if cell == Some(super::shape::CellWidth::Natural) {
+                            // Measuring a cell: ask for the room the formula
+                            // and its number need, not the whole editor.
+                            rendered_metrics(
+                                rendered,
+                                tag.as_ref(),
+                                natural_formula_width(rendered, tag.as_ref()),
+                                centered,
+                            )
+                        } else {
+                            rendered_metrics(rendered, tag.as_ref(), column, centered)
+                        };
                         let count = 1;
                         text.push(OBJECT);
                         run_bytes.push(OBJECT.len_utf8());
@@ -427,7 +489,7 @@ pub(super) fn display_text_mode(
                         display += count;
                         continue;
                     }
-                    Some(Ok(rendered)) if !input.single_line => {
+                    Some(Ok(rendered)) if previews => {
                         math_previews.push(MathPreview::Formula {
                             rendered: rendered.clone(),
                             tag,
@@ -435,7 +497,7 @@ pub(super) fn display_text_mode(
                             display: span.display,
                         });
                     }
-                    Some(Err(error)) if !input.single_line => {
+                    Some(Err(error)) if previews => {
                         let message: String =
                             format!("Formula: {error}").chars().take(96).collect();
                         math_previews.push(MathPreview::Error(shape_source_label(
@@ -565,6 +627,7 @@ pub(super) fn display_text_mode(
         formulas,
         math_previews,
         objects,
+        math_pending,
     }
 }
 

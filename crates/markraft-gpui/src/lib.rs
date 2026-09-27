@@ -641,6 +641,13 @@ pub struct EditorView {
     animation_task: Option<gpui::Task<()>>,
     /// See [`EditorView::set_animate_images`].
     animate_images: bool,
+    /// Where the pointer rests over the editor, while it does.
+    pointer: Option<gpui::Point<Pixels>>,
+    /// The view scrolled under a resting pointer: the next paint asks again
+    /// which picture is under it.
+    pub(crate) rehover: std::cell::Cell<bool>,
+    /// Whether releasing the view drops its frames from the window's atlas.
+    release_hooked: bool,
 }
 
 impl EventEmitter<EditorEvent> for EditorView {}
@@ -741,6 +748,9 @@ impl EditorView {
             player: animation::Player::default(),
             animation_task: None,
             animate_images: true,
+            pointer: None,
+            rehover: std::cell::Cell::new(false),
+            release_hooked: false,
             shaping,
         }
     }
@@ -882,18 +892,37 @@ impl EditorView {
             && let Some(first) = self.player.play(&picture)
         {
             self.animation_task = Some(cx.spawn(async move |this, cx| {
-                let mut delay = first;
+                // Frames are due at fixed times from the start, so the time
+                // spent stepping and painting does not add up over a loop.
+                let mut due = std::time::Instant::now() + first;
                 loop {
-                    cx.background_executor().timer(delay).await;
-                    let next = this.update(cx, |this, cx| {
-                        let next = this.player.advance();
-                        cx.notify();
-                        next
+                    let wait = due.saturating_duration_since(std::time::Instant::now());
+                    cx.background_executor().timer(wait).await;
+                    let tick = this.update(cx, |this, cx| {
+                        if cx.reduce_motion() {
+                            this.player.stop();
+                            cx.notify();
+                            return None;
+                        }
+                        let tick = this.player.advance();
+                        // A stall leaves the frame on screen as it is.
+                        if tick.is_none_or(|tick| tick.changed) {
+                            cx.notify();
+                        }
+                        tick
                     });
-                    match next {
-                        Ok(Some(next)) => delay = next,
-                        _ => break,
-                    }
+                    let Ok(Some(tick)) = tick else {
+                        break;
+                    };
+                    let now = std::time::Instant::now();
+                    due = if !tick.changed {
+                        now + tick.delay
+                    } else if due + tick.delay < now {
+                        // Too late to keep time; start counting again.
+                        now + tick.delay
+                    } else {
+                        due + tick.delay
+                    };
                 }
             }));
         }
@@ -1005,6 +1034,9 @@ impl EditorView {
     /// assistive apps. Nothing a reader sees changes; the next frame that
     /// draws this editor lays the document out again.
     pub fn release_layout(&mut self) {
+        // Nothing draws a released editor, so nothing would see it play.
+        self.animation_task = None;
+        self.player.stop();
         self.shaping.release();
         self.frame.release_rows();
         self.accessible_text.borrow_mut().release();
@@ -2429,10 +2461,23 @@ impl EditorView {
         );
     }
 
-    fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.selecting {
             self.select_point(event.position, true, cx);
         }
+        if !self.release_hooked {
+            // The atlas keeps an uploaded frame until it is dropped from it,
+            // and a view released while playing never paints to drop its own.
+            self.release_hooked = true;
+            cx.on_release_in(window, |this, window, _| {
+                this.player.stop();
+                for frame in this.player.take_retired() {
+                    let _ = window.drop_image(frame);
+                }
+            })
+            .detach();
+        }
+        self.pointer = Some(event.position);
         self.hover_picture(Some(event.position), cx);
     }
     fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -2495,6 +2540,7 @@ impl Render for EditorView {
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !*hovered {
+                    this.pointer = None;
                     this.hover_picture(None, cx);
                 }
             }))
@@ -2532,7 +2578,12 @@ impl Render for EditorView {
             })
             .when(!self.single_line, |this| this.overflow_y_scroll())
             .track_scroll(&self.scroll)
-            .on_scroll_wheel(cx.listener(|this, _, _, cx| this.flash_scrollbar(cx)))
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                this.flash_scrollbar(cx);
+                // Scrolling moves the pictures, not the pointer.
+                this.pointer = Some(event.position);
+                this.rehover.set(true);
+            }))
             .p(self.style().padding)
             .pt(self.style().padding + self.style().top_overlay)
             .pb(self.style().padding + self.style().bottom_overlay)

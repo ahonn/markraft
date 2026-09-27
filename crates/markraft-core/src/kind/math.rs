@@ -119,8 +119,16 @@ pub fn formula_spans(line: &Line, source: &str, types: &DocTypes) -> Vec<Formula
     };
     let mut formulas = Vec::with_capacity(fences.len());
     for (_, display, ranges) in fences {
-        let [open, close] = ranges.as_slice() else {
-            continue;
+        let (open, close) = match ranges.as_slice() {
+            [open, close] => (open.clone(), close.clone()),
+            // An empty body leaves the two fences adjacent with identical
+            // marks, so they read as one run. Every kind's opening and closing
+            // fences have the same length, which puts the boundary at the middle.
+            [both] if both.len() % 2 == 0 && !both.is_empty() => {
+                let middle = both.start + both.len() / 2;
+                (both.start..middle, middle..both.end)
+            }
+            _ => continue,
         };
         // Delimiter spelling belongs to the document kind. The marks give
         // every consumer the same source and body boundaries.

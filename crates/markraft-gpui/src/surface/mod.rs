@@ -524,6 +524,7 @@ impl Element for EditorSurface {
         let placeholder = (projection.line_count() == 1 && projection.plain_text().is_empty())
             .then(|| editor.placeholder.clone());
         let shown = editor.player.shown();
+        let rehover = editor.rehover.take();
         for frame in editor.player.take_retired() {
             let _ = window.drop_image(frame);
         }
@@ -886,7 +887,13 @@ impl Element for EditorSurface {
         });
         // The picture playing has scrolled away or left the document: it
         // stops rather than repaint what no one sees.
-        if shown.any() && !shown_painted {
+        if rehover {
+            // This frame's layout is the scrolled one the pointer now rests on.
+            self.editor.update(cx, |editor, cx| {
+                let pointer = editor.pointer;
+                editor.hover_picture(pointer, cx);
+            });
+        } else if shown.any() && !shown_painted {
             self.editor
                 .update(cx, |editor, cx| editor.hover_picture(None, cx));
         }

@@ -101,6 +101,20 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_fences_of_an_empty_formula_still_form_one() {
+        let found = formulas("$$$$");
+        assert_eq!(
+            found,
+            [FormulaSpan {
+                source: 0..4,
+                content: 2..2,
+                tex: String::new(),
+                display: true,
+            }]
+        );
+    }
+
+    #[test]
     fn editable_body_excludes_every_delimiter_character() {
         for source in ["中文 $x$ tail", "$`x`$", "$$x$$", "$$\n\n$$"] {
             let (projection, types) = projected(source);

@@ -145,3 +145,73 @@ fn display_formulas_in_lists_and_quotes_preserve_their_containers() {
         assert!(!canonical.contains("\\$"));
     }
 }
+
+#[test]
+fn a_formula_never_closes_inside_a_code_or_html_block() {
+    let schema = commonmark_schema();
+    let code = schema.node_id(md::CODE_BLOCK).unwrap();
+    let heading = schema.node_id(md::HEADING).unwrap();
+    for text in [
+        "$$\n```sh\necho $$\n```\n\n# Title\n\nPara",
+        "$$\n<div>\ncost $$\n</div>\n\n# Title",
+    ] {
+        let source = SourceDocument::parse(&schema, text).unwrap();
+        let doc = source.document();
+        let kinds: Vec<_> = (0..doc.child_count())
+            .map(|index| doc.child(index).type_id())
+            .collect();
+        assert!(kinds.contains(&heading), "{text:?}: {kinds:?}");
+        if text.contains("```") {
+            assert!(kinds.contains(&code), "{text:?}: {kinds:?}");
+        }
+        assert_eq!(source.render(&schema, doc).unwrap(), text);
+        assert_eq!(
+            from_markdown(&schema, &to_markdown(&schema, doc)).unwrap(),
+            *doc
+        );
+    }
+}
+
+#[test]
+fn formula_lines_that_look_like_setext_underlines_stay_tex() {
+    let schema = commonmark_schema();
+    for formula in [
+        "$$\nx\n---\n$$",
+        "$$\nx\n===\n$$",
+        "$$\n---\n$$",
+        "- $$\n  x\n  ---\n  $$",
+    ] {
+        let source = SourceDocument::parse(&schema, formula).unwrap();
+        assert_eq!(source.document().child_count(), 1, "{formula:?}");
+        assert_eq!(to_markdown(&schema, source.document()), formula);
+        assert_eq!(
+            from_markdown(&schema, &to_markdown(&schema, source.document())).unwrap(),
+            *source.document(),
+            "{formula:?}"
+        );
+    }
+    let paragraph = schema.node_id(md::PARAGRAPH).unwrap();
+    let source = SourceDocument::parse(&schema, "$$\nx\n---\n$$").unwrap();
+    assert_eq!(source.document().child(0).type_id(), paragraph);
+}
+
+#[test]
+fn an_unclosed_formula_never_pairs_with_the_opening_fence_of_a_later_one() {
+    let schema = commonmark_schema();
+    for text in ["$$\n\n# A\n\ntext\n\n$$\nx\n$$", "$$\n\ntext\n\n$$\nx\n$$"] {
+        let source = SourceDocument::parse(&schema, text).unwrap();
+        let doc = source.document();
+        let last = doc.child(doc.child_count() - 1);
+        let mut body = String::new();
+        last.descendants(&mut |node, _, _, _| {
+            if let Some(text) = node.text() {
+                body.push_str(text);
+            }
+            true
+        });
+        // Literal line breaks are atoms, so only the text runs remain.
+        assert_eq!(body, "$$x$$", "{text:?}");
+        assert_eq!(source.render(&schema, doc).unwrap(), text);
+        assert_eq!(to_markdown(&schema, doc), text);
+    }
+}

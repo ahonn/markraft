@@ -67,8 +67,15 @@ pub(crate) struct DisplayBlock {
 
 impl DisplayBlock {
     /// Recognize a formula at a paragraph start supplied by the block parser.
-    /// Requiring that context prevents fences inside code from becoming math.
-    pub(crate) fn starting_at(lines: &[&str], start: usize, column: usize) -> Option<Self> {
+    /// Requiring that context prevents fences inside code from becoming math;
+    /// `blocks` keeps a closing fence from being taken out of code or from
+    /// the opening line of a later formula.
+    pub(crate) fn starting_at(
+        lines: &[&str],
+        start: usize,
+        column: usize,
+        blocks: &SourceBlocks,
+    ) -> Option<Self> {
         let first = *lines.get(start)?;
         let opening = first.get(column..)?.strip_prefix(DISPLAY_FENCE)?;
         if opening.contains(DISPLAY_FENCE) {
@@ -76,6 +83,14 @@ impl DisplayBlock {
         }
         let continuation = continuation_prefix(first.get(..column)?);
         for (end, line) in lines.iter().enumerate().skip(start + 1) {
+            if blocks.is_literal(end) || blocks.opens_paragraph(end) {
+                // Code and HTML lines are not Markdown text, and a fence that
+                // opens a longer paragraph starts another formula instead.
+                if line.contains(DISPLAY_FENCE) {
+                    return None;
+                }
+                continue;
+            }
             if let Some(body) = line
                 .strip_prefix(&continuation)
                 .and_then(|line| line.strip_suffix(DISPLAY_FENCE))
@@ -124,6 +139,36 @@ impl DisplayBlock {
     }
 }
 
+/// Line facts from the ordinary block parse that decide where a candidate
+/// formula may close. Lines are zero-based.
+#[derive(Default)]
+pub(crate) struct SourceBlocks {
+    literal: Vec<Range<usize>>,
+    multiline_paragraph_starts: Vec<usize>,
+}
+
+impl SourceBlocks {
+    /// Lines of a code or HTML block, which never supply a closing fence.
+    pub(crate) fn add_literal(&mut self, lines: Range<usize>) {
+        self.literal.push(lines);
+    }
+
+    /// A paragraph that begins on `start` and continues past it.
+    pub(crate) fn add_paragraph(&mut self, lines: Range<usize>) {
+        if lines.len() > 1 {
+            self.multiline_paragraph_starts.push(lines.start);
+        }
+    }
+
+    fn is_literal(&self, line: usize) -> bool {
+        self.literal.iter().any(|lines| lines.contains(&line))
+    }
+
+    fn opens_paragraph(&self, line: usize) -> bool {
+        self.multiline_paragraph_starts.contains(&line)
+    }
+}
+
 /// List markers become indentation on continuation lines; quote markers keep
 /// their positions. Markdown container prefixes use ASCII characters only.
 fn continuation_prefix(first: &str) -> String {
@@ -168,7 +213,7 @@ mod tests {
     #[test]
     fn container_source_keeps_tex_and_stops_at_container_boundaries() {
         let lines = ["> - [x] $$", ">   ", ">     中文", ">   $$"];
-        let block = DisplayBlock::starting_at(&lines, 0, 8).unwrap();
+        let block = DisplayBlock::starting_at(&lines, 0, 8, &SourceBlocks::default()).unwrap();
         assert_eq!(block.lines, 0..4);
         assert_eq!(block.continuation(), ">   ");
         let source = block.source(&lines);
@@ -180,7 +225,9 @@ mod tests {
             vec!["$$", "x $$ y", "$$"],
         ] {
             let column = usize::from(lines[0] != "$$") * 2;
-            assert!(DisplayBlock::starting_at(&lines, 0, column).is_none());
+            assert!(
+                DisplayBlock::starting_at(&lines, 0, column, &SourceBlocks::default()).is_none()
+            );
         }
     }
 }

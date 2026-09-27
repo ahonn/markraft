@@ -213,7 +213,8 @@ pub(super) fn paint_pictures(
 /// Draw formula results and diagnostics over their measured decorations.
 pub(super) fn paint_formulas(row: &LayoutLine, window: &mut Window, cx: &mut App) {
     for formula in &row.formulas {
-        let bounds = Bounds::new(row.origin + formula.bounds.origin, formula.bounds.size);
+        let local = row.formula_bounds(formula);
+        let bounds = Bounds::new(row.origin + local.origin, local.size);
         match &formula.content {
             MathContent::Formula(image) => {
                 let _ =

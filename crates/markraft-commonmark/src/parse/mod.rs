@@ -257,20 +257,36 @@ fn parse_with_math<'a>(
         return root;
     }
     let lines: Vec<&str> = source.split('\n').collect();
+    let mut blocks = crate::math::SourceBlocks::default();
+    for node in root.descendants() {
+        let data = node.data.borrow();
+        let lines = data.sourcepos.start.line.saturating_sub(1)..data.sourcepos.end.line;
+        match data.value {
+            NodeValue::CodeBlock(_) | NodeValue::HtmlBlock(_) => blocks.add_literal(lines),
+            NodeValue::Paragraph => blocks.add_paragraph(lines),
+            _ => {}
+        }
+    }
     let mut spans = Vec::new();
     let mut tasks = Vec::new();
     for node in root.descendants() {
         let data = node.data.borrow();
         let start = data.sourcepos.start.line.saturating_sub(1);
         let column = data.sourcepos.start.column.saturating_sub(1);
-        if !matches!(data.value, NodeValue::Paragraph)
+        // A setext underline in the TeX turns the opening lines into a heading.
+        let leaf = match &data.value {
+            NodeValue::Paragraph => true,
+            NodeValue::Heading(heading) => heading.setext,
+            _ => false,
+        };
+        if !leaf
             || spans
                 .last()
                 .is_some_and(|span: &crate::math::DisplayBlock| start < span.lines.end)
         {
             continue;
         }
-        if let Some(span) = crate::math::DisplayBlock::starting_at(&lines, start, column) {
+        if let Some(span) = crate::math::DisplayBlock::starting_at(&lines, start, column, &blocks) {
             if let Some(parent) = node.parent()
                 && let NodeValue::TaskItem(task) = parent.data.borrow().value
                 && span.continuation().len() < column

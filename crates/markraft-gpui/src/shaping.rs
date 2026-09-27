@@ -85,9 +85,10 @@ impl Shaping {
     ) {
         let requests: Vec<_> = results.iter().map(|(request, _)| request.clone()).collect();
         self.maths.finish(results);
+        let turned_away = self.maths.take_turned_away();
         self.lines
             .get_mut()
-            .forget_math(types, Some(equations), &requests);
+            .forget_math(types, Some(equations), &requests, turned_away);
     }
 
     pub(crate) fn images(&self) -> &Images {

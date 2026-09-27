@@ -81,9 +81,20 @@ impl EquationIndex {
                 });
             }
         }
+        let mut shown_tags: BTreeMap<String, usize> = BTreeMap::new();
+        for tag in pending.iter().filter_map(|item| item.tag.as_ref()) {
+            *shown_tags.entry(tag.render()).or_default() += 1;
+        }
         let mut result = Self::default();
         for item in &pending {
             let mut diagnostic = item.parsed.diagnostic.clone();
+            if let Some(tag) = item.tag.as_ref().map(Tag::render)
+                && shown_tags[&tag] > 1
+            {
+                // A manual tag may repeat an automatic number; say so rather
+                // than show two equations under one number.
+                issue(&mut diagnostic, format!("Duplicate equation number: {tag}"));
+            }
             for label in &item.parsed.labels {
                 if labels[label].len() > 1 {
                     issue(
@@ -309,12 +320,11 @@ impl Parsed {
                             cursor += 1;
                         }
                         if name == "verb" {
-                            if let Some(delimiter) = bytes.get(cursor) {
-                                cursor += 1;
-                                if let Some(end) =
-                                    bytes[cursor..].iter().position(|byte| byte == delimiter)
-                                {
-                                    cursor += end + 1;
+                            // The delimiter is any character, so step by characters.
+                            if let Some(delimiter) = source[cursor..].chars().next() {
+                                cursor += delimiter.len_utf8();
+                                if let Some(end) = source[cursor..].find(delimiter) {
+                                    cursor += end + delimiter.len_utf8();
                                 }
                             }
                         } else if let Some((_, end)) = group(source, skip_space(source, cursor)) {
@@ -324,15 +334,17 @@ impl Parsed {
                     }
                     if matches!(name, "begin" | "end") {
                         if let Some((body, end)) = group(source, skip_space(source, cursor)) {
-                            if matches!(
-                                body.trim_end_matches('*'),
-                                "align"
-                                    | "alignat"
-                                    | "flalign"
-                                    | "gather"
-                                    | "multline"
-                                    | "eqnarray"
-                            ) {
+                            let environment = body.trim_end_matches('*');
+                            if name == "begin"
+                                && matches!(environment, "multline" | "eqnarray" | "flalign")
+                            {
+                                // The renderer cannot draw these, so they must
+                                // not take a number from the formulas after them.
+                                result.issue(&format!(
+                                    "The {environment} environment is not supported yet"
+                                ));
+                            }
+                            if matches!(environment, "align" | "alignat" | "gather") {
                                 if name == "begin" {
                                     numbered_environment_depth += 1;
                                 } else {
@@ -762,6 +774,71 @@ mod tests {
                 .unwrap()
                 .contains("no number")
         );
+    }
+
+    #[test]
+    fn verbatim_with_a_multibyte_delimiter_is_skipped_by_characters() {
+        for source in [
+            r"x \verbéaéb\label{a}",
+            r"x \verb中",
+            r"\verb*αβα\label{a}",
+            r"\verbé",
+        ] {
+            let parsed = Parsed::scan(source);
+            assert_eq!(parsed.diagnostic, None, "{source:?}");
+        }
+        assert_eq!(Parsed::scan(r"\verbé\label{b}é\label{a}").labels, ["a"]);
+    }
+
+    #[test]
+    fn environments_the_renderer_lacks_are_diagnosed_instead_of_numbered() {
+        for environment in ["multline", "eqnarray", "flalign", "multline*"] {
+            let equations = index(
+                &[
+                    (
+                        &format!(r"\begin{{{environment}}}a\\b\end{{{environment}}}"),
+                        true,
+                    ),
+                    ("c", true),
+                ],
+                true,
+            );
+            let first = equations.get(0, 0).unwrap();
+            assert_eq!(first.tag, None, "{environment}");
+            assert!(
+                first
+                    .diagnostic
+                    .as_deref()
+                    .unwrap()
+                    .contains(environment.trim_end_matches('*')),
+                "{environment}"
+            );
+            assert_eq!(equations.get(1, 0).unwrap().tag.as_deref(), Some("(1)"));
+        }
+    }
+
+    #[test]
+    fn a_manual_tag_that_repeats_an_automatic_number_is_diagnosed() {
+        let equations = index(&[(r"a\tag{1}", true), ("b", true), ("c", true)], true);
+        let tags: Vec<_> = (0..3)
+            .map(|i| equations.get(i, 0).unwrap().tag.as_deref())
+            .collect();
+        assert_eq!(tags, [Some("(1)"), Some("(1)"), Some("(2)")]);
+        for line in 0..2 {
+            assert!(
+                equations
+                    .get(line, 0)
+                    .unwrap()
+                    .diagnostic
+                    .as_deref()
+                    .unwrap()
+                    .contains("Duplicate equation number: (1)")
+            );
+        }
+        assert_eq!(equations.get(2, 0).unwrap().diagnostic, None);
+        // Starred tags print without parentheses and never collide with them.
+        let equations = index(&[(r"a\tag*{1}", true), ("b", true)], true);
+        assert_eq!(equations.get(0, 0).unwrap().diagnostic, None);
     }
 
     #[test]

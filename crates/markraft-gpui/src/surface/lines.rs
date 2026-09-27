@@ -41,6 +41,8 @@ struct Slot {
     line: Option<LayoutLine>,
     /// Whether the line draws a picture, whose size arrives when its file does.
     picture: bool,
+    /// Whether the line was last shaped with a formula render outstanding.
+    math_pending: bool,
 }
 
 /// Every line of one projection, at one width, under one revision of what
@@ -191,7 +193,7 @@ impl Lines {
                     }
                     None => {
                         let mut line = shape_line(input, index, width, None, text_system);
-                        line.reuse = line_key(input, index);
+                        line.reuse = line_key(input, index).filter(|_| !line.math_pending);
                         self.store(index, line);
                         index += 1;
                     }
@@ -242,6 +244,7 @@ impl Lines {
         slot.measured = Measured::Shaped(line.reuse.clone());
         // A rendered page may hold pictures, whose sizes arrive with them.
         slot.picture |= line.preview.is_some() || line.rendered.is_some();
+        slot.math_pending = line.math_pending;
         slot.line = Some(line);
     }
 
@@ -403,20 +406,34 @@ impl Lines {
     /// their table grids, whose column widths and row heights are shared.
     /// Resetting all measured lines would continually requeue evicted raster
     /// results in notes larger than the math cache.
+    ///
+    /// `turned_away` says the bounded queue refused a request since the last
+    /// batch. Lines still waiting on a render are then shaped again, which is
+    /// what asks for their formulas once more now that the queue has room.
+    /// A line waiting on formulas it does not hold itself — an HTML block's
+    /// page — is shaped again after every batch, since which of its
+    /// formulas a batch finished is not known here.
     pub(crate) fn forget_math(
         &mut self,
         types: &DocTypes,
         equations: Option<&markraft_core::kind::equations::EquationIndex>,
         requests: &[crate::math::MathRequest],
+        turned_away: bool,
     ) {
         let Some(projection) = &self.projection else {
             return;
         };
+        let slots = &self.slots;
         let affected = projection
             .lines()
             .iter()
             .enumerate()
             .map(|(index, line)| {
+                if slots.get(index).is_some_and(|slot| slot.math_pending)
+                    && (turned_away || !has_math(types, line))
+                {
+                    return true;
+                }
                 let Some(source) = projection.line_text(index) else {
                     return false;
                 };
@@ -621,6 +638,7 @@ fn estimated(input: &ShapeInput<'_>, index: usize, width: Pixels) -> Slot {
         measured: Measured::Estimated,
         line: None,
         picture,
+        math_pending: false,
     }
 }
 
@@ -932,6 +950,7 @@ $w$";
                     1.,
                     gpui::black(),
                 )],
+                false,
             );
             for (index, line) in projection.lines().iter().enumerate() {
                 let affected = types
@@ -1025,7 +1044,7 @@ $w$";
                 .map(|request| (request.clone(), crate::math::render_math(request)))
                 .collect();
             maths.finish(results);
-            lines.forget_math(&types, None, &requests);
+            lines.forget_math(&types, None, &requests, maths.take_turned_away());
             lines.sync(&input, &projection, px(400.), 0);
         }
         assert_eq!(rendered.len(), FORMULAS);
@@ -1035,6 +1054,75 @@ $w$";
             lines.sync(&input, &projection, px(400.), 0);
             assert!(!lines.measure_some(&input, 0, Duration::from_secs(1), &text_system));
             assert!(maths.take_requests().is_empty());
+        }
+    }
+
+    #[test]
+    fn moving_the_caret_between_prose_lines_keeps_every_formula_line() {
+        const FORMULAS: usize = 240;
+        let source = (0..FORMULAS)
+            .map(|index| format!("p{index}\n\n$$x_{{{index}}}$$"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let schema = commonmark_schema();
+        let doc = from_markdown(&schema, &source).unwrap();
+        let projection = Arc::new(Projection::of(&doc, &schema));
+        let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
+        let equations =
+            markraft_core::kind::equations::EquationIndex::build(&projection, &types, true);
+        let maths = crate::maths::Maths::default();
+        let images = crate::images::Images::default();
+        let style = EditorStyle::notes();
+        let text_system =
+            WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+        let input_at = |caret: usize| ShapeInput {
+            images: &images,
+            maths: Some(&maths),
+            equations: Some(&equations),
+            scale_factor: 1.,
+            doc: &doc,
+            types: &types,
+            projection: &projection,
+            style: &style,
+            single_line: false,
+            wiki: None,
+            spelling: None,
+            selection: caret..caret,
+            composition: None,
+        };
+        let first = projection.lines()[0].from();
+        let mut lines = Lines::default();
+        let input = input_at(first);
+        lines.sync(&input, &projection, px(400.), 0);
+        for _ in 0..FORMULAS {
+            lines.measure_some(&input, 0, Duration::from_secs(1), &text_system);
+            let requests = maths.take_requests();
+            if requests.is_empty() {
+                break;
+            }
+            let results = requests
+                .iter()
+                .map(|request| (request.clone(), crate::math::render_math(request)))
+                .collect();
+            maths.finish(results);
+            lines.forget_math(
+                &types,
+                Some(&equations),
+                &requests,
+                maths.take_turned_away(),
+            );
+            lines.sync(&input, &projection, px(400.), 0);
+        }
+        assert_eq!(lines.estimated(), 0);
+        // Walk the caret down a few prose lines, as holding an arrow key does.
+        for line in [2, 4, 6] {
+            let input = input_at(projection.lines()[line].from());
+            let before = crate::surface::tests::SHAPED_LINES.with(|count| count.get());
+            lines.sync(&input, &projection, px(400.), 0);
+            while lines.measure_some(&input, 0, Duration::from_secs(1), &text_system) {}
+            let shaped = crate::surface::tests::SHAPED_LINES.with(|count| count.get()) - before;
+            assert!(maths.take_requests().is_empty(), "caret on line {line}");
+            assert!(shaped <= 4, "caret on line {line} reshaped {shaped} lines");
         }
     }
 }

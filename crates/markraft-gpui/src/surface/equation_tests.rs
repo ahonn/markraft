@@ -185,3 +185,172 @@ fn oversized_tag_stays_within_a_narrow_column() {
     assert!(tag.top() > body.bottom());
     assert!(tag.bottom() <= row.text_height() + px(0.001));
 }
+
+/// The cells of the one table in `rows`, as (column, width) pairs.
+fn cell_widths(rows: &[LayoutLine]) -> Vec<(usize, gpui::Pixels)> {
+    rows.iter()
+        .filter_map(|line| line.table.as_ref().map(|cell| (cell.column, line.width)))
+        .collect()
+}
+
+#[test]
+fn a_standalone_or_numbered_formula_asks_a_table_only_for_its_own_width() {
+    for formula in [r"$$y\tag{T}$$", "$$y$$"] {
+        let source = format!("| a | b |\n| --- | --- |\n| x | {formula} |");
+        let rows = shaped_equations(&source, true, 0..0, 800.);
+        let formula_column = cell_widths(&rows)
+            .into_iter()
+            .filter(|(column, _)| *column == 1)
+            .map(|(_, width)| width)
+            .fold(px(0.), |widest, width| widest.max(width));
+        assert!(
+            formula_column > px(0.) && formula_column < px(200.),
+            "{formula}: {formula_column:?}"
+        );
+    }
+}
+
+#[test]
+fn editing_a_formula_in_a_cell_draws_nothing_below_the_cell_text() {
+    let source = "| a |\n| --- |\n| $x^2$ |\n\nafter";
+    // A caret inside the cell's formula reveals its source.
+    let state = crate::typeahead::tests::state_of(source);
+    let mut caret = None;
+    state.doc().descendants(&mut |node, pos, _, _| {
+        if caret.is_none()
+            && let Some(text) = node.text()
+            && let Some(at) = text.find("x^2")
+        {
+            caret = Some(pos + at + 1);
+        }
+        true
+    });
+    let caret = caret.unwrap();
+    let rows = shaped_equations(source, false, caret..caret, 800.);
+    let cell = rows
+        .iter()
+        .find(|line| line.table.as_ref().is_some_and(|cell| cell.row == 1))
+        .unwrap();
+    for formula in &cell.formulas {
+        assert!(
+            formula.bounds.bottom() <= cell.text_height(),
+            "{:?} below {:?}",
+            formula.bounds,
+            cell.text_height()
+        );
+    }
+}
+
+/// `source` laid out with the kind's own reading, so HTML blocks are drawn as
+/// their pages, and with every formula any pass asked for already rendered.
+fn shaped_with_pages(source: &str, width: f32) -> Vec<LayoutLine> {
+    let state = state_of(source);
+    let projection = projection_of(&state);
+    let types = DocTypes::from_schema_names(&commonmark_schema(), &commonmark_doc_type_names());
+    let equations = EquationIndex::build(&projection, &types, false);
+    let style = EditorStyle::notes();
+    let maths = crate::maths::Maths::default();
+    let images = crate::images::Images::default();
+    let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
+    let input = ShapeInput {
+        images: &images,
+        maths: Some(&maths),
+        equations: Some(&equations),
+        scale_factor: 1.,
+        doc: state.doc(),
+        types: &types,
+        projection: &projection,
+        style: &style,
+        single_line: false,
+        wiki: None,
+        spelling: Some(&spelling),
+        selection: 0..0,
+        composition: None,
+    };
+    let text_system =
+        WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+    shape(&input, px(width), &text_system);
+    let requests = maths.take_requests();
+    maths.finish(
+        requests
+            .into_iter()
+            .map(|request| {
+                let result = crate::math::render_math(&request);
+                (request, result)
+            })
+            .collect(),
+    );
+    shape(&input, px(width), &text_system)
+}
+
+#[test]
+fn a_formula_in_a_centered_html_row_moves_with_its_text() {
+    let lines = shaped_with_pages(
+        "intro\n\n<p align=\"center\">\n  <code data-math-style=\"inline\">x^2</code> and text\n</p>",
+        600.,
+    );
+    let page = lines[1].rendered.as_ref().expect("drawn as its page");
+    let (_, line) = &page.lines[0];
+    let [formula] = line.formulas.as_slice() else {
+        panic!("one formula");
+    };
+    let shift = line.row_shifts[0];
+    assert!(shift > px(0.));
+    let drawn = line.formula_bounds(formula);
+    assert_eq!(drawn.origin.x, formula.bounds.origin.x + shift);
+    // The glyph slot the text reserved for it is where it is drawn.
+    let slot = line.display_rectangles(0..1, false)[0];
+    assert!((slot.origin.x - line.origin.x + shift - drawn.origin.x).abs() < px(0.5));
+}
+
+#[test]
+fn a_formula_on_an_html_page_is_drawn_once_its_render_arrives() {
+    let source =
+        "intro\n\n<p align=\"center\">\n  <code data-math-style=\"inline\">x^2</code> text\n</p>";
+    let state = state_of(source);
+    let projection = Arc::new(projection_of(&state));
+    let types = DocTypes::from_schema_names(&commonmark_schema(), &commonmark_doc_type_names());
+    let equations = EquationIndex::build(&projection, &types, false);
+    let style = EditorStyle::notes();
+    let maths = crate::maths::Maths::default();
+    let images = crate::images::Images::default();
+    let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
+    let input = ShapeInput {
+        images: &images,
+        maths: Some(&maths),
+        equations: Some(&equations),
+        scale_factor: 1.,
+        doc: state.doc(),
+        types: &types,
+        projection: &projection,
+        style: &style,
+        single_line: false,
+        wiki: None,
+        spelling: Some(&spelling),
+        selection: 0..0,
+        composition: None,
+    };
+    let text_system =
+        WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+    let mut lines = super::Lines::default();
+    lines.sync(&input, &projection, px(600.), 0);
+    lines.lay_out_range(&input, 0..lines.len(), &text_system);
+    let requests = maths.take_requests();
+    assert!(!requests.is_empty(), "the page asks for its formula");
+    let results = requests
+        .iter()
+        .map(|request| (request.clone(), crate::math::render_math(request)))
+        .collect();
+    maths.finish(results);
+    lines.forget_math(
+        &types,
+        Some(&equations),
+        &requests,
+        maths.take_turned_away(),
+    );
+    lines.sync(&input, &projection, px(600.), 0);
+    lines.lay_out_range(&input, 0..lines.len(), &text_system);
+    let all = lines.all();
+    let page = all[1].rendered.as_ref().expect("drawn as its page");
+    assert_eq!(page.lines[0].1.formulas.len(), 1, "the formula is drawn");
+}

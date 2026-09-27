@@ -19,6 +19,8 @@ struct State {
     pending: HashSet<MathRequest>,
     queue: VecDeque<MathRequest>,
     busy: bool,
+    /// A request found the queue full and was not kept.
+    turned_away: bool,
 }
 
 impl Maths {
@@ -27,10 +29,22 @@ impl Maths {
         if let Some(result) = state.cache.get(request) {
             return Some(result.clone());
         }
-        if state.pending.len() < MAX_PENDING && state.pending.insert(request.clone()) {
+        if state.pending.contains(request) {
+            return None;
+        }
+        if state.pending.len() < MAX_PENDING {
+            state.pending.insert(request.clone());
             state.queue.push_back(request.clone());
+        } else {
+            state.turned_away = true;
         }
         None
+    }
+
+    /// Whether a request was refused since this was last asked, clearing it.
+    /// Whoever asked for it has to ask again once a batch frees room.
+    pub(crate) fn take_turned_away(&self) -> bool {
+        std::mem::take(&mut self.0.borrow_mut().turned_away)
     }
 
     pub(crate) fn take_requests(&self) -> Vec<MathRequest> {
@@ -83,6 +97,8 @@ mod tests {
             ));
         }
         assert_eq!(maths.0.borrow().pending.len(), MAX_PENDING);
+        assert!(maths.take_turned_away());
+        assert!(!maths.take_turned_away());
         assert_eq!(maths.take_requests().len(), BATCH_SIZE);
         assert!(maths.take_requests().is_empty());
     }

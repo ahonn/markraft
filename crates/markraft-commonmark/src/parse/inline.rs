@@ -35,6 +35,8 @@ impl<'a> Walk<'a> {
                 &lines,
                 0,
                 pos.start.column.saturating_sub(1),
+                // The protected parse already chose this paragraph's lines.
+                &crate::math::SourceBlocks::default(),
             ) && block.lines.end == lines.len()
             {
                 let text = block.source(&lines);

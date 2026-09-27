@@ -52,6 +52,7 @@ fn probe(index: usize, line: &markraft_core::projection::Line) -> LayoutLine {
         formulas: Vec::new(),
         table: None,
         reuse: None,
+        math_pending: false,
         rendered: None,
         row_shifts: Vec::new(),
         align: markraft_core::kind::Align::Start,

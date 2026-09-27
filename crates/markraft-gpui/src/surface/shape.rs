@@ -86,7 +86,9 @@ pub(crate) fn shape(
 /// something this cannot hold cheaply: a line the selection or marked text
 /// touches (what it reveals, and the host's source spelling of it), a table
 /// cell (whose size is settled by the whole grid), and a line with a picture
-/// (whose file is read off the disk on every shaping).
+/// (whose file is read off the disk on every shaping). A formula keeps its key:
+/// the index's answer for it is part of the key, and a finished render
+/// forgets the lines that asked for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct LineKey {
     /// The first line has no gap above a heading.
@@ -106,6 +108,10 @@ pub(super) struct LineKey {
     pub(super) callout_header: bool,
     /// Whether the host can open each wiki link on the line, in order.
     pub(super) links: Vec<bool>,
+    /// What the document-wide equation index says of each formula on the
+    /// line: its number and resolved references change with other lines.
+    /// A finished render forgets the line on its own; see `forget_math`.
+    pub(super) equations: Vec<Option<markraft_core::kind::equations::Equation>>,
 }
 
 /// The key the line at `index` is shaped under, or `None` where it has to be
@@ -119,11 +125,9 @@ pub(super) fn line_key(input: &ShapeInput<'_>, index: usize) -> Option<LineKey> 
         return None;
     }
     let mut links = Vec::new();
+    let mut math = false;
     for run in line.runs() {
-        // Completed background renders revise shaping independently of source.
-        if types.math.is_some_and(|math| run.marks.contains_type(math)) {
-            return None;
-        }
+        math |= types.math.is_some_and(|math| run.marks.contains_type(math));
         let RunContent::Atom(node) = &run.content else {
             continue;
         };
@@ -135,6 +139,20 @@ pub(super) fn line_key(input: &ShapeInput<'_>, index: usize) -> Option<LineKey> 
             links.push(input.wiki.is_none_or(|resolves| resolves(&target)));
         }
     }
+    let equations = if math {
+        let source = projection.line_text(index).unwrap_or_default();
+        crate::math_spans::formula_spans(line, source, types)
+            .iter()
+            .map(|span| {
+                input
+                    .equations
+                    .and_then(|equations| equations.get(index, span.source.start))
+                    .cloned()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let next = projection.line(index + 1);
     let above = index.checked_sub(1).map(|above| &projection.lines()[above]);
     Some(LineKey {
@@ -145,6 +163,7 @@ pub(super) fn line_key(input: &ShapeInput<'_>, index: usize) -> Option<LineKey> 
         table_below: opens_table(types, next),
         callout_header: crate::callout::header_of(types, line, above).is_some(),
         links,
+        equations,
     })
 }
 
@@ -226,6 +245,7 @@ pub(super) fn shape_line(
             index,
             font_size,
             wrap_width,
+            cell,
             text_system,
             render_objects,
         );
@@ -411,6 +431,7 @@ pub(super) fn shape_line(
         formulas: Vec::new(),
         table: None,
         reuse: None,
+        math_pending: text.math_pending,
         rendered: None,
         row_shifts: Vec::new(),
         align: Align::Start,
@@ -452,6 +473,9 @@ pub(super) fn shape_line(
             page.top = layout.text_height() + PREVIEW_GAP;
         }
         layout.height = page.top + page.height + gap;
+        // The page's formulas are rendered like the note's own, so the line
+        // waits on them too.
+        layout.math_pending |= page.lines.iter().any(|(_, line)| line.math_pending);
         layout.rendered = Some(Rc::new(page));
     }
     layout

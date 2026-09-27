@@ -132,6 +132,9 @@ pub(super) struct MathDecoration {
     pub(super) content: MathContent,
     /// Absolute document position for a resolved equation reference.
     pub(super) target: Option<usize>,
+    /// The visual row an inline formula sits in, which an aligned row moves;
+    /// previews under the text have none.
+    pub(super) visual: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -337,6 +340,10 @@ pub(crate) struct LayoutLine {
     /// What the line was shaped from beyond its own body, when a later shaping
     /// may keep it; see [`LineKey`].
     pub(super) reuse: Option<LineKey>,
+    /// A formula's render was outstanding when the line was shaped. Such a
+    /// line is never kept: a render the bounded queue turned away is asked
+    /// for again only by shaping the line again.
+    pub(super) math_pending: bool,
     /// What a verbatim line draws of its source rendered: an HTML block's
     /// page. While the caret is away the page stands in for the source, whose
     /// rows stay unpainted so a click still lands on a position of the line;
@@ -390,9 +397,23 @@ impl LayoutLine {
     /// Resolved references use their painted bounds, including in live previews.
     pub(crate) fn equation_target_at(&self, position: Point<Pixels>) -> Option<usize> {
         let local = position - self.origin;
-        self.formulas
-            .iter()
-            .find_map(|formula| formula.target.filter(|_| formula.bounds.contains(&local)))
+        self.formulas.iter().find_map(|formula| {
+            formula
+                .target
+                .filter(|_| self.formula_bounds(formula).contains(&local))
+        })
+    }
+
+    /// Where a formula decoration is drawn, relative to the line's origin,
+    /// moved with its row when the line is aligned.
+    pub(super) fn formula_bounds(&self, formula: &MathDecoration) -> Bounds<Pixels> {
+        let shift = formula
+            .visual
+            .map_or(px(0.), |visual| self.row_shift(visual));
+        Bounds::new(
+            formula.bounds.origin + point(shift, px(0.)),
+            formula.bounds.size,
+        )
     }
 
     /// This line's rows, for `line`, which shares its body and sits at `index`.
