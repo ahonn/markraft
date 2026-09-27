@@ -14,6 +14,8 @@ mod caret;
 mod clipboard;
 mod completion;
 mod emoji;
+#[cfg(test)]
+mod equation_integration;
 mod extension;
 mod find;
 mod footnotes;
@@ -22,6 +24,10 @@ mod images;
 pub mod ime;
 mod layout;
 mod links;
+mod math;
+mod math_edit;
+mod math_spans;
+mod maths;
 mod shaping;
 mod shown;
 mod single_line;
@@ -641,6 +647,8 @@ impl EditorView {
         } = setup;
         let (state, find) = build_state(&schema, &extensions, doc, &types);
         let projection = projection_of(&state);
+        let mut shaping = shaping::Shaping::default();
+        shaping.update_equations(&projection, &types);
         Self {
             document_guard: None,
             transaction_guard: None,
@@ -681,7 +689,7 @@ impl EditorView {
             player: animation::Player::default(),
             animation_task: None,
             animate_images: true,
-            shaping: shaping::Shaping::default(),
+            shaping,
         }
     }
 
@@ -863,6 +871,44 @@ impl EditorView {
         }
     }
 
+    /// Typeset a bounded batch off the UI thread. Results stay keyed by source,
+    /// style and scale, so a late completion cannot replace newer input.
+    pub(crate) fn render_math(&mut self, cx: &mut Context<Self>) {
+        let requests = self.shaping.maths().take_requests();
+        if requests.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    requests
+                        .into_iter()
+                        .map(|request| {
+                            let result = math::render_math(&request);
+                            (request, result)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let caret_visible = this.row_at(this.head()).is_some_and(|(row, offset)| {
+                    this.scroll
+                        .bounds()
+                        .contains(&row.caret(offset, this.caret.upstream()))
+                });
+                this.shaping.finish_math(&this.types, results);
+                // Async metrics can move the last visible caret below the
+                // viewport even though the reader did not move it.
+                if caret_visible {
+                    this.caret.ask_reveal();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Refresh changed image files without modifying document state or history.
     pub fn refresh_images(&mut self, cx: &mut Context<Self>) {
         if self.shaping.refresh_images() {
@@ -1036,6 +1082,23 @@ impl EditorView {
     pub fn text(&self) -> &str {
         self.projection.plain_text()
     }
+    /// Whether standalone display formulas receive automatic document numbers.
+    pub fn auto_number_equations(&self) -> bool {
+        self.shaping.auto_number_equations()
+    }
+
+    /// Number standalone display formulas in document order without changing source.
+    /// Manual tags and references remain available when automatic numbering is off.
+    pub fn set_auto_number_equations(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self
+            .shaping
+            .set_auto_number_equations(enabled, &self.projection, &self.types)
+        {
+            self.caret.ask_reveal();
+            cx.notify();
+        }
+    }
+
     /// The style rows are shaped and drawn with.
     pub fn style(&self) -> &crate::style::EditorStyle {
         self.shaping.style()
@@ -1055,6 +1118,9 @@ impl EditorView {
             style: self.shaping.style(),
             single_line: self.single_line,
             images: self.shaping.images(),
+            maths: Some(self.shaping.maths()),
+            equations: Some(self.shaping.equations()),
+            scale_factor: self.shaping.scale_factor(),
             wiki: self.shaping.wiki(),
             spelling: self.spelling.as_deref(),
             selection: selection.from(doc)..selection.to(doc),
@@ -1152,6 +1218,7 @@ impl EditorView {
         self.find = find;
         self.state = state;
         self.projection = projection_of(&self.state);
+        self.shaping.update_equations(&self.projection, &self.types);
         self.extension_selection = self.state.selection().clone();
         self.undo_group_depth = 0;
         self.scroll.set_offset(point(px(0.), px(0.)));
@@ -1192,6 +1259,9 @@ impl EditorView {
             }
         };
         self.projection = projection_of(&self.state);
+        if transactions.iter().any(Transaction::doc_changed) {
+            self.shaping.update_equations(&self.projection, &self.types);
+        }
         Some(transactions)
     }
 
@@ -1348,6 +1418,13 @@ impl EditorView {
                     .unwrap_or_default()
                     .to_owned()
             })
+    }
+
+    fn equation_reference_under(&self, point: Point<Pixels>) -> Option<usize> {
+        self.frame
+            .rows()
+            .iter()
+            .find_map(|row| row.equation_target_at(point))
     }
 
     /// Where the definition of the footnote reference drawn under `point`
@@ -1727,21 +1804,35 @@ impl EditorView {
         let pos = self.hit(target);
         let upstream = self
             .row_at(pos)
-            .map(|(row, offset)| row.caret(offset, false).y > target.y)
+            .map(|(row, offset)| {
+                let visual = row.visual_for_offset(offset, false);
+                row.origin.y + row.visual_top(visual) > target.y
+            })
             .unwrap_or(false);
         (pos, upstream)
     }
 
     /// Every visual row's vertical centre, across the whole laid-out document,
     /// each one listed once however many lines sit on it.
-    fn visual_row_centers(&self) -> Vec<Pixels> {
+    fn visual_row_centers(&self, x: Pixels) -> Vec<Pixels> {
         surface::merge_row_centers(
             self.frame
                 .rows()
                 .iter()
                 .flat_map(|row| {
-                    (0..row.navigable_rows())
-                        .map(move |i| row.origin.y + row.line_height * (i as f32 + 0.5))
+                    (0..row.navigable_rows()).filter_map(move |i| {
+                        let y = row.origin.y + row.visual_top(i) + row.visual_height(i) * 0.5;
+                        // Other columns may have different wrapping or taller
+                        // objects. Only the cell reached at the kept column
+                        // contributes stops to this vertical movement.
+                        if let Some(cell) = row.table
+                            && surface::cell_under(self.frame.rows(), cell.table, point(x, y))
+                                .is_some_and(|under| under.index != row.index)
+                        {
+                            return None;
+                        }
+                        Some(y)
+                    })
                 })
                 .collect(),
         )
@@ -1754,13 +1845,22 @@ impl EditorView {
         let (row, offset) = self.row_at(head)?;
         let caret = row.caret(offset, self.caret.upstream());
         let x = self.caret.preferred_x().unwrap_or(caret.x);
-        let centers = self.visual_row_centers();
+        let centers = self.visual_row_centers(x);
         if centers.is_empty() {
             return None;
         }
+        let visual = row.visual_for_offset(offset, self.caret.upstream());
+        let center = row.origin.y + row.visual_top(visual) + row.visual_height(visual) * 0.5;
         let current = centers
             .iter()
-            .position(|&y| y > caret.y)
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                (**a - center)
+                    .abs()
+                    .partial_cmp(&(**b - center).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(index, _)| index)
             .unwrap_or(centers.len() - 1);
         let next = (current as isize + delta).clamp(0, centers.len() as isize - 1) as usize;
         let target = point(x, centers[next]);
@@ -1771,8 +1871,9 @@ impl EditorView {
     /// Whether `position` shows on the same visual row as the caret.
     fn same_visual_row(&self, position: usize, upstream: bool) -> bool {
         let caret_y = |pos: usize, upstream: bool| {
-            self.row_at(pos)
-                .map(|(row, offset)| row.caret(offset, upstream).y)
+            self.row_at(pos).map(|(row, offset)| {
+                row.origin.y + row.visual_top(row.visual_for_offset(offset, upstream))
+            })
         };
         caret_y(position, upstream) == caret_y(self.motion_head(), self.caret.upstream())
     }
@@ -1781,14 +1882,14 @@ impl EditorView {
     pub(crate) fn line_edge_target(&self, end: bool) -> Option<(usize, bool)> {
         let head = self.motion_head();
         let (row, offset) = self.row_at(head)?;
-        let caret = row.caret(offset, self.caret.upstream());
+        let visual = row.visual_for_offset(offset, self.caret.upstream());
         Some(self.hit_upstream(point(
             if end {
                 row.origin.x + row.width
             } else {
                 row.origin.x
             },
-            caret.y + row.line_height * 0.5,
+            row.origin.y + row.visual_top(visual) + row.visual_height(visual) * 0.5,
         )))
     }
 
@@ -1918,9 +2019,9 @@ impl EditorView {
     /// From `head` to the edge of its visual row that `end` names, ordered.
     fn line_edge_range(&self, head: usize, end: bool) -> Option<(usize, usize)> {
         let (row, offset) = self.row_at(head)?;
-        let caret = row.caret(offset, self.caret.upstream());
-        let first = caret.y < row.origin.y + row.line_height;
-        let last = caret.y >= row.origin.y + row.line_height * (row.visual_rows() as f32 - 1.);
+        let visual = row.visual_for_offset(offset, self.caret.upstream());
+        let first = visual == 0;
+        let last = visual + 1 == row.visual_rows();
         let edge = match end {
             false if first => row.from,
             true if last => row.to(),
@@ -2006,7 +2107,13 @@ impl EditorView {
                 )
                 .ok()
         });
-        let spec = if let Some(codecs) = self
+        let spec = if let Some(spec) = clipboard_text
+            .as_ref()
+            .filter(|_| !self.single_line)
+            .and_then(|text| clipboard::math_source_paste(&self.state, &self.types, text))
+        {
+            Some(spec)
+        } else if let Some(codecs) = self
             .codecs
             .clone()
             .filter(|_| in_cell && !self.single_line && clipboard_text.is_some())
@@ -2091,6 +2198,13 @@ impl EditorView {
         {
             self.selecting = false;
             Self::open_link(&url, cx);
+            return;
+        }
+        if event.modifiers.platform
+            && let Some(target) = self.equation_reference_under(event.position)
+        {
+            self.selecting = false;
+            self.go_to(target, cx);
             return;
         }
         // ⌘-click on a footnote reference goes to its definition, as it follows
@@ -2575,7 +2689,19 @@ impl EditorView {
             types.bullet_list,
             types.task_item
         ));
-        rich!(ToggleTask, chains::toggle_task);
+        root = root.on_action(cx.listener(|this, _: &ToggleTask, _, cx| {
+            if this.single_line {
+                cx.propagate();
+                return;
+            }
+            let command = markraft_core::commands::chain(vec![
+                math_edit::finish(&this.types),
+                chains::toggle_task(&this.types),
+            ]);
+            if !this.run_command(&command, cx) {
+                cx.propagate();
+            }
+        }));
         root = root
             .on_action(cx.listener(|this, _: &ChooseCodeLanguage, window, cx| {
                 if let Some(pos) = this.active_code_pos() {

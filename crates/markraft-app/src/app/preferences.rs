@@ -60,6 +60,13 @@ impl MarkraftApp {
                 });
             }
         }
+        if before.auto_number_equations != now.auto_number_equations {
+            for editor in self.editors() {
+                editor.update(cx, |editor, cx| {
+                    editor.set_auto_number_equations(now.auto_number_equations, cx)
+                });
+            }
+        }
         if before.hotkey != now.hotkey {
             self.apply_shortcut(Shortcut::Toggle, before);
         }

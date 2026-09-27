@@ -55,10 +55,8 @@ impl InlineCode {
 /// What an inline atom is drawn as.
 ///
 /// A [`AtomShape::Pill`] is chrome the row cannot shape, so it is painted over
-/// a run of fillers reserving its slot. The others *are* text, so the row
-/// shapes their label itself: a placeholder rounded up to a whole number of
-/// fillers would leave a gap after the label, and punctuation after a wiki link
-/// has to sit where it would after any other word.
+/// an object with a measured advance. The others are text, so the row shapes
+/// their label itself and punctuation sits against it as after any other word.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum AtomShape {
     /// An image's stand-in: a picture glyph and a label on a rounded fill.
@@ -125,6 +123,21 @@ pub(super) struct InlineAtom {
     pub(super) frame: Option<Size<Pixels>>,
     /// The pill stands for a note rather than a picture, so it wears a page.
     pub(super) note: bool,
+}
+
+/// A formula image or diagnostic, positioned relative to its paragraph.
+#[derive(Clone)]
+pub(super) struct MathDecoration {
+    pub(super) bounds: Bounds<Pixels>,
+    pub(super) content: MathContent,
+    /// Absolute document position for a resolved equation reference.
+    pub(super) target: Option<usize>,
+}
+
+#[derive(Clone)]
+pub(super) enum MathContent {
+    Formula(Arc<RenderImage>),
+    Error(Rc<ShapedLine>),
 }
 
 /// Where a line's display text holds a different number of characters than the
@@ -240,6 +253,7 @@ pub(crate) struct TableCell {
 #[derive(Clone)]
 pub(crate) struct LayoutRow {
     pub(super) line: Rc<WrappedLine>,
+    pub(super) paint_rows: Vec<ShapedLine>,
     /// `char` offset of the row's start within the projection line.
     pub(super) char_start: usize,
     /// The first visual row this row occupies within the block.
@@ -284,6 +298,7 @@ pub(crate) struct LayoutLine {
     pub rows: Vec<LayoutRow>,
     pub origin: Point<Pixels>,
     pub line_height: Pixels,
+    pub(super) visuals: Vec<VisualRow>,
     /// Text height plus the gap below the line.
     pub height: Pixels,
     pub width: Pixels,
@@ -316,6 +331,7 @@ pub(crate) struct LayoutLine {
     /// Sorted by `source`; see [`Widening`].
     pub(super) widenings: Vec<Widening>,
     pub(super) atoms: Vec<InlineAtom>,
+    pub(super) formulas: Vec<MathDecoration>,
     /// Where the line sits in a table, when it is a cell of one.
     pub(crate) table: Option<TableCell>,
     /// What the line was shaped from beyond its own body, when a later shaping
@@ -371,6 +387,14 @@ pub(crate) fn selection_anchor_row(
 }
 
 impl LayoutLine {
+    /// Resolved references use their painted bounds, including in live previews.
+    pub(crate) fn equation_target_at(&self, position: Point<Pixels>) -> Option<usize> {
+        let local = position - self.origin;
+        self.formulas
+            .iter()
+            .find_map(|formula| formula.target.filter(|_| formula.bounds.contains(&local)))
+    }
+
     /// This line's rows, for `line`, which shares its body and sits at `index`.
     ///
     /// Everything a shaped line holds is relative to its own start except
@@ -392,16 +416,6 @@ impl LayoutLine {
     /// How far visual row `visual` is moved across the line; see `row_shifts`.
     pub(super) fn row_shift(&self, visual: usize) -> Pixels {
         self.row_shifts.get(visual).copied().unwrap_or_default()
-    }
-
-    /// The alignment gpui is asked to paint the rows with, and the width it
-    /// aligns them in; `None` for rows that start at the line's start.
-    pub(super) fn text_align(&self) -> (TextAlign, Option<Pixels>) {
-        match self.align {
-            Align::Start => (TextAlign::Left, None),
-            Align::Center => (TextAlign::Center, Some(self.width)),
-            Align::End => (TextAlign::Right, Some(self.width)),
-        }
     }
 
     /// Align every visual row across the line's width, measuring each row as
@@ -494,7 +508,68 @@ impl LayoutLine {
     }
 
     pub(super) fn text_height(&self) -> Pixels {
-        self.line_height * self.visual_rows() as f32
+        self.visuals
+            .last()
+            .map_or(self.line_height * self.visual_rows() as f32, |row| {
+                row.top + row.height
+            })
+    }
+
+    pub(crate) fn visual_top(&self, visual: usize) -> Pixels {
+        self.visuals
+            .get(visual)
+            .map_or(self.line_height * visual as f32, |row| row.top)
+    }
+
+    pub(crate) fn visual_height(&self, visual: usize) -> Pixels {
+        self.visuals
+            .get(visual)
+            .map_or(self.line_height, |row| row.height)
+    }
+
+    pub(crate) fn visual_text_top(&self, visual: usize) -> Pixels {
+        self.visuals
+            .get(visual)
+            .map_or(self.line_height * visual as f32, |row| row.text_top)
+    }
+
+    pub(super) fn visual_baseline(&self, visual: usize) -> Pixels {
+        self.visuals
+            .get(visual)
+            .map_or(self.visual_top(visual) + self.line_height, |row| {
+                row.baseline
+            })
+    }
+
+    pub(crate) fn visual_at(&self, local_y: Pixels) -> usize {
+        if self.visuals.is_empty() {
+            return ((local_y / self.line_height).floor().max(0.) as usize)
+                .min(self.visual_rows().saturating_sub(1));
+        }
+        self.visuals
+            .partition_point(|row| row.top <= local_y)
+            .saturating_sub(1)
+    }
+
+    pub(crate) fn visual_for_offset(&self, offset: usize, upstream: bool) -> usize {
+        if self.rows.is_empty() {
+            return 0;
+        }
+        let (index, byte) = self.locate(offset);
+        let row = &self.rows[index];
+        let starts = row.wrap_starts();
+        row.visual_start
+            + starts
+                .iter()
+                .skip(1)
+                .take_while(|&&start| {
+                    if upstream {
+                        start < byte
+                    } else {
+                        start <= byte
+                    }
+                })
+                .count()
     }
 
     /// Every picture the line draws and where: its inline atoms', each centred
@@ -505,8 +580,8 @@ impl LayoutLine {
         let atoms = self.atoms.iter().filter_map(|atom| {
             let (picture, drawn) = atom.image.as_ref()?;
             let top = self.origin.y
-                + self.line_height * atom.visual_row as f32
-                + ((self.line_height - drawn.height) * 0.5).max(px(0.));
+                + self.visual_top(atom.visual_row)
+                + ((self.visual_height(atom.visual_row) - drawn.height) * 0.5).max(px(0.));
             let left = self.origin.x + atom.left + self.row_shift(atom.visual_row);
             Some((Bounds::new(point(left, top), *drawn), picture))
         });
@@ -667,7 +742,11 @@ impl LayoutLine {
         };
         let offset = offset + self.marker_inset;
         Some(Bounds::new(
-            self.origin + point(-offset, (self.line_height - height) * 0.5),
+            self.origin
+                + point(
+                    -offset,
+                    self.visual_text_top(0) + (self.line_height - height) * 0.5,
+                ),
             size(width, height),
         ))
     }
@@ -698,10 +777,7 @@ impl LayoutLine {
             for (visual, boundary) in row.line.wrap_boundaries().iter().enumerate() {
                 if row.line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index == byte {
                     return self.origin
-                        + point(
-                            px(0.),
-                            self.line_height * (row.visual_start + visual + 1) as f32,
-                        );
+                        + point(px(0.), self.visual_text_top(row.visual_start + visual + 1));
                 }
             }
         }
@@ -713,7 +789,7 @@ impl LayoutLine {
         if let Some(x) = self.inline_code_x(index, byte, visual) {
             position.x = x;
         }
-        self.origin + point(position.x, self.line_height * visual as f32)
+        self.origin + point(position.x, self.visual_text_top(visual))
     }
 
     /// Where a position strictly inside inline code is drawn. Its edges keep the
@@ -774,8 +850,7 @@ impl LayoutLine {
         if self.rows.is_empty() {
             return 0;
         }
-        let visual = ((local.y / self.line_height).floor() as isize)
-            .clamp(0, self.visual_rows() as isize - 1) as usize;
+        let visual = self.visual_at(local.y);
         let index = self
             .rows
             .iter()
@@ -852,7 +927,7 @@ impl LayoutLine {
                 if a >= b && !trailing {
                     continue;
                 }
-                let y = self.origin.y + self.line_height * absolute as f32;
+                let y = self.origin.y + self.visual_top(absolute);
                 let x_for = |byte: usize| {
                     if byte == start {
                         return px(0.);
@@ -879,7 +954,7 @@ impl LayoutLine {
                     point(self.origin.x + left, y),
                     size(
                         (right - left + if trailing { px(7.) } else { px(0.) }).max(px(2.)),
-                        self.line_height,
+                        self.visual_height(absolute),
                     ),
                 ));
             }

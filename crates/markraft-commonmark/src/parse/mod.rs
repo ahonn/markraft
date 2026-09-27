@@ -198,7 +198,7 @@ pub(crate) fn parse_ast<'a>(
     source: &str,
     options: &Options<'static>,
 ) -> &'a AstNode<'a> {
-    let root = parse_with_footnotes(arena, source, options);
+    let root = parse_with_math(arena, source, options);
     let mut boxes = boxes_before_blocks(root, source);
     if boxes.is_empty() {
         return root;
@@ -209,7 +209,7 @@ pub(crate) fn parse_ast<'a>(
         let line = &mut lines[found.line - 1];
         line.replace_range(found.column - 1..found.column - 1 + found.len, "");
     }
-    let root = parse_with_footnotes(arena, &lines.join("\n"), options);
+    let root = parse_with_math(arena, &lines.join("\n"), options);
     let restore = |point: &mut LineColumn| {
         let mut shift = 0;
         for found in boxes.iter().filter(|found| found.line == point.line) {
@@ -241,6 +241,105 @@ pub(crate) fn parse_ast<'a>(
         }
     }
     root
+}
+
+/// Protect standalone display formulas from CommonMark block parsing. Use
+/// temporary code fences so blank lines, indentation and Markdown-looking
+/// TeX stay literal, then restore paragraph nodes at the original positions.
+/// The conversion layer reads their inline content from the original source.
+fn parse_with_math<'a>(
+    arena: &'a Arena<'a>,
+    source: &str,
+    options: &Options<'static>,
+) -> &'a AstNode<'a> {
+    let root = parse_with_footnotes(arena, source, options);
+    if !options.extension.math_dollars || !source.contains("$$") {
+        return root;
+    }
+    let lines: Vec<&str> = source.split('\n').collect();
+    let mut spans = Vec::new();
+    let mut tasks = Vec::new();
+    for node in root.descendants() {
+        let data = node.data.borrow();
+        let start = data.sourcepos.start.line.saturating_sub(1);
+        let column = data.sourcepos.start.column.saturating_sub(1);
+        if !matches!(data.value, NodeValue::Paragraph)
+            || spans
+                .last()
+                .is_some_and(|span: &crate::math::DisplayBlock| start < span.lines.end)
+        {
+            continue;
+        }
+        if let Some(span) = crate::math::DisplayBlock::starting_at(&lines, start, column) {
+            if let Some(parent) = node.parent()
+                && let NodeValue::TaskItem(task) = parent.data.borrow().value
+                && span.continuation().len() < column
+            {
+                tasks.push((start, task));
+            }
+            spans.push(span);
+        }
+    }
+    if spans.is_empty() {
+        return root;
+    }
+    let mut protected: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+    for span in &spans {
+        let start = span.lines.start;
+        let end = span.lines.end - 1;
+        let column = span.column;
+        let length = lines[start + 1..end]
+            .iter()
+            .map(|line| line.chars().filter(|c| *c == '~').count() + 1)
+            .max()
+            .unwrap_or(3)
+            .max(3);
+        let fence = "~".repeat(length);
+        let prefix = span.continuation();
+        let opening_column = if tasks.iter().any(|&(line, _)| line == start) {
+            prefix.len()
+        } else {
+            column
+        };
+        protected[start] = format!("{}{fence}", &lines[start][..opening_column]);
+        protected[end] = format!("{prefix}{fence}");
+    }
+    let protected = parse_with_footnotes(arena, &protected.join("\n"), options);
+    let mut restored = 0;
+    for node in protected.descendants() {
+        let mut data = node.data.borrow_mut();
+        if matches!(data.value, NodeValue::CodeBlock(_))
+            && let Some(span) = spans
+                .iter()
+                .find(|span| data.sourcepos.start.line == span.lines.start + 1)
+        {
+            let start = span.lines.start;
+            let end = span.lines.end - 1;
+            let column = span.column;
+            // Never attach a later container's source to a code block that
+            // CommonMark actually ended earlier.
+            if data.sourcepos.end.line != end + 1 {
+                return root;
+            }
+            data.value = NodeValue::Paragraph;
+            restored += 1;
+            data.sourcepos.start.column = column + 1;
+            data.sourcepos.end = LineColumn {
+                line: end + 1,
+                column: lines[end].len(),
+            };
+            if let Some(&(_, task)) = tasks.iter().find(|&&(line, _)| line == start)
+                && let Some(parent) = node.parent()
+            {
+                parent.data.borrow_mut().value = NodeValue::TaskItem(task);
+            }
+        }
+    }
+    if restored != spans.len() {
+        return root;
+    }
+    protected.data.borrow_mut().sourcepos.end = source_end(source);
+    protected
 }
 
 /// A task's check box that a heading or a quote follows on its line: where

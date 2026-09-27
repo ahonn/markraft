@@ -38,6 +38,40 @@ fn a_changed_preference_reaches_every_open_note(cx: &mut TestAppContext) {
     assert_eq!(h.markdown(), "beta\n\n- (c)");
 }
 
+// Numbering reaches background sessions and notes opened after the change,
+// without rewriting the Markdown source.
+#[gpui::test]
+fn equation_numbering_reaches_existing_and_new_editors(cx: &mut TestAppContext) {
+    let mut h = open_with(
+        cx,
+        &[
+            ("alpha.md", "alpha\n\n$$x$$\n"),
+            ("beta.md", "beta\n\n$$y$$\n"),
+        ],
+        |preferences| preferences.auto_number_equations = true,
+    );
+    let first = h.app.update(h.cx, |app, _| app.test_editor());
+    assert!(first.update(h.cx, |editor, _| editor.auto_number_equations()));
+    h.browse_to("alpha");
+    h.browse_to("beta");
+    let source = h.markdown();
+    for enabled in [false, true] {
+        h.set_preference(Pref::AutoNumberEquations(enabled));
+        let editors = h.app.update(h.cx, |app, _| app.test_editors());
+        assert!(editors.len() >= 2, "both notes stay open");
+        for editor in editors {
+            assert_eq!(
+                editor.update(h.cx, |editor, _| editor.auto_number_equations()),
+                enabled
+            );
+        }
+        assert_eq!(h.markdown(), source);
+    }
+    h.keys("cmd-n");
+    let created = h.app.update(h.cx, |app, _| app.test_editor());
+    assert!(created.update(h.cx, |editor, _| editor.auto_number_equations()));
+}
+
 // Tab in a code block writes what the preference now names, in an open note.
 #[gpui::test]
 fn the_tab_key_preference_applies_to_an_open_code_block(cx: &mut TestAppContext) {
@@ -128,6 +162,7 @@ fn a_changed_preference_is_what_the_next_launch_reads(cx: &mut TestAppContext) {
     let mut h = open(cx, |_| {});
     h.set_preference(Pref::VimMode(true));
     h.set_preference(Pref::Font(EditorFont::Mono));
+    h.set_preference(Pref::AutoNumberEquations(true));
     h.set_preference(Pref::Bullet(BulletMarker::Star));
     h.set_preference(Pref::TextSize(99.));
     h.set_preference(Pref::SettingsPage("editor".into()));
@@ -137,6 +172,7 @@ fn a_changed_preference_is_what_the_next_launch_reads(cx: &mut TestAppContext) {
     let saved = h.saved_preferences(|saved| saved.vim_mode && saved.settings_page == "editor");
     let saved = saved.expect("a readable settings file");
     assert!(saved.vim_mode);
+    assert!(saved.auto_number_equations);
     assert_eq!(saved.font, EditorFont::Mono);
     assert_eq!(saved.bullet_marker, BulletMarker::Star);
     assert_eq!(saved.text_size, expected.text_size);

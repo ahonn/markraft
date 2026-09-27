@@ -7,6 +7,9 @@ use super::*;
 /// Everything shaping needs that is not the window.
 pub(crate) struct ShapeInput<'a> {
     pub images: &'a crate::images::Images,
+    pub maths: Option<&'a crate::maths::Maths>,
+    pub equations: Option<&'a markraft_core::kind::equations::EquationIndex>,
+    pub scale_factor: f32,
     pub doc: &'a Node,
     pub types: &'a DocTypes,
     pub projection: &'a Projection,
@@ -117,6 +120,10 @@ pub(super) fn line_key(input: &ShapeInput<'_>, index: usize) -> Option<LineKey> 
     }
     let mut links = Vec::new();
     for run in line.runs() {
+        // Completed background renders revise shaping independently of source.
+        if types.math.is_some_and(|math| run.marks.contains_type(math)) {
+            return None;
+        }
         let RunContent::Atom(node) = &run.content else {
             continue;
         };
@@ -210,39 +217,93 @@ pub(super) fn shape_line(
         None => (width - indent - if code { CODE_PADDING } else { px(0.) }).max(px(40.)),
     };
     let unwrapped = single_line || cell == Some(CellWidth::Natural);
-    let text = display_text(input, line, index, font_size, wrap_width, text_system);
-    // A drawn image needs the whole row it was measured for.
-    let line_height = text
-        .line_height
-        .unwrap_or(font_size * style.line_height_ratio);
-    let runs = text_runs(input, line, &text, heading, code, font_size, style);
-    let shaped = text_system
-        .shape_text(
-            text.text.clone().into(),
+    let line_height = font_size * style.line_height_ratio;
+    let mut render_objects = true;
+    let (text, runs, rows) = loop {
+        let text = display_text_mode(
+            input,
+            line,
+            index,
             font_size,
-            &runs.runs,
-            (!unwrapped).then_some(wrap_width),
-            None,
-        )
-        .expect("valid UTF-8 text can be shaped");
-
-    let mut rows = Vec::with_capacity(shaped.len());
-    let mut char_start = 0usize;
-    let mut visual_start = 0usize;
-    for mut wrapped in shaped {
-        if !unwrapped {
-            keep_line_breaking_rules(&mut wrapped, wrap_width);
+            wrap_width,
+            text_system,
+            render_objects,
+        );
+        let runs = text_runs(input, line, &text, heading, code, font_size, style);
+        let shaped = text_system
+            .shape_text(
+                text.text.clone().into(),
+                font_size,
+                &runs.runs,
+                (!unwrapped).then_some(wrap_width),
+                None,
+            )
+            .expect("valid UTF-8 text can be shaped");
+        let mut rows = Vec::with_capacity(shaped.len());
+        let mut char_start = 0usize;
+        let mut byte_start = 0usize;
+        let mut visual_start = 0usize;
+        let mut valid = true;
+        for mut wrapped in shaped {
+            let bytes: Vec<_> = wrapped
+                .text
+                .char_indices()
+                .map(|(byte, _)| byte)
+                .chain([wrapped.text.len()])
+                .collect();
+            let reservations: Vec<_> = text
+                .objects
+                .iter()
+                .filter_map(|object| {
+                    let from = object.display.start.checked_sub(char_start)?;
+                    let to = object.display.end.checked_sub(char_start)?;
+                    Some((*bytes.get(from)?..*bytes.get(to)?, object.width))
+                })
+                .collect();
+            if !text_layout::reserve_inline_widths(&mut wrapped, &reservations) {
+                valid = false;
+                break;
+            }
+            if !unwrapped {
+                let glue: Vec<_> = reservations
+                    .iter()
+                    .map(|(range, _)| range.clone())
+                    .collect();
+                keep_line_breaking_rules(&mut wrapped, wrap_width, &glue);
+            }
+            let paint_rows = if text.objects.is_empty() {
+                Vec::new()
+            } else {
+                let local_runs = text_layout::slice_runs(
+                    &runs.runs,
+                    byte_start..byte_start + wrapped.text.len(),
+                );
+                text_layout::paint_rows(&wrapped, font_size, &local_runs, text_system)
+            };
+            byte_start += wrapped.text.len() + 1;
+            let row = LayoutRow {
+                char_start,
+                visual_start,
+                inline_code: Vec::new(),
+                paint_rows,
+                line: Rc::new(wrapped),
+            };
+            char_start += row.char_len() + 1;
+            visual_start += row.visual_rows();
+            rows.push(row);
         }
-        let row = LayoutRow {
-            char_start,
-            visual_start,
-            inline_code: Vec::new(),
-            line: Rc::new(wrapped),
-        };
-        char_start += row.char_len() + 1;
-        visual_start += row.visual_rows();
-        rows.push(row);
-    }
+        if valid {
+            break (text, runs, rows);
+        }
+        // A platform shaper may omit an object glyph. Keep editable source and
+        // labels visible instead of painting objects over incorrect geometry.
+        render_objects = false;
+    };
+    let visuals = if text.objects.is_empty() {
+        Vec::new()
+    } else {
+        measure_rows(&rows, &text.objects, line_height)
+    };
 
     let gap = gap_below(input, index, line, heading, code, &marker);
     // A code block's panel reaches above its text, at the top of the document
@@ -327,6 +388,7 @@ pub(super) fn shape_line(
         rows,
         origin: point(indent, px(0.)),
         line_height,
+        visuals,
         height: px(0.),
         width: if single_line {
             wrap_width.max(px(0.))
@@ -346,6 +408,7 @@ pub(super) fn shape_line(
         callout_header,
         widenings: text.widenings,
         atoms: Vec::new(),
+        formulas: Vec::new(),
         table: None,
         reuse: None,
         rendered: None,
@@ -375,6 +438,7 @@ pub(super) fn shape_line(
         + gap;
     shape_inline_code(&mut layout, &runs.code, font_size, text_system);
     place_atoms(&mut layout, text.atoms);
+    place_formulas(&mut layout, text.formulas, text.math_previews, font_size);
     // A verbatim line the kind can render — an HTML block — is drawn as its page
     // while the caret is away. The caret or the selection reaching it makes it a
     // focused line, reshaped: its source is drawn to be edited and the page stays
@@ -403,6 +467,9 @@ fn shape_rendered(
 ) -> RenderedLayout {
     let page = ShapeInput {
         images: input.images,
+        maths: input.maths,
+        equations: None,
+        scale_factor: input.scale_factor,
         doc: &rendered.doc,
         types: input.types,
         projection: &rendered.projection,
@@ -605,7 +672,7 @@ pub(super) fn shape_inline_code(
             );
             // The slot comes from the whole line's rectangles, so its row
             // already counts the rows before this one.
-            let visual = ((slot.origin.y - layout.origin.y) / layout.line_height).round() as usize;
+            let visual = layout.visual_at(slot.origin.y - layout.origin.y);
             layout.rows[index].inline_code.push(InlineCode {
                 range: part,
                 visual_row: visual,

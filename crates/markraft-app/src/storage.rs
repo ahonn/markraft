@@ -100,6 +100,8 @@ pub struct Preferences {
     /// Whether typing `# `, `- `, `> ` and the like at the start of a line turns it
     /// into that block.
     pub markdown_shortcuts: bool,
+    /// Number display formulas in document order; manual tags work in either mode.
+    pub auto_number_equations: bool,
     /// The typeface of the note's prose; code keeps its monospaced one.
     pub font: EditorFont,
     pub line_height: LineHeight,
@@ -332,6 +334,7 @@ impl Default for Preferences {
             emoji_characters: false,
             tab_key: TabKey::default(),
             markdown_shortcuts: true,
+            auto_number_equations: false,
             font: EditorFont::default(),
             line_height: LineHeight::default(),
             bullet_marker: BulletMarker::default(),
@@ -372,6 +375,7 @@ pub enum Pref {
     AlwaysOnTop(bool),
     TabKey(TabKey),
     MarkdownShortcuts(bool),
+    AutoNumberEquations(bool),
     Font(EditorFont),
     LineHeight(LineHeight),
     Bullet(BulletMarker),
@@ -409,6 +413,7 @@ impl Pref {
             Pref::AlwaysOnTop(on) => preferences.always_on_top = on,
             Pref::TabKey(key) => preferences.tab_key = key,
             Pref::MarkdownShortcuts(on) => preferences.markdown_shortcuts = on,
+            Pref::AutoNumberEquations(on) => preferences.auto_number_equations = on,
             Pref::Font(font) => preferences.font = font,
             Pref::LineHeight(height) => preferences.line_height = height,
             Pref::Bullet(marker) => preferences.bullet_marker = marker,
@@ -1136,6 +1141,7 @@ mod tests {
             emoji_characters: true,
             tab_key: TabKey::FourSpaces,
             markdown_shortcuts: false,
+            auto_number_equations: true,
             font: EditorFont::Serif,
             line_height: LineHeight::Relaxed,
             bullet_marker: BulletMarker::Plus,
@@ -1153,6 +1159,13 @@ mod tests {
         };
         assert_ne!(preferences, Preferences::default());
         preferences
+    }
+
+    #[test]
+    fn older_settings_leave_automatic_equation_numbering_disabled() {
+        let preferences: Preferences =
+            serde_json::from_str(r#"{"markdown_shortcuts":true}"#).unwrap();
+        assert!(!preferences.auto_number_equations);
     }
 
     #[test]
@@ -1189,6 +1202,7 @@ mod tests {
             Pref::AlwaysOnTop(changed.always_on_top),
             Pref::TabKey(changed.tab_key),
             Pref::MarkdownShortcuts(changed.markdown_shortcuts),
+            Pref::AutoNumberEquations(changed.auto_number_equations),
             Pref::Font(changed.font),
             Pref::LineHeight(changed.line_height),
             Pref::Bullet(changed.bullet_marker),

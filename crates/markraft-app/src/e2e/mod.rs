@@ -24,6 +24,7 @@ mod find;
 mod ime;
 mod inline;
 mod input;
+mod math;
 mod media;
 mod paste;
 mod preferences;

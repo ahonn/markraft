@@ -18,6 +18,51 @@ use gpui::{App, ClipboardItem, Global};
 use markraft_core::kind::DocTypes;
 use markraft_core::{EditorState, Fragment, Schema, Selection, Slice, kind::Codecs};
 
+/// Inside formula delimiters, clipboard text is TeX rather than a Markdown
+/// fragment. Keep its line breaks in this textblock instead of creating lists
+/// or splitting a display formula into paragraphs.
+pub(crate) fn math_source_paste(
+    state: &EditorState,
+    types: &DocTypes,
+    text: &str,
+) -> Option<markraft_core::TransactionSpec> {
+    types.math?;
+    let projection = markraft_core::projection::projection_of(state);
+    let selection = state.selection();
+    let index = projection.line_at(selection.from(state.doc()))?;
+    let line = projection.line(index)?;
+    let source = projection.line_text(index)?;
+    let range = selection.from(state.doc())..selection.to(state.doc());
+    if !crate::math_spans::formula_spans(line, source, types)
+        .iter()
+        .any(|span| span.selection_within(line, range.clone()))
+    {
+        return None;
+    }
+    let schema = state.schema();
+    let mut nodes = Vec::new();
+    for (index, part) in text.replace("\r\n", "\n").split('\n').enumerate() {
+        if index > 0 {
+            nodes.push(
+                schema
+                    .create(
+                        types.hard_break?,
+                        Default::default(),
+                        Default::default(),
+                        Fragment::empty(),
+                    )
+                    .ok()?,
+            );
+        }
+        if !part.is_empty() {
+            nodes.push(schema.text(part));
+        }
+    }
+    markraft_core::commands::replace_selection(Slice::from_fragment(Fragment::from_nodes(nodes)))(
+        state,
+    )
+}
+
 /// A selection from the start of a list item's text into a later item of the
 /// same list, as whole items in their list: pasted, it is
 /// the list it was, where the open slice the selection spells would make its
@@ -192,6 +237,58 @@ mod platform {
 mod tests {
     use super::*;
     use markraft_commonmark::{CommonMarkCodecs, commonmark_schema};
+
+    fn math_paste_at(source: &str, range: std::ops::Range<usize>) -> Option<String> {
+        let state = crate::typeahead::tests::state_of(source);
+        let types = DocTypes::from_schema_names(
+            state.schema(),
+            &markraft_commonmark::commonmark_doc_type_names(),
+        );
+        let projection = markraft_core::projection::projection_of(&state);
+        let line = &projection.lines()[0];
+        let selected = state
+            .update([
+                markraft_core::TransactionSpec::new().selection(Selection::text(
+                    line.offset_to_pos(range.start).unwrap(),
+                    line.offset_to_pos(range.end).unwrap(),
+                )),
+            ])
+            .unwrap();
+        let edit = math_source_paste(selected.state(), &types, "α\n+ β")?;
+        let applied = selected.state().update([edit]).unwrap();
+        Some(
+            markraft_core::projection::projection_of(applied.state())
+                .plain_text()
+                .to_owned(),
+        )
+    }
+
+    #[test]
+    fn formula_paste_accepts_body_edges_and_preserves_literal_line_breaks() {
+        assert_eq!(math_paste_at("$$x$$", 2..3).as_deref(), Some("$$α\n+ β$$"));
+        assert_eq!(
+            math_paste_at("$$\n\n$$", 3..3).as_deref(),
+            Some("$$\nα\n+ β\n$$")
+        );
+        assert_eq!(math_paste_at("$`x`$", 2..3).as_deref(), Some("$`α\n+ β`$"));
+    }
+
+    #[test]
+    fn formula_paste_does_not_replace_delimiters_or_reinterpret_other_source() {
+        for (source, range) in [
+            ("$$x$$", 1..3),
+            ("$$x$$", 2..4),
+            ("$`x`$", 1..3),
+            ("$`x`$", 2..4),
+            ("$$", 1..1),
+            ("`$$x$$`", 3..3),
+            ("```tex\n$$x$$\n```", 3..3),
+            ("costs $5 and $10", 7..7),
+            ("$x$ and $y$", 1..9),
+        ] {
+            assert!(math_paste_at(source, range).is_none(), "{source}");
+        }
+    }
 
     #[test]
     fn a_slice_survives_the_metadata_round_trip() {

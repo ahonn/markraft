@@ -108,6 +108,9 @@ pub(super) fn text_runs(
             face = font(CODE_FONT);
         }
         let widened = placeholder == Some(AtomShape::Pill);
+        if widened && is_math {
+            face = font(UI_FONT);
+        }
         // A pill's fillers reserve the width `filler_width` measured in the
         // chrome face, so they are shaped in it whatever the note's face is.
         if widened && !is_code {

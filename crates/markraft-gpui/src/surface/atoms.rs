@@ -17,8 +17,8 @@ pub(super) fn place_atoms(layout: &mut LayoutLine, pending: Vec<PendingAtom>) {
         };
         layout.atoms.push(InlineAtom {
             left: slot.origin.x - layout.origin.x,
-            slot: slot.size.width,
-            visual_row: ((slot.origin.y - layout.origin.y) / layout.line_height).round() as usize,
+            slot: atom.width,
+            visual_row: layout.visual_at(slot.origin.y - layout.origin.y),
             label: atom.label,
             image: atom.image,
             frame: atom.frame,
@@ -39,8 +39,9 @@ pub(super) struct DisplayText {
     pub(super) run_bytes: Vec<usize>,
     pub(super) widenings: Vec<Widening>,
     pub(super) atoms: Vec<PendingAtom>,
-    /// The height a drawn image needs, where it is taller than a text row.
-    pub(super) line_height: Option<Pixels>,
+    pub(super) formulas: Vec<PendingFormula>,
+    pub(super) math_previews: Vec<MathPreview>,
+    pub(super) objects: Vec<InlineObject>,
 }
 
 impl DisplayText {
@@ -52,9 +53,194 @@ impl DisplayText {
             run_bytes: Vec::new(),
             widenings: Vec::new(),
             atoms: Vec::new(),
-            line_height: None,
+            formulas: Vec::new(),
+            math_previews: Vec::new(),
+            objects: Vec::new(),
         }
     }
+}
+
+pub(super) struct PendingFormula {
+    pub(super) chars: Range<usize>,
+    pub(super) rendered: crate::math::RenderedMath,
+    pub(super) tag: Option<crate::math::RenderedMath>,
+    pub(super) target: Option<usize>,
+    metrics: FormulaMetrics,
+}
+
+pub(super) enum MathPreview {
+    Formula {
+        rendered: crate::math::RenderedMath,
+        tag: Option<crate::math::RenderedMath>,
+        target: Option<usize>,
+        display: bool,
+    },
+    Error(Rc<ShapedLine>),
+}
+
+/// The same geometry reserves the object slot and positions its decorations.
+/// Keeping the number separate preserves its font size when a formula shrinks.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FormulaMetrics {
+    body: Bounds<Pixels>,
+    tag: Option<Bounds<Pixels>>,
+    ascent: Pixels,
+    descent: Pixels,
+    width: Pixels,
+}
+
+pub(super) fn formula_metrics(
+    body: (f32, f32, f32),
+    tag: Option<(f32, f32, f32)>,
+    column: Pixels,
+    centered: bool,
+) -> FormulaMetrics {
+    let column = column.max(px(1.));
+    let (body_width, body_ascent, body_descent) = body;
+    let scale = (f32::from(column) / body_width.max(1.)).min(1.);
+    let width = px(body_width * scale);
+    let height = px((body_ascent + body_descent) * scale);
+    let mut metrics = FormulaMetrics {
+        body: Bounds::new(
+            point(
+                if centered {
+                    (column - width) / 2.
+                } else {
+                    px(0.)
+                },
+                px(0.),
+            ),
+            size(width, height),
+        ),
+        tag: None,
+        ascent: px(body_ascent * scale),
+        descent: px(body_descent * scale),
+        width: if centered { column } else { width },
+    };
+    if let Some((tag_width, tag_ascent, tag_descent)) = tag {
+        let tag_scale = (f32::from(column) / tag_width.max(1.)).min(1.);
+        let tag_size = size(
+            px(tag_width * tag_scale),
+            px((tag_ascent + tag_descent) * tag_scale),
+        );
+        let fits = px(body_width) + (tag_size.width + px(12.)) * 2. <= column;
+        let top = if fits {
+            // Baseline alignment keeps a text tag natural beside a tall fraction.
+            let ascent = metrics.ascent.max(px(tag_ascent * tag_scale));
+            metrics.body.origin.y = ascent - metrics.ascent;
+            metrics.ascent = ascent;
+            metrics.descent = metrics.descent.max(px(tag_descent * tag_scale));
+            ascent - px(tag_ascent * tag_scale)
+        } else {
+            let top = height + px(8.);
+            metrics.descent += px(8.) + tag_size.height;
+            top
+        };
+        metrics.tag = Some(Bounds::new(point(column - tag_size.width, top), tag_size));
+        metrics.width = column;
+    }
+    metrics
+}
+
+fn rendered_metrics(
+    body: &crate::math::RenderedMath,
+    tag: Option<&crate::math::RenderedMath>,
+    column: Pixels,
+    centered: bool,
+) -> FormulaMetrics {
+    formula_metrics(
+        (body.width, body.ascent, body.descent),
+        tag.map(|tag| (tag.width, tag.ascent, tag.descent)),
+        column,
+        centered,
+    )
+}
+
+fn push_formula(
+    layout: &mut LayoutLine,
+    rendered: crate::math::RenderedMath,
+    tag: Option<crate::math::RenderedMath>,
+    target: Option<usize>,
+    metrics: FormulaMetrics,
+    origin: Point<Pixels>,
+) {
+    layout.formulas.push(MathDecoration {
+        bounds: Bounds::new(origin + metrics.body.origin, metrics.body.size),
+        content: MathContent::Formula(rendered.image),
+        target,
+    });
+    if let Some((tag, bounds)) = tag.zip(metrics.tag) {
+        layout.formulas.push(MathDecoration {
+            bounds: Bounds::new(origin + bounds.origin, bounds.size),
+            content: MathContent::Formula(tag.image),
+            target: None,
+        });
+    }
+}
+
+/// Place formulas at the text baseline, and keep a live result underneath
+/// formulas whose source is being edited. Decorations never change source
+/// coordinates or introduce additional caret stops.
+pub(super) fn place_formulas(
+    layout: &mut LayoutLine,
+    pending: Vec<PendingFormula>,
+    previews: Vec<MathPreview>,
+    font_size: Pixels,
+) {
+    for formula in pending {
+        let Some(slot) = layout
+            .display_rectangles(formula.chars.clone(), false)
+            .into_iter()
+            .next()
+        else {
+            continue;
+        };
+        let visual = layout.visual_at(slot.origin.y - layout.origin.y);
+        let top = layout.visual_baseline(visual) - formula.metrics.ascent;
+        let origin = point(slot.origin.x - layout.origin.x, top);
+        push_formula(
+            layout,
+            formula.rendered,
+            formula.tag,
+            formula.target,
+            formula.metrics,
+            origin,
+        );
+    }
+    let mut top = layout.text_height()
+        + layout
+            .preview
+            .as_ref()
+            .map_or(px(0.), |(_, size)| PREVIEW_GAP + size.height);
+    let before = top;
+    for preview in previews {
+        top += PREVIEW_GAP;
+        match preview {
+            MathPreview::Formula {
+                rendered,
+                tag,
+                target,
+                display,
+            } => {
+                let metrics = rendered_metrics(&rendered, tag.as_ref(), layout.width, display);
+                push_formula(layout, rendered, tag, target, metrics, point(px(0.), top));
+                top += metrics.ascent + metrics.descent;
+            }
+            MathPreview::Error(label) => {
+                let height = font_size * 1.4;
+                layout.formulas.push(MathDecoration {
+                    bounds: Bounds::new(
+                        point(px(0.), top),
+                        size(label.width.min(layout.width), height),
+                    ),
+                    content: MathContent::Error(label),
+                    target: None,
+                });
+                top += height;
+            }
+        }
+    }
+    layout.height += top - before;
 }
 
 /// A painted atom the display text has reserved room for, before shaping says
@@ -62,12 +248,14 @@ impl DisplayText {
 pub(super) struct PendingAtom {
     /// `char` range of the placeholder within the display text.
     pub(super) chars: Range<usize>,
+    pub(super) width: Pixels,
     pub(super) label: Rc<ShapedLine>,
     pub(super) image: Option<(Arc<crate::animation::Picture>, Size<Pixels>)>,
     pub(super) frame: Option<Size<Pixels>>,
     pub(super) note: bool,
 }
 
+#[cfg(test)]
 pub(super) fn display_text(
     input: &ShapeInput<'_>,
     line: &Line,
@@ -75,6 +263,18 @@ pub(super) fn display_text(
     font_size: Pixels,
     column: Pixels,
     text_system: &WindowTextSystem,
+) -> DisplayText {
+    display_text_mode(input, line, index, font_size, column, text_system, true)
+}
+
+pub(super) fn display_text_mode(
+    input: &ShapeInput<'_>,
+    line: &Line,
+    index: usize,
+    font_size: Pixels,
+    column: Pixels,
+    text_system: &WindowTextSystem,
+    render_objects: bool,
 ) -> DisplayText {
     let projection = input.projection;
     if line.kind() == LineKind::LeafBlock {
@@ -89,22 +289,194 @@ pub(super) fn display_text(
     // size, side by side where they fit; one sharing its line with text has to
     // stay within a row.
     let alone = pictures_only(input, line);
-    let shown = markraft_core::kind::conceal::shown(input.types.syntax, line, &reveal_of(input));
+    let reveal = reveal_of(input);
+    let shown = markraft_core::kind::conceal::shown(input.types.syntax, line, &reveal);
+    let math_spans = crate::math_spans::formula_spans(line, source, input.types);
+    let equations: Vec<_> = math_spans
+        .iter()
+        .map(|span| {
+            input
+                .equations
+                .and_then(|equations| equations.get(index, span.source.start))
+        })
+        .collect();
+    let math_results: Vec<_> = math_spans
+        .iter()
+        .zip(&equations)
+        .map(|(span, equation)| {
+            let source = equation.map_or(span.tex.as_str(), |equation| {
+                equation.render_source.as_str()
+            });
+            input
+                .maths
+                .filter(|_| !source.trim().is_empty())
+                .and_then(|maths| {
+                    maths.get(&crate::math::MathRequest::new(
+                        source,
+                        span.display,
+                        font_size.into(),
+                        input.scale_factor,
+                        if equation.is_some_and(|equation| equation.target.is_some()) {
+                            input.style.link
+                        } else {
+                            input.style.text
+                        },
+                    ))
+                })
+        })
+        .collect();
+    let tag_results: Vec<_> = equations
+        .iter()
+        .map(|equation| {
+            equation
+                .and_then(|equation| equation.tag.as_deref())
+                .and_then(|tag| {
+                    input.maths.and_then(|maths| {
+                        maths.get(&crate::math::MathRequest::new(
+                            tag,
+                            false,
+                            font_size.into(),
+                            input.scale_factor,
+                            input.style.text,
+                        ))
+                    })
+                })
+        })
+        .collect();
     let mut text = String::with_capacity(source.len());
     let mut run_bytes = Vec::with_capacity(line.runs().len());
     let mut widenings = Vec::new();
     let mut atoms = Vec::new();
+    let mut formulas = Vec::new();
+    let mut math_previews = Vec::new();
     let mut byte = 0usize;
     let mut display = 0usize;
-    let mut filler: Option<Pixels> = None;
-    let mut line_height = None;
+    let mut objects = Vec::new();
     for (index_in_line, run) in line.runs().iter().enumerate() {
         let chars = run.char_to - run.char_from;
         let len: usize = source[byte..].chars().take(chars).map(char::len_utf8).sum();
         let slice = &source[byte..byte + len];
         byte += len;
+        if let Some((math_index, span)) = math_spans
+            .iter()
+            .enumerate()
+            .find(|(_, span)| span.source.contains(&run.char_from))
+            && input.maths.is_some()
+        {
+            let result = &math_results[math_index];
+            let revealed = !render_objects || span.revealed(line, &reveal);
+            if run.char_from == span.source.start {
+                let equation = equations[math_index];
+                let tag = tag_results[math_index]
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .cloned();
+                let target = equation.and_then(|equation| equation.target);
+                if !input.single_line {
+                    if let Some(diagnostic) =
+                        equation.and_then(|equation| equation.diagnostic.as_deref())
+                    {
+                        math_previews.push(MathPreview::Error(shape_source_label(
+                            diagnostic,
+                            font(UI_FONT),
+                            font_size * 0.85,
+                            input.style.muted_text,
+                            text_system,
+                        )));
+                    }
+                    if let Some(Err(error)) = &tag_results[math_index] {
+                        math_previews.push(MathPreview::Error(shape_source_label(
+                            &format!("Equation number: {error}"),
+                            font(UI_FONT),
+                            font_size * 0.85,
+                            input.style.muted_text,
+                            text_system,
+                        )));
+                    }
+                }
+                match result {
+                    Some(Ok(rendered)) if !revealed => {
+                        let centered = span.display && span.is_standalone(source);
+                        let metrics = rendered_metrics(rendered, tag.as_ref(), column, centered);
+                        let count = 1;
+                        text.push(OBJECT);
+                        run_bytes.push(OBJECT.len_utf8());
+                        objects.push(InlineObject {
+                            display: display..display + 1,
+                            width: metrics.width,
+                            alignment: InlineAlignment::Baseline {
+                                ascent: metrics.ascent,
+                                descent: metrics.descent,
+                            },
+                        });
+                        widenings.push(Widening {
+                            source: span.source.start,
+                            source_len: span.source.len(),
+                            display,
+                            len: count,
+                            shape: Some(AtomShape::Pill),
+                            broken: false,
+                        });
+                        formulas.push(PendingFormula {
+                            chars: display..display + count,
+                            rendered: rendered.clone(),
+                            tag,
+                            target,
+                            metrics,
+                        });
+                        display += count;
+                        continue;
+                    }
+                    Some(Ok(rendered)) if !input.single_line => {
+                        math_previews.push(MathPreview::Formula {
+                            rendered: rendered.clone(),
+                            tag,
+                            target,
+                            display: span.display,
+                        });
+                    }
+                    Some(Err(error)) if !input.single_line => {
+                        let message: String =
+                            format!("Formula: {error}").chars().take(96).collect();
+                        math_previews.push(MathPreview::Error(shape_source_label(
+                            &message,
+                            font(UI_FONT),
+                            font_size * 0.85,
+                            input.style.muted_text,
+                            text_system,
+                        )));
+                    }
+                    _ => {}
+                }
+            } else if matches!(result, Some(Ok(_))) && !revealed {
+                run_bytes.push(0);
+                continue;
+            }
+            // Pending and failed renders retain all source, including fences.
+            text.push_str(slice);
+            run_bytes.push(len);
+            display += chars;
+            continue;
+        }
         match atom_of(input, line, run, font_size, column, alone, text_system) {
-            Some(atom) => {
+            Some(mut atom) => {
+                if !render_objects && !atom.shape.is_own_text() {
+                    let source = match &run.content {
+                        RunContent::Atom(node) => {
+                            input.spelling.and_then(|kind| kind.atom_source(node))
+                        }
+                        _ => None,
+                    };
+                    atom.shape = if source.is_some() {
+                        AtomShape::Source
+                    } else {
+                        AtomShape::Text
+                    };
+                    atom.text = source.unwrap_or(atom.text);
+                    if atom.text.is_empty() {
+                        atom.text = "[image]".to_owned();
+                    }
+                }
                 // An atom the row can shape *is* its text: writing the label
                 // into the display text gives it exactly the width its glyphs
                 // advance, so what follows sits against it. A placeholder
@@ -114,30 +486,24 @@ pub(super) fn display_text(
                     run_bytes.push(atom.text.len());
                     atom.text.chars().count()
                 } else {
-                    // One atom is one character, and a pill advances nowhere
-                    // near far enough for what is drawn over it, so the row
-                    // reserves the width in fillers. An atom with nothing to
-                    // shape keeps one, which is its caret stop.
-                    let unit = *filler.get_or_insert_with(|| filler_width(font_size, text_system));
-                    let mut count = (atom.width / unit).ceil().max(1.) as usize;
-                    // A picture as wide as the column reserves no more than the
-                    // column: a filler rounded past its edge would wrap onto a
-                    // row of its own, as tall as the picture and empty.
-                    if atom.image.is_some() || atom.frame.is_some() {
-                        count = count.min(((column / unit).floor() as usize).max(1));
-                    }
-                    text.extend(std::iter::repeat_n(PILL_FILLER, count));
-                    run_bytes.push(count * PILL_FILLER.len_utf8());
-                    // Pictures with the line to themselves set the row's height,
-                    // the tallest of them; one sharing it with text fits inside
-                    // the row it is in.
-                    if alone
-                        && let Some(size) =
-                            atom.image.as_ref().map(|(_, size)| *size).or(atom.frame)
-                    {
-                        line_height = Some(line_height.unwrap_or(px(0.)).max(size.height));
-                    }
+                    // One source atom occupies one display object. Its advance
+                    // is an exact layout metric, independent of font whitespace.
+                    let count = 1;
+                    text.push(OBJECT);
+                    run_bytes.push(OBJECT.len_utf8());
+                    let height = atom
+                        .image
+                        .as_ref()
+                        .map(|(_, size)| size.height)
+                        .or(atom.frame.map(|size| size.height))
+                        .unwrap_or(font_size * input.style.line_height_ratio);
+                    objects.push(InlineObject {
+                        display: display..display + 1,
+                        width: atom.width.min(column),
+                        alignment: InlineAlignment::Center { height },
+                    });
                     atoms.push(PendingAtom {
+                        width: atom.width.min(column),
                         chars: display..display + count,
                         note: atom.note,
                         label: atom.label,
@@ -196,7 +562,9 @@ pub(super) fn display_text(
         run_bytes,
         widenings,
         atoms,
-        line_height,
+        formulas,
+        math_previews,
+        objects,
     }
 }
 
@@ -254,27 +622,6 @@ pub(crate) fn reveal_key(input: &ShapeInput<'_>) -> u64 {
         }
     }
     hasher.finish()
-}
-
-/// The advance of one [`PILL_FILLER`], which is the unit a placeholder reserves
-/// its width in.
-pub(super) fn filler_width(font_size: Pixels, text_system: &WindowTextSystem) -> Pixels {
-    const SAMPLE: usize = 8;
-    let text: String = std::iter::repeat_n(PILL_FILLER, SAMPLE).collect();
-    let shaped = text_system.shape_line(
-        text.clone().into(),
-        font_size,
-        &[TextRun {
-            len: text.len(),
-            font: font(UI_FONT),
-            color: gpui::transparent_black(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        }],
-        None,
-    );
-    (shaped.width / SAMPLE as f32).max(px(1.))
 }
 
 /// An inline atom's content and the width it needs.

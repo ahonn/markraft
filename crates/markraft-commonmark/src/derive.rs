@@ -264,6 +264,26 @@ pub fn derive(kind: BlockKind, text: &str, ctx: &DeriveContext) -> Derived {
     if text.is_empty() {
         return Derived::default();
     }
+    if kind == BlockKind::Paragraph
+        && let Some(formula) = crate::math::DisplaySource::parse(text)
+    {
+        return Derived {
+            styles: vec![StyleSpan {
+                range: formula.range(),
+                style: Style::Math { display: true },
+            }],
+            conceals: formula
+                .fences()
+                .into_iter()
+                .map(|range| Conceal {
+                    range,
+                    span: 0,
+                    display: String::new(),
+                })
+                .collect(),
+            ..Derived::default()
+        };
+    }
     if kind == BlockKind::TableCell && text.contains('\n') {
         // A cell is one line of its row; see the guard module. Read each line
         // as a cell of its own rather than as a broken table.

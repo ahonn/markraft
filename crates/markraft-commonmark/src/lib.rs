@@ -129,6 +129,7 @@ mod house;
 pub mod html;
 mod inline;
 mod kind;
+mod math;
 mod pairs;
 pub mod parse;
 mod pending;

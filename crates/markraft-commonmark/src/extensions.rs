@@ -35,6 +35,7 @@
 //!    end of it goes — with the `\` that spells it a hard break —, whitespace starting a line or ending the block goes,
 //!    and in a heading of level 3 or more — which has no way to hold one — or
 //!    a table cell a break becomes a space.
+//!    A standalone display formula preserves its literal TeX lines instead.
 //! 2. Its atoms: text a reader takes for an image, a wiki link or a raw HTML
 //!    tag becomes that atom, every such spelling in the same round. This is
 //!    how a typed `[[Note]]` becomes a link.
@@ -831,6 +832,9 @@ fn settle_lines(
     items: &Items,
     carets: &[usize],
 ) -> Vec<Change> {
+    if kind == BlockKind::Paragraph && crate::math::DisplaySource::parse(&items.text()).is_some() {
+        return Vec::new();
+    }
     let schema = cx.start_state.schema();
     let items = &items.0;
     // A blank line ends a paragraph, so the block becomes as many blocks as

@@ -32,7 +32,14 @@ impl SerializerState<'_> {
     pub fn render_inline(&mut self, parent: &Node) {
         let schema = self.schema();
         let kind = block_kind(schema, parent.type_id()).unwrap_or(BlockKind::Paragraph);
-        let items = canonical_lines(Items::from_nodes(schema, parent.children()));
+        let items = Items::from_nodes(schema, parent.children());
+        let items = if kind == BlockKind::Paragraph
+            && crate::math::DisplaySource::parse(&items.text()).is_some()
+        {
+            items
+        } else {
+            canonical_lines(items)
+        };
         let insertions = items.guard_insertions(schema, kind, self.item_marker(parent));
         let mut out = String::new();
         let mut next = insertions.iter().peekable();

@@ -1326,6 +1326,27 @@ impl SettingsView {
             row(Some("Line break"), vec![line(vec![hard_break])], p),
             group_gap(),
             row(
+                Some("Math"),
+                vec![
+                    checkbox(
+                        "auto-number-equations",
+                        "Automatically number math blocks",
+                        s.preferences.auto_number_equations,
+                        false,
+                        p,
+                        self.sender(|value| Change::Pref(Pref::AutoNumberEquations(value))),
+                    )
+                    .into_any_element(),
+                    div()
+                        .text_size(px(HELP_SIZE))
+                        .text_color(p.subtitle)
+                        .child("Display formulas only. Manual tags work in either mode.")
+                        .into_any_element(),
+                ],
+                p,
+            ),
+            group_gap(),
+            row(
                 Some("Emoji"),
                 vec![
                     checkbox(

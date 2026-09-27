@@ -20,6 +20,8 @@
 
 pub mod chains;
 pub mod conceal;
+pub mod equations;
+pub mod math;
 pub mod types;
 
 use std::ops::Range;

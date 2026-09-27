@@ -401,7 +401,7 @@ impl AccessibleText {
                     before.push(inner.end);
                 }
                 let x = f32::from(row.origin.x) * scale;
-                let y = f32::from(row.origin.y + row.line_height * visual as f32) * scale;
+                let y = f32::from(row.origin.y + row.visual_top(visual)) * scale;
                 let offsets = character_offsets(&value);
                 let positions = positions_of(line, &value, &before, &offsets, inner.end);
                 self.runs.push(TextRun {
@@ -425,7 +425,7 @@ impl AccessibleText {
                         x0: f64::from(x),
                         y0: f64::from(y),
                         x1: f64::from(x + f32::from(row.width) * scale),
-                        y1: f64::from(y + f32::from(row.line_height) * scale),
+                        y1: f64::from(y + f32::from(row.visual_height(visual)) * scale),
                     },
                     cell: row.table.map(|cell| (cell.row, cell.column)),
                 });
@@ -766,6 +766,9 @@ mod tests {
         )));
         let rows = crate::surface::shape(
             &crate::surface::ShapeInput {
+                maths: None,
+                equations: None,
+                scale_factor: 1.0,
                 doc: state.doc(),
                 types: &types,
                 projection: &projection,
@@ -811,6 +814,9 @@ mod tests {
         )));
         let rows = crate::surface::shape(
             &crate::surface::ShapeInput {
+                maths: None,
+                equations: None,
+                scale_factor: 1.0,
                 doc: state.doc(),
                 types: &types,
                 projection: &projection,
@@ -877,6 +883,9 @@ mod tests {
             let doc = state.doc();
             let rows = crate::surface::shape(
                 &crate::surface::ShapeInput {
+                    maths: None,
+                    equations: None,
+                    scale_factor: 1.0,
                     doc,
                     types: &types,
                     projection: &projection,

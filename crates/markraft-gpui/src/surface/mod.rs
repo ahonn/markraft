@@ -8,11 +8,9 @@
 //! Every geometry query is in visible `char` offsets. The projection retained
 //! by each layout maps document positions past hidden inline boundaries.
 //!
-//! HTML is never rendered or interpreted: a raw block is drawn as the source
-//! it holds, in the code font, and an inline HTML primitive as its source in
-//! the prose around it, so a note shows exactly what it will be written back
-//! as. The one tag drawn as what it means is a `<br>` in a table cell, which
-//! is the cell's line break there.
+//! Inline objects reserve measured advances in the shaped text. Visual rows
+//! retain their own height and baseline so tall content affects only the row
+//! containing it; text, decorations, and objects share that row geometry.
 
 use crate::style::EditorStyle;
 use crate::{CaretShape, EditorView};
@@ -30,9 +28,13 @@ use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
 mod atoms;
+mod inline_object;
+mod text_layout;
 pub(crate) use atoms::shown_atom_label;
 mod breaking;
 mod chrome;
+#[cfg(test)]
+mod equation_tests;
 mod layout_line;
 mod lines;
 mod paint;
@@ -53,6 +55,7 @@ pub(crate) use self::table::{TableScroll, cell_under, merge_row_centers};
 use self::atoms::*;
 use self::breaking::*;
 use self::chrome::*;
+use self::inline_object::*;
 use self::layout_line::*;
 use self::paint::*;
 use self::runs::*;
@@ -77,17 +80,11 @@ const SUBSCRIPT_DROP: f32 = 0.18;
 const INLINE_CODE_PADDING: Pixels = px(5.);
 const NUMBER_GAP: Pixels = px(6.);
 
-/// An inline atom the view draws itself is one character of the projection and
-/// takes far more room than that character advances, so the display text holds
-/// a run of [`PILL_FILLER`] in its place; see [`Widening`]. An image's stand-in
-/// is a pill like inline code; an inline HTML primitive is drawn as the source
-/// it stands for, because the view never renders HTML.
+/// Labels for inline atoms use a compact pill in the visual row's text band.
 const PILL_SCALE: f32 = 0.82;
 const PILL_PADDING: Pixels = px(7.);
 const PILL_ICON: Pixels = px(13.);
 const PILL_ICON_GAP: Pixels = px(5.);
-/// No-break, so an atom never wraps in the middle of its own placeholder.
-const PILL_FILLER: char = '\u{00a0}';
 /// The widest a drawn atom may grow, as a share of the column.
 const PILL_MAX_RATIO: f32 = 0.9;
 
@@ -297,6 +294,9 @@ impl Element for EditorSurface {
         style.flex_shrink = 0.;
         (
             window.request_measured_layout(style, move |known, available, window, cx| {
+                editor.update(cx, |editor, _| {
+                    editor.shaping.set_scale_factor(window.scale_factor());
+                });
                 let view = editor.read(cx);
                 let width = known.width.unwrap_or(match available.width {
                     AvailableSpace::Definite(w) => w,
@@ -426,6 +426,7 @@ impl Element for EditorSurface {
             );
         }
         let revealed = self.editor.update(cx, |editor, cx| {
+            editor.render_math(cx);
             if editor.shaping().images().has_requests() {
                 editor.fetch_remote_images(cx);
             }
@@ -548,6 +549,7 @@ impl Element for EditorSurface {
             let painted = painted_lines(rows);
             for (row, inert) in &painted {
                 let (row, inert): (&LayoutLine, bool) = (row, *inert);
+                paint_formulas(row, window, cx);
                 for atom in &row.atoms {
                     paint_atom(row, atom, &style, window, cx);
                 }
@@ -644,16 +646,32 @@ impl Element for EditorSurface {
                 // goes down here, over the block's chrome and under the
                 // selection, so a selected highlight still reads as selected.
                 for inner in &row.rows {
-                    let origin =
-                        row.origin + point(px(0.), row.line_height * inner.visual_start as f32);
-                    let _ = inner.line.paint_background(
-                        origin,
-                        row.line_height,
-                        TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    );
+                    if inner.paint_rows.is_empty() {
+                        let origin =
+                            row.origin + point(px(0.), row.visual_text_top(inner.visual_start));
+                        let _ = inner.line.paint_background(
+                            origin,
+                            row.line_height,
+                            TextAlign::Left,
+                            None,
+                            window,
+                            cx,
+                        );
+                    } else {
+                        for (index, line) in inner.paint_rows.iter().enumerate() {
+                            let visual = inner.visual_start + index;
+                            let origin = row.origin
+                                + point(row.row_shift(visual), row.visual_text_top(visual));
+                            let _ = line.paint_background(
+                                origin,
+                                row.line_height,
+                                TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+                        }
+                    }
                 }
                 // Inline code pills go over the fill: a code span inside a
                 // highlight carries the fill across its whole slot, so the band
@@ -666,7 +684,7 @@ impl Element for EditorSurface {
                             row.origin
                                 + point(
                                     code.left + row.row_shift(code.visual_row),
-                                    row.line_height * code.visual_row as f32 + inset,
+                                    row.visual_text_top(code.visual_row) + inset,
                                 ),
                             size(code.slot, row.line_height - inset * 2.),
                         );
@@ -716,24 +734,44 @@ impl Element for EditorSurface {
                         }
                     }
                 }
-                let (align, align_width) = row.text_align();
                 for inner in &row.rows {
-                    let origin =
-                        row.origin + point(px(0.), row.line_height * inner.visual_start as f32);
-                    let _ = inner.line.paint(
-                        origin,
-                        row.line_height,
-                        align,
-                        align_width.map(|width| Bounds::new(origin, size(width, row.line_height))),
-                        window,
-                        cx,
-                    );
+                    if inner.paint_rows.is_empty() {
+                        let origin =
+                            row.origin + point(px(0.), row.visual_text_top(inner.visual_start));
+                        let (align, width) = match row.align {
+                            Align::Start => (TextAlign::Left, None),
+                            Align::Center => (TextAlign::Center, Some(row.width)),
+                            Align::End => (TextAlign::Right, Some(row.width)),
+                        };
+                        let _ = inner.line.paint(
+                            origin,
+                            row.line_height,
+                            align,
+                            width.map(|width| Bounds::new(origin, size(width, row.line_height))),
+                            window,
+                            cx,
+                        );
+                    } else {
+                        for (index, line) in inner.paint_rows.iter().enumerate() {
+                            let visual = inner.visual_start + index;
+                            let origin = row.origin
+                                + point(row.row_shift(visual), row.visual_text_top(visual));
+                            let _ = line.paint(
+                                origin,
+                                row.line_height,
+                                TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+                        }
+                    }
                     for code in &inner.inline_code {
                         let _ = code.line.paint(
                             row.origin
                                 + point(
                                     code.text_left() + row.row_shift(code.visual_row),
-                                    row.line_height * code.visual_row as f32 - code.lift,
+                                    row.visual_text_top(code.visual_row) - code.lift,
                                 ),
                             row.line_height,
                             TextAlign::Left,

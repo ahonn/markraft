@@ -24,6 +24,10 @@ use std::cell::{RefCell, RefMut};
 pub(crate) struct Shaping {
     style: EditorStyle,
     images: Images,
+    maths: crate::maths::Maths,
+    equations: markraft_core::kind::equations::EquationIndex,
+    auto_number_equations: bool,
+    scale_factor: Option<f32>,
     /// What the host says a wiki link target can open, so that a link leading
     /// nowhere is not drawn as one that leads somewhere. Absent until the host
     /// says, and then every link is drawn as followable.
@@ -50,6 +54,71 @@ impl Shaping {
         }
         self.style = style;
         self.changed();
+    }
+
+    pub(crate) fn auto_number_equations(&self) -> bool {
+        self.auto_number_equations
+    }
+
+    pub(crate) fn equations(&self) -> &markraft_core::kind::equations::EquationIndex {
+        &self.equations
+    }
+
+    pub(crate) fn update_equations(
+        &mut self,
+        projection: &markraft_core::projection::Projection,
+        types: &markraft_core::kind::DocTypes,
+    ) {
+        self.equations = markraft_core::kind::equations::EquationIndex::build(
+            projection,
+            types,
+            self.auto_number_equations,
+        );
+    }
+
+    pub(crate) fn set_auto_number_equations(
+        &mut self,
+        enabled: bool,
+        projection: &markraft_core::projection::Projection,
+        types: &markraft_core::kind::DocTypes,
+    ) -> bool {
+        if self.auto_number_equations == enabled {
+            return false;
+        }
+        self.auto_number_equations = enabled;
+        self.update_equations(projection, types);
+        self.lines.get_mut().forget_all_math(types);
+        true
+    }
+
+    pub(crate) fn maths(&self) -> &crate::maths::Maths {
+        &self.maths
+    }
+
+    pub(crate) fn scale_factor(&self) -> f32 {
+        self.scale_factor.unwrap_or(1.0)
+    }
+
+    pub(crate) fn set_scale_factor(&mut self, scale: f32) {
+        if self.scale_factor() != scale {
+            self.scale_factor = Some(scale);
+            self.changed();
+        }
+    }
+
+    pub(crate) fn finish_math(
+        &mut self,
+        types: &markraft_core::kind::DocTypes,
+        results: Vec<(
+            crate::math::MathRequest,
+            Result<crate::math::RenderedMath, crate::math::MathError>,
+        )>,
+    ) {
+        let requests: Vec<_> = results.iter().map(|(request, _)| request.clone()).collect();
+        self.maths.finish(results);
+        self.lines
+            .get_mut()
+            .forget_math(types, Some(&self.equations), &requests);
     }
 
     pub(crate) fn images(&self) -> &Images {

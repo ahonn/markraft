@@ -99,6 +99,25 @@ fn a_single_tilde_is_subscript_and_a_double_one_strikethrough() {
 }
 
 #[test]
+fn an_empty_display_body_has_the_same_math_contract_as_a_filled_body() {
+    for text in ["$$\n\n$$", "$$$$", "$$中文\n\nα$$"] {
+        let derived = derive(BlockKind::Paragraph, text, &DeriveContext::new());
+        let end = text.chars().count();
+        assert_eq!(derived.styles.len(), 1, "{text:?}");
+        assert_eq!(derived.styles[0].range, 0..end);
+        assert_eq!(derived.styles[0].style, Style::Math { display: true });
+        assert_eq!(derived.conceals.len(), 2);
+        assert_eq!(derived.conceals[0].range, 0..2);
+        assert_eq!(derived.conceals[1].range, end - 2..end);
+        assert_eq!(derived.conceals[0].span, derived.conceals[1].span);
+        assert_eq!(
+            visible(BlockKind::Paragraph, text),
+            &text[2..text.len() - 2]
+        );
+    }
+}
+
+#[test]
 fn a_formula_conceals_its_fences_and_reads_nothing_inside() {
     assert_eq!(para("$x^2$"), "math(0..5) 0..1@0 4..5@0");
     assert_eq!(para("$$a*b*c$$"), "math(0..9) 0..2@0 7..9@0");
