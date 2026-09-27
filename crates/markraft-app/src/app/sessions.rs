@@ -429,6 +429,9 @@ mod tests {
     #[gpui::test]
     fn an_accepted_host_edit_schedules_its_own_save(cx: &mut gpui::TestAppContext) {
         let mut h = crate::e2e::harness::open_with(cx, &[("Welcome.md", "Original\n")], |_| {});
+        // The window settles its first size, which is saved as a preference,
+        // on a later frame; let it before the workspace has to be clean.
+        h.pass_time(std::time::Duration::from_secs(1));
         h.save();
         let id = h.active_note().id;
         let app = h.app.clone();
