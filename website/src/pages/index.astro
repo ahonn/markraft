@@ -5,6 +5,8 @@ import Loop from '../components/Loop.astro';
 const repo = 'https://github.com/ahonn/markraft';
 // The release workflow also uploads the newest disk image under this fixed name.
 const downloadUrl = `${repo}/releases/latest/download/Markraft.dmg`;
+// Plausible tagged-event classes; they are inert when analytics is not loaded.
+const downloadEvent = (position: string) => `plausible-event-name=Download plausible-event-position=${position}`;
 
 const title = 'Markraft — Open Source Floating Markdown Notepad for Mac';
 const description =
@@ -81,7 +83,7 @@ const lead = 'text-[17px] leading-[1.55] text-muted sm:text-[19px]';
       <a href="#features" class="hidden py-3 text-muted! hover:text-ink! sm:inline">Features</a>
       <a href="#faq" class="hidden py-3 text-muted! hover:text-ink! sm:inline">FAQ</a>
       <a href={repo} class="py-3 text-muted! hover:text-ink!">GitHub</a>
-      <a href={downloadUrl} class="btn btn-secondary btn-small">Download</a>
+      <a href={downloadUrl} class:list={['btn btn-secondary btn-small', downloadEvent('header')]}>Download</a>
     </nav>
   </header>
 
@@ -102,7 +104,7 @@ const lead = 'text-[17px] leading-[1.55] text-muted sm:text-[19px]';
         An open source alternative to Raycast Notes.
       </p>
       <div class="mt-8 flex w-full flex-col items-stretch gap-3 sm:w-auto sm:flex-row sm:items-center">
-        <a href={downloadUrl} class={primaryButton}>
+        <a href={downloadUrl} class:list={[primaryButton, downloadEvent('hero')]}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M12 4v11" /><path d="M7 10.5l5 5 5-5" /><path d="M5 20h14" />
           </svg>
@@ -249,7 +251,7 @@ const lead = 'text-[17px] leading-[1.55] text-muted sm:text-[19px]';
     <section id="download" class:list={[container, gapLarge, 'flex flex-col items-center pb-4 text-center']}>
       <img src="/icon.png" alt="" width="72" height="72" class="size-18" />
       <h2 class="mt-5 text-[clamp(1.75rem,4vw,2.5rem)] font-bold tracking-[-0.02em]">Press ⌥N and start writing.</h2>
-      <a href={downloadUrl} class:list={[primaryButton, 'mt-7 w-full sm:w-auto']}>Download for Mac</a>
+      <a href={downloadUrl} class:list={[primaryButton, 'mt-7 w-full sm:w-auto', downloadEvent('footer')]}>Download for Mac</a>
       <p class="mt-4 text-sm text-subtle">
         Free · macOS 13 or later · Apple Silicon and Intel
       </p>
