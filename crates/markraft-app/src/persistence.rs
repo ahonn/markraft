@@ -71,7 +71,10 @@ enum Request {
     Shutdown,
     Save(u64, Library, Preferences, Instant),
     Recover(Note, Reply<Result<(), StoreError>>),
-    Markdown(Note, Reply<Result<String, StoreError>>),
+    Snapshot(
+        crate::doc::PendingSnapshot,
+        Reply<Result<crate::doc::DocumentSnapshot, StoreError>>,
+    ),
     OpenFile(std::path::PathBuf, Reply<Result<Note, StoreError>>),
     Rename(
         String,
@@ -157,8 +160,8 @@ impl Persistence {
             while let Some(request) = next_request(&incoming, &mut deferred) {
                 match request {
                     Request::Shutdown => break,
-                    Request::Markdown(note, response) => {
-                        let _ = response.send(store.markdown(&note));
+                    Request::Snapshot(snapshot, response) => {
+                        let _ = response.send(snapshot.render());
                     }
                     Request::Recover(note, response) => {
                         let _ = response.send(store.recover(&note));
@@ -273,10 +276,28 @@ impl Persistence {
         let response = self.request_async(|reply| Request::Recover(note, reply));
         Box::pin(async move { response.await? })
     }
-    pub fn markdown_async(&self, note: Note) -> Pending<String> {
-        let response = self.request_async(|reply| Request::Markdown(note, reply));
+    /// Capture committed inputs before queueing; later edits cannot change the export.
+    pub fn snapshot_async(
+        &self,
+        note: Note,
+        library_generation: u64,
+        auto_number_equations: bool,
+    ) -> Pending<crate::doc::DocumentSnapshot> {
+        let source = match self.sources.source(&note) {
+            Ok(source) => source.map(|track| track.snapshot()),
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let snapshot = crate::doc::PendingSnapshot::new(
+            note,
+            library_generation,
+            auto_number_equations,
+            source,
+            self.house.get(),
+        );
+        let response = self.request_async(|reply| Request::Snapshot(snapshot, reply));
         Box::pin(async move { response.await? })
     }
+
     pub fn reload_async(&self) -> Pending<Library> {
         let response = self.request_async(Request::Reload);
         Box::pin(async move { response.await? })
@@ -727,6 +748,41 @@ mod tests {
     }
 
     #[test]
+    fn export_snapshot_is_frozen_before_later_edits_and_does_not_mark_dirty() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, mut library) = open(directory.path());
+        let persistence = Persistence::start(store, false);
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown("Captured"));
+        let note = library.active_note().clone();
+        let generation = library.generation;
+        let changes = library.changes.clone();
+        let pending = persistence.snapshot_async(note.clone(), generation, true);
+        assert_eq!(library.changes, changes);
+        library.set_document(&id, doc::from_markdown("Later"));
+        // Flush is a queue barrier, so the snapshot response is now ready.
+        persistence
+            .flush(0, library.clone(), Preferences::default())
+            .unwrap()
+            .result
+            .unwrap();
+        let snapshot = futures_util::FutureExt::now_or_never(pending)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.note_id, id);
+        assert_eq!(snapshot.document, note.document);
+        assert_eq!(snapshot.markdown, "Captured\n");
+        assert_eq!(snapshot.library_generation, generation);
+        assert_eq!(
+            snapshot.base_path,
+            note.path
+                .and_then(|path| path.parent().map(ToOwned::to_owned))
+        );
+        assert!(snapshot.auto_number_equations);
+        assert_eq!(doc::plain_text(&library.active_note().document), "Later");
+    }
+
+    #[test]
     fn composition_candidates_never_enter_saved_snapshots() {
         use markraft_core::{
             EditorState, EditorStateConfig, Selection,
@@ -751,12 +807,22 @@ mod tests {
             let spec = update_composition(&state, candidate, candidate.chars().count()).unwrap();
             state = state.update([spec]).unwrap().state().clone();
             library.set_document(&id, committed_document(&state).clone());
+            let captured = persistence.snapshot_async(
+                library.active_note().clone(),
+                library.generation,
+                false,
+            );
             persistence
                 .flush(0, library.clone(), Preferences::default())
                 .unwrap()
                 .result
                 .unwrap();
             assert!(only_note(directory.path()).1.ends_with("hello\n"));
+            let captured = futures_util::FutureExt::now_or_never(captured)
+                .unwrap()
+                .unwrap();
+            assert_eq!(captured.document, *committed_document(&state));
+            assert_eq!(captured.markdown, "hello\n");
         }
 
         state = state

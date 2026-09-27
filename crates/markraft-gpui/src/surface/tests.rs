@@ -3,9 +3,8 @@ use super::{
     LayoutLine, LayoutRow, Marker, PREVIEW_GAP, QUOTE_BAR, ROUNDED_FONT, Runs, ShapeInput,
     TABLE_LINE, TableCell, TableScroll, UI_FONT, Widening, atom_label, caret_cell_frame,
     cell_under, chrome_marker, column_demands, column_widths, decoration_of, display_text,
-    drawn_image, file_name, gap_below, max_indent, merge_row_centers, picture_source, place_table,
-    quote_bars, reveal_offset, shape, table_overflows, text_runs, unbreakable_units,
-    visible_strips,
+    drawn_image, gap_below, max_indent, merge_row_centers, picture_source, place_table, quote_bars,
+    reveal_offset, shape, table_overflows, text_runs, unbreakable_units, visible_strips,
 };
 use super::{OBJECT, char_to_byte};
 use crate::style::EditorStyle;
@@ -17,6 +16,7 @@ use markraft_core::EditorState;
 use markraft_core::commands::ColumnAlignment;
 use markraft_core::commands::insert_text;
 use markraft_core::kind::DocTypes;
+use markraft_core::kind::reading::file_name;
 use markraft_core::projection::{Line, RunContent, projection_of};
 use std::collections::HashMap;
 use std::ops::Range;

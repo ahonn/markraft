@@ -1616,13 +1616,17 @@ impl MarkraftApp {
         let original = snapshot.clone();
         let activation = self.io.opening;
         let filename = format!("{}.md", snapshot.title().replace(['/', ':'], "-"));
-        let rendering = persistence.markdown_async(snapshot);
+        let rendering = persistence.snapshot_async(
+            snapshot,
+            self.library.generation,
+            self.preferences.auto_number_equations,
+        );
         let directory = self.path.clone().unwrap_or_default();
         let prompt = cx.prompt_for_new_path(&directory, Some(&filename));
         let executor = cx.background_executor().clone();
         self.run_io(
             async move {
-                let document = rendering.await?;
+                let document = rendering.await?.markdown;
                 let Some(path) = prompt
                     .await
                     .map_err(|e| StoreError::from(e.to_string()))?

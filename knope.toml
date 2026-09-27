@@ -18,6 +18,7 @@ versioned_files = [
     { path = "Cargo.lock", dependency = "markraft-commonmark" },
     { path = "Cargo.lock", dependency = "markraft-core" },
     { path = "Cargo.lock", dependency = "markraft-gpui" },
+    { path = "Cargo.lock", dependency = "markraft-math" },
     { path = "Cargo.lock", dependency = "markraft-vim" },
 ]
 changelog = "CHANGELOG.md"

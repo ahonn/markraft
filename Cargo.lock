@@ -4055,6 +4055,7 @@ dependencies = [
 name = "markraft-core"
 version = "0.1.1"
 dependencies = [
+ "emojis",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -4071,17 +4072,24 @@ dependencies = [
  "log",
  "markraft-commonmark",
  "markraft-core",
+ "markraft-math",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
- "ratex-layout",
- "ratex-parser",
- "ratex-svg",
- "ratex-types",
  "serde_json",
  "syntect",
  "two-face",
  "unicode-segmentation",
  "url",
+]
+
+[[package]]
+name = "markraft-math"
+version = "0.1.1"
+dependencies = [
+ "ratex-layout",
+ "ratex-parser",
+ "ratex-svg",
+ "ratex-types",
 ]
 
 [[package]]

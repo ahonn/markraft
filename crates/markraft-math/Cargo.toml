@@ -1,0 +1,18 @@
+[package]
+name = "markraft-math"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Native LaTeX typesetting and self-contained SVG artifacts"
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+ratex-parser = "=0.1.14"
+ratex-layout = "=0.1.14"
+ratex-types = "=0.1.14"
+ratex-svg = { version = "=0.1.14", features = ["embed-fonts"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

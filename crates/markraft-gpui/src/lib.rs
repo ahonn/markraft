@@ -470,16 +470,64 @@ fn apply_guarded(
     apply_guarded_transactions(state, specs, guard, None)
 }
 
+#[cfg(test)]
 fn apply_guarded_transactions(
     state: &mut EditorState,
     specs: impl IntoIterator<Item = TransactionSpec>,
     guard: Option<&DocumentGuard>,
     transaction_guard: Option<&TransactionGuard>,
 ) -> Result<Vec<Transaction>, EditRejection> {
+    apply_guarded_transactions_with_groups(state, specs, guard, transaction_guard, None)
+}
+
+fn apply_guarded_transactions_with_groups(
+    state: &mut EditorState,
+    specs: impl IntoIterator<Item = TransactionSpec>,
+    guard: Option<&DocumentGuard>,
+    transaction_guard: Option<&TransactionGuard>,
+    isolated_depth: Option<usize>,
+) -> Result<Vec<Transaction>, EditRejection> {
     let started = std::time::Instant::now();
-    let transactions = state
-        .update_with_appended(specs)
-        .map_err(|error| EditRejection::Invalid(error.to_string()))?;
+    let invalid = |error: markraft_core::StateError| EditRejection::Invalid(error.to_string());
+    let mut prepared = state.clone();
+    let mut transactions = Vec::new();
+    let depth = isolated_depth.unwrap_or(0);
+    if depth > 0 {
+        let close = prepared
+            .update([TransactionSpec::new()
+                .effects((0..depth).map(|_| markraft_core::history::end_undo_group().of(())))
+                .add_to_history(false)
+                .no_filter()])
+            .map_err(invalid)?;
+        prepared = close.state().clone();
+        transactions.push(close);
+    }
+    let specs = specs.into_iter().map(|spec| {
+        if isolated_depth.is_some() {
+            spec.annotate(
+                markraft_core::protocol::isolate_history()
+                    .of(markraft_core::protocol::IsolateHistory::Both),
+            )
+        } else {
+            spec
+        }
+    });
+    let edits = prepared.update_with_appended(specs).map_err(invalid)?;
+    if let Some(last) = edits.last() {
+        prepared = last.state().clone();
+    }
+    transactions.extend(edits);
+    if depth > 0 {
+        let reopen = prepared
+            .update([TransactionSpec::new()
+                .effects((0..depth).map(|_| markraft_core::history::begin_undo_group().of(())))
+                .add_to_history(false)
+                .no_filter()])
+            .map_err(invalid)?;
+        // Resolve the reopened history before invoking a source guard with effects.
+        let _ = reopen.state();
+        transactions.push(reopen);
+    }
     let last = transactions
         .last()
         .ok_or_else(|| EditRejection::Invalid("No transaction was produced.".to_owned()))?;
@@ -534,7 +582,7 @@ pub struct EditorView {
     edit_error: Option<EditRejection>,
     file_paste: bool,
     state: EditorState,
-    projection: Arc<Projection>,
+    analysis: markraft_core::kind::analysis::DocumentAnalysis,
     /// The find query and its hits. See [`find`].
     find: markraft_core::StateField<find::Find>,
     pub(crate) types: DocTypes,
@@ -647,8 +695,12 @@ impl EditorView {
         } = setup;
         let (state, find) = build_state(&schema, &extensions, doc, &types);
         let projection = projection_of(&state);
-        let mut shaping = shaping::Shaping::default();
-        shaping.update_equations(&projection, &types);
+        let shaping = shaping::Shaping::default();
+        let analysis = markraft_core::kind::analysis::DocumentAnalysis::new(
+            projection.clone(),
+            &types,
+            Default::default(),
+        );
         Self {
             document_guard: None,
             transaction_guard: None,
@@ -661,7 +713,7 @@ impl EditorView {
             kind,
             extension_selection: state.selection().clone(),
             state,
-            projection,
+            analysis,
             host_extensions: extensions,
             extensions: Vec::new(),
             placeholder: SharedString::default(),
@@ -897,7 +949,8 @@ impl EditorView {
                         .bounds()
                         .contains(&row.caret(offset, this.caret.upstream()))
                 });
-                this.shaping.finish_math(&this.types, results);
+                this.shaping
+                    .finish_math(&this.types, this.analysis.equations(), results);
                 // Async metrics can move the last visible caret below the
                 // viewport even though the reader did not move it.
                 if caret_visible {
@@ -991,8 +1044,12 @@ impl EditorView {
     pub fn find_selection_query(&self) -> Option<String> {
         let doc = self.state.doc();
         let selection = self.state.selection();
-        shown::ShownText::build(&self.projection, &self.types, &conceal::Reveal::nothing())
-            .text_inside(selection.from(doc)..selection.to(doc))
+        shown::ShownText::build(
+            self.analysis.projection(),
+            &self.types,
+            &conceal::Reveal::nothing(),
+        )
+        .text_inside(selection.from(doc)..selection.to(doc))
     }
 
     /// Find `query` and select the first hit at or after the caret. An empty
@@ -1071,32 +1128,50 @@ impl EditorView {
     }
     /// The document's flattened, line-oriented view.
     pub fn projection(&self) -> Arc<Projection> {
-        self.projection.clone()
+        self.analysis.projection().clone()
     }
     /// The same projection, as the handle the laid-out rows are keyed by: a
     /// document that has not changed hands back the very same `Arc`.
     pub(crate) fn projection_arc(&self) -> &Arc<Projection> {
-        &self.projection
+        self.analysis.projection()
     }
     /// The whole document as text, lines joined by `'\n'`.
     pub fn text(&self) -> &str {
-        self.projection.plain_text()
+        self.analysis.projection().plain_text()
     }
     /// Whether standalone display formulas receive automatic document numbers.
     pub fn auto_number_equations(&self) -> bool {
-        self.shaping.auto_number_equations()
+        self.analysis.options().auto_number_equations
     }
 
     /// Number standalone display formulas in document order without changing source.
     /// Manual tags and references remain available when automatic numbering is off.
     pub fn set_auto_number_equations(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let options = markraft_core::kind::analysis::AnalysisOptions {
+            auto_number_equations: enabled,
+        };
         if self
-            .shaping
-            .set_auto_number_equations(enabled, &self.projection, &self.types)
+            .analysis
+            .sync(self.analysis.projection().clone(), &self.types, options)
         {
+            self.shaping.equations_changed(&self.types);
             self.caret.ask_reveal();
             cx.notify();
         }
+    }
+
+    /// Document semantics for the current editing state, independent of layout.
+    /// For saving or export, analyze `committed_document` instead while an IME
+    /// composition is active.
+    pub fn analysis(&self) -> &markraft_core::kind::analysis::DocumentAnalysis {
+        &self.analysis
+    }
+
+    /// Synchronize derived data only after the entire state has been accepted.
+    fn sync_document_analysis(&mut self) {
+        let projection = projection_of(&self.state);
+        self.analysis
+            .sync(projection, &self.types, self.analysis.options());
     }
 
     /// The style rows are shaped and drawn with.
@@ -1114,12 +1189,12 @@ impl EditorView {
         ShapeInput {
             doc,
             types: &self.types,
-            projection: &self.projection,
+            projection: self.analysis.projection(),
             style: self.shaping.style(),
             single_line: self.single_line,
             images: self.shaping.images(),
             maths: Some(self.shaping.maths()),
-            equations: Some(self.shaping.equations()),
+            equations: Some(self.analysis.equations()),
             scale_factor: self.shaping.scale_factor(),
             wiki: self.shaping.wiki(),
             spelling: self.spelling.as_deref(),
@@ -1193,7 +1268,7 @@ impl EditorView {
     }
     /// The type and attributes every selected block shares; mixed formats give `None`.
     pub fn active_block_type(&self) -> Option<(NodeTypeId, Attrs)> {
-        format_state::active_block_type(&self.state, &self.projection)
+        format_state::active_block_type(&self.state, self.analysis.projection())
     }
 
     /// Replace the document, discarding the undo history with it.
@@ -1217,8 +1292,7 @@ impl EditorView {
         );
         self.find = find;
         self.state = state;
-        self.projection = projection_of(&self.state);
-        self.shaping.update_equations(&self.projection, &self.types);
+        self.sync_document_analysis();
         self.extension_selection = self.state.selection().clone();
         self.undo_group_depth = 0;
         self.scroll.set_offset(point(px(0.), px(0.)));
@@ -1246,11 +1320,20 @@ impl EditorView {
         &mut self,
         specs: impl IntoIterator<Item = TransactionSpec>,
     ) -> Option<Vec<Transaction>> {
-        let transactions = match apply_guarded_transactions(
+        self.apply_with_isolation(specs, None)
+    }
+
+    fn apply_with_isolation(
+        &mut self,
+        specs: impl IntoIterator<Item = TransactionSpec>,
+        isolated_depth: Option<usize>,
+    ) -> Option<Vec<Transaction>> {
+        let transactions = match apply_guarded_transactions_with_groups(
             &mut self.state,
             specs,
             self.document_guard.as_ref(),
             self.transaction_guard.as_ref(),
+            isolated_depth,
         ) {
             Ok(transactions) => transactions,
             Err(error) => {
@@ -1258,10 +1341,7 @@ impl EditorView {
                 return None;
             }
         };
-        self.projection = projection_of(&self.state);
-        if transactions.iter().any(Transaction::doc_changed) {
-            self.shaping.update_equations(&self.projection, &self.types);
-        }
+        self.sync_document_analysis();
         Some(transactions)
     }
 
@@ -1275,8 +1355,18 @@ impl EditorView {
         discarding: bool,
         specs: Vec<TransactionSpec>,
     ) -> Option<bool> {
+        self.edit_with_isolation(cx, discarding, specs, None)
+    }
+
+    fn edit_with_isolation(
+        &mut self,
+        cx: &mut Context<Self>,
+        discarding: bool,
+        specs: Vec<TransactionSpec>,
+        isolated_depth: Option<usize>,
+    ) -> Option<bool> {
         let composing = self.is_composing();
-        let transactions = self.apply(specs)?;
+        let transactions = self.apply_with_isolation(specs, isolated_depth)?;
         let changed = transactions.iter().any(Transaction::doc_changed);
         self.caret.moved_by_edit();
         if changed || composing != self.is_composing() {
@@ -1312,6 +1402,23 @@ impl EditorView {
     ) -> bool {
         self.edit(cx, false, specs.into_iter().collect())
             .unwrap_or(false)
+    }
+
+    /// Apply a host edit as a separate undo event, even inside an explicit group.
+    /// The current group resumes after the edit as a fresh segment. All boundary
+    /// and editing states are prepared before guards run; refusal changes nothing.
+    pub fn dispatch_isolated(
+        &mut self,
+        specs: impl IntoIterator<Item = TransactionSpec>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.edit_with_isolation(
+            cx,
+            false,
+            specs.into_iter().collect(),
+            Some(self.undo_group_depth),
+        )
+        .unwrap_or(false)
     }
 
     /// The view's side of [`EditorCx::begin_undo_group`].
@@ -1726,7 +1833,7 @@ impl EditorView {
         };
         // Below the last row laid out is the document's end only where that
         // row is the document's last line.
-        let at_end = last.index + 1 >= self.projection.line_count();
+        let at_end = last.index + 1 >= self.analysis.projection().line_count();
         if at_end && point.y >= last.origin.y + last.height {
             return last.offset_to_pos(last.char_len);
         }
@@ -1734,7 +1841,7 @@ impl EditorView {
         if row.in_callout_header(point.y) {
             return row.offset_to_pos(0);
         }
-        row.hit_position(row.char_at(local), &self.projection)
+        row.hit_position(row.char_at(local), self.analysis.projection())
     }
 
     /// The laid-out line `point` falls on, and the point relative to its origin.
@@ -1917,13 +2024,14 @@ impl EditorView {
         }
         let head = self.head();
         let cursor = self.state.selection().is_cursor();
-        let last_line = self.projection.line_count().saturating_sub(1);
+        let last_line = self.analysis.projection().line_count().saturating_sub(1);
         if delta > 0
             && !extend
             && cursor
-            && self.projection.line_at(head) == Some(last_line)
+            && self.analysis.projection().line_at(head) == Some(last_line)
             && self
-                .projection
+                .analysis
+                .projection()
                 .line(last_line)
                 .is_some_and(|line| line.to() == head && self.types.is_verbatim_block(line))
             && let Some(spec) = markraft_core::commands::exit_code()(&self.state)
@@ -2287,14 +2395,22 @@ impl EditorView {
         }
         let head = self.head();
         if event.click_count >= 3 {
-            if let Some((index, _)) = self.projection.pos_to_line_offset(head)
-                && let Some(line) = self.projection.line(index)
+            if let Some((index, _)) = self.analysis.projection().pos_to_line_offset(head)
+                && let Some(line) = self.analysis.projection().line(index)
             {
                 self.select_range(line.from(), line.to(), cx);
             }
         } else if event.click_count == 2 {
-            let from = self.projection.prev_word_boundary(head).unwrap_or(head);
-            let to = self.projection.next_word_boundary(from).unwrap_or(head);
+            let from = self
+                .analysis
+                .projection()
+                .prev_word_boundary(head)
+                .unwrap_or(head);
+            let to = self
+                .analysis
+                .projection()
+                .next_word_boundary(from)
+                .unwrap_or(head);
             self.select_range(from, to, cx);
         }
         self.reset_caret_blink(cx);
@@ -3051,6 +3167,104 @@ mod document_guard_tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(state.doc(), transactions.last().unwrap().new_doc());
         assert_eq!(track.save(&schema, state.doc()).unwrap(), "new!base");
+    }
+
+    #[test]
+    fn isolated_host_edits_split_and_resume_explicit_groups() {
+        let mut state = at(&state_of("base"), 1);
+        for _ in 0..2 {
+            apply_guarded(
+                &mut state,
+                [TransactionSpec::new()
+                    .effect(markraft_core::history::begin_undo_group().of(()))
+                    .add_to_history(false)],
+                None,
+            )
+            .unwrap();
+        }
+        let original = state.doc().clone();
+        let typed = commands::insert_text("first")(&state).unwrap();
+        apply_guarded(&mut state, [typed], None).unwrap();
+        let before_host = state.doc().clone();
+        let host = commands::insert_text("host")(&state).unwrap();
+        super::apply_guarded_transactions_with_groups(&mut state, [host], None, None, Some(2))
+            .unwrap();
+        let after_host = state.doc().clone();
+        for text in ["later", "more"] {
+            let typed = commands::insert_text(text)(&state).unwrap();
+            apply_guarded(&mut state, [typed], None).unwrap();
+        }
+        assert_eq!(undo_depth(&state), 3);
+        for expected in [after_host, before_host, original] {
+            let spec = undo(&state).unwrap();
+            apply_guarded(&mut state, [spec], None).unwrap();
+            assert_eq!(state.doc(), &expected);
+        }
+    }
+
+    #[test]
+    fn rejected_isolated_edits_keep_the_original_group_and_source() {
+        use markraft_commonmark::{SourceDocument, SourceTrack};
+        let schema = commonmark_schema();
+        let source = SourceDocument::parse(&schema, "base").unwrap();
+        let track = Arc::new(SourceTrack::new(source.clone()));
+        let (mut state, _) = build_state(
+            &schema,
+            &markraft_core::Extension::none(),
+            Some(source.document().clone()),
+            &DocTypes::none(),
+        );
+        let schema_for_guard = schema.clone();
+        let track_for_guard = track.clone();
+        let guard: super::TransactionGuard = Box::new(move |transactions| {
+            if schema_for_guard
+                .describe(transactions.last().unwrap().new_doc())
+                .contains("blocked")
+            {
+                return Err(EditRejection::Protected("Rejected host edit".into()));
+            }
+            track_for_guard
+                .apply_transactions(&schema_for_guard, transactions)
+                .map_err(|error| EditRejection::Protected(error.to_string()))
+        });
+        apply_guarded(
+            &mut state,
+            [TransactionSpec::new()
+                .effect(markraft_core::history::begin_undo_group().of(()))
+                .add_to_history(false)],
+            None,
+        )
+        .unwrap();
+        let first = commands::insert_text("first")(&state).unwrap();
+        super::apply_guarded_transactions(&mut state, [first], None, Some(&guard)).unwrap();
+        let before = state.clone();
+        let before_source = track.snapshot().render(&schema, state.doc()).unwrap();
+        let blocked = commands::insert_text("blocked")(&state).unwrap();
+        assert!(
+            super::apply_guarded_transactions_with_groups(
+                &mut state,
+                [blocked],
+                None,
+                Some(&guard),
+                Some(1)
+            )
+            .is_err()
+        );
+        assert_unchanged(&before, &state);
+        assert_eq!(
+            track.snapshot().render(&schema, state.doc()).unwrap(),
+            before_source
+        );
+        let last = commands::insert_text("last")(&state).unwrap();
+        super::apply_guarded_transactions(&mut state, [last], None, Some(&guard)).unwrap();
+        assert_eq!(undo_depth(&state), 1);
+        let undo = undo(&state).unwrap();
+        super::apply_guarded_transactions(&mut state, [undo], None, Some(&guard)).unwrap();
+        assert_eq!(state.doc(), source.document());
+        assert_eq!(
+            track.snapshot().render(&schema, state.doc()).unwrap(),
+            "base"
+        );
     }
 
     #[test]

@@ -25,8 +25,6 @@ pub(crate) struct Shaping {
     style: EditorStyle,
     images: Images,
     maths: crate::maths::Maths,
-    equations: markraft_core::kind::equations::EquationIndex,
-    auto_number_equations: bool,
     scale_factor: Option<f32>,
     /// What the host says a wiki link target can open, so that a link leading
     /// nowhere is not drawn as one that leads somewhere. Absent until the host
@@ -56,39 +54,9 @@ impl Shaping {
         self.changed();
     }
 
-    pub(crate) fn auto_number_equations(&self) -> bool {
-        self.auto_number_equations
-    }
-
-    pub(crate) fn equations(&self) -> &markraft_core::kind::equations::EquationIndex {
-        &self.equations
-    }
-
-    pub(crate) fn update_equations(
-        &mut self,
-        projection: &markraft_core::projection::Projection,
-        types: &markraft_core::kind::DocTypes,
-    ) {
-        self.equations = markraft_core::kind::equations::EquationIndex::build(
-            projection,
-            types,
-            self.auto_number_equations,
-        );
-    }
-
-    pub(crate) fn set_auto_number_equations(
-        &mut self,
-        enabled: bool,
-        projection: &markraft_core::projection::Projection,
-        types: &markraft_core::kind::DocTypes,
-    ) -> bool {
-        if self.auto_number_equations == enabled {
-            return false;
-        }
-        self.auto_number_equations = enabled;
-        self.update_equations(projection, types);
+    /// Semantic changes invalidate formula metrics, including whole table grids.
+    pub(crate) fn equations_changed(&mut self, types: &markraft_core::kind::DocTypes) {
         self.lines.get_mut().forget_all_math(types);
-        true
     }
 
     pub(crate) fn maths(&self) -> &crate::maths::Maths {
@@ -109,6 +77,7 @@ impl Shaping {
     pub(crate) fn finish_math(
         &mut self,
         types: &markraft_core::kind::DocTypes,
+        equations: &markraft_core::kind::equations::EquationIndex,
         results: Vec<(
             crate::math::MathRequest,
             Result<crate::math::RenderedMath, crate::math::MathError>,
@@ -118,7 +87,7 @@ impl Shaping {
         self.maths.finish(results);
         self.lines
             .get_mut()
-            .forget_math(types, Some(&self.equations), &requests);
+            .forget_math(types, Some(equations), &requests);
     }
 
     pub(crate) fn images(&self) -> &Images {

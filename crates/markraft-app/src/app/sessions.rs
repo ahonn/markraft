@@ -350,6 +350,41 @@ impl MarkraftApp {
         }
         self.sync_find(cx);
     }
+    /// Apply an application edit through the editor's source guard and history.
+    /// Composition is left untouched; callers can report that note as skipped.
+    pub(super) fn edit_session_document(
+        &mut self,
+        id: &str,
+        document: Node,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(session) = self.sessions.get(id) else {
+            return false;
+        };
+        let editor = session.editor().clone();
+        let accepted = editor.update(cx, |editor, cx| {
+            if editor.is_composing() {
+                return false;
+            }
+            let Some(spec) = doc::document_edit(editor.committed_document(), &document) else {
+                return false;
+            };
+            editor.dispatch_isolated([spec], cx)
+        });
+        if accepted {
+            let title = self.library.note(id).map(|note| note.title());
+            if self
+                .library
+                .set_document(id, editor.read(cx).committed_document().clone())
+            {
+                self.links
+                    .invalidate_if(title != self.library.note(id).map(|note| note.title()));
+                self.schedule_save(cx);
+            }
+        }
+        accepted
+    }
+
     pub(super) fn sync_documents(&mut self, cx: &App) {
         for (id, session) in self.sessions.iter() {
             let document = session.editor().read(cx).committed_document().clone();
@@ -386,5 +421,105 @@ impl MarkraftApp {
         self.preferences
             .remote_images
             .then(crate::remote_images::shared)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[gpui::test]
+    fn an_accepted_host_edit_schedules_its_own_save(cx: &mut gpui::TestAppContext) {
+        let mut h = crate::e2e::harness::open_with(cx, &[("Welcome.md", "Original\n")], |_| {});
+        h.save();
+        let id = h.active_note().id;
+        let app = h.app.clone();
+        h.cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                assert!(!app.save.is_dirty());
+                assert!(app.edit_session_document(&id, crate::doc::from_markdown("Changed"), cx));
+                assert!(app.save.is_dirty());
+                assert!(app.library.changes.contains_key(&id));
+            });
+        });
+        h.keys("cmd-z");
+        assert_eq!(h.markdown(), "Original");
+        h.keys("cmd-shift-z");
+        assert_eq!(h.markdown(), "Changed");
+        h.save();
+        assert_eq!(
+            std::fs::read_to_string(h.notes.join("Welcome.md")).unwrap(),
+            "Changed\n"
+        );
+    }
+
+    #[gpui::test]
+    fn host_dispatch_splits_an_open_typing_group(cx: &mut gpui::TestAppContext) {
+        let mut h = crate::e2e::harness::open_with(cx, &[("Welcome.md", "Original\n")], |_| {});
+        let id = h.active_note().id;
+        let app = h.app.clone();
+        h.cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.editor()
+                    .update(cx, |editor, _| editor.begin_undo_group())
+            });
+        });
+        h.keys("cmd-down cmd-right");
+        h.type_text(" first");
+        h.cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                assert!(app.edit_session_document(&id, crate::doc::from_markdown("Changed"), cx));
+            });
+        });
+        h.keys("cmd-down cmd-right");
+        h.type_text(" last");
+        h.cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.editor().update(cx, |editor, _| editor.end_undo_group())
+            });
+        });
+        for expected in ["Changed", "Original first", "Original"] {
+            h.keys("cmd-z");
+            assert_eq!(h.markdown(), expected);
+        }
+    }
+
+    #[gpui::test]
+    fn a_rejected_host_edit_keeps_document_source_and_dirty_generation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut h = crate::e2e::harness::open_with(cx, &[("Welcome.md", "Original\n")], |_| {});
+        let id = h.active_note().id;
+        let app = h.app.clone();
+        h.cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let before = app.library.active_note().document.clone();
+                let generations = app.library.changes.clone();
+                let track = app
+                    .persistence
+                    .as_ref()
+                    .unwrap()
+                    .source(app.library.active_note().clone())
+                    .unwrap()
+                    .unwrap();
+                let source = track
+                    .snapshot()
+                    .render(crate::doc::schema(), &before)
+                    .unwrap();
+                app.sessions
+                    .get(&id)
+                    .unwrap()
+                    .set_read_only(Some("Protected".into()));
+                assert!(!app.edit_session_document(&id, crate::doc::from_markdown("Changed"), cx));
+                assert_eq!(app.library.active_note().document, before);
+                assert_eq!(app.editor().read(cx).committed_document(), &before);
+                assert_eq!(app.library.changes, generations);
+                assert_eq!(
+                    track
+                        .snapshot()
+                        .render(crate::doc::schema(), &before)
+                        .unwrap(),
+                    source
+                );
+            });
+        });
     }
 }

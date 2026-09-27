@@ -842,6 +842,7 @@ impl Store {
             self.clear_pending(id);
         }
     }
+    #[cfg(test)]
     pub fn markdown(&self, note: &Note) -> Result<String, StoreError> {
         render(self.baseline(note), note, &self.house)
     }
@@ -852,6 +853,7 @@ impl Store {
     /// just adopted as — takes those bytes as its baseline. The pre-change
     /// copy is kept only for edits made against it until the change is
     /// acknowledged.
+    #[cfg(test)]
     fn baseline(&self, note: &Note) -> Option<&Saved> {
         let current = self
             .files

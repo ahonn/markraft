@@ -114,7 +114,7 @@ cargo test --workspace             # run the tests
 cargo xtask bundle                 # build target/debug/bundle/osx/Markraft.app
 ```
 
-The toolchain is pinned in `rust-toolchain.toml`. The workspace is split into `markraft-core` (document model and editing), `markraft-commonmark` (Markdown), `markraft-gpui` (the editor view), `markraft-vim` and `markraft-app`.
+The toolchain is pinned in `rust-toolchain.toml`. The workspace is split into `markraft-core` (document model and editing), `markraft-commonmark` (Markdown), `markraft-gpui` (the editor view), `markraft-math` (window-independent LaTeX typesetting), `markraft-vim` and `markraft-app`. See [the architecture notes](docs/architecture.md) for document, source, analysis and rendering boundaries.
 
 ## Acknowledgments
 

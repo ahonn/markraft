@@ -9,6 +9,9 @@
 //! the formats its toolbar and slash menu offer; each resolves to a command from
 //! the editor's catalogue.
 
+mod snapshot;
+pub use snapshot::{DocumentSnapshot, PendingSnapshot};
+
 use markraft_commonmark::{
     CommandRefusal, CommonMarkCodecs, CommonMarkSpelling, Formatter, HouseStyleHandle,
     commonmark_doc_type_names, commonmark_schema, commonmark_serializer, holds_definitions,
@@ -229,6 +232,60 @@ pub fn to_markdown(doc: &Node) -> String {
 /// `doc` as Markdown, new syntax spelled in `house`'s style.
 pub fn to_markdown_in(doc: &Node, house: &HouseStyleHandle) -> String {
     commonmark_serializer(schema(), house).serialize(doc)
+}
+
+/// Describe a host-generated document edit through the normal transaction path.
+/// Unchanged subtrees retain their positions, history and selection mappings.
+/// Full document resets remain reserved for adopting an external document.
+pub fn document_edit(before: &Node, after: &Node) -> Option<markraft_core::TransactionSpec> {
+    use markraft_core::{Change, TransactionSpec};
+    fn collect(before: &Node, after: &Node, pos: usize, changes: &mut Vec<Change>) {
+        if before == after {
+            return;
+        }
+        if before.is_container()
+            && before.markup() == after.markup()
+            && before.child_count() == after.child_count()
+        {
+            let mut offset = pos + 1;
+            for (old, new) in before.children().zip(after.children()) {
+                collect(old, new, offset, changes);
+                offset += old.node_size();
+            }
+        } else {
+            changes.push(Change::replace(
+                pos,
+                pos + before.node_size(),
+                Slice::from_fragment(Fragment::from_node(after.clone())),
+            ));
+        }
+    }
+    if before == after || before.markup() != after.markup() {
+        return None;
+    }
+    let mut changes = Vec::new();
+    if before.child_count() == after.child_count() {
+        let mut offset = 0;
+        for (old, new) in before.children().zip(after.children()) {
+            collect(old, new, offset, &mut changes);
+            offset += old.node_size();
+        }
+    } else {
+        changes.push(Change::replace(
+            0,
+            before.content_size(),
+            Slice::from_fragment(after.content().clone()),
+        ));
+    }
+    Some(
+        TransactionSpec::new()
+            .changes(changes)
+            .user_event("input.document")
+            .annotate(
+                markraft_core::protocol::isolate_history()
+                    .of(markraft_core::protocol::IsolateHistory::Both),
+            ),
+    )
 }
 
 pub fn plain_text(doc: &Node) -> String {

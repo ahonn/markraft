@@ -28,13 +28,11 @@ use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
 mod atoms;
-mod inline_object;
-mod text_layout;
-pub(crate) use atoms::shown_atom_label;
 mod breaking;
 mod chrome;
 #[cfg(test)]
 mod equation_tests;
+mod inline_object;
 mod layout_line;
 mod lines;
 mod paint;
@@ -44,6 +42,7 @@ mod table;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
+mod text_layout;
 
 pub(crate) use self::layout_line::{LayoutLine, selection_anchor_row};
 pub(crate) use self::lines::{Lines, kept_ends};

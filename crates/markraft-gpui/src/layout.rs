@@ -76,7 +76,7 @@ impl EditorView {
             ..lines.index_at(visible.end + overscan) + 1;
         let mut wanted = Vec::from([around, anchor..anchor + 1]);
         for pos in self.anchored_positions() {
-            if let Some(index) = self.projection.line_at(pos) {
+            if let Some(index) = self.analysis.projection().line_at(pos) {
                 wanted.push(index.saturating_sub(1)..(index + 2).min(count));
             }
         }
@@ -155,7 +155,7 @@ impl EditorView {
     /// add them to the frame, so a key can move over lines the frame did not
     /// show. Nothing happens before the first frame.
     pub(crate) fn lay_out_near(&mut self, pos: usize, each_side: usize) {
-        if let Some(index) = self.projection.line_at(pos) {
+        if let Some(index) = self.analysis.projection().line_at(pos) {
             self.lay_out_lines(index.saturating_sub(each_side)..index + each_side + 1);
         }
     }

@@ -360,25 +360,24 @@ impl MarkraftApp {
             let Some(mut note) = self.library.note(&note_id).cloned() else {
                 continue;
             };
-            note.document = document.clone();
-            // Asked of the store first: a link inside source it keeps verbatim cannot be
-            // written, and finding that out at save time would leave a note the user
-            // never touched reported as unsaved.
-            let writable = self
-                .persistence
-                .as_ref()
-                .is_some_and(|p| p.markdown(note).is_ok());
-            if !writable || !self.library.set_document(&note_id, document.clone()) {
+            let accepted = if self.sessions.get(&note_id).is_some() {
+                self.edit_session_document(&note_id, document, cx)
+            } else {
+                note.document = document.clone();
+                // Unopened notes need no editor, but still must round-trip before
+                // changing the library. Snapshot validation never advances source.
+                let writable = self.persistence.as_ref().is_some_and(|p| {
+                    p.source(note.clone()).is_ok_and(|source| match source {
+                        Some(track) => track.snapshot().render(doc::schema(), &document).is_ok(),
+                        None => p.markdown(note).is_ok(),
+                    })
+                });
+                writable && self.library.set_document(&note_id, document)
+            };
+            if accepted {
+                updated += links;
+            } else {
                 kept += links;
-                continue;
-            }
-            updated += links;
-            if let Some(session) = self.sessions.get(&note_id) {
-                // The editor owns its document; replacing it costs that note its undo
-                // history, which is the price of the link being right in both places.
-                session
-                    .editor()
-                    .update(cx, |editor, cx| editor.replace_doc(document, cx));
             }
         }
         self.sync_find(cx);
@@ -459,6 +458,10 @@ mod tests {
         });
         h.wait_for_io();
         assert_eq!(h.active_note().id, active);
+        assert_eq!(h.markdown(), "Backlinks\n\n[[Renamed]]");
+        h.keys("cmd-z");
+        assert_eq!(h.markdown(), "Backlinks\n\n[[Welcome]]");
+        h.keys("cmd-shift-z");
         assert_eq!(h.markdown(), "Backlinks\n\n[[Renamed]]");
         h.keys("cmd-down cmd-right");
         h.type_text(" retained");

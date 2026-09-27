@@ -651,54 +651,18 @@ pub(super) fn attr<'a>(node: &'a Node, name: &str) -> &'a str {
         .trim()
 }
 
-/// The text an atom shows, without the shape the row uses to draw it.
-pub(crate) fn shown_atom_label<'a>(types: &DocTypes, node: &'a Node) -> Option<&'a str> {
-    atom_label(types, node).map(|(_, label)| label)
-}
-
-/// What an inline atom is drawn as, for the atoms the view draws itself: an
-/// image's label, the verbatim source of an inline HTML primitive, a wiki
-/// link's label, or the emoji a shortcode names. Every other atom keeps the
-/// object-replacement character the projection gave it, which is blank.
+/// Resolve reading text independently from its screen shape.
 pub(super) fn atom_label<'a>(types: &DocTypes, node: &'a Node) -> Option<(AtomShape, &'a str)> {
-    let ty = node.type_id();
-    if Some(ty) == types.image {
-        let label = match (attr(node, "alt"), file_name(attr(node, "src"))) {
-            ("", Some(name)) => name,
-            ("", None) => "Image",
-            (alt, _) => alt,
+    use markraft_core::kind::reading::{self, AtomTextRole};
+    reading::atom_label(types, node).map(|(role, label)| {
+        let shape = match role {
+            AtomTextRole::Placeholder => AtomShape::Pill,
+            AtomTextRole::Literal => AtomShape::Text,
+            AtomTextRole::Link => AtomShape::Link,
+            AtomTextRole::Glyph => AtomShape::Glyph,
         };
-        Some((AtomShape::Pill, label))
-    } else if Some(ty) == types.raw_inline {
-        // HTML is kept verbatim and shown as source, so the tag reads exactly as
-        // it was written — a closing tag included.
-        Some((AtomShape::Text, attr(node, "source")))
-    } else if Some(ty) == types.wiki_link {
-        if crate::wiki::wiki_link_embed(node) {
-            // `![[…]]` puts a file in the note rather than pointing at a page, so
-            // it reads as the picture it is: its alias, or the file it names.
-            let label = match (attr(node, "alias"), file_name(attr(node, "target"))) {
-                ("", Some(name)) => name,
-                ("", None) => "Embed",
-                (alias, _) => alias,
-            };
-            return Some((AtomShape::Pill, label));
-        }
-        // The alias is what the author wrote it to read as; without one the
-        // target stands in, with whatever `#heading` or `^block` it names,
-        // because that is what the link says.
-        Some((AtomShape::Link, crate::wiki::wiki_link_label(node)))
-    } else if Some(ty) == types.emoji {
-        // A code the table does not know was never read as one, but an atom
-        // built by hand could hold one: it reads as its name.
-        let code = attr(node, "code");
-        match emojis::get_by_shortcode(code) {
-            Some(emoji) => Some((AtomShape::Glyph, emoji.as_str())),
-            None => Some((AtomShape::Text, code)),
-        }
-    } else {
-        None
-    }
+        (shape, label)
+    })
 }
 
 /// The file an atom draws a picture of, where it draws one. `![](path)` and
@@ -991,15 +955,4 @@ pub(super) fn loading_frame(column: Pixels) -> Size<Pixels> {
         width,
         (width * 0.5625).min(LOADING_FRAME_MAX_HEIGHT).round(),
     )
-}
-
-/// The file name an image source ends in, for a placeholder with no alt text.
-pub(super) fn file_name(src: &str) -> Option<&str> {
-    let path = src
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(src)
-        .trim_end_matches('/');
-    let name = path.rsplit(['/', '\\']).next()?;
-    (!name.is_empty()).then_some(name)
 }

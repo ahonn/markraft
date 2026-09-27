@@ -584,8 +584,8 @@ impl AccessibleText {
 
 impl crate::EditorView {
     pub(crate) fn active_code_pos(&self) -> Option<usize> {
-        let (index, _) = self.projection.pos_to_line_offset(self.head())?;
-        let line = self.projection.line(index)?;
+        let (index, _) = self.analysis.projection().pos_to_line_offset(self.head())?;
+        let line = self.analysis.projection().line(index)?;
         self.types
             .is_code_block(line)
             .then(|| line.block_before())
@@ -609,7 +609,8 @@ impl crate::EditorView {
         }
         let (index, position) = match action {
             ControlAction::EnterCallout(position) => {
-                let Some((index, _)) = self.projection.pos_to_line_offset(position) else {
+                let Some((index, _)) = self.analysis.projection().pos_to_line_offset(position)
+                else {
                     return;
                 };
                 (index, position)
@@ -618,16 +619,18 @@ impl crate::EditorView {
                 if self.wiki_link_at(position).is_none() {
                     return;
                 }
-                let Some((index, _)) = self.projection.pos_to_line_offset(position) else {
+                let Some((index, _)) = self.analysis.projection().pos_to_line_offset(position)
+                else {
                     return;
                 };
                 (index, position)
             }
             ControlAction::ToggleTask(position) => {
-                let Some((index, _)) = self.projection.pos_to_line_offset(position) else {
+                let Some((index, _)) = self.analysis.projection().pos_to_line_offset(position)
+                else {
                     return;
                 };
-                let Some(line) = self.projection.line(index) else {
+                let Some(line) = self.analysis.projection().line(index) else {
                     return;
                 };
                 if self
@@ -640,14 +643,15 @@ impl crate::EditorView {
                 (index, position)
             }
             ControlAction::CodeLanguage(pos) | ControlAction::CopyCode(pos) => {
-                let Some((index, line)) =
-                    self.projection
-                        .lines()
-                        .iter()
-                        .enumerate()
-                        .find(|(_, line)| {
-                            self.types.is_code_block(line) && line.block_before() == Some(pos)
-                        })
+                let Some((index, line)) = self
+                    .analysis
+                    .projection()
+                    .lines()
+                    .iter()
+                    .enumerate()
+                    .find(|(_, line)| {
+                        self.types.is_code_block(line) && line.block_before() == Some(pos)
+                    })
                 else {
                     return;
                 };
@@ -685,7 +689,7 @@ impl crate::EditorView {
             // callout, and reaching it means reaching its content.
             ControlAction::EnterCallout(_) => {}
             ControlAction::CopyCode(_) => {
-                if let Some(text) = self.projection.line_text(index) {
+                if let Some(text) = self.analysis.projection().line_text(index) {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_owned()));
                     cx.emit(crate::EditorEvent::CodeCopied);
                 }
