@@ -269,24 +269,41 @@ pub fn validate_format(format: &str, locale: DateLocale) -> Result<(), FormatPro
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DateLocale {
     English,
+    German,
+    Spanish,
+    French,
+    Japanese,
+    Korean,
+    BrazilianPortuguese,
     SimplifiedChinese,
     TraditionalChinese,
 }
 
 impl DateLocale {
+    /// The languages names can be spelled in, for matching against the system's.
+    /// English is first: it is what any other language falls back to.
+    pub const LANGUAGES: [&'static str; 9] = [
+        "en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-Hans", "zh-Hant",
+    ];
+
     /// From a BCP 47 language as the system reports it.
     pub fn from_language(language: &str) -> Self {
         let lower = language.to_ascii_lowercase();
-        if lower.starts_with("zh-hant")
-            || lower.starts_with("zh-tw")
-            || lower.starts_with("zh-hk")
-            || lower.starts_with("zh-mo")
-        {
-            DateLocale::TraditionalChinese
-        } else if lower.starts_with("zh") {
-            DateLocale::SimplifiedChinese
-        } else {
-            DateLocale::English
+        match lower.split('-').next().unwrap_or_default() {
+            "de" => DateLocale::German,
+            "es" => DateLocale::Spanish,
+            "fr" => DateLocale::French,
+            "ja" => DateLocale::Japanese,
+            "ko" => DateLocale::Korean,
+            "pt" => DateLocale::BrazilianPortuguese,
+            "zh" if ["zh-hant", "zh-tw", "zh-hk", "zh-mo"]
+                .iter()
+                .any(|traditional| lower.starts_with(traditional)) =>
+            {
+                DateLocale::TraditionalChinese
+            }
+            "zh" => DateLocale::SimplifiedChinese,
+            _ => DateLocale::English,
         }
     }
 
@@ -315,7 +332,64 @@ impl DateLocale {
                 "November",
                 "December",
             ],
-            _ => [
+            DateLocale::German => [
+                "Januar",
+                "Februar",
+                "März",
+                "April",
+                "Mai",
+                "Juni",
+                "Juli",
+                "August",
+                "September",
+                "Oktober",
+                "November",
+                "Dezember",
+            ],
+            DateLocale::Spanish => [
+                "enero",
+                "febrero",
+                "marzo",
+                "abril",
+                "mayo",
+                "junio",
+                "julio",
+                "agosto",
+                "septiembre",
+                "octubre",
+                "noviembre",
+                "diciembre",
+            ],
+            DateLocale::French => [
+                "janvier",
+                "février",
+                "mars",
+                "avril",
+                "mai",
+                "juin",
+                "juillet",
+                "août",
+                "septembre",
+                "octobre",
+                "novembre",
+                "décembre",
+            ],
+            DateLocale::BrazilianPortuguese => [
+                "janeiro",
+                "fevereiro",
+                "março",
+                "abril",
+                "maio",
+                "junho",
+                "julho",
+                "agosto",
+                "setembro",
+                "outubro",
+                "novembro",
+                "dezembro",
+            ],
+            DateLocale::Japanese | DateLocale::Korean => self.months_short(false),
+            DateLocale::SimplifiedChinese | DateLocale::TraditionalChinese => [
                 "一月",
                 "二月",
                 "三月",
@@ -332,12 +406,38 @@ impl DateLocale {
         }
     }
 
-    fn months_short(self) -> [&'static str; 12] {
+    /// `in_dashes` is whether the format holds `-MMM-`, where Spanish drops the
+    /// period it otherwise ends a short month with.
+    fn months_short(self, in_dashes: bool) -> [&'static str; 12] {
         match self {
             DateLocale::English => [
                 "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
             ],
-            _ => [
+            DateLocale::German => [
+                "Jan.", "Feb.", "März", "Apr.", "Mai", "Juni", "Juli", "Aug.", "Sep.", "Okt.",
+                "Nov.", "Dez.",
+            ],
+            DateLocale::Spanish if in_dashes => [
+                "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic",
+            ],
+            DateLocale::Spanish => [
+                "ene.", "feb.", "mar.", "abr.", "may.", "jun.", "jul.", "ago.", "sep.", "oct.",
+                "nov.", "dic.",
+            ],
+            DateLocale::French => [
+                "janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.",
+                "nov.", "déc.",
+            ],
+            DateLocale::BrazilianPortuguese => [
+                "jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez",
+            ],
+            DateLocale::Korean => [
+                "1월", "2월", "3월", "4월", "5월", "6월", "7월", "8월", "9월", "10월", "11월",
+                "12월",
+            ],
+            DateLocale::Japanese
+            | DateLocale::SimplifiedChinese
+            | DateLocale::TraditionalChinese => [
                 "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月",
                 "12月",
             ],
@@ -356,7 +456,55 @@ impl DateLocale {
                 "Friday",
                 "Saturday",
             ],
-            _ => [
+            DateLocale::German => [
+                "Sonntag",
+                "Montag",
+                "Dienstag",
+                "Mittwoch",
+                "Donnerstag",
+                "Freitag",
+                "Samstag",
+            ],
+            DateLocale::Spanish => [
+                "domingo",
+                "lunes",
+                "martes",
+                "miércoles",
+                "jueves",
+                "viernes",
+                "sábado",
+            ],
+            DateLocale::French => [
+                "dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi",
+            ],
+            DateLocale::Japanese => [
+                "日曜日",
+                "月曜日",
+                "火曜日",
+                "水曜日",
+                "木曜日",
+                "金曜日",
+                "土曜日",
+            ],
+            DateLocale::Korean => [
+                "일요일",
+                "월요일",
+                "화요일",
+                "수요일",
+                "목요일",
+                "금요일",
+                "토요일",
+            ],
+            DateLocale::BrazilianPortuguese => [
+                "domingo",
+                "segunda-feira",
+                "terça-feira",
+                "quarta-feira",
+                "quinta-feira",
+                "sexta-feira",
+                "sábado",
+            ],
+            DateLocale::SimplifiedChinese | DateLocale::TraditionalChinese => [
                 "星期日",
                 "星期一",
                 "星期二",
@@ -371,6 +519,11 @@ impl DateLocale {
     fn weekdays_short(self) -> [&'static str; 7] {
         match self {
             DateLocale::English => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+            DateLocale::German => ["So.", "Mo.", "Di.", "Mi.", "Do.", "Fr.", "Sa."],
+            DateLocale::Spanish => ["dom.", "lun.", "mar.", "mié.", "jue.", "vie.", "sáb."],
+            DateLocale::French => ["dim.", "lun.", "mar.", "mer.", "jeu.", "ven.", "sam."],
+            DateLocale::BrazilianPortuguese => ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"],
+            DateLocale::Japanese | DateLocale::Korean => self.weekdays_min(),
             DateLocale::SimplifiedChinese => {
                 ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
             }
@@ -383,71 +536,116 @@ impl DateLocale {
     fn weekdays_min(self) -> [&'static str; 7] {
         match self {
             DateLocale::English => ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"],
-            _ => ["日", "一", "二", "三", "四", "五", "六"],
+            DateLocale::German => ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"],
+            DateLocale::Spanish => ["do", "lu", "ma", "mi", "ju", "vi", "sá"],
+            DateLocale::French => ["di", "lu", "ma", "me", "je", "ve", "sa"],
+            DateLocale::BrazilianPortuguese => ["do", "2ª", "3ª", "4ª", "5ª", "6ª", "sá"],
+            DateLocale::Japanese => ["日", "月", "火", "水", "木", "金", "土"],
+            DateLocale::Korean => ["일", "월", "화", "수", "목", "금", "토"],
+            DateLocale::SimplifiedChinese | DateLocale::TraditionalChinese => {
+                ["日", "一", "二", "三", "四", "五", "六"]
+            }
         }
     }
 
     /// The first day of the week (0 is Sunday) and the January day always in week 1.
     fn week_rule(self) -> (u32, u32) {
         match self {
-            DateLocale::SimplifiedChinese => (1, 4),
-            DateLocale::English | DateLocale::TraditionalChinese => (0, 6),
+            DateLocale::German
+            | DateLocale::Spanish
+            | DateLocale::French
+            | DateLocale::SimplifiedChinese => (1, 4),
+            DateLocale::English
+            | DateLocale::Japanese
+            | DateLocale::Korean
+            | DateLocale::BrazilianPortuguese
+            | DateLocale::TraditionalChinese => (0, 6),
         }
     }
 
-    fn meridiem(self, hour: u32, minute: u32, upper: bool) -> String {
+    /// The names this language splits the day into, in order, each with whether it
+    /// falls after noon.
+    fn day_periods(self, upper: bool) -> &'static [(&'static str, bool)] {
         match self {
-            DateLocale::English => match (hour < 12, upper) {
-                (true, true) => "AM",
-                (true, false) => "am",
-                (false, true) => "PM",
-                (false, false) => "pm",
-            }
-            .to_owned(),
-            _ => {
-                let at = hour * 100 + minute;
-                match at {
-                    0..600 => "凌晨",
-                    600..900 => "早上",
-                    900..1130 => "上午",
-                    1130..1230 => "中午",
-                    1230..1800 => "下午",
-                    _ => "晚上",
-                }
-                .to_owned()
-            }
+            DateLocale::Japanese => &[("午前", false), ("午後", true)],
+            DateLocale::Korean => &[("오전", false), ("오후", true)],
+            DateLocale::SimplifiedChinese | DateLocale::TraditionalChinese => &[
+                ("凌晨", false),
+                ("早上", false),
+                ("上午", false),
+                ("中午", false),
+                ("下午", true),
+                ("晚上", true),
+            ],
+            _ if upper => &[("AM", false), ("PM", true)],
+            _ => &[("am", false), ("pm", true)],
         }
+    }
+
+    fn meridiem(self, hour: u32, minute: u32, upper: bool) -> &'static str {
+        let period = match self {
+            // The Chinese periods split the day finer than twelve hours.
+            DateLocale::SimplifiedChinese | DateLocale::TraditionalChinese => {
+                match hour * 100 + minute {
+                    0..600 => 0,
+                    600..900 => 1,
+                    900..1130 => 2,
+                    1130..1230 => 3,
+                    1230..1800 => 4,
+                    _ => 5,
+                }
+            }
+            _ => usize::from(hour >= 12),
+        };
+        self.day_periods(upper)[period].0
     }
 
     fn ordinal(self, number: u32, period: Period) -> String {
-        match self {
-            DateLocale::English => {
-                let suffix = match (number % 100, number % 10) {
-                    (11..=13, _) => "th",
-                    (_, 1) => "st",
-                    (_, 2) => "nd",
-                    (_, 3) => "rd",
-                    _ => "th",
-                };
-                format!("{number}{suffix}")
-            }
-            chinese => {
-                let suffix = match period {
-                    Period::Day => "日",
-                    Period::Month => "月",
-                    Period::Week if chinese == DateLocale::SimplifiedChinese => "周",
-                    Period::Week => "週",
-                    Period::Quarter => "",
-                };
-                format!("{number}{suffix}")
-            }
-        }
+        let first = number == 1;
+        let of_a_day = matches!(period, Period::Day | Period::DayOfYear | Period::Weekday);
+        let suffix = match self {
+            DateLocale::English => match (number % 100, number % 10) {
+                (11..=13, _) => "th",
+                (_, 1) => "st",
+                (_, 2) => "nd",
+                (_, 3) => "rd",
+                _ => "th",
+            },
+            DateLocale::German => ".",
+            DateLocale::Spanish | DateLocale::BrazilianPortuguese => "º",
+            DateLocale::French => match period {
+                Period::Day if first => "er",
+                Period::Day => "",
+                Period::Week if first => "re",
+                _ if first => "er",
+                _ => "e",
+            },
+            DateLocale::Japanese if of_a_day => "日",
+            DateLocale::Japanese => "",
+            DateLocale::Korean => match period {
+                _ if of_a_day => "일",
+                Period::Month => "월",
+                Period::Week => "주",
+                _ => "",
+            },
+            DateLocale::SimplifiedChinese | DateLocale::TraditionalChinese => match period {
+                _ if of_a_day => "日",
+                Period::Month => "月",
+                Period::Week if self == DateLocale::SimplifiedChinese => "周",
+                Period::Week => "週",
+                _ => "",
+            },
+        };
+        format!("{number}{suffix}")
     }
 }
 
+/// What an ordinal counts; some languages end each differently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Period {
     Day,
+    DayOfYear,
+    Weekday,
     Month,
     Week,
     Quarter,
@@ -464,6 +662,8 @@ enum Token {
     Month2,
     MonthOrdinal,
     MonthShort,
+    /// `MMM` in a format that holds `-MMM-`.
+    MonthShortInDashes,
     MonthLong,
     Day,
     Day2,
@@ -597,6 +797,14 @@ impl Pattern {
             literal(&mut pieces, &rest[..first.len_utf8()]);
             rest = &rest[first.len_utf8()..];
         }
+        // Moment.js hands a locale the whole format, not the token's surroundings.
+        if format.contains("-MMM-") {
+            for piece in &mut pieces {
+                if *piece == Piece::Token(Token::MonthShort) {
+                    *piece = Piece::Token(Token::MonthShortInDashes);
+                }
+            }
+        }
         Pattern(pieces)
     }
 
@@ -650,16 +858,18 @@ fn write_token(token: Token, at: NaiveDateTime, locale: DateLocale) -> String {
         Token::Month => date.month().to_string(),
         Token::Month2 => format!("{:02}", date.month()),
         Token::MonthOrdinal => locale.ordinal(date.month(), Period::Month),
-        Token::MonthShort => locale.months_short()[date.month0() as usize].to_owned(),
+        Token::MonthShort | Token::MonthShortInDashes => locale
+            .months_short(token == Token::MonthShortInDashes)[date.month0() as usize]
+            .to_owned(),
         Token::MonthLong => locale.months()[date.month0() as usize].to_owned(),
         Token::Day => date.day().to_string(),
         Token::Day2 => format!("{:02}", date.day()),
         Token::DayOrdinal => locale.ordinal(date.day(), Period::Day),
         Token::DayOfYear => date.ordinal().to_string(),
         Token::DayOfYear3 => format!("{:03}", date.ordinal()),
-        Token::DayOfYearOrdinal => locale.ordinal(date.ordinal(), Period::Day),
+        Token::DayOfYearOrdinal => locale.ordinal(date.ordinal(), Period::DayOfYear),
         Token::Weekday => weekday.to_string(),
-        Token::WeekdayOrdinal => locale.ordinal(weekday, Period::Day),
+        Token::WeekdayOrdinal => locale.ordinal(weekday, Period::Weekday),
         Token::WeekdayMin => locale.weekdays_min()[weekday as usize].to_owned(),
         Token::WeekdayShort => locale.weekdays_short()[weekday as usize].to_owned(),
         Token::WeekdayLong => locale.weekdays()[weekday as usize].to_owned(),
@@ -695,8 +905,8 @@ fn write_token(token: Token, at: NaiveDateTime, locale: DateLocale) -> String {
         Token::Minute2 => format!("{:02}", at.minute()),
         Token::Second => at.second().to_string(),
         Token::Second2 => format!("{:02}", at.second()),
-        Token::MeridiemUpper => locale.meridiem(at.hour(), at.minute(), true),
-        Token::MeridiemLower => locale.meridiem(at.hour(), at.minute(), false),
+        Token::MeridiemUpper => locale.meridiem(at.hour(), at.minute(), true).to_owned(),
+        Token::MeridiemLower => locale.meridiem(at.hour(), at.minute(), false).to_owned(),
     }
 }
 
@@ -828,11 +1038,10 @@ fn read_token<'a>(
             fields.month = Some(month);
             rest
         }
-        Token::MonthShort | Token::MonthLong => {
-            let names = if token == Token::MonthShort {
-                locale.months_short()
-            } else {
-                locale.months()
+        Token::MonthShort | Token::MonthShortInDashes | Token::MonthLong => {
+            let names = match token {
+                Token::MonthLong => locale.months(),
+                _ => locale.months_short(token == Token::MonthShortInDashes),
             };
             let (index, rest) = name(text, &names)?;
             fields.month = Some(index as u32 + 1);
@@ -851,7 +1060,7 @@ fn read_token<'a>(
             let (day, rest) = match token {
                 Token::DayOfYear => digits(text, 1, 3)?,
                 Token::DayOfYear3 => digits(text, 3, 3)?,
-                _ => ordinal(text, locale, Period::Day)?,
+                _ => ordinal(text, locale, Period::DayOfYear)?,
             };
             fields.day_of_year = Some(day);
             rest
@@ -860,7 +1069,7 @@ fn read_token<'a>(
             let (day, rest) = if token == Token::Weekday {
                 digits(text, 1, 1)?
             } else {
-                ordinal(text, locale, Period::Day)?
+                ordinal(text, locale, Period::Weekday)?
             };
             fields.weekday = Some(day);
             rest
@@ -952,25 +1161,13 @@ fn read_token<'a>(
             rest
         }
         Token::MeridiemUpper | Token::MeridiemLower => {
-            let upper = token == Token::MeridiemUpper;
-            let (morning, afternoon) =
-                (locale.meridiem(0, 0, upper), locale.meridiem(13, 0, upper));
-            if locale == DateLocale::English {
-                if let Some(rest) = text.strip_prefix(morning.as_str()) {
-                    fields.afternoon = Some(false);
-                    rest
-                } else {
-                    fields.afternoon = Some(true);
-                    text.strip_prefix(afternoon.as_str())?
-                }
-            } else {
-                // The Chinese periods split the day finer than twelve hours; the
-                // formatted round trip settles which hour it was.
-                let periods = ["凌晨", "早上", "上午", "中午", "下午", "晚上"];
-                let (index, rest) = name(text, &periods)?;
-                fields.afternoon = Some(index >= 4);
-                rest
-            }
+            // Where a language splits the day finer than twelve hours, the
+            // formatted round trip settles which hour it was.
+            let periods = locale.day_periods(token == Token::MeridiemUpper);
+            let names: Vec<_> = periods.iter().map(|(name, _)| *name).collect();
+            let (index, rest) = name(text, &names)?;
+            fields.afternoon = Some(periods[index].1);
+            rest
         }
     };
     Some(rest)
@@ -1218,6 +1415,218 @@ mod tests {
     }
 
     #[test]
+    fn every_language_spells_names_as_moment_does() {
+        let autumn = at(day(2026, 9, 28), 9, 41, 7);
+        let spring = at(day(2026, 3, 1), 15, 5, 0);
+        let formats = [
+            "MMMM MMM Mo",
+            "dddd ddd dd do",
+            "Do DDDo Qo",
+            "wo Wo w e",
+            "h A a",
+        ];
+        // What Moment.js 2.30.1 writes for `formats` at each of the two moments.
+        let cases = [
+            (
+                DateLocale::German,
+                [
+                    "September Sep. 9.",
+                    "Montag Mo. Mo 1.",
+                    "28. 271. 3.",
+                    "40. 40. 40 0",
+                    "9 AM am",
+                ],
+                [
+                    "März März 3.",
+                    "Sonntag So. So 0.",
+                    "1. 60. 1.",
+                    "9. 9. 9 6",
+                    "3 PM pm",
+                ],
+            ),
+            (
+                DateLocale::Spanish,
+                [
+                    "septiembre sep. 9º",
+                    "lunes lun. lu 1º",
+                    "28º 271º 3º",
+                    "40º 40º 40 0",
+                    "9 AM am",
+                ],
+                [
+                    "marzo mar. 3º",
+                    "domingo dom. do 0º",
+                    "1º 60º 1º",
+                    "9º 9º 9 6",
+                    "3 PM pm",
+                ],
+            ),
+            (
+                DateLocale::French,
+                [
+                    "septembre sept. 9e",
+                    "lundi lun. lu 1er",
+                    "28 271e 3e",
+                    "40e 40e 40 0",
+                    "9 AM am",
+                ],
+                [
+                    "mars mars 3e",
+                    "dimanche dim. di 0e",
+                    "1er 60e 1er",
+                    "9e 9e 9 6",
+                    "3 PM pm",
+                ],
+            ),
+            (
+                DateLocale::Japanese,
+                [
+                    "9月 9月 9",
+                    "月曜日 月 月 1日",
+                    "28日 271日 3",
+                    "40 40 40 1",
+                    "9 午前 午前",
+                ],
+                [
+                    "3月 3月 3",
+                    "日曜日 日 日 0日",
+                    "1日 60日 1",
+                    "10 9 10 0",
+                    "3 午後 午後",
+                ],
+            ),
+            (
+                DateLocale::Korean,
+                [
+                    "9월 9월 9월",
+                    "월요일 월 월 1일",
+                    "28일 271일 3",
+                    "40주 40주 40 1",
+                    "9 오전 오전",
+                ],
+                [
+                    "3월 3월 3월",
+                    "일요일 일 일 0일",
+                    "1일 60일 1",
+                    "10주 9주 10 0",
+                    "3 오후 오후",
+                ],
+            ),
+            (
+                DateLocale::BrazilianPortuguese,
+                [
+                    "setembro set 9º",
+                    "segunda-feira seg 2ª 1º",
+                    "28º 271º 3º",
+                    "40º 40º 40 1",
+                    "9 AM am",
+                ],
+                [
+                    "março mar 3º",
+                    "domingo dom do 0º",
+                    "1º 60º 1º",
+                    "10º 9º 10 0",
+                    "3 PM pm",
+                ],
+            ),
+        ];
+        for (locale, in_autumn, in_spring) in cases {
+            for (moment, expected) in [(autumn, in_autumn), (spring, in_spring)] {
+                for (format, expected) in formats.iter().zip(expected) {
+                    assert_eq!(
+                        Pattern::new(format).format(moment, locale),
+                        expected,
+                        "{locale:?} {format}"
+                    );
+                }
+            }
+        }
+        // A short month between dashes loses its period in Spanish only.
+        for (locale, dashed, spaced) in [
+            (DateLocale::Spanish, "2026-sep-28", "28 sep. 2026"),
+            (DateLocale::German, "2026-Sep.-28", "28 Sep. 2026"),
+            (DateLocale::French, "2026-sept.-28", "28 sept. 2026"),
+            (
+                DateLocale::BrazilianPortuguese,
+                "2026-set-28",
+                "28 set 2026",
+            ),
+            (DateLocale::Japanese, "2026-9月-28", "28 9月 2026"),
+        ] {
+            assert_eq!(
+                Pattern::new("YYYY-MMM-DD").format(autumn, locale),
+                dashed,
+                "{locale:?}"
+            );
+            assert_eq!(
+                Pattern::new("DD MMM YYYY").format(autumn, locale),
+                spaced,
+                "{locale:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_language_reads_back_the_names_it_writes() {
+        for language in DateLocale::LANGUAGES {
+            let locale = DateLocale::from_language(language);
+            for format in [
+                "YYYY-MM-DD dddd",
+                "YYYY/MMMM/YYYY-MMM-DD",
+                "YYYY MMM D ddd",
+                "dddd, MMMM Do YYYY",
+                "YYYY DDDo",
+                "gggg-[w]wo-e",
+                "GGGG-Wo-E",
+                "YYYY-MM-DD hh A",
+            ] {
+                assert_eq!(
+                    validate_format(format, locale),
+                    Ok(()),
+                    "{language} {format}"
+                );
+            }
+        }
+        let french = settings("", "dddd Do MMMM YYYY");
+        assert_eq!(
+            french.path_for(day(2026, 3, 1), DateLocale::French),
+            PathBuf::from("dimanche 1er mars 2026.md")
+        );
+        for name in ["dimanche 1er mars 2026.md", "Sunday 1st March 2026.md"] {
+            assert_eq!(
+                french.day_of(Path::new(name), DateLocale::French),
+                Some(day(2026, 3, 1)),
+                "{name}"
+            );
+        }
+        // A name the language would not write is not one of its days.
+        assert_eq!(
+            french.day_of(Path::new("dimanche 1 mars 2026.md"), DateLocale::French),
+            None
+        );
+    }
+
+    #[test]
+    fn a_system_language_picks_its_date_language() {
+        for (language, expected) in [
+            ("en-AU", DateLocale::English),
+            ("de", DateLocale::German),
+            ("de-AT", DateLocale::German),
+            ("es-MX", DateLocale::Spanish),
+            ("fr-CA", DateLocale::French),
+            ("ja", DateLocale::Japanese),
+            ("ko-KR", DateLocale::Korean),
+            ("pt-BR", DateLocale::BrazilianPortuguese),
+            ("zh-Hans", DateLocale::SimplifiedChinese),
+            ("zh-Hant-HK", DateLocale::TraditionalChinese),
+            ("zh-TW", DateLocale::TraditionalChinese),
+            ("it", DateLocale::English),
+        ] {
+            assert_eq!(DateLocale::from_language(language), expected, "{language}");
+        }
+    }
+
+    #[test]
     fn week_numbers_cross_the_turn_of_the_year() {
         let english = DateLocale::English;
         // 2027-01-01 is a Friday: ISO puts it in 2026's week 53, while a Sunday
@@ -1235,6 +1644,20 @@ mod tests {
             Pattern::new("gggg-[w]ww").format(new_year, DateLocale::SimplifiedChinese),
             "2026-w53"
         );
+        for (locale, expected) in [
+            (DateLocale::German, "2026-w53"),
+            (DateLocale::Spanish, "2026-w53"),
+            (DateLocale::French, "2026-w53"),
+            (DateLocale::Japanese, "2027-w01"),
+            (DateLocale::Korean, "2027-w01"),
+            (DateLocale::BrazilianPortuguese, "2027-w01"),
+        ] {
+            assert_eq!(
+                Pattern::new("gggg-[w]ww").format(new_year, locale),
+                expected,
+                "{locale:?}"
+            );
+        }
         let settings = settings("", "GGGG-[W]WW-E");
         let path = settings.path_for(day(2027, 1, 1), english);
         assert_eq!(path, PathBuf::from("2026-W53-5.md"));

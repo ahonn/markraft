@@ -19,9 +19,9 @@ pub(super) fn today() -> NaiveDate {
 /// that shares the folder would spell them by default.
 pub(super) fn date_locale() -> DateLocale {
     static LOCALE: std::sync::LazyLock<DateLocale> = std::sync::LazyLock::new(|| {
-        DateLocale::from_language(&crate::platform::locale::preferred_language(&[
-            "en", "zh-Hans", "zh-Hant",
-        ]))
+        DateLocale::from_language(&crate::platform::locale::preferred_language(
+            &DateLocale::LANGUAGES,
+        ))
     });
     *LOCALE
 }
