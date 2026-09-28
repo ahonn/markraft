@@ -1,0 +1,5 @@
+{
+  "_version": 1,
+  "language.system": "시스템",
+  "language.custom": "%{language}(사용자 지정)"
+}

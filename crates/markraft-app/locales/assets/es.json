@@ -1,0 +1,20 @@
+{
+  "_version": 1,
+  "asset.inside-folder": "Elige una carpeta de imágenes dentro de la carpeta actual.",
+  "asset.folder-unavailable": "La carpeta de imágenes no está disponible.",
+  "asset.outside-folder": "La carpeta de imágenes enlaza fuera de la carpeta seleccionada.",
+  "asset.save-first": "Guarda el documento antes de insertar imágenes.",
+  "asset.invalid-name": "El nombre del archivo de imagen no es Unicode válido.",
+  "asset.images-only": "Aquí solo se pueden insertar archivos de imagen.",
+  "asset.too-large": "La imagen supera los 16 MB.",
+  "asset.root-mapping": "Asignación YAML de typora-root-url no admitida; usa un escalar de nivel superior.",
+  "asset.duplicate-root": "Valores de typora-root-url duplicados; la vista previa de la raíz de imágenes no está disponible.",
+  "asset.multiline-root": "No se admite typora-root-url de varias líneas; usa una ruta de una sola línea.",
+  "asset.merged-root": "No se admiten raíces de imágenes heredadas mediante fusiones de YAML.",
+  "asset.root-path": "Ruta de typora-root-url no admitida; usa un directorio local absoluto o relativo al documento.",
+  "asset.remote-root": "La vista previa de typora-root-url remoto no está disponible; usa un directorio local.",
+  "asset.invalid-root": "typora-root-url local no válido.",
+  "asset.save-relative": "Guarda el documento antes de usar un typora-root-url relativo.",
+  "asset.unsupported-value": "Valor YAML de typora-root-url no admitido; usa una ruta de una sola línea, sin comillas o entrecomillada.",
+  "asset.operation-failed": "Falló la operación de imagen: %{detail}"
+}

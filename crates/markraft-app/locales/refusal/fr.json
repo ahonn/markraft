@@ -1,0 +1,18 @@
+{
+  "_version": 1,
+  "refusal.bold": "Impossible d’appliquer le gras ici : ** accolé à une ponctuation reste du texte.",
+  "refusal.italic": "Impossible d’appliquer l’italique ici : * accolé à une ponctuation reste du texte.",
+  "refusal.strikethrough": "Impossible d’appliquer le barré ici : ~~ accolé à une ponctuation reste du texte.",
+  "refusal.code": "Impossible d’appliquer le code ici : ` accolé à une ponctuation reste du texte.",
+  "refusal.underline": "Impossible d’appliquer le souligné ici : <u> accolé à une ponctuation reste du texte.",
+  "refusal.highlight": "Impossible d’appliquer le surlignage ici : == accolé à une ponctuation reste du texte.",
+  "refusal.superscript": "Impossible d’appliquer l’exposant ici : ^ accolé à une ponctuation reste du texte.",
+  "refusal.subscript": "Impossible d’appliquer l’indice ici : ~ accolé à une ponctuation reste du texte.",
+  "refusal.formula": "Impossible d’ajouter une formule ici : $ accolé à une ponctuation reste du texte.",
+  "refusal.link": "Impossible d’ajouter un lien ici : […](…) accolé à une ponctuation reste du texte.",
+  "refusal.other": "Impossible d’appliquer ce format ici : ses délimiteurs accolés à une ponctuation restent du texte.",
+  "refusal.unreadable": "Markdown ne peut pas écrire cette mise en forme ici.",
+  "refusal.unsavable": "Impossible d’enregistrer cette modification sans réécrire d’autres parties du Markdown.",
+  "refusal.invalid-file": "Ce fichier ne peut pas être modifié dans Markraft : %{error}",
+  "refusal.no-transaction": "Aucune transaction n’a été produite."
+}

@@ -1,0 +1,20 @@
+{
+  "_version": 1,
+  "asset.inside-folder": "Choisissez un dossier d’images situé dans le dossier actuel.",
+  "asset.folder-unavailable": "Le dossier d’images est indisponible.",
+  "asset.outside-folder": "Le dossier d’images pointe en dehors du dossier sélectionné.",
+  "asset.save-first": "Enregistrez le document avant d’insérer des images.",
+  "asset.invalid-name": "Le nom du fichier image n’est pas de l’Unicode valide.",
+  "asset.images-only": "Seuls des fichiers image peuvent être insérés ici.",
+  "asset.too-large": "L’image dépasse 16 Mo.",
+  "asset.root-mapping": "Mappage YAML non pris en charge pour typora-root-url ; utilisez un scalaire de premier niveau.",
+  "asset.duplicate-root": "Valeurs typora-root-url en double ; l’aperçu de la racine des images est indisponible.",
+  "asset.multiline-root": "typora-root-url sur plusieurs lignes non pris en charge ; utilisez un chemin sur une seule ligne.",
+  "asset.merged-root": "Les racines d’images héritées par fusion YAML ne sont pas prises en charge.",
+  "asset.root-path": "Chemin typora-root-url non pris en charge ; utilisez un dossier local absolu ou relatif au document.",
+  "asset.remote-root": "Aperçu indisponible pour un typora-root-url distant ; utilisez un dossier local.",
+  "asset.invalid-root": "typora-root-url local non valide.",
+  "asset.save-relative": "Enregistrez le document avant d’utiliser un typora-root-url relatif.",
+  "asset.unsupported-value": "Valeur YAML non prise en charge pour typora-root-url ; utilisez un chemin sur une seule ligne, brut ou entre guillemets.",
+  "asset.operation-failed": "Échec de l’opération sur l’image : %{detail}"
+}

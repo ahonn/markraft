@@ -1,0 +1,18 @@
+{
+  "_version": 1,
+  "refusal.bold": "Não é possível aplicar negrito aqui: ** ao lado de pontuação permanece como texto.",
+  "refusal.italic": "Não é possível aplicar itálico aqui: * ao lado de pontuação permanece como texto.",
+  "refusal.strikethrough": "Não é possível aplicar tachado aqui: ~~ ao lado de pontuação permanece como texto.",
+  "refusal.code": "Não é possível aplicar código aqui: ` ao lado de pontuação permanece como texto.",
+  "refusal.underline": "Não é possível aplicar sublinhado aqui: <u> ao lado de pontuação permanece como texto.",
+  "refusal.highlight": "Não é possível aplicar realce aqui: == ao lado de pontuação permanece como texto.",
+  "refusal.superscript": "Não é possível aplicar sobrescrito aqui: ^ ao lado de pontuação permanece como texto.",
+  "refusal.subscript": "Não é possível aplicar subscrito aqui: ~ ao lado de pontuação permanece como texto.",
+  "refusal.formula": "Não é possível aplicar fórmula aqui: $ ao lado de pontuação permanece como texto.",
+  "refusal.link": "Não é possível adicionar um link aqui: […](…) ao lado de pontuação permanece como texto.",
+  "refusal.other": "Não é possível aplicar este formato aqui: seus delimitadores ao lado de pontuação permanecem como texto.",
+  "refusal.unreadable": "O Markdown não consegue escrever esta formatação aqui.",
+  "refusal.unsavable": "Não é possível salvar esta edição sem reescrever outro Markdown.",
+  "refusal.invalid-file": "Este arquivo não pode ser editado no Markraft: %{error}",
+  "refusal.no-transaction": "Nenhuma transação foi produzida."
+}

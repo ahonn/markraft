@@ -267,6 +267,13 @@ mod tests {
         for (requested, expected) in [
             ("en", "en"),
             ("en-AU", "en"),
+            ("de-AT", "de"),
+            ("es-MX", "es"),
+            ("fr-CA", "fr"),
+            ("ja-JP", "ja"),
+            ("ko-KR", "ko"),
+            ("pt", "pt-BR"),
+            ("pt-BR", "pt-BR"),
             ("zh-Hans", "zh-Hans"),
             ("zh-CN", "zh-Hans"),
             ("zh-SG", "zh-Hans"),

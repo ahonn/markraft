@@ -1,0 +1,20 @@
+{
+  "_version": 1,
+  "asset.inside-folder": "現在のフォルダ内の画像フォルダを選択してください。",
+  "asset.folder-unavailable": "画像フォルダを利用できません。",
+  "asset.outside-folder": "画像フォルダのリンク先が、選択したフォルダの外にあります。",
+  "asset.save-first": "画像を挿入する前に書類を保存してください。",
+  "asset.invalid-name": "画像のファイル名が有効なUnicodeではありません。",
+  "asset.images-only": "ここに挿入できるのは画像ファイルのみです。",
+  "asset.too-large": "画像が 16 MB を超えています。",
+  "asset.root-mapping": "typora-root-url のYAMLマッピングには対応していません。トップレベルのスカラーを使用してください。",
+  "asset.duplicate-root": "typora-root-url の値が重複しているため、画像ルートをプレビューできません。",
+  "asset.multiline-root": "複数行の typora-root-url には対応していません。1行のパスを使用してください。",
+  "asset.merged-root": "YAMLのマージで継承された画像ルートには対応していません。",
+  "asset.root-path": "この typora-root-url のパスには対応していません。ローカルの絶対パス、または書類からの相対ディレクトリを使用してください。",
+  "asset.remote-root": "リモートの typora-root-url はプレビューできません。ローカルのディレクトリを使用してください。",
+  "asset.invalid-root": "ローカルの typora-root-url が無効です。",
+  "asset.save-relative": "相対パスの typora-root-url を使う前に書類を保存してください。",
+  "asset.unsupported-value": "この typora-root-url のYAML値には対応していません。1行のプレーンなパス、または引用符で囲んだパスを使用してください。",
+  "asset.operation-failed": "画像の操作に失敗しました：%{detail}"
+}

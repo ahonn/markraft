@@ -1,0 +1,5 @@
+{
+  "_version": 1,
+  "language.system": "Système",
+  "language.custom": "%{language} (personnalisé)"
+}

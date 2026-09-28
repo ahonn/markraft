@@ -1,0 +1,17 @@
+{
+  "_version": 1,
+  "date.month-1": "1월",
+  "date.month-2": "2월",
+  "date.month-3": "3월",
+  "date.month-4": "4월",
+  "date.month-5": "5월",
+  "date.month-6": "6월",
+  "date.month-7": "7월",
+  "date.month-8": "8월",
+  "date.month-9": "9월",
+  "date.month-10": "10월",
+  "date.month-11": "11월",
+  "date.month-12": "12월",
+  "date.day-month": "%{month} %{day}일",
+  "date.day-month-year": "%{year}년 %{month} %{day}일"
+}

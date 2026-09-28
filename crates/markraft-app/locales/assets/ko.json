@@ -1,0 +1,20 @@
+{
+  "_version": 1,
+  "asset.inside-folder": "현재 폴더 안에 있는 이미지 폴더를 선택하세요.",
+  "asset.folder-unavailable": "이미지 폴더를 사용할 수 없습니다.",
+  "asset.outside-folder": "이미지 폴더가 선택한 폴더 밖으로 연결되어 있습니다.",
+  "asset.save-first": "이미지를 삽입하기 전에 문서를 저장하세요.",
+  "asset.invalid-name": "이미지 파일 이름이 유효한 유니코드가 아닙니다.",
+  "asset.images-only": "여기에는 이미지 파일만 삽입할 수 있습니다.",
+  "asset.too-large": "이미지가 16 MB를 초과합니다.",
+  "asset.root-mapping": "typora-root-url의 YAML 매핑은 지원되지 않습니다. 최상위 스칼라를 사용하세요.",
+  "asset.duplicate-root": "typora-root-url 값이 중복되어 이미지 루트를 미리 볼 수 없습니다.",
+  "asset.multiline-root": "여러 줄로 된 typora-root-url은 지원되지 않습니다. 한 줄 경로를 사용하세요.",
+  "asset.merged-root": "YAML 병합으로 상속된 이미지 루트는 지원되지 않습니다.",
+  "asset.root-path": "지원되지 않는 typora-root-url 경로입니다. 로컬 절대 경로나 문서 기준 상대 디렉토리를 사용하세요.",
+  "asset.remote-root": "원격 typora-root-url은 미리 볼 수 없습니다. 로컬 디렉토리를 사용하세요.",
+  "asset.invalid-root": "로컬 typora-root-url이 유효하지 않습니다.",
+  "asset.save-relative": "상대 typora-root-url을 사용하기 전에 문서를 저장하세요.",
+  "asset.unsupported-value": "지원되지 않는 typora-root-url YAML 값입니다. 한 줄로 된 일반 경로나 따옴표로 묶은 경로를 사용하세요.",
+  "asset.operation-failed": "이미지 작업 실패: %{detail}"
+}

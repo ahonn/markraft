@@ -1,0 +1,18 @@
+{
+  "_version": 1,
+  "refusal.bold": "여기에는 볼드체를 추가할 수 없습니다. 구두점 옆의 ** 기호는 텍스트로 남습니다.",
+  "refusal.italic": "여기에는 이탤릭체를 추가할 수 없습니다. 구두점 옆의 * 기호는 텍스트로 남습니다.",
+  "refusal.strikethrough": "여기에는 취소선을 추가할 수 없습니다. 구두점 옆의 ~~ 기호는 텍스트로 남습니다.",
+  "refusal.code": "여기에는 코드를 추가할 수 없습니다. 구두점 옆의 ` 기호는 텍스트로 남습니다.",
+  "refusal.underline": "여기에는 밑줄을 추가할 수 없습니다. 구두점 옆의 <u> 태그는 텍스트로 남습니다.",
+  "refusal.highlight": "여기에는 하이라이트를 추가할 수 없습니다. 구두점 옆의 == 기호는 텍스트로 남습니다.",
+  "refusal.superscript": "여기에는 위 첨자를 추가할 수 없습니다. 구두점 옆의 ^ 기호는 텍스트로 남습니다.",
+  "refusal.subscript": "여기에는 아래 첨자를 추가할 수 없습니다. 구두점 옆의 ~ 기호는 텍스트로 남습니다.",
+  "refusal.formula": "여기에는 수식을 추가할 수 없습니다. 구두점 옆의 $ 기호는 텍스트로 남습니다.",
+  "refusal.link": "여기에는 링크를 추가할 수 없습니다. 구두점 옆의 […](…) 구문은 텍스트로 남습니다.",
+  "refusal.other": "여기에는 이 서식을 추가할 수 없습니다. 구두점 옆의 구분 기호는 텍스트로 남습니다.",
+  "refusal.unreadable": "Markdown으로는 여기에 이 서식을 쓸 수 없습니다.",
+  "refusal.unsavable": "다른 Markdown을 다시 쓰지 않고는 이 편집을 저장할 수 없습니다.",
+  "refusal.invalid-file": "Markraft에서 이 파일을 편집할 수 없습니다: %{error}",
+  "refusal.no-transaction": "생성된 트랜잭션이 없습니다."
+}

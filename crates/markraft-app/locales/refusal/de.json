@@ -1,0 +1,18 @@
+{
+  "_version": 1,
+  "refusal.bold": "Fett ist hier nicht möglich: ** neben Satzzeichen bleibt Text.",
+  "refusal.italic": "Kursiv ist hier nicht möglich: * neben Satzzeichen bleibt Text.",
+  "refusal.strikethrough": "Durchgestrichen ist hier nicht möglich: ~~ neben Satzzeichen bleibt Text.",
+  "refusal.code": "Code ist hier nicht möglich: ` neben Satzzeichen bleibt Text.",
+  "refusal.underline": "Unterstrichen ist hier nicht möglich: <u> neben Satzzeichen bleibt Text.",
+  "refusal.highlight": "Markierung ist hier nicht möglich: == neben Satzzeichen bleibt Text.",
+  "refusal.superscript": "Hochgestellt ist hier nicht möglich: ^ neben Satzzeichen bleibt Text.",
+  "refusal.subscript": "Tiefgestellt ist hier nicht möglich: ~ neben Satzzeichen bleibt Text.",
+  "refusal.formula": "Eine Formel ist hier nicht möglich: $ neben Satzzeichen bleibt Text.",
+  "refusal.link": "Ein Link ist hier nicht möglich: […](…) neben Satzzeichen bleibt Text.",
+  "refusal.other": "Dieses Format ist hier nicht möglich: Seine Begrenzer neben Satzzeichen bleiben Text.",
+  "refusal.unreadable": "Markdown kann diese Formatierung hier nicht schreiben.",
+  "refusal.unsavable": "Diese Änderung lässt sich nicht sichern, ohne anderes Markdown umzuschreiben.",
+  "refusal.invalid-file": "Diese Datei kann in Markraft nicht bearbeitet werden: %{error}",
+  "refusal.no-transaction": "Es wurde keine Transaktion erzeugt."
+}

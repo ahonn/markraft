@@ -1,0 +1,20 @@
+{
+  "_version": 1,
+  "asset.inside-folder": "Wähle einen Bilderordner innerhalb des aktuellen Ordners.",
+  "asset.folder-unavailable": "Der Bilderordner ist nicht verfügbar.",
+  "asset.outside-folder": "Der Bilderordner verweist aus dem gewählten Ordner heraus.",
+  "asset.save-first": "Sichere das Dokument, bevor du Bilder einfügst.",
+  "asset.invalid-name": "Der Dateiname des Bilds ist kein gültiges Unicode.",
+  "asset.images-only": "Hier können nur Bilddateien eingefügt werden.",
+  "asset.too-large": "Das Bild ist größer als 16 MB.",
+  "asset.root-mapping": "YAML-Mapping für typora-root-url wird nicht unterstützt; verwende einen Skalar auf oberster Ebene.",
+  "asset.duplicate-root": "Doppelte Werte für typora-root-url; die Vorschau des Bildstammordners ist nicht verfügbar.",
+  "asset.multiline-root": "Mehrzeiliges typora-root-url wird nicht unterstützt; verwende einen einzeiligen Pfad.",
+  "asset.merged-root": "Über YAML-Merges geerbte Bildstammordner werden nicht unterstützt.",
+  "asset.root-path": "Dieser Pfad für typora-root-url wird nicht unterstützt; verwende einen lokalen absoluten oder dokumentrelativen Ordner.",
+  "asset.remote-root": "Die Vorschau für ein entferntes typora-root-url ist nicht verfügbar; verwende einen lokalen Ordner.",
+  "asset.invalid-root": "Ungültiges lokales typora-root-url.",
+  "asset.save-relative": "Sichere das Dokument, bevor du ein relatives typora-root-url verwendest.",
+  "asset.unsupported-value": "Dieser YAML-Wert für typora-root-url wird nicht unterstützt; verwende einen einzeiligen Pfad, einfach oder in Anführungszeichen.",
+  "asset.operation-failed": "Bildvorgang fehlgeschlagen: %{detail}"
+}
