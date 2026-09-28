@@ -67,10 +67,11 @@ const structuredData = [
 const container = 'mx-auto w-[min(65rem,100%-2rem)]';
 const primaryButton = 'btn btn-primary';
 const secondaryButton = 'btn btn-secondary';
-const h2 = 'text-[clamp(2rem,4.5vw,2.75rem)] font-bold leading-[1.1] tracking-[-0.02em]';
+const h2 = 'text-[clamp(2rem,4.5vw,2.75rem)] font-semibold leading-[1.1] tracking-[-0.02em]';
 const gapLarge = 'mt-28 sm:mt-40';
 const gapSmall = 'mt-24 sm:mt-32';
 const lead = 'text-[17px] leading-[1.55] text-muted sm:text-[19px]';
+const media = 'overflow-hidden rounded-[20px] bg-backdrop';
 ---
 
 <Base title={title} description={description} structuredData={structuredData}>
@@ -96,11 +97,11 @@ const lead = 'text-[17px] leading-[1.55] text-muted sm:text-[19px]';
         height="96"
         class="size-20 drop-shadow-[0_10px_18px_rgba(20,60,140,0.22)] sm:size-24"
       />
-      <h1 class="mt-7 max-w-[52rem] text-[clamp(2.375rem,6vw,4rem)] font-bold leading-[1.05] tracking-[-0.03em]">
+      <h1 class="mt-7 max-w-[52rem] text-[clamp(2.375rem,6vw,4rem)] font-semibold leading-[1.05] tracking-[-0.03em]">
         The floating Markdown notepad for Mac
       </h1>
       <p class="mt-5 max-w-[34rem] text-[17px] leading-normal text-muted sm:text-[21px]">
-        Press ⌥N in any app to write, and again to put it away.<br class="hidden sm:inline" />
+        Press ⌥N in any app to write, and again to put it away.{' '}<br class="hidden sm:inline" />
         An open source alternative to Raycast Notes.
       </p>
       <div class="mt-8 flex w-full flex-col items-stretch gap-3 sm:w-auto sm:flex-row sm:items-center">
@@ -115,16 +116,14 @@ const lead = 'text-[17px] leading-[1.55] text-muted sm:text-[19px]';
       <p class="mt-4 text-sm text-subtle">Free · Open source · macOS 13 or later</p>
     </section>
 
-    <div class="mx-auto mt-12 w-[min(69rem,100%-2rem)] rounded-[26px] bg-surface p-2 sm:mt-14 sm:rounded-[34px] sm:p-4">
-      <div class="overflow-hidden rounded-[18px] bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06),0_20px_50px_-24px_rgba(20,40,80,0.28)] ring-1 ring-black/5 sm:rounded-[20px]">
-        <Loop
-          name="hero"
-          eager
-          width={1600}
-          height={900}
-          label="A Markraft note formats its Markdown as three points are typed and checked off, then shows the plain .md source underneath."
-        />
-      </div>
+    <div class="mx-auto mt-12 w-[min(69rem,100%-2rem)] overflow-hidden rounded-[20px] bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06),0_20px_50px_-24px_rgba(20,40,80,0.28)] ring-1 ring-black/5 sm:mt-14">
+      <Loop
+        name="hero"
+        eager
+        width={1600}
+        height={900}
+        label="A Markraft note formats its Markdown as three points are typed and checked off, then shows the plain .md source underneath."
+      />
     </div>
 
     <section id="features" class:list={[container, gapLarge, 'flex flex-col gap-10']}>
@@ -136,7 +135,7 @@ const lead = 'text-[17px] leading-[1.55] text-muted sm:text-[19px]';
           and it fits right in.
         </p>
       </div>
-      <div class="overflow-hidden rounded-[20px] bg-backdrop">
+      <div class={media}>
         <Loop
           name="your-files"
           width={1600}
@@ -147,7 +146,7 @@ const lead = 'text-[17px] leading-[1.55] text-muted sm:text-[19px]';
     </section>
 
     <section class:list={[container, gapLarge, 'grid items-center gap-10 md:grid-cols-2 md:gap-20']}>
-      <div class="overflow-hidden rounded-[20px] bg-backdrop md:order-first">
+      <div class:list={[media, 'md:order-first']}>
         <Loop
           name="format-as-you-type"
           width={1320}
@@ -169,13 +168,15 @@ const lead = 'text-[17px] leading-[1.55] text-muted sm:text-[19px]';
       </div>
     </section>
 
-    <section class:list={[container, gapLarge, 'flex flex-col items-center']}>
-      <h2 class:list={[h2, 'text-center']}>Find anything without the mouse.</h2>
-      <p class:list={[lead, 'mt-4 max-w-[38rem] text-center']}>
-        Press ⌘K to see everything Markraft can do, or ⌘P to jump to any note by searching what is in it.
-      </p>
-      <div class="mt-12 grid w-full gap-6 md:grid-cols-2">
-        <figure class="overflow-hidden rounded-3xl bg-backdrop">
+    <section class:list={[container, gapLarge, 'flex flex-col gap-10']}>
+      <div class="flex max-w-[40rem] flex-col gap-4">
+        <h2 class={h2}>Find anything without the mouse.</h2>
+        <p class={lead}>
+          Press ⌘K to see everything Markraft can do, or ⌘P to jump to any note by searching what is in it.
+        </p>
+      </div>
+      <div class="grid w-full gap-6 md:grid-cols-2">
+        <figure class={media}>
           <Loop
             name="actions"
             width={1320}
@@ -184,7 +185,7 @@ const lead = 'text-[17px] leading-[1.55] text-muted sm:text-[19px]';
           />
           <figcaption class="flex items-center gap-2.5 bg-white/55 px-5 py-3.5 text-sm text-muted"><kbd>⌘K</kbd>All actions</figcaption>
         </figure>
-        <figure class="overflow-hidden rounded-3xl bg-backdrop">
+        <figure class={media}>
           <Loop
             name="find-a-note"
             width={1320}
@@ -207,7 +208,7 @@ const lead = 'text-[17px] leading-[1.55] text-muted sm:text-[19px]';
           <kbd>dd</kbd><kbd>p</kbd><kbd>ciw</kbd><kbd>:wq</kbd>
         </p>
       </div>
-      <div class="overflow-hidden rounded-[20px] bg-backdrop">
+      <div class={media}>
         <Loop
           name="vim"
           width={1320}
@@ -219,15 +220,15 @@ const lead = 'text-[17px] leading-[1.55] text-muted sm:text-[19px]';
 
     <section class:list={[container, gapSmall, 'grid gap-10 border-t border-line pt-12 md:grid-cols-3 md:gap-14']}>
       <div class="flex flex-col gap-2.5">
-        <h3 class="text-[21px] font-bold">Stays out of the way</h3>
+        <h3 class="text-[21px] font-semibold">Stays out of the way</h3>
         <p class="text-[17px] leading-[1.55] text-muted">It sits quietly in the menu bar and appears right over whatever you are doing.</p>
       </div>
       <div class="flex flex-col gap-2.5">
-        <h3 class="text-[21px] font-bold">Private by default</h3>
+        <h3 class="text-[21px] font-semibold">Private by default</h3>
         <p class="text-[17px] leading-[1.55] text-muted">No account and no cloud. Your notes never leave your Mac unless you move them.</p>
       </div>
       <div class="flex flex-col gap-2.5">
-        <h3 class="text-[21px] font-bold">Free for good</h3>
+        <h3 class="text-[21px] font-semibold">Free for good</h3>
         <p class="text-[17px] leading-[1.55] text-muted">
           No subscription and no limit on how many notes you keep. The code is <a href={repo}>open on GitHub</a> for anyone to read.
         </p>
@@ -250,7 +251,7 @@ const lead = 'text-[17px] leading-[1.55] text-muted sm:text-[19px]';
 
     <section id="download" class:list={[container, gapLarge, 'flex flex-col items-center pb-4 text-center']}>
       <img src="/icon.png" alt="" width="72" height="72" class="size-18" />
-      <h2 class="mt-5 text-[clamp(1.75rem,4vw,2.5rem)] font-bold tracking-[-0.02em]">Press ⌥N and start writing.</h2>
+      <h2 class="mt-5 text-[clamp(1.75rem,4vw,2.5rem)] font-semibold tracking-[-0.02em]">Press ⌥N and start writing.</h2>
       <a href={downloadUrl} class:list={[primaryButton, 'mt-7 w-full sm:w-auto', downloadEvent('footer')]}>Download for Mac</a>
       <p class="mt-4 text-sm text-subtle">
         Free · macOS 13 or later · Apple Silicon and Intel
