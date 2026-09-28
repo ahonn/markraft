@@ -1,3 +1,14 @@
+## 0.1.3 (2026-09-28)
+
+### Features
+
+- Add daily notes: a shortcut, Show on open and ⌘K open today's note from a template, with settings that can be synced from an Obsidian vault.
+- Add Traditional Chinese and a language setting that updates the interface without interrupting editing or undo history.
+
+### Fixes
+
+- Drop notices that repeated what the window already shows, including the one on every stray Escape in vim mode.
+
 ## 0.1.2 (2026-09-27)
 
 ### Features
