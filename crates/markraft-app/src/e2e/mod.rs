@@ -18,6 +18,7 @@
 pub(crate) mod harness;
 
 mod blocks;
+mod daily;
 mod disk;
 mod faults;
 mod find;

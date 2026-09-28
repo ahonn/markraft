@@ -35,7 +35,10 @@ pub(crate) fn open_with<'a>(
     let notes = root.path().join("notes");
     std::fs::create_dir_all(&notes).expect("the notes folder");
     for (name, text) in files {
-        std::fs::write(notes.join(name), text).expect("a seeded note");
+        let path = notes.join(name);
+        std::fs::create_dir_all(path.parent().expect("a seeded note's folder"))
+            .expect("a seeded note's folder");
+        std::fs::write(path, text).expect("a seeded note");
     }
     let settings = root.path().join("settings.json");
     cx.update(|cx| {

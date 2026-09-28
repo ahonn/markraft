@@ -4139,6 +4139,7 @@ dependencies = [
 name = "markraft-app"
 version = "0.1.2"
 dependencies = [
+ "chrono",
  "futures-channel",
  "futures-util",
  "global-hotkey",

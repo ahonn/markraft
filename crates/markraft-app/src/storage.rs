@@ -96,6 +96,8 @@ pub struct Preferences {
     pub always_on_top: bool,
     /// The global shortcut that opens a new note. Empty turns it off.
     pub new_note_hotkey: String,
+    /// The global shortcut that opens today's daily note. Empty turns it off.
+    pub daily_note_hotkey: String,
     /// Whether the emoji menu and `:name:` write the emoji character rather than its
     /// shortcode. Off by default: shortcodes are written.
     pub emoji_characters: bool,
@@ -136,6 +138,8 @@ pub struct Preferences {
     pub hard_break: HardBreakStyle,
 }
 
+// The variant names are what the settings file stores, so they keep their shape.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Summon {
     /// The note that was showing.
@@ -143,6 +147,8 @@ pub enum Summon {
     LastNote,
     /// A new note, unless the one showing is still empty.
     NewNote,
+    /// Today's daily note, made if it does not exist yet.
+    DailyNote,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,6 +338,7 @@ impl Default for Preferences {
             hide_on_deactivate: false,
             always_on_top: true,
             new_note_hotkey: String::new(),
+            daily_note_hotkey: String::new(),
             emoji_characters: false,
             tab_key: TabKey::default(),
             markdown_shortcuts: true,
@@ -371,6 +378,8 @@ pub enum Pref {
     Hotkey(String),
     /// The global shortcut that opens a new note. Empty turns it off.
     NewNoteHotkey(String),
+    /// The global shortcut that opens today's daily note. Empty turns it off.
+    DailyNoteHotkey(String),
     /// Rounded and kept within [`Preferences::TEXT_SIZES`].
     TextSize(f32),
     HideOnDeactivate(bool),
@@ -408,6 +417,7 @@ impl Pref {
             Pref::AnimateImages(on) => preferences.animate_images = on,
             Pref::Hotkey(shortcut) => preferences.hotkey = shortcut,
             Pref::NewNoteHotkey(shortcut) => preferences.new_note_hotkey = shortcut,
+            Pref::DailyNoteHotkey(shortcut) => preferences.daily_note_hotkey = shortcut,
             Pref::TextSize(size) => {
                 let range = Preferences::TEXT_SIZES;
                 preferences.text_size = size.round().clamp(*range.start(), *range.end());
@@ -465,12 +475,16 @@ impl Note {
             .collect()
     }
 
-    /// User-visible fallback titles are localized without changing file names.
+    /// User-visible fallback titles are localized without changing file names. A
+    /// note with nothing to title it but a file, such as a daily note made from no
+    /// template, goes by the file's name, as the title bar names it.
     pub fn title_message(&self) -> Message {
-        if doc::title_line(&self.document).is_none() {
-            Message::new("error.untitled-note")
-        } else {
-            self.title().into()
+        if doc::title_line(&self.document).is_some() {
+            return self.title().into();
+        }
+        match self.path.as_deref().and_then(Path::file_stem) {
+            Some(stem) => stem.to_string_lossy().into_owned().into(),
+            None => Message::new("error.untitled-note"),
         }
     }
 
@@ -761,6 +775,8 @@ pub struct WorkspaceSettings {
     pub new_note_name: NoteNaming,
     /// What a pasted or dropped image's copy is called.
     pub image_name: ImageNaming,
+    /// Where daily notes go, what they are called and what they start as.
+    pub daily: crate::daily::DailySettings,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1155,6 +1171,7 @@ mod tests {
             hide_on_deactivate: true,
             always_on_top: false,
             new_note_hotkey: "Alt+Shift+N".into(),
+            daily_note_hotkey: "Alt+Shift+D".into(),
             emoji_characters: true,
             tab_key: TabKey::FourSpaces,
             markdown_shortcuts: false,
@@ -1216,6 +1233,7 @@ mod tests {
             Pref::AnimateImages(changed.animate_images),
             Pref::Hotkey(changed.hotkey.clone()),
             Pref::NewNoteHotkey(changed.new_note_hotkey.clone()),
+            Pref::DailyNoteHotkey(changed.daily_note_hotkey.clone()),
             Pref::TextSize(changed.text_size),
             Pref::HideOnDeactivate(changed.hide_on_deactivate),
             Pref::AlwaysOnTop(changed.always_on_top),

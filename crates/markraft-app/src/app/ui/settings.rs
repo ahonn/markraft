@@ -87,10 +87,12 @@ pub(in crate::app) fn bind_keys(cx: &mut App) {
 /// that asked can say so. Cleared as each one is asked again, and when the window goes.
 #[derive(Clone, Default)]
 pub(in crate::app) struct SettingsErrors {
-    /// By [`Shortcut`]: the shortcut that shows the note, then the one for a new note.
-    pub(in crate::app) shortcuts: [Option<Message>; 2],
+    /// By [`Shortcut`]: the shortcut that shows the note, the one for a new note, then
+    /// the one for today's daily note.
+    pub(in crate::app) shortcuts: [Option<Message>; 3],
     login: Option<Message>,
     new_notes: Option<Message>,
+    daily: Option<Message>,
     images: Option<Message>,
     updates: Option<Message>,
 }
@@ -114,6 +116,13 @@ enum Change {
     AutomaticUpdates(bool),
     CheckForUpdates,
     ImageName(ImageNaming),
+    DailyFolder,
+    ResetDailyFolder,
+    /// A date format the window has already checked.
+    DailyFormat(String),
+    DailyTemplate(Option<PathBuf>),
+    ChooseDailyTemplate,
+    SyncDailyFromObsidian,
 }
 
 /// The preference `which` global shortcut is.
@@ -121,6 +130,7 @@ fn shortcut_pref(which: Shortcut, shortcut: String) -> Pref {
     match which {
         Shortcut::Toggle => Pref::Hotkey(shortcut),
         Shortcut::NewNote => Pref::NewNoteHotkey(shortcut),
+        Shortcut::DailyNote => Pref::DailyNoteHotkey(shortcut),
     }
 }
 
@@ -168,6 +178,11 @@ struct Snapshot {
     /// None where this copy has no updater to ask: unbundled, or not configured.
     automatic_updates: Option<bool>,
     image_name: ImageNaming,
+    daily: crate::daily::DailySettings,
+    /// Where daily notes go, and whether that is other than the notes folder itself.
+    daily_folder: Option<(String, bool)>,
+    /// The Obsidian vault this folder is keeps its daily notes otherwise.
+    obsidian_differs: bool,
     errors: SettingsErrors,
 }
 
@@ -211,6 +226,12 @@ impl MarkraftApp {
             (new_notes, images)
         };
         let (new_notes, images) = self.path.as_ref().map(placed).unzip();
+        let daily_folder = self.path.as_ref().map(|root| {
+            (
+                folder_label(root, &workspace.daily.folder),
+                !workspace.daily.folder.as_os_str().is_empty(),
+            )
+        });
         Snapshot {
             i18n: self.i18n.clone(),
             dark: self.dark,
@@ -222,6 +243,12 @@ impl MarkraftApp {
             new_note_name: workspace.new_note_name,
             automatic_updates: self.updater.automatically_checks(),
             image_name: workspace.image_name,
+            daily: workspace.daily.clone(),
+            daily_folder,
+            obsidian_differs: self
+                .obsidian_daily
+                .as_ref()
+                .is_some_and(|obsidian| *obsidian != workspace.daily),
             errors: self.settings_errors.clone(),
         }
     }
@@ -243,7 +270,10 @@ impl MarkraftApp {
                 return;
             }
             Change::Pref(pref) => self.set_preference(pref, window, cx),
-            Change::Refresh => self.refresh_launch_at_login(),
+            Change::Refresh => {
+                self.refresh_launch_at_login();
+                self.obsidian_daily = self.read_obsidian_daily();
+            }
             Change::LaunchAtLogin(enabled) => {
                 if let Some(platform) = &mut self.platform {
                     self.settings_errors.login = platform.set_launch_at_login(enabled).err();
@@ -303,6 +333,35 @@ impl MarkraftApp {
             Change::CheckForUpdates => {
                 self.settings_errors.updates = self.updater.check().err();
             }
+            Change::DailyFolder => {
+                self.settings_errors.daily = None;
+                self.configure_daily_folder(window, cx);
+            }
+            Change::ResetDailyFolder => {
+                self.settings_errors.daily = None;
+                self.library.workspace.daily.folder = PathBuf::new();
+                self.schedule_save(cx);
+            }
+            Change::DailyFormat(format) => {
+                self.library.workspace.daily.format = format;
+                self.schedule_save(cx);
+            }
+            Change::DailyTemplate(template) => {
+                self.settings_errors.daily = None;
+                self.library.workspace.daily.template = template;
+                self.schedule_save(cx);
+            }
+            Change::ChooseDailyTemplate => {
+                self.settings_errors.daily = None;
+                self.choose_daily_template(window, cx);
+            }
+            Change::SyncDailyFromObsidian => {
+                if let Some(obsidian) = self.obsidian_daily.clone() {
+                    self.settings_errors.daily = None;
+                    self.library.workspace.daily = obsidian;
+                    self.schedule_save(cx);
+                }
+            }
         }
         cx.notify();
     }
@@ -328,6 +387,10 @@ impl MarkraftApp {
 
     pub(in crate::app) fn set_settings_error_images(&mut self, error: Option<Message>) {
         self.settings_errors.images = error;
+    }
+
+    pub(in crate::app) fn set_settings_error_daily(&mut self, error: Option<Message>) {
+        self.settings_errors.daily = error;
     }
 }
 
@@ -365,6 +428,17 @@ impl Link {
                 .update(cx, |app, cx| app.settings_closed(window, cx));
         });
     }
+}
+
+/// Room between the date format field's outline and its text.
+const DAILY_FORMAT_PAD_X: f32 = 8.;
+
+/// The date format field: the note window's query field, on the Settings window's
+/// ground.
+fn daily_format_style(dark: bool) -> EditorStyle {
+    let mut style = crate::app::query_style(dark);
+    style.background = Palette::new(dark).field;
+    style
 }
 
 /// The one Settings window there may be. A second request brings this one forward.
@@ -551,7 +625,17 @@ pub(in crate::app) struct SettingsView {
     /// The toolbar, which the window opens on, so ← and → move between pages.
     toolbar: FocusHandle,
     /// One field for each global shortcut, by [`Shortcut`].
-    recorders: [FocusHandle; 2],
+    recorders: [FocusHandle; 3],
+    /// The daily note date format as typed, which reaches the folder's settings only
+    /// once it names every day on its own; until then it says why beneath it.
+    daily_format: Entity<EditorView>,
+    daily_format_problem: Option<crate::daily::FormatProblem>,
+    /// The format the folder's settings held when the field last followed them, so a
+    /// change made elsewhere — a sync from Obsidian — reaches the field, and one typed
+    /// here does not come back to it.
+    daily_format_seen: String,
+    /// Whether the field was last styled dark.
+    daily_format_dark: bool,
     /// The shortcut whose field is listening.
     recording: Option<Shortcut>,
     /// Why the chord just pressed cannot be a global shortcut. Said under the field,
@@ -585,11 +669,37 @@ impl SettingsView {
         let recorders = [
             cx.focus_handle().tab_stop(true),
             cx.focus_handle().tab_stop(true),
+            cx.focus_handle().tab_stop(true),
         ];
+        let (format, dark, i18n) = {
+            let app = app.read(cx);
+            (
+                app.library.workspace.daily.format.clone(),
+                app.dark,
+                app.i18n.clone(),
+            )
+        };
+        let daily_format = cx.new(|cx| {
+            let mut editor = EditorView::single_line(cx)
+                .with_style(daily_format_style(dark))
+                .with_messages(i18n.editor_messages());
+            editor.set_value(&format, cx);
+            editor.set_aria_label(i18n.text("settings.daily-format"), cx);
+            editor
+        });
         let own = window.window_handle();
         let this = cx.entity().downgrade();
         let mut subscriptions = vec![
-            cx.observe(&app, |_, _, cx| cx.notify()),
+            cx.observe(&app, |view, app, cx| {
+                view.follow_daily_format(&app, cx);
+                cx.notify();
+            }),
+            cx.subscribe(&daily_format, |view, editor, event: &EditorEvent, cx| {
+                if matches!(event, EditorEvent::Changed { .. }) {
+                    let text = editor.read(cx).text().trim().to_owned();
+                    view.daily_format_changed(text, cx);
+                }
+            }),
             // Ahead of every binding, so a listening recorder hears ⌘W or Tab as part
             // of a chord rather than as the window's own command.
             cx.intercept_keystrokes(move |event, window, cx| {
@@ -629,6 +739,10 @@ impl SettingsView {
             page,
             toolbar: cx.focus_handle().tab_stop(true),
             recorders,
+            daily_format,
+            daily_format_problem: None,
+            daily_format_seen: format,
+            daily_format_dark: dark,
             recording: None,
             refusal: None,
             moving: false,
@@ -638,6 +752,44 @@ impl SettingsView {
             selects: select::Selects::new(cx),
             fitting: Rc::default(),
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// Take a daily note format the folder's settings changed to elsewhere, and the
+    /// theme, into the field.
+    fn follow_daily_format(&mut self, app: &Entity<MarkraftApp>, cx: &mut Context<Self>) {
+        let (format, dark) = {
+            let app = app.read(cx);
+            (app.library.workspace.daily.format.clone(), app.dark)
+        };
+        if dark != self.daily_format_dark {
+            self.daily_format_dark = dark;
+            self.daily_format.update(cx, |editor, cx| {
+                editor.set_style(daily_format_style(dark), cx)
+            });
+        }
+        if format == self.daily_format_seen {
+            return;
+        }
+        self.daily_format_seen = format.clone();
+        if self.daily_format.read(cx).text().trim() != format {
+            self.daily_format_problem = None;
+            self.daily_format
+                .update(cx, |editor, cx| editor.set_value(&format, cx));
+        }
+    }
+
+    /// A format typed into the field goes to the folder's settings once it gives every
+    /// day a name of its own; until then the field says why not.
+    fn daily_format_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        let problem = crate::daily::validate_format(&text, super::daily_notes::date_locale()).err();
+        if problem != self.daily_format_problem {
+            self.daily_format_problem = problem;
+            cx.notify();
+        }
+        if problem.is_none() && text != self.daily_format_seen {
+            self.daily_format_seen = text.clone();
+            self.link.send(Change::DailyFormat(text), cx);
         }
     }
 
@@ -841,6 +993,7 @@ impl SettingsView {
         let name = match which {
             Shortcut::Toggle => i18n.text("settings.toggle-shortcut"),
             Shortcut::NewNote => i18n.text("settings.new-note-shortcut"),
+            Shortcut::DailyNote => i18n.text("settings.daily-note-shortcut"),
         };
         let clear = (bound && self.recording != Some(which)).then(|| {
             div()
@@ -852,6 +1005,7 @@ impl SettingsView {
                 .aria_label(i18n.text(match which {
                     Shortcut::Toggle => "settings.clear-toggle-shortcut",
                     Shortcut::NewNote => "settings.clear-new-note-shortcut",
+                    Shortcut::DailyNote => "settings.clear-daily-note-shortcut",
                 }))
                 .flex_shrink_0()
                 .cursor_pointer()
@@ -927,6 +1081,7 @@ impl SettingsView {
             &[
                 (s.i18n.text("settings.last-note"), Summon::LastNote),
                 (s.i18n.text("settings.new-note-option"), Summon::NewNote),
+                (s.i18n.text("settings.daily-note-option"), Summon::DailyNote),
             ],
             s.preferences.summon,
             |value| Change::Pref(Pref::Summon(value)),
@@ -949,6 +1104,14 @@ impl SettingsView {
             cx,
         )])];
         new_note_lines.extend(self.shortcut_notes(Shortcut::NewNote, s, p));
+        let mut daily_note_lines = vec![line(vec![self.shortcut_field(
+            Shortcut::DailyNote,
+            &s.preferences.daily_note_hotkey,
+            &s.i18n,
+            p,
+            cx,
+        )])];
+        daily_note_lines.extend(self.shortcut_notes(Shortcut::DailyNote, s, p));
 
         let mut startup = vec![
             checkbox(
@@ -977,6 +1140,11 @@ impl SettingsView {
             group_gap(),
             row(Some(s.i18n.text("settings.show-and-hide")), toggle_lines, p),
             row(Some(s.i18n.text("settings.new-note")), new_note_lines, p),
+            row(
+                Some(s.i18n.text("settings.daily-note")),
+                daily_note_lines,
+                p,
+            ),
             group_gap(),
             row(
                 Some(s.i18n.text("settings.note-window")),
@@ -1365,6 +1533,24 @@ impl SettingsView {
                 p,
             ));
 
+            if let Some(daily_folder) = &s.daily_folder {
+                page.push(group_gap());
+                page.extend(self.daily_rows(
+                    location(
+                        "daily-folder",
+                        s.i18n.text("settings.save-daily-notes"),
+                        root_name.clone(),
+                        daily_folder,
+                        Change::ResetDailyFolder,
+                        Change::DailyFolder,
+                        cx,
+                    ),
+                    s,
+                    p,
+                    cx,
+                ));
+            }
+
             page.push(group_gap());
             page.push(row(
                 Some(s.i18n.text("settings.deleting")),
@@ -1383,6 +1569,131 @@ impl SettingsView {
             ));
         }
         page
+    }
+
+    /// Where daily notes go, what they are called and what they start as, with the
+    /// way to take Obsidian's when this folder is also a vault that keeps them
+    /// otherwise.
+    fn daily_rows(
+        &self,
+        folder: AnyElement,
+        s: &Snapshot,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Vec<Div> {
+        let mut folder_lines = vec![line(vec![folder])];
+        if let Some(refused) = &s.errors.daily {
+            folder_lines.push(error(refused.render(&s.i18n), p));
+        }
+
+        let field = div()
+            .id("daily-format")
+            .flex()
+            .items_center()
+            .flex_shrink_0()
+            .w(px(SELECT_WIDTH))
+            .h(px(SELECT_HEIGHT))
+            .px(px(DAILY_FORMAT_PAD_X))
+            .rounded(px(SELECT_RADIUS))
+            .bg(p.field)
+            .border_1()
+            .border_color(p.field_border)
+            .overflow_hidden()
+            .child(div().flex_1().min_w_0().child(self.daily_format.clone()))
+            .into_any_element();
+        let mut format_lines = vec![line(vec![field])];
+        let typed = self.daily_format.read(cx).text().trim().to_owned();
+        format_lines.push(match self.daily_format_problem {
+            Some(problem) => error(s.i18n.text(problem.message_key()), p),
+            None => {
+                let preview = crate::daily::DailySettings {
+                    format: typed,
+                    ..s.daily.clone()
+                }
+                .path_for(
+                    super::daily_notes::today(),
+                    super::daily_notes::date_locale(),
+                );
+                div()
+                    .text_size(px(HELP_SIZE))
+                    .text_color(p.subtitle)
+                    .child(s.i18n.text_with(
+                        "settings.daily-format-preview",
+                        &[("path", &preview.display().to_string())],
+                    ))
+                    .into_any_element()
+            }
+        });
+
+        let none = s.i18n.text("settings.none");
+        let mut template_rows = vec![MenuItem::choice(
+            none.clone(),
+            s.daily
+                .template
+                .is_some()
+                .then_some(Change::DailyTemplate(None)),
+            s.daily.template.is_none(),
+        )];
+        let face = match &s.daily.template {
+            Some(template) => {
+                let name = template
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| template.display().to_string());
+                template_rows.push(MenuItem::choice(name.clone(), None, true));
+                name
+            }
+            None => none,
+        };
+        template_rows.push(MenuRow::Separator);
+        template_rows.push(MenuItem::action(
+            s.i18n.text("settings.choose-file"),
+            Change::ChooseDailyTemplate,
+        ));
+        let template = self.pop_up(
+            "daily-template",
+            s.i18n.text("settings.daily-template"),
+            face.into(),
+            template_rows,
+            p,
+            cx,
+        );
+
+        let mut rows = vec![
+            row(
+                Some(s.i18n.text("settings.save-daily-notes")),
+                folder_lines,
+                p,
+            ),
+            row(Some(s.i18n.text("settings.daily-format")), format_lines, p),
+            row(
+                Some(s.i18n.text("settings.daily-template")),
+                vec![line(vec![template])],
+                p,
+            ),
+        ];
+        if s.obsidian_differs {
+            rows.push(row(
+                None,
+                vec![line(vec![
+                    button(
+                        "sync-obsidian",
+                        s.i18n.text("settings.sync-obsidian"),
+                        p,
+                        // The button goes once the settings match, and the keyboard
+                        // would go with it; it returns to the pages, where the window
+                        // opened, so Escape and ⌘W still close it.
+                        cx.listener(|view, _: &ClickEvent, window, cx| {
+                            window.focus(&view.toolbar, cx);
+                            view.link.send(Change::SyncDailyFromObsidian, cx);
+                        }),
+                    )
+                    .into_any_element(),
+                ])],
+                p,
+            ));
+        }
+        rows
     }
 
     fn markdown(&self, s: &Snapshot, p: Palette, cx: &mut Context<Self>) -> Vec<Div> {
@@ -1728,7 +2039,7 @@ impl Render for SettingsView {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{Page, language_options, placement};
+    use super::{OpenSettings, Page, language_options, placement};
     use crate::locale::{I18n, LanguagePreference, available_languages};
     use gpui::{Bounds, point, px, size};
 
@@ -1813,5 +2124,41 @@ mod tests {
         }
         assert_eq!(Page::remembered(""), Page::General);
         assert_eq!(Page::remembered("gone"), Page::General);
+    }
+
+    /// Every page draws, with each control it can hold: a pop-up button the page
+    /// adds must also have a place in the focus order.
+    #[gpui::test]
+    fn every_page_draws(cx: &mut gpui::TestAppContext) {
+        let h = crate::e2e::harness::open_with(
+            cx,
+            &[(".obsidian/daily-notes.json", r#"{"folder": "Journal"}"#)],
+            |_| {},
+        );
+        let app = h.app.clone();
+        h.cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                // The vault keeps its daily notes elsewhere, so the sync button draws.
+                app.obsidian_daily = app.read_obsidian_daily();
+                assert!(app.obsidian_daily.is_some());
+                app.open_settings(window, cx);
+            })
+        });
+        h.cx.run_until_parked();
+        let settings =
+            h.cx.update(|_, cx| cx.try_global::<OpenSettings>().map(|open| open.0))
+                .expect("the Settings window");
+        for page in Page::ALL {
+            settings
+                .update(&mut *h.cx, |view, window, cx| {
+                    view.set_page(page, cx);
+                    window.refresh();
+                })
+                .expect("the Settings window");
+            h.cx.run_until_parked();
+            settings
+                .update(&mut *h.cx, |view, _, _| assert_eq!(view.page, page))
+                .expect("the Settings window");
+        }
     }
 }

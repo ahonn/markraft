@@ -64,5 +64,11 @@
   "notice.updated-link-one": "%{count} link updated",
   "notice.updated-link-many": "%{count} links updated",
   "notice.links-kept": "%{count} not changed",
-  "chrome.unreadable-file": "This file cannot be edited"
+  "chrome.unreadable-file": "This file cannot be edited",
+  "notice.daily-template-missing": "The daily note template “%{name}” couldn't be read, so the note starts empty.",
+  "notice.daily-failed": "The daily note couldn't be made: %{error}",
+  "notice.folder-daily": "Open a folder to use daily notes.",
+  "notice.choose-markdown-inside": "Choose a Markdown file inside the notes folder.",
+  "dialog.daily-folder": "Daily Notes Folder",
+  "dialog.daily-template": "Daily Note Template"
 }

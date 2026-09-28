@@ -26,6 +26,10 @@ macro_rules! define_icons {
 // in the same file maps that year to a macOS version.
 define_icons! {
     Plus => "plus",
+    // Daily notes: today's, and the days either side.
+    Calendar => "calendar",
+    PreviousDay => "chevron.backward",
+    NextDay => "chevron.forward",
     // vim's `:u`, `:red`, `:q` and `:qa`, offered to a `:` query.
     Undo => "arrow.uturn.backward",
     Redo => "arrow.uturn.forward",

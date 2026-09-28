@@ -64,5 +64,11 @@
   "notice.updated-link-one": "已更新 %{count} 個連結",
   "notice.updated-link-many": "已更新 %{count} 個連結",
   "notice.links-kept": "%{count} 個未變更",
-  "chrome.unreadable-file": "無法編輯此檔案"
+  "chrome.unreadable-file": "無法編輯此檔案",
+  "notice.daily-template-missing": "無法讀取日記範本「%{name}」，這篇日記會從空白開始。",
+  "notice.daily-failed": "無法建立日記：%{error}",
+  "notice.folder-daily": "請先開啟資料夾再使用日記。",
+  "notice.choose-markdown-inside": "請選擇筆記資料夾內的 Markdown 檔案。",
+  "dialog.daily-folder": "日記資料夾",
+  "dialog.daily-template": "日記範本"
 }

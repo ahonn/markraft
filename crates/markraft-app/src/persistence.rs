@@ -77,6 +77,7 @@ enum Request {
         Reply<Result<crate::doc::DocumentSnapshot, StoreError>>,
     ),
     OpenFile(std::path::PathBuf, Reply<Result<Note, StoreError>>),
+    CreateNote(NewNote, Reply<Result<Created, StoreError>>),
     Rename(
         String,
         String,
@@ -90,6 +91,40 @@ enum Request {
     #[cfg(test)]
     Acknowledge(Vec<String>),
 }
+/// A note to make at a path in the notes folder, starting from a template when
+/// there is one: `fill` turns the template's text — `None` when there is none, or it
+/// could not be read — into the new note's.
+pub struct NewNote {
+    pub relative: std::path::PathBuf,
+    pub template: Option<std::path::PathBuf>,
+    pub fill: FillTemplate,
+}
+
+/// Turns a template's text, or `None`, into a new note's.
+pub type FillTemplate = Box<dyn FnOnce(Option<&str>) -> String + Send>;
+
+/// The note [`NewNote`] asked for, and whether its template was missing.
+pub struct Created {
+    pub note: Note,
+    pub template_missing: bool,
+}
+
+impl NewNote {
+    fn create(self, store: &mut Store) -> Result<Created, StoreError> {
+        let template = self
+            .template
+            .as_deref()
+            .map(|template| store.read_text(template));
+        let template_missing = matches!(template, Some(None));
+        let text = (self.fill)(template.flatten().as_deref());
+        let note = store.create_note(&self.relative, &text)?;
+        Ok(Created {
+            note,
+            template_missing,
+        })
+    }
+}
+
 pub struct Persistence {
     requests: Sender<Request>,
     events: Receiver<Event>,
@@ -169,6 +204,9 @@ impl Persistence {
                     }
                     Request::OpenFile(path, response) => {
                         let _ = response.send(store.add_file(path));
+                    }
+                    Request::CreateNote(new, response) => {
+                        let _ = response.send(new.create(&mut store));
                     }
                     Request::Rename(id, name, response) => {
                         let _ = response.send(store.rename(&id, &name));
@@ -267,6 +305,11 @@ impl Persistence {
     pub fn open_file_async(&self, path: std::path::PathBuf) -> Pending<Note> {
         self.watch_file(&path);
         let response = self.request_async(|reply| Request::OpenFile(path, reply));
+        Box::pin(async move { response.await? })
+    }
+    /// Make the note `new` describes, or take the one already at its path.
+    pub fn create_note_async(&self, new: NewNote) -> Pending<Created> {
+        let response = self.request_async(|reply| Request::CreateNote(new, reply));
         Box::pin(async move { response.await? })
     }
     pub fn rename_async(&self, id: String, name: String) -> Pending<std::path::PathBuf> {

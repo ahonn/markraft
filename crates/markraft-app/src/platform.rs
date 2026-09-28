@@ -112,15 +112,17 @@ pub fn local_utc_offset() -> i64 {
     }
 }
 
-/// The two global shortcuts: one shows and hides the note, the other opens a new one.
+/// The global shortcuts: one shows and hides the note, one opens a new note, and one
+/// opens today's daily note.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Shortcut {
     Toggle,
     NewNote,
+    DailyNote,
 }
 
 impl Shortcut {
-    const ALL: [Shortcut; 2] = [Shortcut::Toggle, Shortcut::NewNote];
+    pub const ALL: [Shortcut; 3] = [Shortcut::Toggle, Shortcut::NewNote, Shortcut::DailyNote];
 
     fn index(self) -> usize {
         self as usize
@@ -130,6 +132,7 @@ impl Shortcut {
         match self {
             Shortcut::Toggle => PlatformEvent::Toggle,
             Shortcut::NewNote => PlatformEvent::NewNote,
+            Shortcut::DailyNote => PlatformEvent::DailyNote,
         }
     }
 }
@@ -138,6 +141,7 @@ impl Shortcut {
 pub enum PlatformEvent {
     Toggle,
     NewNote,
+    DailyNote,
     Settings,
     CheckForUpdates,
     ReportIssue,
@@ -148,7 +152,7 @@ pub struct Platform {
     _tray: TrayIcon,
     hotkeys: GlobalHotKeyManager,
     /// The registered chord of each [`Shortcut`], by its index.
-    shortcuts: [Option<HotKey>; 2],
+    shortcuts: [Option<HotKey>; 3],
     /// Whether the shortcuts have been let go of while the Settings window records a
     /// new one, so the chord being recorded is not taken by a running shortcut.
     suspended: bool,
@@ -200,7 +204,7 @@ impl Platform {
         let mut platform = Self {
             _tray: tray,
             hotkeys,
-            shortcuts: [None; 2],
+            shortcuts: [None; 3],
             suspended: false,
             menu_actions,
             menu_items: vec![

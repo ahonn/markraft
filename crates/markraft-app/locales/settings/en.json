@@ -109,6 +109,19 @@
     "larger": "Larger",
     "text-size-value": "%{size} pt",
     "follow-system": "Follow System",
-    "language": "Language"
+    "language": "Language",
+    "daily-note-option": "Today’s Daily Note",
+    "daily-note": "Daily note",
+    "daily-note-shortcut": "Daily note shortcut",
+    "clear-daily-note-shortcut": "Clear daily note shortcut",
+    "save-daily-notes": "Save daily notes in",
+    "daily-format": "Date format",
+    "daily-format-preview": "Today’s note: %{path}",
+    "daily-format-empty": "Enter a date format.",
+    "daily-format-ambiguous": "This format does not give each day a name of its own.",
+    "daily-format-unsafe": "This format makes names a file cannot have.",
+    "daily-template": "Daily note template",
+    "choose-file": "Choose File…",
+    "sync-obsidian": "Sync from Obsidian"
   }
 }

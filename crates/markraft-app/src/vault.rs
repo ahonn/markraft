@@ -660,6 +660,47 @@ impl Store {
         self.persist_manifest()?;
         Ok(note)
     }
+    /// The text of the file at `relative` in the notes folder, or `None` when there is
+    /// no such readable text file there.
+    pub fn read_text(&self, relative: &Path) -> Option<String> {
+        if !safe_relative(relative) {
+            return None;
+        }
+        let bytes = read_optional(&self.directory.join(relative)).ok()??;
+        String::from_utf8(bytes).ok()
+    }
+    /// Make the note at `relative` with `contents`, or take the one already there.
+    ///
+    /// The file is written without replacing anything, so a note another program made
+    /// at that path first — or makes while this runs — is the one returned, as it is.
+    /// It is tracked before this returns, so the watcher reading it afterwards finds
+    /// nothing new.
+    pub fn create_note(&mut self, relative: &Path, contents: &str) -> Result<Note, StoreError> {
+        if !safe_relative(relative) || relative.as_os_str().is_empty() {
+            return Err(Message::new("error.new-note-outside").into());
+        }
+        let path = self.directory.join(relative);
+        if let Some(saved) = self.files.values().find(|saved| saved.path == path) {
+            return Ok(saved.note.clone());
+        }
+        let parent = path.parent().ok_or(Message::new("error.no-parent"))?;
+        reject_symlink_components(&self.directory, parent)?;
+        fs::create_dir_all(parent).map_err(|e| describe(parent, &e))?;
+        if let Err(error) = write_document(&path, contents.as_bytes(), None)
+            && !path.exists()
+        {
+            return Err(error);
+        }
+        let saved = self
+            .read_path(&path, None)?
+            .ok_or(Message::new("error.file-gone"))?;
+        let note = saved.note.clone();
+        self.manifest.paths.insert(path, identity(&note));
+        self.files.insert(note.id.clone(), saved);
+        self.update_source(&note.id);
+        self.persist_refresh();
+        Ok(note)
+    }
     pub fn refresh(&mut self) -> Result<Vec<External>, StoreError> {
         let files = self.read_folder()?;
         let mut changes = Vec::new();

@@ -1,6 +1,7 @@
 use crate::locale::Message;
 mod assets;
 mod carry;
+mod daily_notes;
 mod feedback;
 mod find;
 mod interaction;
@@ -138,6 +139,10 @@ pub struct MarkraftApp {
     /// round trip to a system service, too slow for every frame of the Settings
     /// window, so it is asked when that window comes forward and after a change.
     launch_at_login: Option<bool>,
+    /// The daily note settings of the Obsidian vault this folder also is, as last read
+    /// when the Settings window came forward. `None` when it is not one, or they
+    /// cannot be used here.
+    obsidian_daily: Option<crate::daily::DailySettings>,
     /// Whether Markraft was the active app at the last poll, so the note hides once
     /// when another app takes over rather than on every poll after.
     app_active: bool,
@@ -345,6 +350,7 @@ impl MarkraftApp {
             feedback,
             settings_errors: Default::default(),
             launch_at_login: None,
+            obsidian_daily: None,
             app_active: true,
             quitting: QuitState::default(),
             trashed: Vec::new(),
@@ -733,6 +739,7 @@ impl MarkraftApp {
                     self.show(window, cx);
                     self.new_note(window, cx);
                 }
+                PlatformEvent::DailyNote => self.toggle_daily_note(window, cx),
                 PlatformEvent::Settings => self.open_settings(window, cx),
                 PlatformEvent::CheckForUpdates => self.check_for_updates(window, cx),
                 PlatformEvent::ReportIssue => self.report_issue(cx),
@@ -910,15 +917,30 @@ impl MarkraftApp {
             .as_ref()
             .is_some_and(|platform| !platform.is_visible(window));
         self.show(window, cx);
-        // Brought back from hiding, the note can be a fresh page — but one still blank
-        // already is, and a second would only pile up empty notes.
-        if hidden
-            && self.preferences.summon == crate::storage::Summon::NewNote
-            && self.persistence.is_some()
-            && self.interaction.panel() == Panel::Editor
-            && !doc::is_blank(&self.library.active_note().document)
-        {
-            self.new_note(window, cx);
+        if hidden {
+            self.summon(window, cx);
+        }
+    }
+    /// The note brought back from hiding: what Show on open asks for.
+    fn summon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.persistence.is_none() || self.interaction.panel() != Panel::Editor {
+            return;
+        }
+        match self.preferences.summon {
+            crate::storage::Summon::LastNote => {}
+            // Brought back from hiding, the note can be a fresh page — but one still
+            // blank and not yet a file already is, and a second would only pile up
+            // empty notes. A blank note that is a file, such as today's daily note
+            // made from no template, is somewhere else's page to write in.
+            crate::storage::Summon::NewNote => {
+                let active = self.library.active_note();
+                if !doc::is_blank(&active.document) || active.path.is_some() {
+                    self.new_note(window, cx);
+                }
+            }
+            crate::storage::Summon::DailyNote => {
+                self.open_daily_note(daily_notes::today(), window, cx)
+            }
         }
     }
     /// ⌘Q waits for durability without blocking input or the event loop.
@@ -2395,7 +2417,7 @@ const LIVE_META_CHARS: usize = 38;
 /// this the chrome has nowhere to sit, so a window with less room than this keeps the
 /// height and lets the editor scroll instead.
 const MINIMUM_HEIGHT: Pixels = px(220.);
-/// What the preferences ask of the platform: both global shortcuts, and whether the
+/// What the preferences ask of the platform: the global shortcuts, and whether the
 /// note floats above other apps. A shortcut that cannot be had does not stop the rest.
 fn apply_platform_preferences(
     platform: &mut Platform,
@@ -2406,7 +2428,8 @@ fn apply_platform_preferences(
     let spaces = platform.set_all_spaces(window, preferences.all_spaces);
     let toggle = platform.set_shortcut(Shortcut::Toggle, &preferences.hotkey);
     let new_note = platform.set_shortcut(Shortcut::NewNote, &preferences.new_note_hotkey);
-    on_top.and(spaces).and(toggle).and(new_note)
+    let daily_note = platform.set_shortcut(Shortcut::DailyNote, &preferences.daily_note_hotkey);
+    on_top.and(spaces).and(toggle).and(new_note).and(daily_note)
 }
 
 /// Tell the Markdown writer which markers the preferences ask new syntax to be spelled

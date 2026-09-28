@@ -109,6 +109,19 @@
     "larger": "放大",
     "text-size-value": "%{size} 點",
     "follow-system": "跟隨系統",
-    "language": "語言"
+    "language": "語言",
+    "daily-note-option": "今天的日記",
+    "daily-note": "日記",
+    "daily-note-shortcut": "日記快捷鍵",
+    "clear-daily-note-shortcut": "清除日記快捷鍵",
+    "save-daily-notes": "日記儲存位置",
+    "daily-format": "日期格式",
+    "daily-format-preview": "今天的日記：%{path}",
+    "daily-format-empty": "請輸入日期格式。",
+    "daily-format-ambiguous": "這個格式無法讓每一天都有自己的名稱。",
+    "daily-format-unsafe": "這個格式產生的名稱無法作為檔名。",
+    "daily-template": "日記範本",
+    "choose-file": "選擇檔案…",
+    "sync-obsidian": "從 Obsidian 同步"
   }
 }

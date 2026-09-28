@@ -76,6 +76,9 @@ impl MarkraftApp {
         if before.new_note_hotkey != now.new_note_hotkey {
             self.apply_shortcut(Shortcut::NewNote, before);
         }
+        if before.daily_note_hotkey != now.daily_note_hotkey {
+            self.apply_shortcut(Shortcut::DailyNote, before);
+        }
         if before.text_size != now.text_size
             || before.font != now.font
             || before.line_height != now.line_height
@@ -163,6 +166,7 @@ impl MarkraftApp {
         let value = match which {
             Shortcut::Toggle => self.preferences.hotkey.clone(),
             Shortcut::NewNote => self.preferences.new_note_hotkey.clone(),
+            Shortcut::DailyNote => self.preferences.daily_note_hotkey.clone(),
         };
         match platform.set_shortcut(which, &value) {
             Ok(()) => {
@@ -176,6 +180,10 @@ impl MarkraftApp {
                         .preferences
                         .new_note_hotkey
                         .clone_from(&before.new_note_hotkey),
+                    Shortcut::DailyNote => self
+                        .preferences
+                        .daily_note_hotkey
+                        .clone_from(&before.daily_note_hotkey),
                 }
                 self.settings_errors.shortcuts[index] = Some(error);
             }

@@ -24,6 +24,10 @@ use tokens::{POPOVER_RADIUS, ROW_HEIGHT, ROW_RADIUS, keycaps, popover_shadow};
 #[derive(Clone)]
 enum Intent {
     New,
+    /// Today's daily note, and the ones either side of the daily note on screen.
+    DailyToday,
+    DailyPrevious,
+    DailyNext,
     Browse,
     Actions,
     ToggleFormatToolbar,
@@ -147,7 +151,12 @@ enum ActionGroup {
 impl Intent {
     fn action_group(&self) -> ActionGroup {
         match self {
-            Self::New | Self::Browse | Self::Pin => ActionGroup::Notes,
+            Self::New
+            | Self::DailyToday
+            | Self::DailyPrevious
+            | Self::DailyNext
+            | Self::Browse
+            | Self::Pin => ActionGroup::Notes,
             Self::Copy | Self::PastePlain | Self::PasteMarkdown | Self::Undo | Self::Redo => {
                 ActionGroup::Editing
             }
@@ -267,6 +276,9 @@ fn ex_commands() -> Vec<Command> {
 fn intent_icon(intent: &Intent) -> Icon {
     match intent {
         Intent::New => Icon::Plus,
+        Intent::DailyToday => Icon::Calendar,
+        Intent::DailyPrevious => Icon::PreviousDay,
+        Intent::DailyNext => Icon::NextDay,
         Intent::Browse => Icon::Notes,
         Intent::Pin => Icon::Pin,
         Intent::Delete | Intent::TrashNote(_) => Icon::Trash,
@@ -326,6 +338,15 @@ impl MarkraftApp {
         }
         match intent {
             Intent::New => self.new_note(window, cx),
+            Intent::DailyToday => {
+                self.open_daily_note(daily_notes::today(), window, cx);
+            }
+            Intent::DailyPrevious | Intent::DailyNext => {
+                match self.adjacent_daily_note(matches!(intent, Intent::DailyNext)) {
+                    Some(id) => self.select_note(&id, window, cx),
+                    None => self.intent(Intent::Back, window, cx),
+                }
+            }
             Intent::Browse => self.open_panel(Panel::Browse, window, cx),
             Intent::Actions => self.open_panel(Panel::Actions, window, cx),
             Intent::ToggleFormatToolbar => {
@@ -1349,6 +1370,8 @@ impl MarkraftApp {
                 ("buffers", 7),
                 ("files", 5),
             ]),
+            Command::new("daily-today", "command.daily-today", Intent::DailyToday)
+                .ex(&[("today", 5)]),
             Command::new("save-now", "command.save-now", Intent::Save).ex(&[("write", 1)]),
             Command::new("copy-markdown", "command.copy-as-markdown", Intent::Copy),
             Command::new(
@@ -1490,6 +1513,24 @@ impl MarkraftApp {
                 SlashEffect::Block(doc::Block::Divider),
             ),
         ];
+        // Stepping between daily notes is offered from a daily note, towards a day
+        // that has one.
+        if self.adjacent_daily_note(false).is_some() {
+            items.push(
+                Command::new(
+                    "daily-previous",
+                    "command.daily-previous",
+                    Intent::DailyPrevious,
+                )
+                .ex(&[("dprev", 5)]),
+            );
+        }
+        if self.adjacent_daily_note(true).is_some() {
+            items.push(
+                Command::new("daily-next", "command.daily-next", Intent::DailyNext)
+                    .ex(&[("dnext", 5)]),
+            );
+        }
         // A table cannot nest in another one, and a code block keeps its pipes literal.
         if caret.table.is_none() && !caret.in_code {
             items.push(
