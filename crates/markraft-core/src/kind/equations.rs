@@ -10,6 +10,60 @@ use std::ops::Range;
 use super::{DocTypes, math::formula_spans};
 use crate::projection::Projection;
 
+/// A semantic equation issue. Presentation layers choose how to localize it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EquationDiagnostic {
+    /// An inline formula contains display-only metadata.
+    StandaloneTag,
+    /// A macro redefines a reserved metadata command.
+    MetadataRedefined,
+    /// Metadata appears inside a multi-row environment.
+    PerRowMetadata,
+    /// A metadata command or reference is incomplete.
+    IncompleteMetadata,
+    /// One formula declares multiple tags.
+    MultipleTags,
+    /// A tag has no content.
+    EmptyTag,
+    /// A tag contains a reference.
+    TagReference,
+    /// A label has no name.
+    EmptyLabel,
+    /// Multiple formulas share this displayed number.
+    DuplicateNumber(String),
+    /// Multiple formulas share this label.
+    DuplicateLabel(String),
+    /// This reference matches multiple labels.
+    AmbiguousReference(String),
+    /// This reference has no matching label.
+    UnknownReference(String),
+    /// This reference targets an unnumbered equation.
+    UnnumberedReference(String),
+    /// This environment is not supported.
+    UnsupportedEnvironment(String),
+}
+
+impl std::fmt::Display for EquationDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StandaloneTag => f.write_str("Equation tags require a standalone display formula"),
+            Self::MetadataRedefined => f.write_str("Redefining equation metadata commands is not supported"),
+            Self::PerRowMetadata => f.write_str("Per-row equation metadata is not supported yet; place block metadata after the environment"),
+            Self::IncompleteMetadata => f.write_str("Incomplete equation metadata or reference"),
+            Self::MultipleTags => f.write_str("A formula can have only one equation tag"),
+            Self::EmptyTag => f.write_str("Equation tags cannot be empty"),
+            Self::TagReference => f.write_str("Equation tags cannot contain references"),
+            Self::EmptyLabel => f.write_str("Equation labels cannot be empty"),
+            Self::DuplicateNumber(value) => write!(f, "Duplicate equation number: {value}"),
+            Self::DuplicateLabel(value) => write!(f, "Duplicate equation label: {value}"),
+            Self::AmbiguousReference(value) => write!(f, "Ambiguous equation reference: {value}"),
+            Self::UnknownReference(value) => write!(f, "Unknown equation reference: {value}"),
+            Self::UnnumberedReference(value) => write!(f, "Equation has no number: {value}"),
+            Self::UnsupportedEnvironment(value) => write!(f, "The {value} environment is not supported yet"),
+        }
+    }
+}
+
 /// Renderable information for one formula, in projected source coordinates.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Equation {
@@ -22,7 +76,7 @@ pub struct Equation {
     /// Absolute document position for a formula consisting of a single reference.
     pub target: Option<usize>,
     /// A semantic issue to show alongside the editable original source.
-    pub diagnostic: Option<String>,
+    pub diagnostic: Option<EquationDiagnostic>,
 }
 
 /// A deterministic index keyed by projected line and formula source start.
@@ -47,7 +101,7 @@ impl EquationIndex {
                 let mut parsed = Parsed::scan(&span.tex);
                 let standalone = span.is_standalone(source);
                 if !standalone && parsed.tag.is_some() {
-                    parsed.issue("Equation tags require a standalone display formula");
+                    parsed.issue(EquationDiagnostic::StandaloneTag);
                 }
                 let body = parsed.with_references(&span.tex, |_, _| String::new());
                 let nonempty = !body.trim().is_empty();
@@ -93,13 +147,13 @@ impl EquationIndex {
             {
                 // A manual tag may repeat an automatic number; say so rather
                 // than show two equations under one number.
-                issue(&mut diagnostic, format!("Duplicate equation number: {tag}"));
+                issue(&mut diagnostic, EquationDiagnostic::DuplicateNumber(tag));
             }
             for label in &item.parsed.labels {
                 if labels[label].len() > 1 {
                     issue(
                         &mut diagnostic,
-                        format!("Duplicate equation label: {label}"),
+                        EquationDiagnostic::DuplicateLabel(label.clone()),
                     );
                 }
             }
@@ -112,20 +166,23 @@ impl EquationIndex {
                         Some(_) => {
                             issue(
                                 &mut diagnostic,
-                                format!("Ambiguous equation reference: {label}"),
+                                EquationDiagnostic::AmbiguousReference(label.to_owned()),
                             );
                             return "??".into();
                         }
                         None => {
                             issue(
                                 &mut diagnostic,
-                                format!("Unknown equation reference: {label}"),
+                                EquationDiagnostic::UnknownReference(label.to_owned()),
                             );
                             return "??".into();
                         }
                     };
                     let Some(tag) = &target.tag else {
-                        issue(&mut diagnostic, format!("Equation has no number: {label}"));
+                        issue(
+                            &mut diagnostic,
+                            EquationDiagnostic::UnnumberedReference(label.to_owned()),
+                        );
                         return "??".into();
                     };
                     resolved_targets.push(target.position);
@@ -191,7 +248,7 @@ struct Parsed {
     labels: Vec<String>,
     tag: Option<Tag>,
     suppressed: bool,
-    diagnostic: Option<String>,
+    diagnostic: Option<EquationDiagnostic>,
 }
 enum Edit {
     Remove,
@@ -204,8 +261,8 @@ struct Reference {
 }
 
 impl Parsed {
-    fn issue(&mut self, message: &str) {
-        issue(&mut self.diagnostic, message.to_owned());
+    fn issue(&mut self, message: EquationDiagnostic) {
+        issue(&mut self.diagnostic, message);
     }
 
     fn references(&self) -> usize {
@@ -297,7 +354,7 @@ impl Parsed {
                     ) {
                         let (end, redefines_metadata) = macro_end(source, cursor, name);
                         if redefines_metadata {
-                            result.issue("Redefining equation metadata commands is not supported");
+                            result.issue(EquationDiagnostic::MetadataRedefined);
                         }
                         cursor = end;
                         continue;
@@ -340,8 +397,8 @@ impl Parsed {
                             {
                                 // The renderer cannot draw these, so they must
                                 // not take a number from the formulas after them.
-                                result.issue(&format!(
-                                    "The {environment} environment is not supported yet"
+                                result.issue(EquationDiagnostic::UnsupportedEnvironment(
+                                    environment.to_owned(),
                                 ));
                             }
                             if matches!(environment, "align" | "alignat" | "gather") {
@@ -376,7 +433,7 @@ impl Parsed {
                         && numbered_environment_depth > 0
                         && matches!(name, "tag" | "label" | "notag" | "nonumber")
                     {
-                        result.issue("Per-row equation metadata is not supported yet; place block metadata after the environment");
+                        result.issue(EquationDiagnostic::PerRowMetadata);
                     }
                     if depth == 0 && matches!(name, "notag" | "nonumber") {
                         result.suppressed = true;
@@ -393,20 +450,20 @@ impl Parsed {
                         cursor += 1;
                     }
                     let Some((body, end)) = group(source, skip_space(source, cursor)) else {
-                        result.issue("Incomplete equation metadata or reference");
+                        result.issue(EquationDiagnostic::IncompleteMetadata);
                         continue;
                     };
                     cursor = end;
                     match name {
                         "tag" => {
                             if result.tag.is_some() {
-                                result.issue("A formula can have only one equation tag");
+                                result.issue(EquationDiagnostic::MultipleTags);
                             }
                             if body.trim().is_empty() {
-                                result.issue("Equation tags cannot be empty");
+                                result.issue(EquationDiagnostic::EmptyTag);
                             }
                             if contains_reference(body) {
-                                result.issue("Equation tags cannot contain references");
+                                result.issue(EquationDiagnostic::TagReference);
                             }
                             result.tag = Some(Tag {
                                 body: body.to_owned(),
@@ -416,7 +473,7 @@ impl Parsed {
                         }
                         "label" => {
                             if body.trim().is_empty() {
-                                result.issue("Equation labels cannot be empty");
+                                result.issue(EquationDiagnostic::EmptyLabel);
                             } else {
                                 result.labels.push(body.trim().to_owned());
                             }
@@ -438,7 +495,7 @@ impl Parsed {
     }
 }
 
-fn issue(target: &mut Option<String>, message: String) {
+fn issue(target: &mut Option<EquationDiagnostic>, message: EquationDiagnostic) {
     if target.is_none() {
         *target = Some(message);
     }
@@ -734,6 +791,7 @@ mod tests {
                 .diagnostic
                 .as_ref()
                 .unwrap()
+                .to_string()
                 .contains("Duplicate")
         );
         assert!(
@@ -743,6 +801,7 @@ mod tests {
                 .diagnostic
                 .as_ref()
                 .unwrap()
+                .to_string()
                 .contains("Duplicate")
         );
         assert!(
@@ -752,6 +811,7 @@ mod tests {
                 .diagnostic
                 .as_ref()
                 .unwrap()
+                .to_string()
                 .contains("Ambiguous")
         );
         assert_eq!(equations.get(2, 0).unwrap().target, None);
@@ -762,6 +822,7 @@ mod tests {
                 .diagnostic
                 .as_ref()
                 .unwrap()
+                .to_string()
                 .contains("Unknown")
         );
         let equations = index(&[(r"a\label{a}", true), (r"\ref{a}", false)], false);
@@ -772,6 +833,7 @@ mod tests {
                 .diagnostic
                 .as_ref()
                 .unwrap()
+                .to_string()
                 .contains("no number")
         );
     }
@@ -808,8 +870,9 @@ mod tests {
             assert!(
                 first
                     .diagnostic
-                    .as_deref()
+                    .as_ref()
                     .unwrap()
+                    .to_string()
                     .contains(environment.trim_end_matches('*')),
                 "{environment}"
             );
@@ -830,8 +893,9 @@ mod tests {
                     .get(line, 0)
                     .unwrap()
                     .diagnostic
-                    .as_deref()
+                    .as_ref()
                     .unwrap()
+                    .to_string()
                     .contains("Duplicate equation number: (1)")
             );
         }
@@ -940,6 +1004,7 @@ mod tests {
                 .diagnostic
                 .as_ref()
                 .unwrap()
+                .to_string()
                 .contains("cannot contain references")
         );
     }
@@ -992,6 +1057,7 @@ mod tests {
                 .diagnostic
                 .as_ref()
                 .unwrap()
+                .to_string()
                 .contains("Per-row")
         );
         let block_label = index(

@@ -222,6 +222,7 @@ fn per_line<T>(
     let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
         maths: None,
         equations: None,
         scale_factor: 1.,
@@ -455,6 +456,7 @@ fn shaped_in(
     let style = EditorStyle::notes();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
         maths: None,
         equations: None,
         scale_factor: 1.,
@@ -484,6 +486,7 @@ fn pill_labels(source: &str, resolves: fn(&str) -> bool) -> Vec<String> {
     let wiki: crate::WikiResolver = Box::new(resolves);
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
         maths: None,
         equations: None,
         scale_factor: 1.,
@@ -515,6 +518,7 @@ fn fetching_atoms(source: &str) -> Vec<(String, Option<gpui::Size<Pixels>>)> {
     let style = EditorStyle::notes();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
         maths: None,
         equations: None,
         scale_factor: 1.,
@@ -584,6 +588,7 @@ fn runs_styled(
     let types = callout_types();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
         maths: None,
         equations: None,
         scale_factor: 1.,
@@ -1162,6 +1167,7 @@ fn a_picture_stays_in_view_under_its_spelled_out_source() {
     let types = callout_types();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
         maths: None,
         equations: None,
         scale_factor: 1.,
@@ -1222,6 +1228,7 @@ fn a_remote_picture_stays_in_view_under_its_spelled_out_source() {
     let shaped = |images: &crate::images::Images| {
         let input = ShapeInput {
             images,
+            messages: &crate::EditorMessages::ENGLISH,
             maths: None,
             equations: None,
             scale_factor: 1.,
@@ -2183,6 +2190,7 @@ fn the_caret_never_swaps_a_marker_for_its_spelling() {
     let heading_pos = projection.lines()[0].from();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
         maths: None,
         equations: None,
         scale_factor: 1.,
@@ -2256,6 +2264,7 @@ fn the_caret_never_swaps_a_marker_for_its_spelling() {
     let rows = shape(
         &ShapeInput {
             images: &images,
+            messages: &crate::EditorMessages::ENGLISH,
             maths: None,
             equations: None,
             scale_factor: 1.,
@@ -2361,6 +2370,7 @@ fn a_focused_quote_draws_as_it_does_unfocused() {
     let quote_pos = projection.lines()[0].from();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
         maths: None,
         equations: None,
         scale_factor: 1.,
@@ -2514,6 +2524,7 @@ fn the_reveal_key_changes_only_with_the_revealed_set() {
         let pos = |offset| projection.lines()[0].offset_to_pos(offset).unwrap();
         let input = ShapeInput {
             images: &images,
+            messages: &crate::EditorMessages::ENGLISH,
             maths: None,
             equations: None,
             scale_factor: 1.,
@@ -2584,6 +2595,7 @@ fn sync_state(
     let selection = state.selection();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
         maths: None,
         equations: None,
         scale_factor: 1.,
@@ -2891,6 +2903,7 @@ fn shaped_revealing(
     let types = callout_types();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
         maths: None,
         equations: None,
         scale_factor: 1.,
@@ -3066,6 +3079,7 @@ fn shaped_math(
     let images = crate::images::Images::default();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
         maths: Some(&maths),
         equations: None,
         scale_factor: 1.,

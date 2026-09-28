@@ -6,6 +6,55 @@ use super::harness::{open, open_with};
 use crate::storage::*;
 use gpui::TestAppContext;
 
+#[gpui::test]
+fn locale_changes_preserve_search_document_and_undo(cx: &mut TestAppContext) {
+    use crate::locale::{I18n, LanguagePreference};
+
+    let mut h = open(cx, |_| {});
+    h.type_text("unchanged note");
+    let source = h.markdown();
+    h.keys("cmd-k");
+    h.type_text("new note");
+    h.app.update(h.cx, |app, cx| {
+        app.test_set_locale(I18n::fixture("zh-Hans"), cx);
+    });
+    h.cx.run_until_parked();
+    assert_eq!(
+        h.app.update(h.cx, |app, cx| app.test_query_text(cx)),
+        "new note"
+    );
+    assert_eq!(
+        h.app.update(h.cx, |app, cx| app.test_action_labels(cx)),
+        Some(vec!["新建测试笔记".to_owned()])
+    );
+    assert_eq!(h.markdown(), source);
+
+    h.set_preference(Pref::Language(LanguagePreference::Locale("en".into())));
+    assert_eq!(
+        h.app.update(h.cx, |app, cx| app.test_query_text(cx)),
+        "new note"
+    );
+    assert_eq!(
+        h.app.update(h.cx, |app, cx| app.test_action_labels(cx)),
+        Some(vec!["New Note".to_owned()])
+    );
+    h.keys("escape cmd-z");
+    assert_eq!(h.markdown(), "");
+}
+
+#[gpui::test]
+fn locale_changes_reach_a_slash_provider_in_an_existing_editor(cx: &mut TestAppContext) {
+    let mut h = open(cx, |_| {});
+    h.app.update(h.cx, |app, cx| {
+        app.test_set_locale(crate::locale::I18n::fixture("zh-Hans"), cx);
+    });
+    h.cx.run_until_parked();
+    h.type_text("/测试标题");
+    h.keys("enter");
+    h.type_text("Title");
+    assert_eq!(h.markdown(), "# Title");
+}
+
 // A note left open in the background takes a change made while another is on
 // screen: coming back to it, typing follows the new preferences.
 #[gpui::test]
@@ -160,6 +209,8 @@ fn theme_and_typography_restyle_every_open_note(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_changed_preference_is_what_the_next_launch_reads(cx: &mut TestAppContext) {
     let mut h = open(cx, |_| {});
+    let language = crate::locale::LanguagePreference::Locale("future-Language".into());
+    h.set_preference(Pref::Language(language.clone()));
     h.set_preference(Pref::VimMode(true));
     h.set_preference(Pref::Font(EditorFont::Mono));
     h.set_preference(Pref::AutoNumberEquations(true));
@@ -169,7 +220,9 @@ fn a_changed_preference_is_what_the_next_launch_reads(cx: &mut TestAppContext) {
     let expected = h.app.update(h.cx, |app, _| app.test_preferences());
     assert_eq!(expected.text_size, *Preferences::TEXT_SIZES.end());
 
-    let saved = h.saved_preferences(|saved| saved.vim_mode && saved.settings_page == "editor");
+    let saved = h.saved_preferences(|saved| {
+        saved.vim_mode && saved.settings_page == "editor" && saved.language == language
+    });
     let saved = saved.expect("a readable settings file");
     assert!(saved.vim_mode);
     assert!(saved.auto_number_equations);
@@ -177,4 +230,5 @@ fn a_changed_preference_is_what_the_next_launch_reads(cx: &mut TestAppContext) {
     assert_eq!(saved.bullet_marker, BulletMarker::Star);
     assert_eq!(saved.text_size, expected.text_size);
     assert_eq!(saved.settings_page, "editor");
+    assert_eq!(saved.language, language);
 }

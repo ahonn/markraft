@@ -6,6 +6,7 @@
 //! are built on it, and neither on the other. [`StoreError`] is what every
 //! failure below the application is reported as.
 
+use crate::locale::Message;
 use std::{
     fmt,
     fs::{self, File},
@@ -14,10 +15,10 @@ use std::{
 };
 
 /// Why the store, the settings file or the instance lock could not do what
-/// was asked. The application words it once, at its edge, with [`fmt::Display`],
-/// whose sentences are the ones a person can act on; a caller that needs to
-/// tell the kinds apart — a lock from a full disk, several failures from one —
-/// reads the variant.
+/// was asked. The application renders [`Self::message`] in its current language;
+/// [`fmt::Display`] keeps diagnostics and logs in English. A caller that needs
+/// to distinguish a lock from a full disk, or several failures from one, reads
+/// the variant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreError {
     /// The operating system refused something at `path`. `detail` is its own
@@ -29,19 +30,19 @@ pub enum StoreError {
     },
     /// Another Markraft holds what this one needs: the folder's lock, or the
     /// running instance that should have answered.
-    Locked(String),
+    Locked(Message),
     /// A state file the store keeps could not be read as what it should hold.
-    Json { path: PathBuf, detail: String },
+    Json { path: PathBuf, detail: Message },
     /// A refusal the store made itself: a name it cannot file under, a path
     /// outside the folder, a library or preferences it will not write.
-    Invalid(String),
+    Invalid(Message),
     /// The save worker is gone or did not answer in time.
-    Worker(String),
+    Worker(Message),
     /// Disk won: these notes, by title, kept the disk version and their local
     /// edits were written beside the file as conflicted copies. Not a failure
     /// of the store, but not a save of what the caller handed it either, so a
     /// caller must not take the note as saved.
-    Conflict(Vec<String>),
+    Conflict(Vec<Message>),
     /// Several failures from one save, reported together.
     Several(Vec<StoreError>),
 }
@@ -58,53 +59,64 @@ impl StoreError {
     }
 }
 
-impl fmt::Display for StoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl StoreError {
+    pub fn message(&self) -> Message {
         match self {
-            StoreError::Io { path, kind, detail } => f.write_str(&message(path, *kind, detail)),
-            StoreError::Locked(text) | StoreError::Invalid(text) | StoreError::Worker(text) => {
-                f.write_str(text)
+            Self::Io { path, kind, detail } => message(path, *kind, detail),
+            Self::Locked(text) | Self::Invalid(text) | Self::Worker(text) => text.clone(),
+            Self::Json { detail, .. } => {
+                Message::new("error.saved-state").arg("detail", detail.clone())
             }
-            StoreError::Json { detail, .. } => {
-                write!(f, "Cannot read the folder's saved state: {detail}")
-            }
-            StoreError::Conflict(titles) => {
-                for (index, title) in titles.iter().enumerate() {
-                    if index > 0 {
-                        f.write_str("\n")?;
-                    }
-                    write!(
-                        f,
-                        "“{title}” changed on disk. Your edits were saved as a copy."
-                    )?;
-                }
-                Ok(())
-            }
-            StoreError::Several(errors) => {
-                for (index, error) in errors.iter().enumerate() {
-                    if index > 0 {
-                        f.write_str("\n")?;
-                    }
-                    write!(f, "{error}")?;
-                }
-                Ok(())
+            Self::Conflict(titles) => Message::join(
+                titles
+                    .iter()
+                    .map(|title| Message::new("error.conflict-note").arg("title", title.clone()))
+                    .collect(),
+                "\n",
+            ),
+            Self::Several(errors) => {
+                Message::join(errors.iter().map(Self::message).collect(), "\n")
             }
         }
     }
 }
 
+impl fmt::Display for StoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.message().fmt(f)
+    }
+}
+
+impl From<Message> for StoreError {
+    fn from(message: Message) -> Self {
+        Self::Invalid(message)
+    }
+}
+
+impl From<&StoreError> for Message {
+    fn from(error: &StoreError) -> Self {
+        error.message()
+    }
+}
+
+impl From<StoreError> for Message {
+    fn from(error: StoreError) -> Self {
+        error.message()
+    }
+}
+
 impl std::error::Error for StoreError {}
 
-/// A sentence the store worded itself.
+/// External diagnostic text. Application-owned sentences use [`Message`] keys.
 impl From<String> for StoreError {
     fn from(text: String) -> StoreError {
-        StoreError::Invalid(text)
+        StoreError::Invalid(text.into())
     }
 }
 
 impl From<&str> for StoreError {
     fn from(text: &str) -> StoreError {
-        StoreError::Invalid(text.to_owned())
+        StoreError::Invalid(text.into())
     }
 }
 
@@ -127,10 +139,15 @@ pub(crate) fn same_regular_file(left: &Path, right: &Path) -> bool {
 /// and that file would be lost, so the refusal is the file system's own.
 pub(crate) fn move_without_replacing(from: &Path, to: &Path) -> Result<(), StoreError> {
     let occupied = || {
-        StoreError::from(format!(
-            "“{}” already exists. Choose another name.",
-            to.file_name().unwrap_or_default().to_string_lossy()
-        ))
+        Message::new("error.rename-exists")
+            .arg(
+                "name",
+                to.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+            .into()
     };
     // A name that differs only in case is the same file on a file system that does
     // not keep case, and renaming a file over itself replaces nothing.
@@ -181,7 +198,7 @@ pub(crate) fn move_to_trash(path: &Path) -> Result<Option<PathBuf>, StoreError> 
 }
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn move_to_trash(_path: &Path) -> Result<Option<PathBuf>, StoreError> {
-    Err("System Trash is not available on this platform.".into())
+    Err(Message::new("error.trash-unavailable").into())
 }
 /// The permissions a new file in `folder` should have: the folder's own, without the
 /// execute bits a Markdown file has no use for.
@@ -244,37 +261,18 @@ pub(crate) fn describe(path: &Path, error: &io::Error) -> StoreError {
 
 /// The sentence a person reads for an [`StoreError::Io`], separated so it can
 /// be tested without the log.
-fn message(path: &Path, kind: io::ErrorKind, detail: &str) -> String {
-    let name = file_label(path);
-    match kind {
-        io::ErrorKind::NotFound => format!(
-            "“{name}” is no longer there. It may have been renamed, moved or deleted; \
-             choose the notes folder again."
-        ),
-        io::ErrorKind::PermissionDenied => format!(
-            "Markraft is not allowed to use “{name}”. Check its permissions in Finder, \
-             or choose another notes folder."
-        ),
-        io::ErrorKind::AlreadyExists => {
-            format!("“{name}” already exists. Rename or move it, then try again.")
-        }
-        io::ErrorKind::InvalidFilename => format!(
-            "“{name}” is not a name this disk accepts. Shorten the note's first line, \
-             then try again."
-        ),
-        io::ErrorKind::StorageFull => {
-            format!("The disk has no room left for “{name}”. Free some space, then try again.")
-        }
-        io::ErrorKind::ReadOnlyFilesystem => format!(
-            "“{name}” is on a disk that cannot be written to. Choose a notes folder \
-             on a disk you can write to."
-        ),
-        io::ErrorKind::TimedOut => format!(
-            "“{name}” did not respond in time. If it is on a network drive or in iCloud, \
-             check the connection and try again."
-        ),
-        _ => format!("Markraft could not use “{name}” ({detail})."),
-    }
+fn message(path: &Path, kind: io::ErrorKind, detail: &str) -> Message {
+    let message = match kind {
+        io::ErrorKind::NotFound => Message::new("error.file-missing"),
+        io::ErrorKind::PermissionDenied => Message::new("error.file-permission"),
+        io::ErrorKind::AlreadyExists => Message::new("error.file-exists"),
+        io::ErrorKind::InvalidFilename => Message::new("error.file-invalid-name"),
+        io::ErrorKind::StorageFull => Message::new("error.disk-full"),
+        io::ErrorKind::ReadOnlyFilesystem => Message::new("error.disk-read-only"),
+        io::ErrorKind::TimedOut => Message::new("error.file-timeout"),
+        _ => Message::new("error.file-unavailable").arg("detail", detail.to_owned()),
+    };
+    message.arg("name", file_label(path))
 }
 
 /// A file or folder as the user knows it. The whole path belongs in the log; in
@@ -406,6 +404,30 @@ mod tests {
         let several = StoreError::several(vec!["one".into(), "two".into()]);
         assert_eq!(several.to_string(), "one\ntwo");
         assert_eq!(StoreError::several(vec!["one".into()]), "one".into());
+    }
+
+    #[test]
+    fn store_errors_keep_nested_messages_localizable_and_diagnostics_literal() {
+        let language = crate::locale::LanguagePreference::Locale("zh-Hant".into());
+        let i18n = crate::locale::I18n::for_preference(&language);
+        let error = StoreError::several(vec![
+            describe(
+                Path::new("/notes/草稿%{name}.md"),
+                &io::Error::other("EIO: %{detail}"),
+            ),
+            Message::new("error.recovery-cleanup")
+                .arg("detail", Message::new("error.worker-stopped"))
+                .into(),
+        ]);
+        assert_eq!(
+            error.message().render(&i18n),
+            "Markraft 無法使用「草稿%{name}.md」（EIO: %{detail}）。\n無法清除舊的復原草稿：儲存工作已停止"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("Old recovery drafts could not be cleared: The save worker stopped")
+        );
     }
 
     #[test]

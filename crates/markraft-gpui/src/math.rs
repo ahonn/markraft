@@ -56,11 +56,31 @@ impl RenderedMath {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct MathError(String);
+pub(crate) enum MathError {
+    Typeset(markraft_math::TypesetError),
+    InvalidScale,
+    TooLarge,
+    ParseSvg(String),
+    RenderSvg(String),
+}
+
+impl MathError {
+    pub(crate) fn localized(&self, messages: &crate::EditorMessages) -> String {
+        use crate::EditorMessage::*;
+        match self {
+            Self::Typeset(error) => messages.typeset_error(error),
+            Self::InvalidScale => messages.text(FormulaInvalidScale),
+            Self::TooLarge => messages.text(FormulaTooLarge),
+            Self::ParseSvg(error) => messages.format(FormulaParseSvg, &[("error", error)]),
+            Self::RenderSvg(error) => messages.format(FormulaRenderSvg, &[("error", error)]),
+        }
+    }
+}
 
 impl fmt::Display for MathError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
+        self.localized(&crate::EditorMessages::ENGLISH)
+            .fmt(formatter)
     }
 }
 
@@ -70,7 +90,7 @@ impl std::error::Error for MathError {}
 pub(crate) fn render_math(request: &MathRequest) -> Result<RenderedMath, MathError> {
     let scale_factor = f32::from_bits(request.scale_factor);
     if !scale_factor.is_finite() || !(0.5..=8.0).contains(&scale_factor) {
-        return Err(MathError("Invalid formula display scale".into()));
+        return Err(MathError::InvalidScale);
     }
     let artifact = typeset(
         &request.source,
@@ -80,7 +100,7 @@ pub(crate) fn render_math(request: &MathRequest) -> Result<RenderedMath, MathErr
             color: request.color.map(f32::from_bits),
         },
     )
-    .map_err(|error| MathError(error.to_string()))?;
+    .map_err(MathError::Typeset)?;
     rasterize(&artifact, scale_factor)
 }
 
@@ -94,14 +114,12 @@ fn rasterize(artifact: &MathArtifact, scale_factor: f32) -> Result<RenderedMath,
         || !(1.0..=MAX_PIXEL_DIMENSION).contains(&pixel_height)
         || pixel_width * pixel_height > MAX_PIXELS
     {
-        return Err(MathError(
-            "Formula exceeds the rendered image size limit".into(),
-        ));
+        return Err(MathError::TooLarge);
     }
     let renderer = SvgRenderer::new(Arc::new(()));
     let svg = renderer
         .parse_svg(artifact.svg.as_bytes())
-        .map_err(|error| MathError(format!("Could not parse formula SVG: {error}")))?;
+        .map_err(|error| MathError::ParseSvg(error.to_string()))?;
     let image = renderer
         .render_parsed(
             &svg,
@@ -110,7 +128,7 @@ fn rasterize(artifact: &MathArtifact, scale_factor: f32) -> Result<RenderedMath,
                 DevicePixels(pixel_height as i32),
             )),
         )
-        .map_err(|error| MathError(format!("Could not render formula SVG: {error}")))?;
+        .map_err(|error| MathError::RenderSvg(error.to_string()))?;
     Ok(RenderedMath {
         image,
         width: artifact.width,
@@ -152,7 +170,7 @@ impl MathCache {
         let bytes = request.source.len()
             + result
                 .as_ref()
-                .map_or_else(|error| error.0.len(), RenderedMath::byte_len);
+                .map_or_else(|error| error.to_string().len(), RenderedMath::byte_len);
         if bytes > CACHE_BYTES {
             return;
         }
@@ -262,11 +280,14 @@ mod tests {
         for index in 0..CACHE_ENTRIES {
             cache.insert(
                 request(&index.to_string(), false),
-                Err(MathError("invalid".into())),
+                Err(MathError::Typeset(markraft_math::TypesetError::Empty)),
             );
         }
         assert!(cache.get(&request("0", false)).is_some());
-        cache.insert(request("new", false), Err(MathError("invalid".into())));
+        cache.insert(
+            request("new", false),
+            Err(MathError::Typeset(markraft_math::TypesetError::Empty)),
+        );
         assert!(cache.get(&request("0", false)).is_some());
         assert!(cache.get(&request("1", false)).is_none());
         assert_eq!(cache.entries.len(), CACHE_ENTRIES);

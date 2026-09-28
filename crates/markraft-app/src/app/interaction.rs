@@ -10,6 +10,18 @@ pub(super) enum InputKind {
     Rename,
 }
 
+impl InputKind {
+    fn messages(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Notes => ("input.search-notes", "input.notes-label"),
+            Self::Actions => ("input.search-actions", "input.actions-label"),
+            Self::Link => ("input.link", "input.link-label"),
+            Self::Language => ("input.search-languages", "input.languages-label"),
+            Self::Rename => ("input.name", "input.name-label"),
+        }
+    }
+}
+
 pub(super) enum Popover {
     Format(FormatMenu),
     Link(LinkPopover),
@@ -218,22 +230,32 @@ impl MarkraftApp {
         true
     }
 
-    pub(super) fn set_query(
-        &mut self,
-        text: String,
-        placeholder: &'static str,
-        label: &'static str,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn refresh_input_language(&self, cx: &mut Context<Self>) {
+        if let Some(input) = &self.input {
+            let (placeholder, label) = input.kind.messages();
+            input.editor.update(cx, |editor, cx| {
+                editor.set_messages(self.i18n.editor_messages(), cx);
+                editor.set_placeholder(self.i18n.text(placeholder), cx);
+                editor.set_aria_label(self.i18n.text(label), cx);
+            });
+        }
+    }
+
+    pub(super) fn set_query(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(kind) = self.interaction.input_kind() else {
             return;
         };
+        let (placeholder, label) = kind.messages();
         self.cancel_input(cx);
-        let editor = cx.new(|cx| EditorView::single_line(cx).with_style(query_style(self.dark)));
+        let editor = cx.new(|cx| {
+            EditorView::single_line(cx)
+                .with_style(query_style(self.dark))
+                .with_messages(self.i18n.editor_messages())
+        });
         editor.update(cx, |editor, cx| {
             editor.set_value(&text, cx);
-            editor.set_placeholder(placeholder, cx);
-            editor.set_aria_label(label, cx);
+            editor.set_placeholder(self.i18n.text(placeholder), cx);
+            editor.set_aria_label(self.i18n.text(label), cx);
         });
         let changes = cx.subscribe(&editor, move |this, editor, event: &EditorEvent, cx| {
             if !matches!(event, EditorEvent::Changed { .. }) {

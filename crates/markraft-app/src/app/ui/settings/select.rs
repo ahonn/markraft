@@ -15,8 +15,9 @@ use gpui_base::{Popup, Select};
 use std::rc::Rc;
 
 /// Every pop-up button the pages hold. Each has its own place in the focus order.
-const IDS: [&str; 15] = [
+const IDS: [&str; 16] = [
     "summon",
+    "language",
     "line-width",
     "ordered-delimiter",
     "hard-break",
@@ -145,11 +146,11 @@ fn step(items: &[bool], from: usize, down: bool) -> usize {
 impl SettingsView {
     /// A pop-up button for `value`, one of `options`; choosing one sends `change`.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn select<T: Copy + PartialEq + 'static>(
+    pub(super) fn select<T: Clone + PartialEq + 'static>(
         &self,
         id: &'static str,
-        label: &'static str,
-        options: &'static [(&'static str, T)],
+        label: String,
+        options: &[(String, T)],
         value: T,
         change: fn(T) -> Change,
         p: Palette,
@@ -159,10 +160,11 @@ impl SettingsView {
             .iter()
             .find(|(_, v)| *v == value)
             .unwrap_or(&options[0])
-            .0;
+            .0
+            .clone();
         let rows = options
             .iter()
-            .map(|(name, v)| MenuItem::choice(*name, Some(change(*v)), *v == value))
+            .map(|(name, v)| MenuItem::choice(name.clone(), Some(change(v.clone())), *v == value))
             .collect();
         self.pop_up(id, label, face.into(), rows, p, cx)
     }
@@ -172,7 +174,7 @@ impl SettingsView {
     pub(super) fn pop_up(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: String,
         face: SharedString,
         rows: Vec<MenuRow>,
         p: Palette,

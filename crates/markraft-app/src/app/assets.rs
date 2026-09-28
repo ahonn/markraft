@@ -1,4 +1,5 @@
 //! Image insertion policy. Existing images are never moved or garbage-collected.
+use crate::locale::Message;
 use crate::storage::{AttachmentPolicy, ImageNaming};
 use std::{
     fs,
@@ -38,34 +39,38 @@ pub(super) fn is_image(path: &Path) -> bool {
         })
 }
 
-fn subdirectory(base: &Path, relative: &Path) -> Result<PathBuf, String> {
+fn subdirectory(base: &Path, relative: &Path) -> Result<PathBuf, Message> {
     if relative
         .components()
         .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
     {
-        return Err("Choose an image folder inside the current folder.".into());
+        return Err(Message::new("asset.inside-folder"));
     }
     let destination = base.join(relative);
     let mut ancestor = destination.as_path();
     while !ancestor.exists() {
         ancestor = ancestor
             .parent()
-            .ok_or("The image folder is unavailable.")?;
+            .ok_or(Message::new("asset.folder-unavailable"))?;
     }
     if !ancestor
         .canonicalize()
-        .map_err(|error| error.to_string())?
-        .starts_with(base.canonicalize().map_err(|error| error.to_string())?)
+        .map_err(|error| Message::new("asset.operation-failed").arg("detail", error.to_string()))?
+        .starts_with(base.canonicalize().map_err(|error| {
+            Message::new("asset.operation-failed").arg("detail", error.to_string())
+        })?)
     {
-        return Err("The image folder links outside the selected folder.".into());
+        return Err(Message::new("asset.outside-folder"));
     }
     Ok(destination)
 }
 
-fn destination(document: &Path, root: &Path, policy: &AttachmentPolicy) -> Result<PathBuf, String> {
-    let parent = document
-        .parent()
-        .ok_or("Save the document before inserting images.")?;
+fn destination(
+    document: &Path,
+    root: &Path,
+    policy: &AttachmentPolicy,
+) -> Result<PathBuf, Message> {
+    let parent = document.parent().ok_or(Message::new("asset.save-first"))?;
     match policy {
         AttachmentPolicy::Default => subdirectory(parent, Path::new("assets")),
         AttachmentPolicy::WorkspaceFolder(relative) => subdirectory(root, relative),
@@ -73,7 +78,7 @@ fn destination(document: &Path, root: &Path, policy: &AttachmentPolicy) -> Resul
 }
 
 /// Produce a URL path, escaping spaces, delimiters and non-ASCII bytes once.
-fn relative_url(parent: &Path, path: &Path) -> Result<String, String> {
+fn relative_url(parent: &Path, path: &Path) -> Result<String, Message> {
     let from: Vec<_> = parent.components().collect();
     let to: Vec<_> = path.components().collect();
     let shared = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
@@ -86,7 +91,7 @@ fn relative_url(parent: &Path, path: &Path) -> Result<String, String> {
     }
     let text = relative
         .to_str()
-        .ok_or("The image filename is not valid Unicode.")?;
+        .ok_or(Message::new("asset.invalid-name"))?;
     let mut encoded = String::new();
     for byte in text.bytes() {
         if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
@@ -160,13 +165,15 @@ pub(super) fn insert(
     policy: &AttachmentPolicy,
     naming: ImageNaming,
     journal: &Path,
-) -> Result<Inserted, String> {
+) -> Result<Inserted, Message> {
     let parent = document
         .parent()
-        .ok_or("Save the document before inserting images.")?
+        .ok_or(Message::new("asset.save-first"))?
         .canonicalize()
-        .map_err(|error| error.to_string())?;
-    let root = root.canonicalize().map_err(|error| error.to_string())?;
+        .map_err(|error| Message::new("asset.operation-failed").arg("detail", error.to_string()))?;
+    let root = root
+        .canonicalize()
+        .map_err(|error| Message::new("asset.operation-failed").arg("detail", error.to_string()))?;
     let mut references = Vec::new();
     let mut urls = Vec::new();
     let mut paths = Vec::new();
@@ -175,7 +182,7 @@ pub(super) fn insert(
         let (existing, bytes, extension) = match asset {
             Asset::File(path) | Asset::Copy(path) => {
                 if !is_image(&path) {
-                    return Err("Only image files can be inserted here.".into());
+                    return Err(Message::new("asset.images-only"));
                 }
                 // The name handed over says what the image is: a symbolic
                 // link's target may have no extension at all.
@@ -183,15 +190,21 @@ pub(super) fn insert(
                     .extension()
                     .map(|extension| extension.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                let path = path.canonicalize().map_err(|error| error.to_string())?;
+                let path = path.canonicalize().map_err(|error| {
+                    Message::new("asset.operation-failed").arg("detail", error.to_string())
+                })?;
                 if !copy && path.starts_with(&root) {
                     (Some(path), Vec::new(), String::new())
                 } else {
-                    let metadata = path.metadata().map_err(|error| error.to_string())?;
+                    let metadata = path.metadata().map_err(|error| {
+                        Message::new("asset.operation-failed").arg("detail", error.to_string())
+                    })?;
                     if metadata.len() > MAX_BYTES {
-                        return Err("The image exceeds 16 MB.".into());
+                        return Err(Message::new("asset.too-large"));
                     }
-                    let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+                    let bytes = fs::read(&path).map_err(|error| {
+                        Message::new("asset.operation-failed").arg("detail", error.to_string())
+                    })?;
                     (None, bytes, extension)
                 }
             }
@@ -205,10 +218,12 @@ pub(super) fn insert(
             path
         } else {
             if bytes.len() as u64 > MAX_BYTES {
-                return Err("The image exceeds 16 MB.".into());
+                return Err(Message::new("asset.too-large"));
             }
             let folder = destination(document, &root, policy)?;
-            fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
+            fs::create_dir_all(&folder).map_err(|error| {
+                Message::new("asset.operation-failed").arg("detail", error.to_string())
+            })?;
             let path = image_path(&folder, document, naming, &extension);
             // Record the destination before writing. If copying, insertion or
             // document saving is interrupted, the retained image stays traceable
@@ -225,16 +240,24 @@ pub(super) fn insert(
                 &record,
                 &serde_json::to_vec(&entry).map_err(|e| e.to_string())?,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                Message::new("asset.operation-failed").arg("detail", error.message())
+            })?;
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&path)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| {
+                    Message::new("asset.operation-failed").arg("detail", error.to_string())
+                })?;
             file.write_all(&bytes)
                 .and_then(|_| file.sync_all())
-                .map_err(|error| error.to_string())?;
-            path.canonicalize().map_err(|error| error.to_string())?
+                .map_err(|error| {
+                    Message::new("asset.operation-failed").arg("detail", error.to_string())
+                })?;
+            path.canonicalize().map_err(|error| {
+                Message::new("asset.operation-failed").arg("detail", error.to_string())
+            })?
         };
         let url = relative_url(&parent, &path)?;
         references.push(format!("![image]({url})"));
@@ -253,7 +276,7 @@ pub(super) fn insert(
 /// application settings.
 /// This intentionally is not a general YAML parser: unsupported values are
 /// explicit diagnostics, so the caller can disable ambiguous image previews.
-pub(super) fn image_root(source: &str, document: &Path) -> Result<Option<PathBuf>, String> {
+pub(super) fn image_root(source: &str, document: &Path) -> Result<Option<PathBuf>, Message> {
     let normalized = source
         .trim_start_matches('\u{feff}')
         .replace("\r\n", "\n")
@@ -277,7 +300,7 @@ pub(super) fn image_root(source: &str, document: &Path) -> Result<Option<PathBuf
             continue;
         }
         if line.starts_with('{') && line.contains("typora-root-url") {
-            return Err("Unsupported typora-root-url YAML mapping; use a top-level scalar.".into());
+            return Err(Message::new("asset.root-mapping"));
         }
         let Some((key, scalar)) = line.split_once(':') else {
             continue;
@@ -290,9 +313,7 @@ pub(super) fn image_root(source: &str, document: &Path) -> Result<Option<PathBuf
             continue;
         }
         if value.is_some() {
-            return Err(
-                "Duplicate typora-root-url values; image root preview is unavailable.".into(),
-            );
+            return Err(Message::new("asset.duplicate-root"));
         }
         // A plain YAML scalar may continue on an indented line. Using only
         // its first line would silently select the wrong image directory.
@@ -301,9 +322,7 @@ pub(super) fn image_root(source: &str, document: &Path) -> Result<Option<PathBuf
                 continue;
             }
             if next.starts_with(char::is_whitespace) {
-                return Err(
-                    "Multiline typora-root-url is unsupported; use a single-line path.".into(),
-                );
+                return Err(Message::new("asset.multiline-root"));
             }
             break;
         }
@@ -311,24 +330,22 @@ pub(super) fn image_root(source: &str, document: &Path) -> Result<Option<PathBuf
     }
     let Some(value) = value else {
         return if merged {
-            Err("Image roots inherited through YAML merges are unsupported.".into())
+            Err(Message::new("asset.merged-root"))
         } else {
             Ok(None)
         };
     };
     if value.is_empty() || value.chars().any(char::is_control) || value.starts_with('~') {
-        return Err("Unsupported typora-root-url path; use a local absolute or document-relative directory.".into());
+        return Err(Message::new("asset.root-path"));
     }
     if let Ok(url) = url::Url::parse(&value) {
         if url.scheme() != "file" {
-            return Err(
-                "Remote typora-root-url preview is unavailable; use a local directory.".into(),
-            );
+            return Err(Message::new("asset.remote-root"));
         }
         return url
             .to_file_path()
             .map(Some)
-            .map_err(|_| "Invalid local typora-root-url.".into());
+            .map_err(|_| Message::new("asset.invalid-root"));
     }
     let path = PathBuf::from(value);
     let path = if path.is_absolute() {
@@ -336,23 +353,25 @@ pub(super) fn image_root(source: &str, document: &Path) -> Result<Option<PathBuf
     } else {
         document
             .parent()
-            .ok_or("Save the document before using a relative typora-root-url.")?
+            .ok_or(Message::new("asset.save-relative"))?
             .join(path)
     };
     std::path::absolute(path)
         .map(Some)
-        .map_err(|error| error.to_string())
+        .map_err(|error| Message::new("asset.operation-failed").arg("detail", error.to_string()))
 }
 
-fn root_scalar(value: &str) -> Result<String, String> {
-    const UNSUPPORTED: &str =
-        "Unsupported typora-root-url YAML value; use a single-line plain or quoted path.";
+fn root_scalar(value: &str) -> Result<String, Message> {
+    let unsupported = || Message::new("asset.unsupported-value");
     let tail_is_comment = |tail: &str| tail.trim().is_empty() || tail.trim_start().starts_with('#');
     if value.starts_with('\"') {
         let mut values = serde_json::Deserializer::from_str(value).into_iter::<String>();
-        let decoded = values.next().ok_or(UNSUPPORTED)?.map_err(|_| UNSUPPORTED)?;
+        let decoded = values
+            .next()
+            .ok_or_else(unsupported)?
+            .map_err(|_| unsupported())?;
         if !tail_is_comment(&value[values.byte_offset()..]) {
-            return Err(UNSUPPORTED.into());
+            return Err(unsupported());
         }
         return Ok(decoded);
     }
@@ -366,7 +385,7 @@ fn root_scalar(value: &str) -> Result<String, String> {
                     decoded.push('\'');
                 } else {
                     if !tail_is_comment(&value[offset + ch.len_utf8()..]) {
-                        return Err(UNSUPPORTED.into());
+                        return Err(unsupported());
                     }
                     return Ok(decoded);
                 }
@@ -374,7 +393,7 @@ fn root_scalar(value: &str) -> Result<String, String> {
                 decoded.push(ch);
             }
         }
-        return Err(UNSUPPORTED.into());
+        return Err(unsupported());
     }
     let value = value
         .char_indices()
@@ -393,7 +412,7 @@ fn root_scalar(value: &str) -> Result<String, String> {
         )
         || value.parse::<f64>().is_ok()
     {
-        return Err(UNSUPPORTED.into());
+        return Err(unsupported());
     }
     Ok(value.to_owned())
 }

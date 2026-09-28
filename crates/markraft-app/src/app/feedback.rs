@@ -15,7 +15,7 @@
 //! Everything said here is also logged, once per change, so a screenshot of
 //! the window can be matched to the log a report carries.
 
-use gpui::SharedString;
+use crate::locale::Message;
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -35,7 +35,7 @@ const FILE_STATUS_FLASH: Duration = Duration::from_millis(900);
 /// A clickable follow-up on a notice — reveal a path in Finder.
 #[derive(Clone)]
 pub(super) struct NoticeAction {
-    pub(super) label: SharedString,
+    pub(super) label: Message,
     pub(super) path: PathBuf,
 }
 
@@ -43,7 +43,7 @@ pub(super) struct NoticeAction {
 /// button and stays longer, because reaching that button takes a moment.
 #[derive(Clone)]
 pub(super) struct Notice {
-    pub(super) text: SharedString,
+    pub(super) text: Message,
     until: Instant,
     pub(super) action: Option<NoticeAction>,
     #[cfg(test)]
@@ -58,24 +58,24 @@ impl Notice {
 
 #[derive(Default)]
 pub(super) struct Feedback {
-    error: Option<String>,
-    platform_error: Option<String>,
+    error: Option<Message>,
+    platform_error: Option<Message>,
     notice: Option<Notice>,
     /// Sentences waiting their turn, each with the path its button reveals.
-    queued: VecDeque<(String, Option<PathBuf>)>,
+    queued: VecDeque<(Message, Option<PathBuf>)>,
     flash_until: Option<Instant>,
 }
 
 impl Feedback {
     /// Why the last thing the user asked for did not happen. It stands until
     /// something replaces it or clears it, because the state it describes does.
-    pub(super) fn error(&self) -> Option<&String> {
+    pub(super) fn error(&self) -> Option<&Message> {
         self.error.as_ref()
     }
 
     /// Show `error` in the banner. Worded here, once, whatever reported it.
-    pub(super) fn set_error(&mut self, error: impl ToString) {
-        let error = error.to_string();
+    pub(super) fn set_error(&mut self, error: impl Into<Message>) {
+        let error = error.into();
         if self.error.as_ref() != Some(&error) {
             log::error!("shown: {error}");
         }
@@ -89,11 +89,11 @@ impl Feedback {
     /// What the system refused the app itself — a shortcut another app holds,
     /// an opening-at-login that did not take. Its own carrier because it is
     /// about the app rather than about the note.
-    pub(super) fn platform_error(&self) -> Option<&String> {
+    pub(super) fn platform_error(&self) -> Option<&Message> {
         self.platform_error.as_ref()
     }
 
-    pub(super) fn set_platform_error(&mut self, error: Option<String>) {
+    pub(super) fn set_platform_error(&mut self, error: Option<Message>) {
         if let Some(error) = error
             .as_ref()
             .filter(|&error| self.platform_error.as_ref() != Some(error))
@@ -109,10 +109,11 @@ impl Feedback {
 
     /// An acknowledgment of what the user just did, which replaces whatever is
     /// on screen: they are looking at the thing they just did.
-    pub(super) fn inform(&mut self, text: impl AsRef<str>) {
-        log::debug!("shown: {}", text.as_ref());
+    pub(super) fn inform(&mut self, text: impl Into<Message>) {
+        let text = text.into();
+        log::debug!("shown: {text}");
         self.notice = Some(Notice {
-            text: text.as_ref().to_owned().into(),
+            text,
             until: Instant::now() + ACKNOWLEDGMENT,
             action: None,
             #[cfg(test)]
@@ -121,13 +122,14 @@ impl Feedback {
     }
 
     /// An acknowledgment with a path the user can reveal — stays long enough to click.
-    pub(super) fn inform_with_reveal(&mut self, text: impl AsRef<str>, path: PathBuf) {
-        log::info!("shown: {} ({})", text.as_ref(), path.display());
+    pub(super) fn inform_with_reveal(&mut self, text: impl Into<Message>, path: PathBuf) {
+        let text = text.into();
+        log::info!("shown: {text} ({})", path.display());
         self.notice = Some(Notice {
-            text: text.as_ref().to_owned().into(),
+            text,
             until: Instant::now() + WITH_ACTION,
             action: Some(NoticeAction {
-                label: "Show in Finder".into(),
+                label: Message::new("settings.show-in-finder"),
                 path,
             }),
             #[cfg(test)]
@@ -138,18 +140,19 @@ impl Feedback {
     /// A sentence the user has to read, rather than an acknowledgment of what
     /// they just did. It waits for the notice on screen instead of replacing it,
     /// and the same sentence queued twice is said once.
-    pub(super) fn queue(&mut self, text: String) {
+    pub(super) fn queue(&mut self, text: impl Into<Message>) {
         self.enqueue(text, None);
     }
 
     /// [`Self::queue`], with a button that reveals `path` in Finder: what a
     /// sentence would otherwise have to spell out as a path.
-    pub(super) fn queue_with_reveal(&mut self, text: String, path: PathBuf) {
+    pub(super) fn queue_with_reveal(&mut self, text: impl Into<Message>, path: PathBuf) {
         self.enqueue(text, Some(path));
     }
 
     /// [`Self::queue`], with a button when there is a `path` to reveal.
-    pub(super) fn enqueue(&mut self, text: String, path: Option<PathBuf>) {
+    pub(super) fn enqueue(&mut self, text: impl Into<Message>, path: Option<PathBuf>) {
+        let text = text.into();
         if !self.queued.iter().any(|(queued, _)| *queued == text) {
             match &path {
                 Some(path) => log::info!("shown: {text} ({})", path.display()),
@@ -163,12 +166,12 @@ impl Feedback {
     /// acknowledgments are excluded, so polling cannot change what tests observe.
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub(super) fn queued(&self) -> impl Iterator<Item = &str> {
+    pub(super) fn queued(&self) -> impl Iterator<Item = String> {
         self.notice
             .iter()
             .filter(|notice| notice.from_queue)
-            .map(|notice| notice.text.as_ref())
-            .chain(self.queued.iter().map(|(text, _)| text.as_str()))
+            .map(|notice| notice.text.to_string())
+            .chain(self.queued.iter().map(|(text, _)| text.to_string()))
     }
 
     /// Dismiss a notice that carries an action, and say whether there was one.
@@ -212,7 +215,7 @@ impl Feedback {
             && let Some((text, path)) = self.queued.pop_front()
         {
             self.notice = Some(Notice {
-                text: text.into(),
+                text,
                 until: now
                     + if path.is_some() {
                         WITH_ACTION
@@ -220,7 +223,7 @@ impl Feedback {
                         READING_NOTICE
                     },
                 action: path.map(|path| NoticeAction {
-                    label: "Show in Finder".into(),
+                    label: Message::new("settings.show-in-finder"),
                     path,
                 }),
                 #[cfg(test)]
@@ -242,8 +245,8 @@ mod tests {
     #[test]
     fn queued_sentences_take_turns() {
         let mut feedback = Feedback::default();
-        feedback.queue("first".into());
-        feedback.queue("second".into());
+        feedback.queue("first");
+        feedback.queue("second");
         assert!(feedback.notice().is_none(), "nothing until the tick");
 
         assert!(feedback.tick());
@@ -271,7 +274,7 @@ mod tests {
     #[test]
     fn a_queued_sentence_can_carry_a_button() {
         let mut feedback = Feedback::default();
-        feedback.queue_with_reveal("saved aside".into(), PathBuf::from("/kept.md"));
+        feedback.queue_with_reveal("saved aside", PathBuf::from("/kept.md"));
         assert!(feedback.tick());
         let notice = feedback.notice().expect("the notice");
         assert_eq!(notice.text.to_string(), "saved aside");
@@ -284,8 +287,8 @@ mod tests {
     #[test]
     fn the_same_sentence_is_queued_once() {
         let mut feedback = Feedback::default();
-        feedback.queue("same".into());
-        feedback.queue("same".into());
+        feedback.queue("same");
+        feedback.queue("same");
         assert!(feedback.tick());
         feedback.notice.as_mut().unwrap().until = Instant::now() - Duration::from_secs(1);
         assert!(feedback.tick(), "the notice expires");

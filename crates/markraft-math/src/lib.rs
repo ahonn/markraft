@@ -44,11 +44,36 @@ pub struct MathArtifact {
 
 /// Invalid TeX, invalid options or a formula exceeding the typesetting limits.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TypesetError(String);
+pub enum TypesetError {
+    /// The source exceeds the supported byte limit.
+    SourceTooLarge,
+    /// The formula has no non-whitespace source.
+    Empty,
+    /// The requested font size is outside the supported range.
+    InvalidFontSize,
+    /// A color component is not finite or outside zero through one.
+    InvalidColor,
+    /// The display list exceeds the supported item count.
+    TooComplex,
+    /// The logical geometry exceeds the supported dimensions.
+    LayoutTooLarge,
+    /// External parser details for invalid LaTeX source.
+    InvalidLatex(String),
+}
 
 impl fmt::Display for TypesetError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
+        match self {
+            Self::SourceTooLarge => formatter.write_str("Formula exceeds the 16 KiB source limit"),
+            Self::Empty => formatter.write_str("Formula is empty"),
+            Self::InvalidFontSize => formatter.write_str("Invalid formula font size"),
+            Self::InvalidColor => formatter.write_str("Invalid formula foreground color"),
+            Self::TooComplex => formatter.write_str("Formula exceeds the display complexity limit"),
+            Self::LayoutTooLarge => {
+                formatter.write_str("Formula exceeds the logical layout size limit")
+            }
+            Self::InvalidLatex(error) => write!(formatter, "Invalid LaTeX: {error}"),
+        }
     }
 }
 
@@ -61,27 +86,25 @@ impl std::error::Error for TypesetError {}
 /// their own pixel allocation limits. This function may run on a worker thread.
 pub fn typeset(source: &str, options: TypesetOptions) -> Result<MathArtifact, TypesetError> {
     if source.len() > MAX_SOURCE_BYTES {
-        return Err(TypesetError(
-            "Formula exceeds the 16 KiB source limit".into(),
-        ));
+        return Err(TypesetError::SourceTooLarge);
     }
     if source.trim().is_empty() {
-        return Err(TypesetError("Formula is empty".into()));
+        return Err(TypesetError::Empty);
     }
     let font_size = options.font_size;
     if !font_size.is_finite() || !(1.0..=256.0).contains(&font_size) {
-        return Err(TypesetError("Invalid formula font size".into()));
+        return Err(TypesetError::InvalidFontSize);
     }
     if options
         .color
         .iter()
         .any(|component| !component.is_finite() || !(0.0..=1.0).contains(component))
     {
-        return Err(TypesetError("Invalid formula foreground color".into()));
+        return Err(TypesetError::InvalidColor);
     }
     let [r, g, b, a] = options.color;
     let nodes = ratex_parser::parse(source)
-        .map_err(|error| TypesetError(format!("Invalid LaTeX: {error}")))?;
+        .map_err(|error| TypesetError::InvalidLatex(error.to_string()))?;
     let layout = ratex_layout::layout(
         &nodes,
         &LayoutOptions {
@@ -96,9 +119,7 @@ pub fn typeset(source: &str, options: TypesetOptions) -> Result<MathArtifact, Ty
     );
     let list = ratex_layout::to_display_list(&layout);
     if list.items.len() > MAX_DISPLAY_ITEMS {
-        return Err(TypesetError(
-            "Formula exceeds the display complexity limit".into(),
-        ));
+        return Err(TypesetError::TooComplex);
     }
     let width = list.width as f32 * font_size + 2.0 * PADDING;
     let ascent = list.height as f32 * font_size + PADDING;
@@ -112,9 +133,7 @@ pub fn typeset(source: &str, options: TypesetOptions) -> Result<MathArtifact, Ty
         || height == 0.0
         || width * height > MAX_LAYOUT_AREA
     {
-        return Err(TypesetError(
-            "Formula exceeds the logical layout size limit".into(),
-        ));
+        return Err(TypesetError::LayoutTooLarge);
     }
     let svg = ratex_svg::render_to_svg_with_color_syntax(
         &list,

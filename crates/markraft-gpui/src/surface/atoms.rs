@@ -425,10 +425,10 @@ pub(super) fn display_text_mode(
                 let target = equation.and_then(|equation| equation.target);
                 if previews {
                     if let Some(diagnostic) =
-                        equation.and_then(|equation| equation.diagnostic.as_deref())
+                        equation.and_then(|equation| equation.diagnostic.as_ref())
                     {
                         math_previews.push(MathPreview::Error(shape_source_label(
-                            diagnostic,
+                            &input.messages.equation_diagnostic(diagnostic),
                             font(UI_FONT),
                             font_size * 0.85,
                             input.style.muted_text,
@@ -437,7 +437,10 @@ pub(super) fn display_text_mode(
                     }
                     if let Some(Err(error)) = &tag_results[math_index] {
                         math_previews.push(MathPreview::Error(shape_source_label(
-                            &format!("Equation number: {error}"),
+                            &input.messages.format(
+                                crate::EditorMessage::EquationError,
+                                &[("error", &error.localized(input.messages))],
+                            ),
                             font(UI_FONT),
                             font_size * 0.85,
                             input.style.muted_text,
@@ -498,8 +501,15 @@ pub(super) fn display_text_mode(
                         });
                     }
                     Some(Err(error)) if previews => {
-                        let message: String =
-                            format!("Formula: {error}").chars().take(96).collect();
+                        let message: String = input
+                            .messages
+                            .format(
+                                crate::EditorMessage::FormulaError,
+                                &[("error", &error.localized(input.messages))],
+                            )
+                            .chars()
+                            .take(96)
+                            .collect();
                         math_previews.push(MathPreview::Error(shape_source_label(
                             &message,
                             font(UI_FONT),
@@ -536,7 +546,7 @@ pub(super) fn display_text_mode(
                     };
                     atom.text = source.unwrap_or(atom.text);
                     if atom.text.is_empty() {
-                        atom.text = "[image]".to_owned();
+                        atom.text = input.messages.text(crate::EditorMessage::ImagePlaceholder);
                     }
                 }
                 // An atom the row can shape *is* its text: writing the label
@@ -840,8 +850,16 @@ pub(super) fn atom_of(
         Some(_) if note => original,
         Some(source) => match images.load(source) {
             Err(crate::images::ImageError::Missing) if embed => original,
-            Err(error) => format!("{}: {original}", error.label()),
-            Ok(_) if !alone => format!("Inline image: {original}"),
+            Err(error) => input.messages.format(
+                crate::EditorMessage::ImageStatus,
+                &[
+                    ("status", &input.messages.text(error.message())),
+                    ("name", &original),
+                ],
+            ),
+            Ok(_) if !alone => input
+                .messages
+                .format(crate::EditorMessage::InlineImage, &[("name", &original)]),
             Ok(_) => original.to_owned(),
         },
         None => original,

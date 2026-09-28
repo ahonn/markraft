@@ -75,7 +75,7 @@ fn vim_text_objects_reach_the_note_through_the_real_bindings(cx: &mut TestAppCon
 }
 
 /// The labels the actions panel lists, or `None` while it is closed.
-fn action_labels(h: &mut super::harness::Harness<'_>) -> Option<Vec<&'static str>> {
+fn action_labels(h: &mut super::harness::Harness<'_>) -> Option<Vec<String>> {
     h.app.update(h.cx, |app, cx| app.test_action_labels(cx))
 }
 
@@ -86,8 +86,11 @@ fn vim_colon_runs_the_command_it_names(cx: &mut TestAppContext) {
     let mut h = open_with(cx, &[("c.md", "one two\n")], |p| p.vim_mode = true);
     h.keys("cmd-up :");
     let all = action_labels(&mut h).expect("the panel is open");
-    assert!(all.contains(&"Save Now") && all.contains(&"Hide Window"));
-    assert!(!all.contains(&"Bold"), "only commands vim has a name for");
+    assert!(all.contains(&"Save Now".to_owned()) && all.contains(&"Hide Window".to_owned()));
+    assert!(
+        !all.contains(&"Bold".to_owned()),
+        "only commands vim has a name for"
+    );
     h.type_text("q");
     assert_eq!(action_labels(&mut h).unwrap()[0], "Hide Window");
     h.keys("escape");

@@ -7,6 +7,7 @@ mod doc;
 mod e2e;
 mod fs;
 mod instance;
+mod locale;
 mod logging;
 mod persistence;
 mod platform;
@@ -137,7 +138,7 @@ fn main() {
             }
             (Some(store), library, None)
         }
-        Err(error) => (None, Library::default(), Some(error.to_string())),
+        Err(error) => (None, Library::default(), Some(error.into())),
     };
     let sender = instance.sender();
     let application = gpui_platform::application();

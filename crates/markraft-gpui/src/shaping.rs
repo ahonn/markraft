@@ -22,6 +22,7 @@ use std::cell::{RefCell, RefMut};
 
 #[derive(Default)]
 pub(crate) struct Shaping {
+    messages: crate::EditorMessages,
     style: EditorStyle,
     images: Images,
     maths: crate::maths::Maths,
@@ -39,6 +40,14 @@ pub(crate) struct Shaping {
 }
 
 impl Shaping {
+    pub(crate) fn messages(&self) -> &crate::EditorMessages {
+        &self.messages
+    }
+
+    pub(crate) fn set_messages(&mut self, messages: crate::EditorMessages) {
+        self.messages = messages;
+        self.changed();
+    }
     pub(crate) fn style(&self) -> &EditorStyle {
         &self.style
     }

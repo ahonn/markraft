@@ -11,7 +11,11 @@
 use super::*;
 use markraft_core::commands::{Command as EditCommand, command, replace_selection};
 use markraft_gpui::{Typeahead, TypeaheadItem, TypeaheadProvider};
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
 
 /// The extension id the `[[` menu registers under.
 pub(in crate::app) const WIKI_MENU: &str = "wiki-menu";
@@ -52,6 +56,7 @@ pub(in crate::app) type LinkIndex = Rc<RefCell<HashMap<String, ()>>>;
 /// [`Links::invalidate`] rather than a `bool` any caller can set.
 pub(in crate::app) struct Links {
     targets: LinkTargets,
+    revision: Rc<Cell<u64>>,
     index: LinkIndex,
     stale: bool,
 }
@@ -61,6 +66,7 @@ impl Default for Links {
     fn default() -> Links {
         Links {
             targets: LinkTargets::default(),
+            revision: Rc::default(),
             index: LinkIndex::default(),
             stale: true,
         }
@@ -105,6 +111,7 @@ impl Links {
     fn fill(&self, targets: Vec<LinkTarget>, index: HashMap<String, ()>) {
         *self.targets.borrow_mut() = targets;
         *self.index.borrow_mut() = index;
+        self.revision.set(self.revision.get().wrapping_add(1));
     }
 }
 
@@ -122,9 +129,14 @@ pub(in crate::app) fn reaches(index: &HashMap<String, ()>, target: &str) -> bool
 
 struct WikiProvider {
     targets: LinkTargets,
+    revision: Rc<Cell<u64>>,
 }
 
 impl TypeaheadProvider for WikiProvider {
+    fn revision(&self) -> u64 {
+        self.revision.get()
+    }
+
     /// The trigger scan stops at the first bracket of `[[`, so the second one arrives
     /// as the head of the query. That is what tells a link apart from an ordinary
     /// bracket: without it there are no items, and no items keeps the menu closed and
@@ -187,6 +199,7 @@ impl MarkraftApp {
             TRIGGERS.to_vec(),
             WikiProvider {
                 targets: self.links.targets(),
+                revision: self.links.revision.clone(),
             },
         )
     }
@@ -226,7 +239,7 @@ impl MarkraftApp {
                     stem
                 };
                 Some(LinkTarget {
-                    title: note.title(),
+                    title: note.display_title(&self.i18n),
                     target,
                     location: relative
                         .parent()
@@ -271,12 +284,13 @@ impl MarkraftApp {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{LinkTarget, TRIGGERS, WikiProvider};
+    use super::{LinkTarget, Links, TRIGGERS, WikiProvider};
     use markraft_gpui::TypeaheadProvider;
     use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
     fn provider(targets: &[(&str, &str, &str)]) -> WikiProvider {
         WikiProvider {
+            revision: Rc::default(),
             targets: Rc::new(RefCell::new(
                 targets
                     .iter()
@@ -288,6 +302,30 @@ mod tests {
                     .collect(),
             )),
         }
+    }
+
+    #[test]
+    fn refreshed_labels_publish_a_revision_without_changing_link_targets() {
+        let links = Links::default();
+        let provider = WikiProvider {
+            targets: links.targets(),
+            revision: links.revision.clone(),
+        };
+        let before = provider.revision();
+        for label in ["Untitled", "未命名"] {
+            links.fill(
+                vec![LinkTarget {
+                    title: label.into(),
+                    target: "empty-note".into(),
+                    location: String::new(),
+                }],
+                HashMap::new(),
+            );
+            let items = provider.items("[");
+            assert_eq!(items[0].label, label);
+            assert_eq!(items[0].id, "empty-note");
+        }
+        assert_eq!(provider.revision(), before + 2);
     }
 
     #[test]

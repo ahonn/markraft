@@ -75,13 +75,13 @@ pub(crate) struct Head {
 }
 
 /// The header a callout's type and title spell: the title where it has one, and
-/// the type capitalised where it has not.
-pub(crate) fn head_of(kind: &str, title: &str) -> Option<Head> {
+/// the localized default for a known type where it has not.
+fn localized_head(kind: &str, title: &str, messages: &crate::EditorMessages) -> Option<Head> {
     if kind.is_empty() {
         return None;
     }
     let label = match title.trim() {
-        "" => capitalize(kind),
+        "" => messages.callout_title(kind),
         title => title.to_owned(),
     };
     Some(Head {
@@ -92,17 +92,19 @@ pub(crate) fn head_of(kind: &str, title: &str) -> Option<Head> {
 
 /// A type as a header reads it: `note` becomes `Note`, and a type an author
 /// capitalised keeps the capitals it was given.
-fn capitalize(kind: &str) -> String {
-    let mut chars = kind.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => String::new(),
-    }
+#[cfg(test)]
+fn head_of(kind: &str, title: &str) -> Option<Head> {
+    localized_head(kind, title, &crate::EditorMessages::ENGLISH)
 }
 
 /// The innermost block quote a line sits in, when it is a callout that has this
 /// line as its first — which is the line the header is drawn above.
-pub(crate) fn header_of(types: &DocTypes, line: &Line, previous: Option<&Line>) -> Option<Head> {
+pub(crate) fn header_of(
+    types: &DocTypes,
+    line: &Line,
+    previous: Option<&Line>,
+    messages: &crate::EditorMessages,
+) -> Option<Head> {
     let quote = innermost_quote(types, line)?;
     // The header belongs to the quote's own first line. Every line of the
     // quote's first block passes `opens_quote`, so the line above settles it:
@@ -114,7 +116,7 @@ pub(crate) fn header_of(types: &DocTypes, line: &Line, previous: Option<&Line>) 
         return None;
     }
     let attrs = types.callout?;
-    head_of(attr(quote, attrs.kind), attr(quote, attrs.title))
+    localized_head(attr(quote, attrs.kind), attr(quote, attrs.title), messages)
 }
 
 /// The tone of every block quote a line sits in, outermost first, for the bars
@@ -260,5 +262,22 @@ mod tests {
         );
         // An ordinary quote has no header at all.
         assert_eq!(head_of("", "Title"), None);
+    }
+
+    #[test]
+    fn localizing_callout_defaults_never_rewrites_authored_titles() {
+        let messages = crate::EditorMessages::new(|message, args| match message {
+            crate::EditorMessage::CalloutNote => "注意".into(),
+            _ => crate::EditorMessages::ENGLISH.format(message, args),
+        });
+        assert_eq!(localized_head("note", "", &messages).unwrap().label, "注意");
+        assert_eq!(
+            localized_head("note", "Note", &messages).unwrap().label,
+            "Note"
+        );
+        assert_eq!(
+            localized_head("custom", "", &messages).unwrap().label,
+            "Custom"
+        );
     }
 }

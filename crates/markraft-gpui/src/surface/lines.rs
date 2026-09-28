@@ -787,7 +787,7 @@ pub(super) fn estimate_height(
         px(0.)
     };
     let above = index.checked_sub(1).map(|above| &projection.lines()[above]);
-    let header = if crate::callout::header_of(types, line, above).is_some() {
+    let header = if crate::callout::header_of(types, line, above, input.messages).is_some() {
         CALLOUT_HEADER_HEIGHT
     } else {
         px(0.)
@@ -845,6 +845,7 @@ $w$";
         let style = EditorStyle::notes();
         let input = ShapeInput {
             images: &images,
+            messages: &crate::EditorMessages::ENGLISH,
             maths: None,
             equations: Some(&equations),
             scale_factor: 1.,
@@ -1009,6 +1010,7 @@ $w$";
         let style = EditorStyle::notes();
         let input = ShapeInput {
             images: &images,
+            messages: &crate::EditorMessages::ENGLISH,
             maths: Some(&maths),
             equations: None,
             scale_factor: 1.,
@@ -1077,6 +1079,7 @@ $w$";
             WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
         let input_at = |caret: usize| ShapeInput {
             images: &images,
+            messages: &crate::EditorMessages::ENGLISH,
             maths: Some(&maths),
             equations: Some(&equations),
             scale_factor: 1.,

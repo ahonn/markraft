@@ -1,6 +1,8 @@
 //! Local note-library persistence owned by the application, never by the editor.
 use crate::doc;
 use crate::fs::StoreError;
+use crate::locale::LanguagePreference;
+use crate::locale::Message;
 use markraft_core::Node;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -48,7 +50,7 @@ pub fn resolve_notes_folder(
     if let Some(path) = settings_folder {
         return Ok(path);
     }
-    let home = home.ok_or_else(|| "HOME is unavailable; use --dir PATH".to_owned())?;
+    let home = home.ok_or_else(|| Message::new("error.home-missing"))?;
     ensure_notes_folder(&default_notes_folder_in(home))
 }
 
@@ -71,6 +73,8 @@ const LIBRARY_VERSION: u32 = 2;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
+    /// Requested display language; old settings continue to follow the system.
+    pub language: LanguagePreference,
     pub dark_mode: Option<bool>,
     pub auto_height: bool,
     pub hotkey: String,
@@ -307,11 +311,7 @@ impl Preferences {
         if self.window_bounds.is_some_and(|bounds| {
             bounds.iter().any(|value| !value.is_finite()) || bounds[2] <= 0.0 || bounds[3] <= 0.0
         }) {
-            return Err(
-                "The window size Markraft remembered cannot be used, so it stopped before \
-                 saving. Resize the window, then try again."
-                    .into(),
-            );
+            return Err(Message::new("error.invalid-bounds").into());
         }
         Ok(())
     }
@@ -320,6 +320,7 @@ impl Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            language: LanguagePreference::default(),
             dark_mode: None,
             auto_height: true,
             hotkey: "Alt+N".into(),
@@ -359,6 +360,7 @@ impl Default for Preferences {
 /// set, so they have no word here.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pref {
+    Language(LanguagePreference),
     Theme(Option<bool>),
     AutoHeight(bool),
     VimMode(bool),
@@ -397,6 +399,7 @@ impl Pref {
     /// Write this setting into `preferences`.
     pub fn apply(self, preferences: &mut Preferences) {
         match self {
+            Pref::Language(language) => preferences.language = language,
             Pref::Theme(mode) => preferences.dark_mode = mode,
             Pref::AutoHeight(on) => preferences.auto_height = on,
             Pref::VimMode(on) => preferences.vim_mode = on,
@@ -443,7 +446,7 @@ pub struct Note {
     pub pinned: bool,
     /// Absolute location, independent of the displayed title.
     pub path: Option<PathBuf>,
-    pub read_only: Option<String>,
+    pub read_only: Option<Message>,
     pub conflicted: bool,
 }
 
@@ -460,6 +463,19 @@ impl Note {
             .graphemes(true)
             .take(64)
             .collect()
+    }
+
+    /// User-visible fallback titles are localized without changing file names.
+    pub fn title_message(&self) -> Message {
+        if doc::title_line(&self.document).is_none() {
+            Message::new("error.untitled-note")
+        } else {
+            self.title().into()
+        }
+    }
+
+    pub fn display_title(&self, i18n: &crate::locale::I18n) -> String {
+        self.title_message().render(i18n)
     }
 
     /// Where the file is, as a search matches it: the path under the notes folder
@@ -620,7 +636,7 @@ impl Library {
 
     /// A permissions notification changes editability, not the local document or
     /// the generation of an outstanding save.
-    pub fn update_read_only(&mut self, id: &str, value: Option<String>) {
+    pub fn update_read_only(&mut self, id: &str, value: Option<Message>) {
         if let Some(note) = self.notes.iter_mut().find(|note| note.id == id) {
             note.read_only = value;
         }
@@ -702,11 +718,7 @@ impl Library {
 
     pub fn validate(&self) -> Result<(), StoreError> {
         if self.version != LIBRARY_VERSION {
-            return Err(
-                "These notes were written by a different version of Markraft. \
-                 Update Markraft, then open them again."
-                    .into(),
-            );
+            return Err(Message::new("error.library-version").into());
         }
         let mut ids = HashSet::new();
         if self
@@ -714,18 +726,10 @@ impl Library {
             .iter()
             .any(|note| note.id.is_empty() || !ids.insert(&note.id))
         {
-            return Err(
-                "Markraft cannot tell two of your notes apart, so it stopped before \
-                 saving. Reload the folder to use the notes on disk."
-                    .into(),
-            );
+            return Err(Message::new("error.duplicate-notes").into());
         }
         if self.note(&self.active_id).is_none() {
-            return Err(
-                "Markraft lost track of which note is open, so it stopped before saving. \
-                 Open a note from the list, then try again."
-                    .into(),
-            );
+            return Err(Message::new("error.active-note-missing").into());
         }
         Ok(())
     }
@@ -820,33 +824,32 @@ impl Settings {
     /// the settings file, so the reset does not go unexplained.
     /// What to say about settings that could not be read, and the unreadable
     /// file, kept aside, for the notice to show.
-    pub fn recovery_notice(&self) -> Option<(String, PathBuf)> {
-        self.recovered_from.clone().map(|damaged| {
-            (
-                "Settings were unreadable and have been reset.".to_owned(),
-                damaged,
-            )
-        })
+    pub fn recovery_notice(&self) -> Option<(Message, PathBuf)> {
+        self.recovered_from
+            .clone()
+            .map(|damaged| (Message::new("error.settings-reset"), damaged))
     }
 
     pub fn write(&self, path: &Path) -> Result<(), StoreError> {
         let bytes = serde_json::to_vec_pretty(self).map_err(|error| {
             log::warn!("settings could not be encoded: {error}");
-            "Markraft could not prepare your settings for saving.".to_owned()
+            Message::new("error.settings-encode")
         })?;
         crate::fs::atomic_write(path, &bytes)
     }
 }
 
 /// Said when disk won over edits that were then kept as a conflicted copy.
-pub const CONFLICT_KEPT: &str = "Changed on disk. Your edits were saved as a copy.";
+pub fn conflict_kept() -> Message {
+    Message::new("error.conflict-kept")
+}
 
-/// [`CONFLICT_KEPT`], for `count` notes.
-pub fn conflicts_kept(count: usize) -> String {
+/// Conflict notices distinguish one note from several without embedding a count.
+pub fn conflicts_kept(count: usize) -> Message {
     if count == 1 {
-        CONFLICT_KEPT.to_owned()
+        conflict_kept()
     } else {
-        format!("{count} notes changed on disk. Your edits were saved as copies.")
+        Message::new("error.conflicts-kept").arg("count", count.to_string())
     }
 }
 
@@ -854,11 +857,11 @@ pub fn conflicts_kept(count: usize) -> String {
 /// show them in: on the way to the first window, or on the save worker's thread.
 /// Whoever can show them drains them.
 #[derive(Clone, Debug, Default)]
-pub struct Notices(Arc<Mutex<Vec<String>>>);
+pub struct Notices(Arc<Mutex<Vec<Message>>>);
 
 impl Notices {
     /// Repeats are dropped: the same file is read again on every refresh.
-    pub fn raise(&self, text: String) {
+    pub fn raise(&self, text: Message) {
         if let Ok(mut pending) = self.0.lock()
             && !pending.contains(&text)
         {
@@ -867,7 +870,7 @@ impl Notices {
     }
 
     /// Everything raised since the last call.
-    pub fn take(&self) -> Vec<String> {
+    pub fn take(&self) -> Vec<Message> {
         self.0
             .lock()
             .map(|mut pending| std::mem::take(&mut *pending))
@@ -1026,6 +1029,19 @@ mod tests {
     }
 
     #[test]
+    fn fallback_titles_translate_without_changing_persistent_names_or_user_titles() {
+        let i18n =
+            crate::locale::I18n::for_preference(&LanguagePreference::Locale("zh-Hant".into()));
+        let mut library = Library::default();
+        let id = library.active_id.clone();
+        let note = library.note(&id).unwrap();
+        assert_eq!(note.title(), "Untitled");
+        assert_eq!(note.display_title(&i18n), "未命名");
+        library.set_document(&id, doc::from_markdown("Untitled"));
+        assert_eq!(library.note(&id).unwrap().display_title(&i18n), "Untitled");
+    }
+
+    #[test]
     fn a_title_skips_leading_markup_and_falls_back_to_untitled() {
         let mut library = Library::default();
         let html = library.new_note(doc::from_markdown("<div class=\"card\">\n\nReal title\n"));
@@ -1111,7 +1127,7 @@ mod tests {
         let kept = settings.recovered_from.clone().expect("the file was kept");
         assert!(kept.exists());
         let (notice, shown) = settings.recovery_notice().expect("a notice");
-        assert!(notice.contains("reset"), "{notice}");
+        assert!(notice.to_string().contains("reset"), "{notice}");
         assert_eq!(shown, kept);
 
         // The recovery belongs to this launch: it is not written back, and the
@@ -1127,6 +1143,7 @@ mod tests {
     /// shows up as a difference.
     fn every_preference_changed() -> Preferences {
         let preferences = Preferences {
+            language: LanguagePreference::Locale("future-Language".into()),
             dark_mode: Some(true),
             auto_height: false,
             hotkey: "Ctrl+Shift+M".into(),
@@ -1162,10 +1179,11 @@ mod tests {
     }
 
     #[test]
-    fn older_settings_leave_automatic_equation_numbering_disabled() {
+    fn older_settings_keep_new_preferences_at_defaults() {
         let preferences: Preferences =
             serde_json::from_str(r#"{"markdown_shortcuts":true}"#).unwrap();
         assert!(!preferences.auto_number_equations);
+        assert_eq!(preferences.language, LanguagePreference::System);
     }
 
     #[test]
@@ -1189,6 +1207,7 @@ mod tests {
     fn every_pref_sets_its_own_field() {
         let changed = every_preference_changed();
         let words = vec![
+            Pref::Language(changed.language.clone()),
             Pref::Theme(changed.dark_mode),
             Pref::AutoHeight(changed.auto_height),
             Pref::VimMode(changed.vim_mode),
@@ -1243,7 +1262,11 @@ mod tests {
         notices.raise("A note could not be read.".into());
         notices.raise("The settings were reset.".into());
         assert_eq!(
-            notices.take(),
+            notices
+                .take()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
             ["A note could not be read.", "The settings were reset."]
         );
         assert!(notices.take().is_empty());

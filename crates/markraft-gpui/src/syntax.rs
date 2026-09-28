@@ -58,8 +58,8 @@ fn theme(dark: bool) -> Theme {
 
 /// Language identifiers stored in documents and their menu labels.
 pub fn code_languages() -> &'static [(&'static str, &'static str)] {
-    &[
-        ("", "Plain Text"),
+    const LANGUAGES: &[(&str, &str)] = &[
+        ("", crate::EditorMessage::PlainText.english()),
         ("rust", "Rust"),
         ("javascript", "JavaScript"),
         ("typescript", "TypeScript"),
@@ -83,7 +83,8 @@ pub fn code_languages() -> &'static [(&'static str, &'static str)] {
         ("toml", "TOML"),
         ("xml", "XML"),
         ("markdown", "Markdown"),
-    ]
+    ];
+    LANGUAGES
 }
 
 /// The [`code_languages`] entry a fence alias names, or the alias unchanged.

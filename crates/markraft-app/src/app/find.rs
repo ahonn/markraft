@@ -107,7 +107,7 @@ impl MarkraftApp {
     pub(super) fn repeat_vim_find(&mut self, forward: bool, cx: &mut Context<Self>) {
         let query = self.find_editor.read(cx).text().to_owned();
         if query.is_empty() {
-            self.inform("No previous search.", cx);
+            self.inform(Message::new("surfaces.find.no-previous-search"), cx);
             return;
         }
         self.editor()
@@ -119,9 +119,9 @@ impl MarkraftApp {
     fn report_vim_find(&mut self, cx: &mut Context<Self>) {
         let status = self.editor().read(cx).find_status();
         if status.query.is_empty() {
-            self.inform("No previous search.", cx);
+            self.inform(Message::new("surfaces.find.no-previous-search"), cx);
         } else if status.total == 0 {
-            self.inform("No results", cx);
+            self.inform(Message::new("surfaces.find.no-results"), cx);
         }
     }
 

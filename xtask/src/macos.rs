@@ -14,6 +14,7 @@ const VOLUME_NAME: &str = "Markraft";
 // Served from an R2 bucket on our own domain rather than a GitHub release asset,
 // so hosting can move and prereleases can get a feed without rebuilding old apps.
 const FEED_URL: &str = "https://updates.markraft.app/appcast.xml";
+const LOCALE_CATALOG: &str = include_str!("../../crates/markraft-app/locale_catalog.json");
 /// The architectures a universal app joins, the first one's bundle being the base.
 pub const UNIVERSAL_TARGETS: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
 
@@ -190,8 +191,26 @@ fn configure_metadata(info: &mut Dictionary, public_key: &str, mock: bool) -> Re
     if !public_key.is_empty() {
         crate::crypto::validate_public_key(public_key)?;
     }
+    let catalog: Vec<serde_json::Value> =
+        serde_json::from_str(LOCALE_CATALOG).context("Parse the app locale catalog")?;
+    let localizations: Vec<Value> = catalog
+        .iter()
+        .map(|locale| {
+            locale["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(|id| Value::String(id.to_owned()))
+                .context("Each app locale must have a nonempty id")
+        })
+        .collect::<Result<_>>()?;
+    let development_region = localizations
+        .first()
+        .context("The app locale catalog must contain its development language first")?
+        .clone();
     // cargo-bundle generates a timestamp; Sparkle must compare release versions.
     info.insert("CFBundleVersion".into(), version.into());
+    info.insert("CFBundleDevelopmentRegion".into(), development_region);
+    info.insert("CFBundleLocalizations".into(), localizations.into());
     info.insert("LSUIElement".into(), true.into());
     // Advertise Open With support without claiming to be the default editor.
     let mut markdown = Dictionary::new();
@@ -396,6 +415,34 @@ mod tests {
         assert_eq!(
             tags["public.filename-extension"].as_array().unwrap(),
             &vec![Value::String("md".into()), Value::String("markdown".into())]
+        );
+    }
+
+    #[test]
+    fn bundle_localizations_replace_stale_metadata_with_the_app_catalog() {
+        let mut info = metadata("0.2.1");
+        info.insert("CFBundleDevelopmentRegion".into(), "stale".into());
+        info.insert(
+            "CFBundleLocalizations".into(),
+            Value::Array(vec!["stale".into()]),
+        );
+        configure_metadata(&mut info, "", false).unwrap();
+
+        let catalog: Vec<serde_json::Value> = serde_json::from_str(LOCALE_CATALOG).unwrap();
+        let expected: Vec<_> = catalog
+            .iter()
+            .map(|locale| locale["id"].as_str().unwrap())
+            .collect();
+        let actual: Vec<_> = info["CFBundleLocalizations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|locale| locale.as_string().unwrap())
+            .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            info["CFBundleDevelopmentRegion"].as_string(),
+            expected.first().copied()
         );
     }
 

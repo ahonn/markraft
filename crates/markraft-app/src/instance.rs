@@ -1,5 +1,6 @@
 //! Typed, bounded launch requests shared by CLI, Finder, and the running app.
 use crate::fs::StoreError;
+use crate::locale::Message;
 use std::{
     fs::{File, OpenOptions, TryLockError},
     io::{self, Write},
@@ -31,7 +32,9 @@ impl Request {
                 || paths.len() > MAX_PATHS
                 || paths.iter().any(|p| !p.is_absolute()))
         {
-            return Err(format!("An open request needs 1–{MAX_PATHS} absolute file paths.").into());
+            return Err(Message::new("error.launch-path-count")
+                .arg("max", MAX_PATHS.to_string())
+                .into());
         }
         Ok(())
     }
@@ -40,16 +43,14 @@ impl Request {
         self.validate()?;
         let message = serde_json::to_vec(self).map_err(|error| error.to_string())?;
         if message.len() > MAX_REQUEST_BYTES {
-            return Err(
-                "Too many file paths for one launch. Open a smaller group of files.".into(),
-            );
+            return Err(Message::new("error.launch-too-many").into());
         }
         Ok(message)
     }
 
     fn decode(message: &[u8]) -> Result<Self, StoreError> {
         if message.len() > MAX_REQUEST_BYTES {
-            return Err("Launch request is too large.".into());
+            return Err(Message::new("error.launch-large").into());
         }
         let request: Self = serde_json::from_slice(message).map_err(|error| error.to_string())?;
         request.validate()?;
@@ -65,9 +66,9 @@ pub struct RequestSender(SyncSender<Request>);
 impl RequestSender {
     pub fn send(&self, request: Request) -> Result<(), StoreError> {
         request.encode()?;
-        self.0
-            .try_send(request)
-            .map_err(|error| StoreError::from(format!("Could not queue the open request: {error}")))
+        self.0.try_send(request).map_err(|error| {
+            StoreError::from(Message::new("error.launch-queue").arg("detail", error.to_string()))
+        })
     }
 
     pub fn open_urls(&self, urls: Vec<String>) -> Result<(), StoreError> {
@@ -75,9 +76,11 @@ impl RequestSender {
             .into_iter()
             .map(|value| {
                 url::Url::parse(&value)
-                    .map_err(|error| format!("Invalid file URL: {error}"))?
+                    .map_err(|error| {
+                        Message::new("error.invalid-file-url").arg("detail", error.to_string())
+                    })?
                     .to_file_path()
-                    .map_err(|_| "Only local file URLs can be opened.".to_owned())
+                    .map_err(|_| Message::new("error.local-files-only"))
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.send(Request::OpenPaths(paths))
@@ -162,12 +165,9 @@ impl Instance {
                         }
                     }
                     if Instant::now() >= deadline {
-                        return Err(StoreError::Locked(
-                            "Markraft is already running, but it did not answer. \
-                             Wait a moment and open it again, or quit it from the \
-                             menu bar first."
-                                .into(),
-                        ));
+                        return Err(StoreError::Locked(Message::new(
+                            "error.instance-unresponsive",
+                        )));
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -212,9 +212,7 @@ impl Instance {
 /// share one sentence and leave the detail in the log.
 fn relaunch_failure(error: &io::Error) -> StoreError {
     log::warn!("the launch channel failed: {error}");
-    "Markraft could not set up the link that a second launch uses to reopen its window. \
-     Quit Markraft and open it again."
-        .into()
+    Message::new("error.relaunch-link").into()
 }
 
 fn canonical_target(file: &Path) -> Result<PathBuf, StoreError> {
@@ -233,7 +231,7 @@ fn canonical_target(file: &Path) -> Result<PathBuf, StoreError> {
         .map_err(|error| crate::fs::describe(parent, &error))?
         .join(
             file.file_name()
-                .ok_or("Markraft needs a settings file to work with, not a folder.")?,
+                .ok_or(Message::new("error.settings-is-folder"))?,
         ))
 }
 

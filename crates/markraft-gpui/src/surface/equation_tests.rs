@@ -48,6 +48,7 @@ fn shaped_equations(
     let images = crate::images::Images::default();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
         maths: Some(&maths),
         equations: Some(&equations),
         scale_factor: 1.,
@@ -254,6 +255,7 @@ fn shaped_with_pages(source: &str, width: f32) -> Vec<LayoutLine> {
     let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
         maths: Some(&maths),
         equations: Some(&equations),
         scale_factor: 1.,
@@ -317,6 +319,7 @@ fn a_formula_on_an_html_page_is_drawn_once_its_render_arrives() {
     let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
         maths: Some(&maths),
         equations: Some(&equations),
         scale_factor: 1.,

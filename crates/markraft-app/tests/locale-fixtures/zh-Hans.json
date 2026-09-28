@@ -1,0 +1,12 @@
+{
+  "_version": 1,
+  "greeting": "你好，%{name}",
+  "command.new-note": "新建测试笔记",
+  "command.heading-1": "测试标题一",
+  "notes.edited-today": "测试：今天编辑",
+  "notes.edited-days-ago": "测试：%{days} 天前编辑",
+  "settings.language": "测试语言",
+  "menu.new-note": "新建测试笔记",
+  "input.search-actions": "测试搜索操作",
+  "input.actions-label": "测试操作搜索"
+}

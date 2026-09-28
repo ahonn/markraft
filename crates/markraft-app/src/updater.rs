@@ -1,17 +1,18 @@
 //! Sparkle stays on AppKit's main thread; callbacks hand work to the app's poll loop.
+use crate::locale::Message;
 use objc2_foundation::{NSBundle, NSString};
 use sparkle_updater::{MainThreadMarker, RelaunchContinuation, SparkleUpdater, UpdaterConfig};
 use std::{cell::RefCell, path::Path, rc::Rc};
 
-const UNBUNDLED: &str = "Updates work only in the installed app.";
-const UNCONFIGURED: &str = "This copy can't update. Install a release from GitHub.";
+const UNBUNDLED: &str = "error.updates-unbundled";
+const UNCONFIGURED: &str = "error.updates-unconfigured";
 
 pub struct Updater {
     // Retain the controller and delegates for the whole application lifetime.
     native: Option<SparkleUpdater>,
-    unavailable: String,
+    unavailable: Message,
     pending: Rc<RefCell<PendingRelaunch<RelaunchContinuation>>>,
-    startup_error: Option<String>,
+    startup_error: Option<Message>,
 }
 
 impl Updater {
@@ -19,12 +20,12 @@ impl Updater {
         let pending = Rc::new(RefCell::new(PendingRelaunch::default()));
         let mut this = Self {
             native: None,
-            unavailable: UNBUNDLED.into(),
+            unavailable: Message::new(UNBUNDLED),
             pending,
             startup_error: None,
         };
         let Some(main_thread) = MainThreadMarker::new() else {
-            this.fail("The updater must start on the macOS main thread.".into());
+            this.fail(Message::new("error.updater-main-thread"));
             return this;
         };
         let bundle = NSBundle::mainBundle();
@@ -36,8 +37,7 @@ impl Updater {
                 .as_deref()
                 != Some("app.markraft.mac.update-test")
         {
-            this.unavailable =
-                "The mock updater requires the isolated update-test app bundle.".into();
+            this.unavailable = Message::new("error.updater-mock");
             return this;
         }
         if Path::new(&bundle.bundlePath().to_string())
@@ -56,7 +56,7 @@ impl Updater {
             value("SUFeedURL").as_deref(),
             value("SUPublicEDKey").as_deref(),
         ) {
-            this.unavailable = UNCONFIGURED.into();
+            this.unavailable = Message::new(UNCONFIGURED);
             return this;
         }
         let pending = this.pending.clone();
@@ -80,7 +80,7 @@ impl Updater {
             Ok(None) => {}
             Err(error) => {
                 log::warn!("the updater could not start: {error}");
-                this.fail("Automatic updates couldn't start.".into());
+                this.fail(Message::new("error.updater-start"));
             }
         }
         this
@@ -93,23 +93,23 @@ impl Updater {
     pub fn disabled() -> Self {
         Self {
             native: None,
-            unavailable: UNBUNDLED.into(),
+            unavailable: Message::new(UNBUNDLED),
             pending: Rc::new(RefCell::new(PendingRelaunch::default())),
             startup_error: None,
         }
     }
 
-    fn fail(&mut self, message: String) {
+    fn fail(&mut self, message: Message) {
         log::warn!("{message}");
         self.unavailable = message.clone();
         self.startup_error = Some(message);
     }
 
-    pub fn take_startup_error(&mut self) -> Option<String> {
+    pub fn take_startup_error(&mut self) -> Option<Message> {
         self.startup_error.take()
     }
 
-    pub fn check(&self) -> Result<(), String> {
+    pub fn check(&self) -> Result<(), Message> {
         if self.pending.borrow_mut().retry() {
             return Ok(());
         }
@@ -118,9 +118,9 @@ impl Updater {
             .as_ref()
             .ok_or_else(|| self.unavailable.clone())?;
         // Sparkle also brings an existing update dialog forward here.
-        native
-            .check_for_updates()
-            .map_err(|error| error.to_string())
+        native.check_for_updates().map_err(|error| {
+            Message::new("error.updater-operation").arg("detail", error.to_string())
+        })
     }
 
     /// Whether Sparkle checks for updates on its own schedule. None where there is no
@@ -133,14 +133,16 @@ impl Updater {
     }
 
     /// Sparkle keeps the answer in its own user defaults, so it outlives the app.
-    pub fn set_automatically_checks(&self, enabled: bool) -> Result<(), String> {
+    pub fn set_automatically_checks(&self, enabled: bool) -> Result<(), Message> {
         let native = self
             .native
             .as_ref()
             .ok_or_else(|| self.unavailable.clone())?;
         native
             .set_automatically_checks_for_updates(enabled)
-            .map_err(|error| error.to_string())
+            .map_err(|error| {
+                Message::new("error.updater-operation").arg("detail", error.to_string())
+            })
     }
 
     pub fn take_relaunch(&self) -> Option<RelaunchContinuation> {

@@ -11,6 +11,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Default)]
 pub(crate) struct AccessibleText {
+    messages: crate::EditorMessages,
     /// What the last update was built from; see [`AccessibleText::update`].
     built: Option<Built>,
     /// What each line no frame laid out reads as, for the projection they
@@ -50,12 +51,12 @@ fn accessible_bounds(bounds: Bounds<Pixels>, scale: f32) -> accesskit::Rect {
 
 /// What a screen reader is told a wiki link is, so it reads as a link to
 /// somewhere rather than as the bare character the projection gives an atom.
-fn wiki_link_label(label: &str) -> String {
+fn wiki_link_label(label: &str, messages: &crate::EditorMessages) -> String {
     let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
     if label.is_empty() {
-        "Empty wiki link".into()
+        messages.text(crate::EditorMessage::EmptyWikiLink)
     } else {
-        format!("Wiki link: {label}")
+        messages.format(crate::EditorMessage::WikiLink, &[("label", &label)])
     }
 }
 
@@ -268,6 +269,10 @@ fn read_unlaid(
 }
 
 impl AccessibleText {
+    pub(crate) fn set_messages(&mut self, messages: crate::EditorMessages) {
+        self.messages = messages;
+        self.release();
+    }
     /// Give back what the last update built, for an editor that is not being
     /// drawn; the next update rebuilds it all anyway.
     pub(crate) fn release(&mut self) {
@@ -346,7 +351,7 @@ impl AccessibleText {
                     let label = crate::wiki::wiki_link_label(node);
                     Some((
                         ControlAction::OpenWikiLink(line.abs(run.start)),
-                        wiki_link_label(label),
+                        wiki_link_label(label, &self.messages),
                     ))
                 } else {
                     None
@@ -376,7 +381,9 @@ impl AccessibleText {
                 self.controls.push(AccessibleControl {
                     node_id: None,
                     action: ControlAction::EnterCallout(row.from),
-                    label: format!("Callout: {label}"),
+                    label: self
+                        .messages
+                        .format(crate::EditorMessage::Callout, &[("label", label)]),
                     checked: None,
                     bounds: accessible_bounds(bounds, scale),
                 });
@@ -386,7 +393,7 @@ impl AccessibleText {
                     node_id: None,
                     action: ControlAction::ToggleTask(row.from),
                     label: if prose.is_empty() {
-                        "Task".into()
+                        self.messages.text(crate::EditorMessage::Task)
                     } else {
                         prose.clone()
                     },
@@ -779,6 +786,7 @@ mod tests {
                 style: &style,
                 single_line: false,
                 images: &images,
+                messages: &crate::EditorMessages::ENGLISH,
                 wiki: None,
                 selection: 0..0,
                 spelling: None,
@@ -827,6 +835,7 @@ mod tests {
                 style: &style,
                 single_line: false,
                 images: &images,
+                messages: &crate::EditorMessages::ENGLISH,
                 wiki: None,
                 selection: 0..0,
                 spelling: None,
@@ -896,6 +905,7 @@ mod tests {
                     style: &style,
                     single_line: false,
                     images: &images,
+                    messages: &crate::EditorMessages::ENGLISH,
                     wiki: None,
                     selection: state.selection().from(doc)..state.selection().to(doc),
                     spelling: None,
@@ -965,6 +975,7 @@ mod tests {
             .map(|&byte| line.offset_to_pos(value[..byte].chars().count()).unwrap())
             .collect();
         let text = AccessibleText {
+            messages: crate::EditorMessages::ENGLISH,
             built: None,
             unlaid: Vec::new(),
             unlaid_of: None,
@@ -1006,6 +1017,7 @@ mod tests {
         };
         // Two visual rows of one line holding "你好", then the next block.
         let text = AccessibleText {
+            messages: crate::EditorMessages::ENGLISH,
             built: None,
             unlaid: Vec::new(),
             unlaid_of: None,

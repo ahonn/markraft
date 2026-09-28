@@ -102,6 +102,11 @@ impl TypeaheadItem {
 }
 
 pub trait TypeaheadProvider: 'static {
+    /// Changes when external data affects the current query's items. The host must
+    /// also request an editor redraw; providers with static data can keep zero.
+    fn revision(&self) -> u64 {
+        0
+    }
     /// Items for `query`, the text between the trigger and the caret. An empty list
     /// keeps the menu closed, so the keys it would take keep their usual meaning.
     fn items(&self, query: &str) -> Vec<TypeaheadItem>;
@@ -242,6 +247,30 @@ struct State {
 /// What each of the four actions does, so that "an action a closed instance receives is
 /// a no-op" is one decision taken in one place rather than four early returns.
 impl State {
+    /// Refresh an open menu without editing its trigger or losing its selected item.
+    fn refresh(&mut self, provider: &dyn TypeaheadProvider) -> bool {
+        let Some(open) = &mut self.open else {
+            return false;
+        };
+        let revision = provider.revision();
+        if open.revision == revision {
+            return false;
+        }
+        let selected_id = open.items.get(self.selected).map(|item| item.id.clone());
+        let items = provider.items(&open.query);
+        if items.is_empty() {
+            self.open = None;
+            self.selected = 0;
+            return true;
+        }
+        self.selected = selected_id
+            .and_then(|id| items.iter().position(|item| item.id == id))
+            .unwrap_or_else(|| self.selected.min(items.len() - 1));
+        open.items = items;
+        open.revision = revision;
+        true
+    }
+
     /// The row an arrow key moves to. Clamped rather than wrapping, like the app's
     /// other pickers.
     fn stepped(&self, delta: isize) -> Option<usize> {
@@ -274,6 +303,7 @@ struct Open {
     trigger: Range<usize>,
     query: String,
     items: Vec<TypeaheadItem>,
+    revision: u64,
 }
 
 /// A typeahead over `triggers`. Several instances may share one editor; each owns its
@@ -296,6 +326,13 @@ pub struct Typeahead {
 }
 
 impl Typeahead {
+    fn refresh_items(&self) {
+        let mut state = self.state.borrow_mut();
+        if state.refresh(self.provider.as_ref()) && state.open.is_some() {
+            self.scroll.scroll_to_item(state.selected);
+        }
+    }
+
     /// With a Chinese input method `/` types `、` and `:` types `：`, so a menu that
     /// should open under one usually configures both.
     pub fn new(id: &'static str, triggers: Vec<char>, provider: impl TypeaheadProvider) -> Self {
@@ -330,12 +367,14 @@ impl Extension for Typeahead {
     }
 
     fn key_context(&self, context: &mut KeyContext) {
+        self.refresh_items();
         if self.state.borrow().open.is_some() {
             context.add("typeahead");
         }
     }
 
     fn update(&mut self, update: &Update, cx: &mut EditorCx<'_>) {
+        self.refresh_items();
         let mut state = self.state.borrow_mut();
         if update.replaced {
             state.dismissed = None;
@@ -370,6 +409,7 @@ impl Extension for Typeahead {
                         trigger: found.trigger,
                         query: found.query,
                         items,
+                        revision: self.provider.revision(),
                     });
                 }
             }
@@ -390,8 +430,10 @@ impl Extension for Typeahead {
         let step = |delta: isize| {
             let state = self.state.clone();
             let scroll = self.scroll.clone();
+            let provider = self.provider.clone();
             move |cx: &mut EditorCx<'_>| {
                 let mut state = state.borrow_mut();
+                state.refresh(provider.as_ref());
                 let Some(selected) = state.stepped(delta) else {
                     return;
                 };
@@ -419,6 +461,7 @@ impl Extension for Typeahead {
     }
 
     fn overlay(&mut self, cx: &EditorCx<'_>, window: &mut Window, _: &mut App) -> Option<Overlay> {
+        self.refresh_items();
         let state = self.state.borrow();
         let open = state.open.as_ref()?;
         let viewport = window.viewport_size();
@@ -458,6 +501,7 @@ impl Extension for Typeahead {
 /// One transaction: the literal trigger text goes, then the provider's command
 /// runs against what that leaves, so a single undo brings the typed `/query` back.
 fn accept(state: &Rc<RefCell<State>>, provider: &Rc<dyn TypeaheadProvider>, cx: &mut EditorCx<'_>) {
+    state.borrow_mut().refresh(provider.as_ref());
     let accepting = state.borrow().accepting();
     let Some((start, item)) = accepting else {
         return;
@@ -491,7 +535,8 @@ fn accept(state: &Rc<RefCell<State>>, provider: &Rc<dyn TypeaheadProvider>, cx: 
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) mod tests {
     use super::{Open, State, TriggerMatch, Update, open_match, track_dismissed, trigger_match};
-    use crate::typeahead::TypeaheadItem;
+    use crate::Extension;
+    use crate::typeahead::{Typeahead, TypeaheadItem, TypeaheadProvider};
     use markraft_commonmark::{
         commonmark_doc_type_names, commonmark_extensions, commonmark_schema, from_markdown,
         schema as md,
@@ -505,6 +550,7 @@ pub(crate) mod tests {
     use markraft_core::{
         Attrs, EditorStateConfig, Extension as DocExtension, Schema, Selection, TransactionSpec,
     };
+    use std::{cell::RefCell, rc::Rc};
 
     const SLASH: [char; 2] = ['/', '、'];
 
@@ -779,10 +825,97 @@ pub(crate) mod tests {
                 items: (0..rows)
                     .map(|row| TypeaheadItem::new(row.to_string(), row.to_string()))
                     .collect(),
+                revision: 0,
             }),
             selected: 0,
             dismissed: None,
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct ChangingProvider(Rc<RefCell<ProviderData>>);
+
+    #[derive(Default)]
+    struct ProviderData {
+        revision: u64,
+        items: Vec<TypeaheadItem>,
+        queries: Vec<String>,
+    }
+
+    impl TypeaheadProvider for ChangingProvider {
+        fn revision(&self) -> u64 {
+            self.0.borrow().revision
+        }
+
+        fn items(&self, query: &str) -> Vec<TypeaheadItem> {
+            let mut data = self.0.borrow_mut();
+            data.queries.push(query.to_owned());
+            data.items.clone()
+        }
+
+        fn accept(&self, _: &TypeaheadItem) -> Command {
+            markraft_core::commands::command(|_| None)
+        }
+    }
+
+    #[test]
+    fn provider_revision_refreshes_open_labels_and_preserves_selected_id() {
+        let provider = ChangingProvider::default();
+        let menu = Typeahead::new("test", vec!['/'], provider.clone());
+        let mut initial = open(3);
+        initial.selected = 2;
+        initial.open.as_mut().unwrap().query = "heading".into();
+        *menu.state.borrow_mut() = initial;
+        *provider.0.borrow_mut() = ProviderData {
+            revision: 1,
+            items: vec![
+                TypeaheadItem::new("2", "标题"),
+                TypeaheadItem::new("0", "段落"),
+            ],
+            ..Default::default()
+        };
+
+        // Render builds the key context before the overlay, with no document edit.
+        menu.key_context(&mut gpui::KeyContext::default());
+        let state = menu.state.borrow();
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.accepting().unwrap().1.label.as_ref(), "标题");
+        assert_eq!(state.open.as_ref().unwrap().trigger, 1..2);
+        assert_eq!(state.open.as_ref().unwrap().query, "heading");
+        drop(state);
+
+        // The overlay and later frames reuse the same revision's lookup result.
+        menu.refresh_items();
+        menu.key_context(&mut gpui::KeyContext::default());
+        assert_eq!(provider.0.borrow().queries, ["heading"]);
+    }
+
+    #[test]
+    fn provider_revision_clamps_removed_selection_and_closes_empty_results() {
+        let provider = ChangingProvider::default();
+        let menu = Typeahead::new("test", vec!['/'], provider.clone());
+        let mut initial = open(3);
+        initial.selected = 2;
+        *menu.state.borrow_mut() = initial;
+        *provider.0.borrow_mut() = ProviderData {
+            revision: 1,
+            items: vec![TypeaheadItem::new("replacement", "Replacement")],
+            ..Default::default()
+        };
+        menu.refresh_items();
+        assert_eq!(menu.state.borrow().selected, 0);
+        assert_eq!(
+            menu.state.borrow().accepting().unwrap().1.id.as_ref(),
+            "replacement"
+        );
+
+        provider.0.borrow_mut().revision = 2;
+        provider.0.borrow_mut().items.clear();
+        menu.key_context(&mut gpui::KeyContext::default());
+        assert!(menu.state.borrow().open.is_none());
+        assert!(menu.state.borrow().accepting().is_none());
+        assert_eq!(menu.state.borrow().stepped(1), None);
+        assert_eq!(menu.state.borrow().dismissed, None);
     }
 
     /// Every instance receives the four actions while any of them is open, so a closed

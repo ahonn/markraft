@@ -21,48 +21,52 @@ const STOP: &str = "table-bar-";
 const CONTROLS: [(&str, &str, TableEdit); 10] = [
     (
         "table-bar-row-add-before",
-        "Add Row Above",
+        "command.add-row-above",
         TableEdit::RowBefore,
     ),
     (
         "table-bar-row-add",
-        "Add Row Below · ⌘↩",
+        "surfaces.table.add-row-below",
         TableEdit::RowAfter,
     ),
     (
         "table-bar-column-add-before",
-        "Add Column Left",
+        "command.add-column-left",
         TableEdit::ColumnBefore,
     ),
     (
         "table-bar-column-add",
-        "Add Column Right",
+        "command.add-column-right",
         TableEdit::ColumnAfter,
     ),
     (
         "table-bar-align-left",
-        "Align Column Left",
+        "command.align-column-left",
         TableEdit::Align(ColumnAlignment::Left),
     ),
     (
         "table-bar-align-center",
-        "Align Column Center",
+        "command.align-column-center",
         TableEdit::Align(ColumnAlignment::Center),
     ),
     (
         "table-bar-align-right",
-        "Align Column Right",
+        "command.align-column-right",
         TableEdit::Align(ColumnAlignment::Right),
     ),
-    ("table-bar-row-delete", "Delete Row", TableEdit::DeleteRow),
+    (
+        "table-bar-row-delete",
+        "command.delete-row",
+        TableEdit::DeleteRow,
+    ),
     (
         "table-bar-column-delete",
-        "Delete Column",
+        "command.delete-column",
         TableEdit::DeleteColumn,
     ),
     (
         "table-bar-table-delete",
-        "Delete Table",
+        "command.delete-table",
         TableEdit::DeleteTable,
     ),
 ];
@@ -207,7 +211,7 @@ impl MarkraftApp {
                 .then(|| edit == TableEdit::Align(table.alignment));
             pill = pill.child(self.format_button(
                 id,
-                label,
+                self.i18n.text(label),
                 edit.icon(),
                 Intent::Table(edit),
                 toggled,

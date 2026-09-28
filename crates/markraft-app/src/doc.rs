@@ -122,19 +122,19 @@ pub struct MarkdownKind {
     /// Whether typed Markdown becomes formatting — what Enter's block rule
     /// answers to, as the input rules do.
     shortcuts: Arc<AtomicBool>,
-    refusal: fn(&CommandRefusal) -> String,
+    refusal: Arc<dyn Fn(&CommandRefusal) -> String + Send + Sync>,
 }
 
 impl MarkdownKind {
     pub fn new(
         house: HouseStyleHandle,
         shortcuts: Arc<AtomicBool>,
-        refusal: fn(&CommandRefusal) -> String,
+        refusal: impl Fn(&CommandRefusal) -> String + Send + Sync + 'static,
     ) -> MarkdownKind {
         MarkdownKind {
             house,
             shortcuts,
-            refusal,
+            refusal: Arc::new(refusal),
         }
     }
 
@@ -154,7 +154,10 @@ impl DocumentKind for MarkdownKind {
     }
 
     fn toggle_mark(&self, ty: MarkTypeId, _attrs: Attrs) -> Option<Formatting> {
-        Some(worded(self.formatter().toggle_style(ty), self.refusal))
+        Some(worded(
+            self.formatter().toggle_style(ty),
+            self.refusal.clone(),
+        ))
     }
 
     /// By editing the link's source.
@@ -164,7 +167,7 @@ impl DocumentKind for MarkdownKind {
             Some(url) => formatter.set_link(url, ""),
             None => formatter.unlink(),
         };
-        Some(worded(command, self.refusal))
+        Some(worded(command, self.refusal.clone()))
     }
 
     /// Every style open at the caret is closed before the cut and opened again
@@ -197,7 +200,7 @@ impl DocumentKind for MarkdownKind {
 /// A kind's formatting command, its refusal put in the application's words.
 fn worded(
     command: markraft_commonmark::FormatCommand,
-    refusal: fn(&CommandRefusal) -> String,
+    refusal: Arc<dyn Fn(&CommandRefusal) -> String + Send + Sync>,
 ) -> Formatting {
     Arc::new(move |state| command(state).map_err(|error| refusal(&error)))
 }

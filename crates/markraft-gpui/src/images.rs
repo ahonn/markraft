@@ -33,17 +33,18 @@ pub(crate) enum ImageError {
 }
 
 impl ImageError {
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn message(self) -> crate::EditorMessage {
+        use crate::EditorMessage::*;
         match self {
-            Self::Remote => "Remote preview unavailable",
-            Self::Loading => "Loading image",
-            Self::RemoteFailed => "Cannot load remote image",
-            Self::InvalidPath => "Invalid image path",
-            Self::Missing => "Image file not found",
-            Self::TooLarge => "Image exceeds 16 MB",
-            Self::Unsupported => "Unsupported image format",
-            Self::Unreadable => "Cannot read image",
-            Self::UnsupportedRoot => "Unsupported typora-root-url",
+            Self::Remote => ImageRemote,
+            Self::Loading => ImageLoading,
+            Self::RemoteFailed => ImageRemoteFailed,
+            Self::InvalidPath => ImageInvalidPath,
+            Self::Missing => ImageMissing,
+            Self::TooLarge => ImageTooLarge,
+            Self::Unsupported => ImageUnsupported,
+            Self::Unreadable => ImageUnreadable,
+            Self::UnsupportedRoot => ImageUnsupportedRoot,
         }
     }
 }

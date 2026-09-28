@@ -6,6 +6,7 @@ use super::*;
 
 /// Everything shaping needs that is not the window.
 pub(crate) struct ShapeInput<'a> {
+    pub messages: &'a crate::EditorMessages,
     pub images: &'a crate::images::Images,
     pub maths: Option<&'a crate::maths::Maths>,
     pub equations: Option<&'a markraft_core::kind::equations::EquationIndex>,
@@ -161,7 +162,7 @@ pub(super) fn line_key(input: &ShapeInput<'_>, index: usize) -> Option<LineKey> 
         joined_quotes: joined_quote_levels(projection, index, types),
         list_continues: list_continues(types, line, next),
         table_below: opens_table(types, next),
-        callout_header: crate::callout::header_of(types, line, above).is_some(),
+        callout_header: crate::callout::header_of(types, line, above, input.messages).is_some(),
         links,
         equations,
     })
@@ -348,9 +349,10 @@ pub(super) fn shape_line(
             .and_then(|block| block.attrs.get("language"))
             .and_then(|value| value.as_str())
             .filter(|language| !language.is_empty())
-            .unwrap_or("Plain Text");
+            .map(str::to_owned)
+            .unwrap_or_else(|| input.messages.text(crate::EditorMessage::PlainText));
         shape_source_label(
-            language,
+            &language,
             font(CODE_FONT),
             font_size - px(1.),
             style.muted_text,
@@ -384,15 +386,16 @@ pub(super) fn shape_line(
         })
         .flatten();
     let above = index.checked_sub(1).map(|above| &projection.lines()[above]);
-    let callout_header = crate::callout::header_of(types, line, above).map(|head| CalloutHeader {
-        label: callout_label(
-            &head.label,
-            style.callout_tone(head.tone),
-            style,
-            text_system,
-        ),
-        text: head.label,
-    });
+    let callout_header =
+        crate::callout::header_of(types, line, above, input.messages).map(|head| CalloutHeader {
+            label: callout_label(
+                &head.label,
+                style.callout_tone(head.tone),
+                style,
+                text_system,
+            ),
+            text: head.label,
+        });
     let top_gap = top_gap
         + if callout_header.is_some() {
             CALLOUT_HEADER_HEIGHT
@@ -490,6 +493,7 @@ fn shape_rendered(
     text_system: &WindowTextSystem,
 ) -> RenderedLayout {
     let page = ShapeInput {
+        messages: input.messages,
         images: input.images,
         maths: input.maths,
         equations: None,

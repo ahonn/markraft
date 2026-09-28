@@ -5,6 +5,7 @@
 //! best effort — a hook that fails to write says nothing and hands on to the
 //! default hook, which still prints to stderr.
 
+use crate::locale::Message;
 use std::backtrace::Backtrace;
 use std::fs;
 use std::io;
@@ -53,7 +54,7 @@ pub fn install(directory: PathBuf) {
 
 /// The sentence for the next launch to show, once, if a report was written
 /// since the last time one was shown, and the report to reveal beside it.
-pub fn take_notice(directory: &Path) -> Option<(String, PathBuf)> {
+pub fn take_notice(directory: &Path) -> Option<(Message, PathBuf)> {
     let mark = directory.join(UNREPORTED);
     let named = fs::read(&mark).ok()?;
     let _ = fs::remove_file(&mark);
@@ -63,10 +64,7 @@ pub fn take_notice(directory: &Path) -> Option<(String, PathBuf)> {
     } else {
         directory.to_owned()
     };
-    Some((
-        "Markraft quit unexpectedly. A report was saved.".to_owned(),
-        report,
-    ))
+    Some((Message::new("error.crash-notice"), report))
 }
 
 /// A new issue on the project's tracker, its environment field filled with
@@ -152,7 +150,7 @@ mod tests {
             "thread 'main' panicked"
         );
         let (notice, revealed) = take_notice(&logs).expect("a notice");
-        assert!(notice.contains("quit unexpectedly"), "{notice}");
+        assert!(notice.to_string().contains("quit unexpectedly"), "{notice}");
         assert_eq!(revealed, report);
         assert_eq!(take_notice(&logs), None);
         assert!(report.exists(), "the report outlives its notice");

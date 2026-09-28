@@ -28,6 +28,7 @@ mod math;
 mod math_edit;
 mod math_spans;
 mod maths;
+mod messages;
 mod shaping;
 mod shown;
 mod single_line;
@@ -46,6 +47,7 @@ pub use find::FindStatus;
 pub use markraft_core::commands::ColumnAlignment;
 pub use markraft_core::kind::{CalloutAttrs, DocTypes, DocumentKind, Formatting, PlainKind};
 use markraft_core::kind::{chains, conceal};
+pub use messages::{EditorMessage, EditorMessages};
 pub use style::EditorStyle;
 pub use syntax::{canonical_language, code_languages};
 pub use typeahead::{Typeahead, TypeaheadItem, TypeaheadProvider};
@@ -66,7 +68,7 @@ use surface::{EditorSurface, FrameLayout, LayoutLine, ShapeInput};
 const TYPING_GROUP_DELAY: u64 = 750;
 
 /// What an editor calls itself until its host gives it a name of its own.
-const DEFAULT_ARIA_LABEL: &str = "Text editor";
+const DEFAULT_ARIA_LABEL: &str = EditorMessage::TextEditor.english();
 
 // All bindings are scoped so embedding hosts retain their own shortcuts.
 actions!(
@@ -422,6 +424,8 @@ pub enum EditRejection {
     Protected(String),
     /// The transaction itself could not be built.
     Invalid(String),
+    /// An edit did not produce a transaction to apply.
+    NoTransaction,
     /// The document kind has no way to write this edit here — a style its
     /// syntax cannot spell at that spot. Nothing changed.
     Refused(String),
@@ -430,11 +434,13 @@ pub enum EditRejection {
 impl EditRejection {
     /// The sentence the host attached, whichever case it belongs to.
     pub fn message(&self) -> &str {
-        let (Self::ReadOnly(message)
-        | Self::Protected(message)
-        | Self::Invalid(message)
-        | Self::Refused(message)) = self;
-        message
+        match self {
+            Self::ReadOnly(message)
+            | Self::Protected(message)
+            | Self::Invalid(message)
+            | Self::Refused(message) => message,
+            Self::NoTransaction => "No transaction was produced.",
+        }
     }
 }
 
@@ -528,9 +534,7 @@ fn apply_guarded_transactions_with_groups(
         let _ = reopen.state();
         transactions.push(reopen);
     }
-    let last = transactions
-        .last()
-        .ok_or_else(|| EditRejection::Invalid("No transaction was produced.".to_owned()))?;
+    let last = transactions.last().ok_or(EditRejection::NoTransaction)?;
     // Resolve every state field before a source guard commits its baseline.
     // After successful guards, publishing the prepared state cannot fail.
     let next = last.state().clone();
@@ -607,6 +611,7 @@ pub struct EditorView {
     /// What the editor calls itself to assistive technology. A host that lends one
     /// editor to several surfaces renames it as it hands it over.
     pub(crate) aria_label: SharedString,
+    custom_aria_label: bool,
     pub(crate) single_line: bool,
     pub(crate) focus: FocusHandle,
     /// What the last paint produced; see [`FrameLayout`].
@@ -726,6 +731,7 @@ impl EditorView {
             placeholder: SharedString::default(),
             indent_text: "\t".into(),
             aria_label: DEFAULT_ARIA_LABEL.into(),
+            custom_aria_label: false,
             single_line: false,
             focus: cx.focus_handle(),
             frame: FrameLayout::default(),
@@ -1004,10 +1010,36 @@ impl EditorView {
     /// Name this editor for assistive technology, in place of the generic default.
     pub fn with_aria_label(mut self, label: impl Into<SharedString>) -> Self {
         self.aria_label = label.into();
+        self.custom_aria_label = true;
         self
     }
     pub fn set_aria_label(&mut self, label: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.aria_label = label.into();
+        self.custom_aria_label = true;
+        cx.notify();
+    }
+
+    /// Set presentation messages without replacing the document or its undo state.
+    pub fn with_messages(mut self, messages: EditorMessages) -> Self {
+        if !self.custom_aria_label {
+            self.aria_label = messages.text(EditorMessage::TextEditor).into();
+        }
+        self.accessible_text
+            .borrow_mut()
+            .set_messages(messages.clone());
+        self.shaping.set_messages(messages);
+        self
+    }
+
+    pub fn set_messages(&mut self, messages: EditorMessages, cx: &mut Context<Self>) {
+        if !self.custom_aria_label {
+            self.aria_label = messages.text(EditorMessage::TextEditor).into();
+        }
+        self.accessible_text
+            .borrow_mut()
+            .set_messages(messages.clone());
+        self.shaping.set_messages(messages);
+        self.frame.clear();
         cx.notify();
     }
     pub fn set_placeholder(
@@ -1225,6 +1257,7 @@ impl EditorView {
             style: self.shaping.style(),
             single_line: self.single_line,
             images: self.shaping.images(),
+            messages: self.shaping.messages(),
             maths: Some(self.shaping.maths()),
             equations: Some(self.analysis.equations()),
             scale_factor: self.shaping.scale_factor(),
