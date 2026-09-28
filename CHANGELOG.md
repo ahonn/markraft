@@ -1,3 +1,11 @@
+## 0.1.4 (2026-09-28)
+
+### Features
+
+- Spell the dates in daily note names in German, Spanish, French, Japanese, Korean and Brazilian Portuguese when the system uses one of them.
+- Add German, Spanish, French, Japanese, Korean and Brazilian Portuguese.
+- Add Simplified Chinese.
+
 ## 0.1.3 (2026-09-28)
 
 ### Features
