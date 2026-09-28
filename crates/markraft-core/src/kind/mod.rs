@@ -18,8 +18,13 @@
 //! nothing; a kind whose roles are not on this list resolves its own ids and
 //! hands the view whatever it needs beside this table.
 
+pub mod analysis;
 pub mod chains;
 pub mod conceal;
+pub mod equations;
+pub mod footnotes;
+pub mod math;
+pub mod reading;
 pub mod types;
 
 use std::ops::Range;

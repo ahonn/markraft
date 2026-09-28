@@ -1,0 +1,5 @@
+{
+  "_version": 1,
+  "greeting": "Hello, %{name}",
+  "only-english": "English fallback"
+}

@@ -1,6 +1,7 @@
 //! One worker owns the notes folder: it preserves save ordering, and it watches the
 //! folder so that changes made by other programs reach the application.
 use crate::fs::StoreError;
+use crate::locale::Message;
 use crate::{
     storage::{Library, Note, Notices, Preferences},
     vault::{External, Store},
@@ -24,9 +25,9 @@ use std::{
 
 /// Said when outside changes will not be noticed as they happen; the details
 /// go to the log.
-const WATCH_FAILED: &str = "Couldn't watch for outside changes.";
+const WATCH_FAILED: &str = "error.watch-failed";
 /// Said when a look for outside changes failed; the details go to the log.
-const CHECK_FAILED: &str = "Couldn't check for outside changes.";
+const CHECK_FAILED: &str = "error.check-failed";
 
 #[cfg(test)]
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -71,7 +72,10 @@ enum Request {
     Shutdown,
     Save(u64, Library, Preferences, Instant),
     Recover(Note, Reply<Result<(), StoreError>>),
-    Markdown(Note, Reply<Result<String, StoreError>>),
+    Snapshot(
+        crate::doc::PendingSnapshot,
+        Reply<Result<crate::doc::DocumentSnapshot, StoreError>>,
+    ),
     OpenFile(std::path::PathBuf, Reply<Result<Note, StoreError>>),
     Rename(
         String,
@@ -144,7 +148,7 @@ impl Persistence {
                             }
                             Err(error) => {
                                 log::warn!("{} could not be watched: {error}", parent.display());
-                                notices.raise(WATCH_FAILED.to_owned());
+                                notices.raise(Message::new(WATCH_FAILED));
                             }
                         }
                     }
@@ -157,8 +161,8 @@ impl Persistence {
             while let Some(request) = next_request(&incoming, &mut deferred) {
                 match request {
                     Request::Shutdown => break,
-                    Request::Markdown(note, response) => {
-                        let _ = response.send(store.markdown(&note));
+                    Request::Snapshot(snapshot, response) => {
+                        let _ = response.send(snapshot.render());
                     }
                     Request::Recover(note, response) => {
                         let _ = response.send(store.recover(&note));
@@ -200,7 +204,7 @@ impl Persistence {
                         }
                         Err(error) => {
                             log::warn!("refreshing changed paths failed: {error}");
-                            store.notices().raise(CHECK_FAILED.to_owned());
+                            store.notices().raise(Message::new(CHECK_FAILED));
                         }
                         _ => {}
                     },
@@ -210,7 +214,7 @@ impl Persistence {
                         }
                         Err(error) => {
                             log::warn!("refreshing the folder failed: {error}");
-                            store.notices().raise(CHECK_FAILED.to_owned());
+                            store.notices().raise(Message::new(CHECK_FAILED));
                         }
                         _ => {}
                     },
@@ -273,10 +277,28 @@ impl Persistence {
         let response = self.request_async(|reply| Request::Recover(note, reply));
         Box::pin(async move { response.await? })
     }
-    pub fn markdown_async(&self, note: Note) -> Pending<String> {
-        let response = self.request_async(|reply| Request::Markdown(note, reply));
+    /// Capture committed inputs before queueing; later edits cannot change the export.
+    pub fn snapshot_async(
+        &self,
+        note: Note,
+        library_generation: u64,
+        auto_number_equations: bool,
+    ) -> Pending<crate::doc::DocumentSnapshot> {
+        let source = match self.sources.source(&note) {
+            Ok(source) => source.map(|track| track.snapshot()),
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let snapshot = crate::doc::PendingSnapshot::new(
+            note,
+            library_generation,
+            auto_number_equations,
+            source,
+            self.house.get(),
+        );
+        let response = self.request_async(|reply| Request::Snapshot(snapshot, reply));
         Box::pin(async move { response.await? })
     }
+
     pub fn reload_async(&self) -> Pending<Library> {
         let response = self.request_async(Request::Reload);
         Box::pin(async move { response.await? })
@@ -297,7 +319,11 @@ impl Persistence {
         match self.sources.source(&note)? {
             Some(track) => track
                 .save(crate::doc::schema(), &note.document)
-                .map_err(|error| error.to_string().into()),
+                .map_err(|error| {
+                    Message::new("error.markdown-preserve")
+                        .arg("detail", error.to_string())
+                        .into()
+                }),
             None => Ok(format!(
                 "{}\n",
                 crate::doc::to_markdown_in(&note.document, &self.house)
@@ -325,16 +351,11 @@ impl Persistence {
                 preferences,
                 Instant::now(),
             ))
-            .map_err(|_| {
-                StoreError::Worker(
-                    "Saving stopped working. Copy your note (⇧⌘C), then quit and reopen Markraft."
-                        .into(),
-                )
-            })
+            .map_err(|_| StoreError::Worker(Message::new("error.saving-stopped")))
     }
     /// Everything the notes folder gave the user to read, once there is somewhere
     /// to show it. Empty after it has been taken.
-    pub fn notices(&self) -> Vec<String> {
+    pub fn notices(&self) -> Vec<Message> {
         self.notices.take()
     }
     /// The caller compares save revisions with its current document revision. Old
@@ -369,22 +390,12 @@ impl Persistence {
         let (response, result) = mpsc::channel();
         self.requests
             .send(Request::Reload(Reply::Blocking(response)))
-            .map_err(|_| {
-                StoreError::Worker(
-                    "Markraft can no longer reach your notes folder. Copy your note (⇧⌘C), \
-                 then quit and reopen Markraft."
-                        .into(),
-                )
-            })?;
+            .map_err(|_| StoreError::Worker(Message::new("error.worker-folder-unreachable")))?;
         // Do not time out and leave an invisible baseline change queued: the UI must
         // receive the adopted library before any later local snapshot can be saved.
-        result.recv().map_err(|_| {
-            StoreError::Worker(
-                "Markraft stopped reading your notes folder before it had finished. \
-                 Copy your note (⇧⌘C), then quit and reopen Markraft."
-                    .into(),
-            )
-        })?
+        result
+            .recv()
+            .map_err(|_| StoreError::Worker(Message::new("error.worker-read-stopped")))?
     }
     /// A queue barrier: all earlier requests finish before this latest snapshot is saved.
     /// The outer result confirms receipt, not whether writing succeeded; callers must
@@ -419,12 +430,7 @@ impl Persistence {
                 Reply::Blocking(response),
                 Instant::now(),
             ))
-            .map_err(|_| {
-                StoreError::Worker(
-                    "Saving stopped working. Copy your note (⇧⌘C), then quit and reopen Markraft."
-                        .into(),
-                )
-            })?;
+            .map_err(|_| StoreError::Worker(Message::new("error.saving-stopped")))?;
         let saved = receive(result, timeout)?;
         for (_, path) in &saved.paths {
             self.watch_file(path);
@@ -498,23 +504,17 @@ fn save_snapshot(
 
 /// The worker's channel is closed: the thread is gone.
 fn stopped() -> StoreError {
-    StoreError::Worker("The save worker stopped".into())
+    StoreError::Worker(Message::new("error.worker-stopped"))
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn receive<T>(receiver: Receiver<T>, timeout: Duration) -> Result<T, StoreError> {
     receiver.recv_timeout(timeout).map_err(|error| match error {
-        RecvTimeoutError::Timeout => StoreError::Worker(
-            "The notes folder is taking too long to respond. The request may still complete; \
-             your note remains open. Try again."
-                .into(),
-        ),
-        RecvTimeoutError::Disconnected => StoreError::Worker(
-            "The save worker stopped before responding. Copy your note (⇧⌘C), \
-             then quit and reopen Markraft."
-                .into(),
-        ),
+        RecvTimeoutError::Timeout => StoreError::Worker(Message::new("error.worker-timeout")),
+        RecvTimeoutError::Disconnected => {
+            StoreError::Worker(Message::new("error.worker-no-response"))
+        }
     })
 }
 
@@ -559,7 +559,7 @@ fn watch(
             }
             Err(error) => {
                 log::warn!("file watching failed: {error}");
-                callback_notices.raise(WATCH_FAILED.to_owned());
+                callback_notices.raise(Message::new(WATCH_FAILED));
                 full_scan.store(true, Ordering::SeqCst);
                 true
             }
@@ -598,7 +598,7 @@ fn watch(
         Ok(watcher) => Some(watcher),
         Err(error) => {
             log::warn!("file watching could not start: {error}");
-            notices.raise(WATCH_FAILED.to_owned());
+            notices.raise(Message::new(WATCH_FAILED));
             None
         }
     }
@@ -727,6 +727,41 @@ mod tests {
     }
 
     #[test]
+    fn export_snapshot_is_frozen_before_later_edits_and_does_not_mark_dirty() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, mut library) = open(directory.path());
+        let persistence = Persistence::start(store, false);
+        let id = library.active_id.clone();
+        library.set_document(&id, doc::from_markdown("Captured"));
+        let note = library.active_note().clone();
+        let generation = library.generation;
+        let changes = library.changes.clone();
+        let pending = persistence.snapshot_async(note.clone(), generation, true);
+        assert_eq!(library.changes, changes);
+        library.set_document(&id, doc::from_markdown("Later"));
+        // Flush is a queue barrier, so the snapshot response is now ready.
+        persistence
+            .flush(0, library.clone(), Preferences::default())
+            .unwrap()
+            .result
+            .unwrap();
+        let snapshot = futures_util::FutureExt::now_or_never(pending)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.note_id, id);
+        assert_eq!(snapshot.document, note.document);
+        assert_eq!(snapshot.markdown, "Captured\n");
+        assert_eq!(snapshot.library_generation, generation);
+        assert_eq!(
+            snapshot.base_path,
+            note.path
+                .and_then(|path| path.parent().map(ToOwned::to_owned))
+        );
+        assert!(snapshot.auto_number_equations);
+        assert_eq!(doc::plain_text(&library.active_note().document), "Later");
+    }
+
+    #[test]
     fn composition_candidates_never_enter_saved_snapshots() {
         use markraft_core::{
             EditorState, EditorStateConfig, Selection,
@@ -751,12 +786,22 @@ mod tests {
             let spec = update_composition(&state, candidate, candidate.chars().count()).unwrap();
             state = state.update([spec]).unwrap().state().clone();
             library.set_document(&id, committed_document(&state).clone());
+            let captured = persistence.snapshot_async(
+                library.active_note().clone(),
+                library.generation,
+                false,
+            );
             persistence
                 .flush(0, library.clone(), Preferences::default())
                 .unwrap()
                 .result
                 .unwrap();
             assert!(only_note(directory.path()).1.ends_with("hello\n"));
+            let captured = futures_util::FutureExt::now_or_never(captured)
+                .unwrap()
+                .unwrap();
+            assert_eq!(captured.document, *committed_document(&state));
+            assert_eq!(captured.markdown, "hello\n");
         }
 
         state = state

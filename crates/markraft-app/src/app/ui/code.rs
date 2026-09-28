@@ -1,6 +1,26 @@
 use super::*;
 use markraft_gpui::canonical_language;
 
+/// Syntax IDs stay unchanged; the plain-text choice can be searched in either language.
+fn matching_languages(i18n: &crate::locale::I18n, query: &str) -> Vec<(&'static str, String)> {
+    let query = query.trim().to_lowercase();
+    markraft_gpui::code_languages()
+        .iter()
+        .filter_map(|&(id, english)| {
+            let label = if id.is_empty() {
+                i18n.text(markraft_gpui::EditorMessage::PlainText.key())
+            } else {
+                english.to_owned()
+            };
+            (id.to_lowercase().contains(&query)
+                || label.to_lowercase().contains(&query)
+                || english.to_lowercase().contains(&query)
+                || canonical_language(id) == canonical_language(&query))
+            .then_some((id, label))
+        })
+        .collect()
+}
+
 impl MarkraftApp {
     pub(in crate::app) fn open_code_language(&mut self, pos: usize, cx: &mut Context<Self>) {
         let editor = self.editor();
@@ -14,22 +34,12 @@ impl MarkraftApp {
             .unwrap_or(0);
         self.show_popover(Popover::CodeLanguage(pos), cx);
         self.code_language.open_at(selected);
-        self.set_query(String::new(), "Search languages…", "Filter languages", cx);
+        self.set_query(String::new(), cx);
         cx.notify();
     }
 
-    pub(super) fn matching_code_languages(&self, cx: &App) -> Vec<(&'static str, &'static str)> {
-        let query = self.query().read(cx).text().to_owned();
-        let query = query.trim().to_lowercase();
-        markraft_gpui::code_languages()
-            .iter()
-            .copied()
-            .filter(|(id, label)| {
-                id.to_lowercase().contains(&query)
-                    || label.to_lowercase().contains(&query)
-                    || canonical_language(id) == canonical_language(&query)
-            })
-            .collect()
+    pub(super) fn matching_code_languages(&self, cx: &App) -> Vec<(&'static str, String)> {
+        matching_languages(&self.i18n, self.query().read(cx).text())
     }
 
     pub(super) fn apply_code_language(
@@ -99,7 +109,7 @@ impl MarkraftApp {
         let mut list = div()
             .id("code-language-list")
             .role(Role::ListBox)
-            .aria_label("Code languages")
+            .aria_label(self.i18n.text("surfaces.code.languages"))
             .track_scroll(self.code_language.scroll())
             .flex_1()
             .min_h_0()
@@ -112,7 +122,7 @@ impl MarkraftApp {
                 div()
                     .id(stop.clone())
                     .role(Role::Button)
-                    .aria_label(label)
+                    .aria_label(label.clone())
                     .aria_selected(index == self.code_language.row())
                     .aria_position_in_set(index + 1)
                     .aria_size_of_set(total)
@@ -159,7 +169,7 @@ impl MarkraftApp {
                     .px_2()
                     .text_size(px(13.))
                     .text_color(self.muted())
-                    .child("No matching languages"),
+                    .child(self.i18n.text("surfaces.code.no-matches")),
             );
         }
         Some(
@@ -198,5 +208,26 @@ impl MarkraftApp {
                 )
                 .child(list),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matching_languages;
+    use crate::locale::{I18n, LanguagePreference};
+
+    #[::core::prelude::v1::test]
+    fn plain_text_is_searchable_by_its_translation_and_english_name() {
+        let i18n = I18n::for_preference(&LanguagePreference::Locale("zh-Hant".into()));
+        for query in ["純文字", "Plain Text", "  PLAIN  "] {
+            assert_eq!(
+                matching_languages(&i18n, query),
+                vec![("", "純文字".into())]
+            );
+        }
+        assert_eq!(
+            matching_languages(&i18n, "Rust"),
+            vec![("rust", "Rust".into())]
+        );
     }
 }

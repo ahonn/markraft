@@ -11,6 +11,7 @@ license.workspace = true
 log = "0.4"
 gpui.workspace = true
 markraft-core.workspace = true
+markraft-math.workspace = true
 unicode-segmentation = "1.12"
 serde_json = "1"
 syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }

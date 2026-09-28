@@ -45,7 +45,7 @@ impl MarkraftApp {
                 .child(separator())
                 .child(self.format_button(
                     "link-apply",
-                    "Apply · ↩",
+                    self.i18n.text("surfaces.link.apply"),
                     Icon::Check,
                     Intent::ApplyLink,
                     None,
@@ -53,7 +53,7 @@ impl MarkraftApp {
                 ))
                 .child(self.format_button(
                     "link-remove",
-                    "Unlink",
+                    self.i18n.text("surfaces.link.unlink"),
                     Icon::Unlink,
                     Intent::Unlink,
                     None,
@@ -82,7 +82,7 @@ impl MarkraftApp {
                 )
                 .child(self.format_button(
                     "link-edit",
-                    "Edit link",
+                    self.i18n.text("surfaces.link.edit"),
                     Icon::Edit,
                     Intent::EditLink,
                     None,
@@ -90,7 +90,7 @@ impl MarkraftApp {
                 ))
                 .child(self.format_button(
                     "link-copy",
-                    "Copy link",
+                    self.i18n.text("surfaces.link.copy"),
                     Icon::Copy,
                     Intent::CopyLink,
                     None,
@@ -98,7 +98,7 @@ impl MarkraftApp {
                 ))
                 .child(self.format_button(
                     "link-open",
-                    "Open link",
+                    self.i18n.text("surfaces.link.open"),
                     Icon::External,
                     Intent::OpenLink,
                     None,
@@ -106,7 +106,7 @@ impl MarkraftApp {
                 ))
                 .child(self.format_button(
                     "link-unlink",
-                    "Unlink",
+                    self.i18n.text("surfaces.link.unlink"),
                     Icon::Unlink,
                     Intent::Unlink,
                     None,

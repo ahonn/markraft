@@ -2,9 +2,10 @@
 //!
 //! Create and use this object on AppKit's main thread. GPUI owns the native
 //! window; native pointers below are borrowed only for the duration of a call.
+pub(crate) mod locale;
 pub(crate) mod symbols;
 
-use crate::locale::{Locale, Translator};
+use crate::locale::Message;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use objc2::{
     AllocAnyThread, MainThreadMarker, class,
@@ -46,17 +47,6 @@ unsafe impl Encode for NSRect {
             Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]),
         ],
     );
-}
-
-const LOGIN_ITEMS: &str = "System Settings → General → Login Items & Extensions";
-
-fn menu_text(translator: &Translator, key: &str, english: &str) -> String {
-    let value = translator.text(key);
-    if value == key {
-        english.to_owned()
-    } else {
-        value
-    }
 }
 
 /// The version this copy says it is, and its build when that says something more:
@@ -163,48 +153,24 @@ pub struct Platform {
     /// new one, so the chord being recorded is not taken by a running shortcut.
     suspended: bool,
     menu_actions: Vec<(MenuId, PlatformEvent)>,
-    menu_items: Vec<MenuItem>,
+    menu_items: Vec<(MenuItem, &'static str)>,
     // Retained NSRunningApplication; None when no previous app is known.
     previous_app: Option<Retained<AnyObject>>,
 }
 
 impl Platform {
-    pub fn new(locale: Locale) -> Result<Self, String> {
+    pub fn new() -> Result<Self, Message> {
         let hotkeys = GlobalHotKeyManager::new().map_err(menu_bar_failure)?;
-        let translator = Translator::new(locale);
+        let i18n = crate::locale::I18n::english();
         let menu = Menu::new();
-        let toggle = MenuItem::new(
-            menu_text(&translator, "menu.show-hide", "Show / Hide Notes"),
-            true,
-            None,
-        );
-        let new_note = MenuItem::new(
-            menu_text(&translator, "menu.new-note", "New Note"),
-            true,
-            None,
-        );
-        let settings = MenuItem::new(
-            menu_text(&translator, "menu.settings", "Settings…"),
-            true,
-            None,
-        );
-        let updates = MenuItem::new(
-            menu_text(&translator, "menu.updates", "Check for Updates…"),
-            true,
-            None,
-        );
+        let toggle = MenuItem::new(i18n.text("menu.show-hide"), true, None);
+        let new_note = MenuItem::new(i18n.text("menu.new-note"), true, None);
+        let settings = MenuItem::new(i18n.text("menu.settings"), true, None);
+        let updates = MenuItem::new(i18n.text("menu.updates"), true, None);
         // An accessory app has no menu bar of its own, so a menu bar's Help menu
         // comes down to this. Debug info and logs are in the command palette.
-        let report = MenuItem::new(
-            menu_text(&translator, "menu.report", "Report an Issue…"),
-            true,
-            None,
-        );
-        let quit = MenuItem::new(
-            menu_text(&translator, "menu.quit", "Quit Markraft"),
-            true,
-            None,
-        );
+        let report = MenuItem::new(i18n.text("menu.report"), true, None);
+        let quit = MenuItem::new(i18n.text("menu.quit"), true, None);
         menu.append_items(&[
             &toggle,
             &new_note,
@@ -237,7 +203,14 @@ impl Platform {
             shortcuts: [None; 2],
             suspended: false,
             menu_actions,
-            menu_items: vec![toggle, new_note, settings, updates, report, quit],
+            menu_items: vec![
+                (toggle, "menu.show-hide"),
+                (new_note, "menu.new-note"),
+                (settings, "menu.settings"),
+                (updates, "menu.updates"),
+                (report, "menu.report"),
+                (quit, "menu.quit"),
+            ],
             previous_app: None,
         };
         platform.remember_frontmost_app();
@@ -250,25 +223,16 @@ impl Platform {
         Ok(platform)
     }
 
-    /// Update the status item's menu after the interface language changes.
-    pub fn set_locale(&mut self, locale: Locale) {
-        let translator = Translator::new(locale);
-        let labels = [
-            ("menu.show-hide", "Show / Hide Notes"),
-            ("menu.new-note", "New Note"),
-            ("menu.settings", "Settings…"),
-            ("menu.updates", "Check for Updates…"),
-            ("menu.report", "Report an Issue…"),
-            ("menu.quit", "Quit Markraft"),
-        ];
-        for (item, (key, english)) in self.menu_items.iter().zip(labels) {
-            item.set_text(menu_text(&translator, key, english));
+    /// Refresh labels without replacing menu IDs or their action bindings.
+    pub fn set_locale(&mut self, i18n: &crate::locale::I18n) {
+        for (item, key) in &self.menu_items {
+            item.set_text(i18n.text(key));
         }
     }
 
     /// Register before replacing, so an unavailable shortcut preserves the old one.
     /// An empty string explicitly disables the global shortcut.
-    pub fn set_shortcut(&mut self, which: Shortcut, shortcut: &str) -> Result<(), String> {
+    pub fn set_shortcut(&mut self, which: Shortcut, shortcut: &str) -> Result<(), Message> {
         // The swap below assumes the current shortcuts are registered.
         self.resume_shortcuts()?;
         let next = if shortcut.trim().is_empty() {
@@ -276,10 +240,7 @@ impl Platform {
         } else {
             Some(HotKey::from_str(shortcut).map_err(|error| {
                 log::warn!("{shortcut} is not a hotkey: {error}");
-                format!(
-                    "“{shortcut}” is not a shortcut Markraft understands. \
-                     Try one like Alt+N or Ctrl+Shift+Space."
-                )
+                Message::new("error.shortcut-invalid").arg("shortcut", shortcut.to_owned())
             })?)
         };
         let current = self.shortcuts[which.index()];
@@ -291,17 +252,14 @@ impl Platform {
                 .iter()
                 .any(|other| *other != which && self.shortcuts[other.index()] == next)
         {
-            return Err(format!(
-                "“{shortcut}” is already Markraft's other shortcut. Choose a different one."
-            ));
+            return Err(
+                Message::new("error.shortcut-duplicate").arg("shortcut", shortcut.to_owned())
+            );
         }
         if let Some(next) = next {
             self.hotkeys.register(next).map_err(|error| {
                 log::warn!("{shortcut} could not be registered: {error}");
-                format!(
-                    "“{shortcut}” is not available — another app is probably using it. \
-                     Choose a different shortcut."
-                )
+                Message::new("error.shortcut-unavailable").arg("shortcut", shortcut.to_owned())
             })?;
         }
         if let Some(previous) = current
@@ -311,9 +269,7 @@ impl Platform {
                 let _ = self.hotkeys.unregister(next);
             }
             log::warn!("a shortcut could not be released: {error}");
-            return Err("Markraft could not release the shortcut it was using. \
-                        Quit and reopen Markraft, then set it again."
-                .into());
+            return Err(Message::new("error.shortcut-release"));
         }
         self.shortcuts[which.index()] = next;
         Ok(())
@@ -334,7 +290,7 @@ impl Platform {
     }
 
     /// Take the suspended shortcuts back. Another app may have claimed one meanwhile.
-    pub fn resume_shortcuts(&mut self) -> Result<(), String> {
+    pub fn resume_shortcuts(&mut self) -> Result<(), Message> {
         if !std::mem::take(&mut self.suspended) {
             return Ok(());
         }
@@ -349,9 +305,7 @@ impl Platform {
             }
         }
         if lost {
-            return Err("A shortcut was taken by another app while it was being \
-                        changed. Choose a different shortcut."
-                .into());
+            return Err(Message::new("error.shortcut-taken"));
         }
         Ok(())
     }
@@ -366,7 +320,7 @@ impl Platform {
     }
 
     /// Keep the note above other apps' windows, or let it sit among them.
-    pub fn set_always_on_top(&self, window: &gpui::Window, on_top: bool) -> Result<(), String> {
+    pub fn set_always_on_top(&self, window: &gpui::Window, on_top: bool) -> Result<(), Message> {
         let native = native_window(window)?;
         unsafe {
             let _: () = msg_send![native, setFloatingPanel: Bool::new(on_top)];
@@ -378,7 +332,7 @@ impl Platform {
 
     /// Put the note on every Space, full-screen ones included, or leave it on the one
     /// it was opened on.
-    pub fn set_all_spaces(&self, window: &gpui::Window, all: bool) -> Result<(), String> {
+    pub fn set_all_spaces(&self, window: &gpui::Window, all: bool) -> Result<(), Message> {
         // NSWindowCollectionBehaviorCanJoinAllSpaces and …FullScreenAuxiliary.
         const ALL_SPACES: usize = 1 << 0 | 1 << 8;
         let native = native_window(window)?;
@@ -402,7 +356,7 @@ impl Platform {
         })
     }
 
-    pub fn set_launch_at_login(&mut self, enabled: bool) -> Result<(), String> {
+    pub fn set_launch_at_login(&mut self, enabled: bool) -> Result<(), Message> {
         let service = main_app_service()?;
         let status: isize = unsafe { msg_send![&*service, status] };
         if (enabled && status == 1) || (!enabled && matches!(status, 0 | 3)) {
@@ -430,27 +384,28 @@ impl Platform {
         }
         if success == Bool::NO {
             let detail = if error.is_null() {
-                "macOS did not provide an error description".to_owned()
+                Message::new("error.native-no-detail")
             } else {
                 let description: *mut AnyObject = unsafe { msg_send![error, localizedDescription] };
-                ns_string_text(description).unwrap_or_else(|| "Unknown macOS error".to_owned())
+                ns_string_text(description)
+                    .map(Message::from)
+                    .unwrap_or_else(|| Message::new("error.native-unknown"))
             };
-            return Err(format!(
-                "Could not {} launch at login: {detail}. Use a signed Markraft app \
-                 installed in Applications, and check {LOGIN_ITEMS}.",
-                if enabled { "enable" } else { "disable" },
-            ));
+            return Err(Message::new(if enabled {
+                "error.login-enable"
+            } else {
+                "error.login-disable"
+            })
+            .arg("detail", detail));
         }
         if (enabled && resulting_status != 1) || (!enabled && resulting_status == 1) {
-            return Err(format!(
-                "macOS has not applied the change. Check {LOGIN_ITEMS}."
-            ));
+            return Err(Message::new("error.login-not-applied"));
         }
         Ok(())
     }
 
     /// Use with GPUI's `WindowKind::Floating`, which creates an NSPanel.
-    pub fn configure_window(&mut self, window: &mut gpui::Window) -> Result<(), String> {
+    pub fn configure_window(&mut self, window: &mut gpui::Window) -> Result<(), Message> {
         let native = native_window(window)?;
         let view = native_view(window)?;
         unsafe {
@@ -538,7 +493,7 @@ impl Platform {
 
     /// Bring the note forward; with `follow_pointer`, onto the display the pointer is
     /// on, so it appears there rather than being seen to jump.
-    pub fn show(&mut self, window: &mut gpui::Window, follow_pointer: bool) -> Result<(), String> {
+    pub fn show(&mut self, window: &mut gpui::Window, follow_pointer: bool) -> Result<(), Message> {
         self.remember_frontmost_app();
         let native = native_window(window)?;
         if follow_pointer {
@@ -556,7 +511,7 @@ impl Platform {
     }
 
     /// Keep the GPUI window and editor entity alive, including selection/history.
-    pub fn hide(&mut self, window: &mut gpui::Window) -> Result<(), String> {
+    pub fn hide(&mut self, window: &mut gpui::Window) -> Result<(), Message> {
         let native = native_window(window)?;
         let was_key: Bool = unsafe { msg_send![native, isKeyWindow] };
         unsafe {
@@ -617,15 +572,13 @@ impl Drop for Platform {
 }
 
 /// Losing the native window reads the same to the user however it happened.
-const NO_NATIVE_WINDOW: &str = "Markraft could not find its own window. Quit and reopen Markraft.";
+const NO_NATIVE_WINDOW: &str = "error.native-window";
 
 /// The menu bar item and the global shortcut are one thing to the user, and a
 /// failure to set them up leaves the notes themselves working.
-fn menu_bar_failure(detail: impl std::fmt::Display) -> String {
+fn menu_bar_failure(detail: impl std::fmt::Display) -> Message {
     log::warn!("the menu bar item could not be set up: {detail}");
-    "Markraft could not put its icon in the menu bar. Notes still work, but the \
-     menu bar item and the shortcut that opens them are unavailable."
-        .to_owned()
+    Message::new("error.menu-bar-unavailable")
 }
 
 /// NSViewLayerContentsPlacementTop: a frame of another size than the view is
@@ -725,28 +678,24 @@ fn move_to_pointer_screen(native: *mut AnyObject) {
     }
 }
 
-fn native_window(window: &gpui::Window) -> Result<*mut AnyObject, String> {
+fn native_window(window: &gpui::Window) -> Result<*mut AnyObject, Message> {
     let view = native_view(window)?;
     let native: *mut AnyObject = unsafe { msg_send![view, window] };
     if native.is_null() {
-        Err(NO_NATIVE_WINDOW.into())
+        Err(Message::new(NO_NATIVE_WINDOW))
     } else {
         Ok(native)
     }
 }
 
 /// GPUI's own view, which draws the window: a subview of the content view.
-fn native_view(window: &gpui::Window) -> Result<*mut AnyObject, String> {
+fn native_view(window: &gpui::Window) -> Result<*mut AnyObject, Message> {
     let handle = HasWindowHandle::window_handle(window).map_err(|error| {
         log::warn!("the window handle is unavailable: {error}");
-        NO_NATIVE_WINDOW.to_owned()
+        Message::new(NO_NATIVE_WINDOW)
     })?;
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
-        return Err(
-            "Markraft could not take charge of its window, so it cannot float above \
-             other apps. Quit and reopen Markraft."
-                .into(),
-        );
+        return Err(Message::new("error.native-window-control"));
     };
     Ok(handle.ns_view.as_ptr().cast::<AnyObject>())
 }
@@ -756,32 +705,30 @@ fn native_view(window: &gpui::Window) -> Result<*mut AnyObject, String> {
 #[link(name = "ServiceManagement", kind = "framework")]
 unsafe extern "C" {}
 
-fn main_app_service() -> Result<Retained<AnyObject>, String> {
-    let class = AnyClass::get(c"SMAppService")
-        .ok_or_else(|| "Launch at login requires macOS 13 or later.".to_owned())?;
+fn main_app_service() -> Result<Retained<AnyObject>, Message> {
+    let class =
+        AnyClass::get(c"SMAppService").ok_or_else(|| Message::new("error.login-version"))?;
     let service: Option<Retained<AnyObject>> = unsafe { msg_send![class, mainAppService] };
-    service.ok_or_else(|| "macOS could not find the Markraft app bundle.".to_owned())
+    service.ok_or_else(|| Message::new("error.bundle-not-found"))
 }
 
-fn ensure_installed_bundle() -> Result<(), String> {
+fn ensure_installed_bundle() -> Result<(), Message> {
     let bundle: *mut AnyObject = unsafe { msg_send![class!(NSBundle), mainBundle] };
     let path: *mut AnyObject = unsafe { msg_send![bundle, bundlePath] };
-    let path = ns_string_text(path).ok_or_else(|| "Could not locate the app bundle.".to_owned())?;
+    let path = ns_string_text(path).ok_or_else(|| Message::new("error.bundle-location"))?;
     let path = Path::new(&path);
     let user_applications =
         std::env::var_os("HOME").map(|home| Path::new(&home).join("Applications"));
     let installed = path.starts_with("/Applications")
         || user_applications.is_some_and(|applications| path.starts_with(applications));
     if path.extension().is_none_or(|extension| extension != "app") || !installed {
-        return Err("Move Markraft.app to Applications and launch that copy \
-                    before enabling launch at login."
-            .into());
+        return Err(Message::new("error.install-for-login"));
     }
     Ok(())
 }
 
-fn login_approval_message() -> String {
-    format!("Allow Markraft in {LOGIN_ITEMS} to enable launch at login.")
+fn login_approval_message() -> Message {
+    Message::new("error.login-approval")
 }
 
 fn ns_string_text(string: *mut AnyObject) -> Option<String> {
@@ -804,13 +751,13 @@ fn ns_string_text(string: *mut AnyObject) -> Option<String> {
 /// Retina or a non-Retina menu bar. It also sizes its click target from the image
 /// it was given and never again, so it gets a blank of the final size and the
 /// status item's button gets the real image afterwards.
-fn blank_menu_bar_icon() -> Result<Icon, String> {
+fn blank_menu_bar_icon() -> Result<Icon, Message> {
     const PIXELS: u32 = MENU_BAR_IMAGE_POINTS as u32;
     Icon::from_rgba(vec![0; (PIXELS * PIXELS * 4) as usize], PIXELS, PIXELS)
         .map_err(menu_bar_failure)
 }
 
-fn show_menu_bar_image(tray: &TrayIcon) -> Result<(), String> {
+fn show_menu_bar_image(tray: &TrayIcon) -> Result<(), Message> {
     let main_thread = MainThreadMarker::new()
         .ok_or_else(|| menu_bar_failure("the status item is set up off the main thread"))?;
     let button = tray

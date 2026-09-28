@@ -1,0 +1,17 @@
+{
+  "_version": 1,
+  "date.month-1": "Jan",
+  "date.month-2": "Feb",
+  "date.month-3": "Mar",
+  "date.month-4": "Apr",
+  "date.month-5": "May",
+  "date.month-6": "Jun",
+  "date.month-7": "Jul",
+  "date.month-8": "Aug",
+  "date.month-9": "Sep",
+  "date.month-10": "Oct",
+  "date.month-11": "Nov",
+  "date.month-12": "Dec",
+  "date.day-month": "%{day} %{month}",
+  "date.day-month-year": "%{day} %{month} %{year}"
+}

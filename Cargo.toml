@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/markraft-core",
     "crates/markraft-commonmark",
+    "crates/markraft-math",
     "crates/markraft-gpui",
     "crates/markraft-vim",
     "crates/markraft-app",
@@ -10,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 publish = false
 license = "MIT"
@@ -22,6 +23,7 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.6", features = 
 gpui-base = "=0.6.6"
 markraft-core = { path = "crates/markraft-core" }
 markraft-commonmark = { path = "crates/markraft-commonmark" }
+markraft-math = { path = "crates/markraft-math" }
 markraft-gpui = { path = "crates/markraft-gpui" }
 markraft-vim = { path = "crates/markraft-vim" }
 

@@ -610,6 +610,88 @@ fn entered(line: &str) -> Option<EditorState> {
 }
 
 #[test]
+fn enter_after_a_math_fence_creates_a_source_line_between_matching_fences() {
+    let state = entered("$$").expect("a display formula");
+    assert_eq!(state.doc().child_count(), 1);
+    assert_eq!(state.head(), 4);
+    assert_eq!(
+        markraft_commonmark::to_markdown(state.schema(), state.doc()),
+        "$$\n\n$$"
+    );
+    let source = markraft_commonmark::SourceDocument::parse(state.schema(), "$$").unwrap();
+    let saved = source
+        .render(state.schema(), state.doc())
+        .expect("empty formula saves");
+    assert_eq!(saved, "$$\n\n$$");
+    assert_eq!(
+        markraft_commonmark::from_markdown(state.schema(), &saved).unwrap(),
+        *state.doc()
+    );
+    let typed = type_all(&state, r"\frac{1}{2}");
+    assert_eq!(
+        markraft_commonmark::to_markdown(typed.schema(), typed.doc()),
+        "$$\n\\frac{1}{2}\n$$"
+    );
+}
+
+#[test]
+fn enter_inside_display_math_keeps_multiline_latex_in_one_paragraph() {
+    let schema = commonmark_schema();
+    let original = "$$\n\\begin{aligned}\nx &= 1\\\\y &= 2\n\\end{aligned}\n$$\n";
+    let source = markraft_commonmark::SourceDocument::parse(&schema, original).unwrap();
+    let cursor = 1 + original[..original.find("y &= 2").unwrap()].chars().count();
+    let state = start_from(source.document().clone(), &schema, cursor);
+    let state = run_command(&state, &markraft_commonmark::block_from_line())
+        .expect("Enter inserts a formula newline")
+        .unwrap()
+        .state()
+        .clone();
+    assert_eq!(state.doc().child_count(), 1);
+    assert_eq!(state.head(), cursor + 1);
+    let rendered = source.render(&schema, state.doc()).expect("formula saves");
+    assert_eq!(rendered, original.replace("y &= 2", "\ny &= 2"));
+    assert_eq!(
+        markraft_commonmark::SourceDocument::parse(&schema, &rendered)
+            .unwrap()
+            .document(),
+        state.doc()
+    );
+}
+
+#[test]
+fn math_enter_does_not_capture_inline_formulas_or_the_closing_fence() {
+    for line in ["$x$", "text $$", "$$x$$", "$$x$$ and $$y$$"] {
+        assert!(entered(line).is_none(), "{line:?}");
+    }
+}
+
+#[test]
+fn creating_and_editing_display_math_inside_containers_round_trips() {
+    for line in ["- $$", "> $$", "> - $$", "1. $$", "- [ ] $$"] {
+        let state = entered(line).expect("a display formula");
+        let empty = markraft_commonmark::to_markdown(state.schema(), state.doc());
+        assert_eq!(
+            markraft_commonmark::from_markdown(state.schema(), &empty).unwrap(),
+            *state.doc(),
+            "{line:?} => {empty:?}"
+        );
+        let state = type_all(&state, "x = 1");
+        let state = run_command(&state, &markraft_commonmark::block_from_line())
+            .expect("a newline in the formula")
+            .unwrap()
+            .state()
+            .clone();
+        let state = type_all(&state, "y = 2");
+        let markdown = markraft_commonmark::to_markdown(state.schema(), state.doc());
+        assert_eq!(
+            markraft_commonmark::from_markdown(state.schema(), &markdown).unwrap(),
+            *state.doc(),
+            "{line:?} => {markdown:?}"
+        );
+    }
+}
+
+#[test]
 fn enter_after_a_fence_opens_a_code_block_in_its_language() {
     let schema = commonmark_schema();
     for (line, markdown) in [

@@ -27,6 +27,25 @@ impl<'a> Walk<'a> {
         node: &'a AstNode<'a>,
     ) -> Result<(Vec<Node>, Option<String>), ParseError> {
         let pos = self.target(node).sourcepos();
+        if matches!(&*self.value(node), NodeValue::Paragraph) && pos.end.line > pos.start.line {
+            let lines: Vec<_> = (pos.start.line..=pos.end.line)
+                .map(|line| self.cx.line(line))
+                .collect();
+            if let Some(block) = crate::math::DisplayBlock::starting_at(
+                &lines,
+                0,
+                pos.start.column.saturating_sub(1),
+                // The protected parse already chose this paragraph's lines.
+                &crate::math::SourceBlocks::default(),
+            ) && block.lines.end == lines.len()
+            {
+                let text = block.source(&lines);
+                return Ok((
+                    crate::textblock::build(self.schema, BlockKind::Paragraph, &text),
+                    None,
+                ));
+            }
+        }
         let (kind, lines) = match &*self.value(node) {
             NodeValue::Paragraph => (
                 BlockKind::Paragraph,

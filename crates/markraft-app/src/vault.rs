@@ -1,4 +1,5 @@
 //! In-place Markdown persistence. Application metadata never enters the workspace.
+use crate::locale::Message;
 use crate::{
     doc,
     fs::{
@@ -80,12 +81,7 @@ struct Recovery {
 /// beside itself and the folder opens fresh rather than not at all. One a newer
 /// Markraft wrote is refused instead: starting fresh would write over it.
 fn read_manifest(path: &Path, bytes: &[u8]) -> Result<(Manifest, bool), StoreError> {
-    let newer = || {
-        StoreError::Invalid(
-            "A newer version of Markraft last opened this folder. Update Markraft to open it."
-                .into(),
-        )
-    };
+    let newer = || StoreError::Invalid(Message::new("error.newer-folder"));
     match serde_json::from_slice::<Manifest>(bytes) {
         Ok(manifest) if manifest.version > MANIFEST_VERSION => Err(newer()),
         Ok(manifest) => Ok((manifest, false)),
@@ -117,7 +113,7 @@ struct SourceVersion {
     document: markraft_core::Node,
     updated_at: u64,
     path: Option<PathBuf>,
-    read_only: Option<String>,
+    read_only: Option<Message>,
     track: Option<Arc<SourceTrack>>,
 }
 #[derive(Default)]
@@ -181,7 +177,7 @@ impl Sources {
                 .track
                 .clone()
                 .map(Some)
-                .ok_or_else(|| "This file is not Markdown Markraft can read.".into()),
+                .ok_or_else(|| Message::new("error.unreadable-markdown").into()),
             None => Ok(None),
         }
     }
@@ -246,7 +242,7 @@ impl Store {
             .join("workspaces")
             .join(format!("{hash:016x}"));
         if state.starts_with(&directory) {
-            return Err("Application settings must be stored outside the Markdown folder.".into());
+            return Err(Message::new("error.settings-outside-folder").into());
         }
         fs::create_dir_all(&state).map_err(|e| describe(&state, &e))?;
         let lock_path = state.join("lock");
@@ -257,9 +253,8 @@ impl Store {
             .truncate(false)
             .open(&lock_path)
             .map_err(|e| describe(&lock_path, &e))?;
-        lock.try_lock().map_err(|_| {
-            StoreError::Locked("Another Markraft instance is already using this folder.".into())
-        })?;
+        lock.try_lock()
+            .map_err(|_| StoreError::Locked(Message::new("error.folder-locked")))?;
         let manifest_path = state.join("manifest.json");
         let (manifest, reset) =
             match read_optional(&manifest_path).map_err(|e| describe(&manifest_path, &e))? {
@@ -289,7 +284,7 @@ impl Store {
         if reset {
             store
                 .notices
-                .raise("Folder settings were unreadable and have been reset.".to_owned());
+                .raise(Message::new("error.folder-settings-reset"));
         }
         let mut library = store.scan_library()?;
         store.restore_recovery(&mut library);
@@ -333,7 +328,7 @@ impl Store {
         let path = self.state.join("manifest.json");
         let bytes = serde_json::to_vec_pretty(&self.manifest).map_err(|e| StoreError::Json {
             path: path.clone(),
-            detail: e.to_string(),
+            detail: e.to_string().into(),
         })?;
         if bytes == self.manifest_bytes {
             return Ok(());
@@ -409,7 +404,7 @@ impl Store {
         if let Err(error) = self.persist_manifest() {
             log::warn!("saving refreshed folder metadata failed: {error}");
             self.notices
-                .raise(format!("Folder settings could not be saved: {error}"));
+                .raise(Message::new("error.folder-settings-save").arg("detail", error));
         }
     }
     fn read_path(
@@ -429,8 +424,7 @@ impl Store {
                 .read_only
                 .as_ref()
                 .filter(|reason| {
-                    reason.starts_with("This file is not UTF-8")
-                        || reason.starts_with("Markdown could not be parsed")
+                    reason.is_key("error.not-utf8") || reason.is_key("error.markdown-parse")
                 })
                 .cloned();
             saved.note.read_only = unsafe_file(path)?.or(content_error);
@@ -454,12 +448,13 @@ impl Store {
                     document
                 }
                 Err(error) => {
-                    read_only = Some(format!("Markdown could not be parsed: {error}"));
+                    read_only =
+                        Some(Message::new("error.markdown-parse").arg("detail", error.to_string()));
                     doc::empty()
                 }
             },
             Err(_) => {
-                read_only = Some("This file is not UTF-8 text. Open it in another editor to convert its encoding.".into());
+                read_only = Some(Message::new("error.not-utf8"));
                 doc::empty()
             }
         };
@@ -515,7 +510,7 @@ impl Store {
         if let Err(error) = cleanup {
             log::warn!("clearing legacy recovery drafts failed: {error}");
             self.notices
-                .raise(format!("Old recovery drafts could not be cleared: {error}"));
+                .raise(Message::new("error.recovery-cleanup").arg("detail", error));
         }
         // Nothing after adopting the new baseline can turn this into an error:
         // the UI must receive the library that the store will now save against.
@@ -578,16 +573,12 @@ impl Store {
             .collect();
         match missing.as_slice() {
             [] => {}
-            [path] => self.notices.raise(format!(
-                "“{}” was deleted outside Markraft.",
-                path.file_name()
-                    .map(|name| name.to_string_lossy())
-                    .unwrap_or_default()
-            )),
-            _ => self.notices.raise(format!(
-                "{} notes' files were deleted outside Markraft.",
-                missing.len()
-            )),
+            [path] => self
+                .notices
+                .raise(Message::new("error.file-deleted").arg("name", crate::fs::file_label(path))),
+            _ => self
+                .notices
+                .raise(Message::new("error.files-deleted").arg("count", missing.len().to_string())),
         }
     }
     /// Give a note's file another name, in the folder it is already in.
@@ -600,10 +591,10 @@ impl Store {
         let saved = self
             .files
             .get(id)
-            .ok_or("Save this note to a file before renaming it.")?
+            .ok_or(Message::new("error.rename-unsaved"))?
             .clone();
         if self.pending.contains(id) {
-            return Err("A note changed on disk. Wait a moment, then try renaming again.".into());
+            return Err(Message::new("error.rename-pending").into());
         }
         if let Some(reason) = unsafe_file(&saved.path)? {
             return Err(reason.into());
@@ -620,14 +611,12 @@ impl Store {
         }
         let disk = read_optional(&saved.path).map_err(|e| describe(&saved.path, &e))?;
         if disk.as_ref() != Some(&saved.bytes) {
-            return Err(format!(
-                "“{}” changed on disk. Refresh before renaming it.",
-                saved.note.title()
-            )
-            .into());
+            return Err(Message::new("error.rename-changed")
+                .arg("title", saved.note.title_message())
+                .into());
         }
         move_without_replacing(&saved.path, &target)?;
-        let parent = target.parent().ok_or("The file has no parent")?;
+        let parent = target.parent().ok_or(Message::new("error.no-parent"))?;
         File::open(parent)
             .and_then(|f| f.sync_all())
             .map_err(|e| describe(parent, &e))?;
@@ -659,7 +648,7 @@ impl Store {
         }
         let saved = self
             .read_path(&path, None)?
-            .ok_or("The file no longer exists")?;
+            .ok_or(Message::new("error.file-gone"))?;
         self.loose.insert(path.clone());
         self.settings.open_files = self.loose.iter().cloned().collect();
         self.settings.open_files.sort();
@@ -842,6 +831,7 @@ impl Store {
             self.clear_pending(id);
         }
     }
+    #[cfg(test)]
     pub fn markdown(&self, note: &Note) -> Result<String, StoreError> {
         render(self.baseline(note), note, &self.house)
     }
@@ -852,6 +842,7 @@ impl Store {
     /// just adopted as — takes those bytes as its baseline. The pre-change
     /// copy is kept only for edits made against it until the change is
     /// acknowledged.
+    #[cfg(test)]
     fn baseline(&self, note: &Note) -> Option<&Saved> {
         let current = self
             .files
@@ -873,9 +864,9 @@ impl Store {
         let Some(path) = path else {
             // Nothing to stand beside. Saying so is what keeps the caller from
             // reporting a copy that was never written.
-            return Err("This note has no file to keep a copy beside.".into());
+            return Err(Message::new("error.no-recovery-path").into());
         };
-        let parent = path.parent().ok_or("The file has no parent")?;
+        let parent = path.parent().ok_or(Message::new("error.no-parent"))?;
         if !parent.exists() {
             return Err(describe(
                 parent,
@@ -925,7 +916,8 @@ impl Store {
                     .and_then(|bytes| {
                         serde_json::from_slice(&bytes).map_err(|e| StoreError::Json {
                             path: path.clone(),
-                            detail: format!("unreadable draft: {e}"),
+                            detail: Message::new("error.unreadable-draft")
+                                .arg("detail", e.to_string()),
                         })
                     }) {
                     Ok(record) => record,
@@ -1016,11 +1008,10 @@ impl Store {
             let _ = fs::remove_file(&path);
         }
         if conflicted > 0 {
-            self.notices.raise(crate::storage::CONFLICT_KEPT.to_owned());
+            self.notices.raise(crate::storage::conflict_kept());
         }
         if held > 0 {
-            self.notices
-                .raise("Some changes aren't saved yet; Markraft will retry.".to_owned());
+            self.notices.raise(Message::new("error.recovery-retry"));
         }
     }
     fn clear_recovery(&self, id: &str) {
@@ -1040,7 +1031,7 @@ impl Store {
         let mut errors: Vec<StoreError> = Vec::new();
         // The notes disk won over, by title: one conflict error at the end, so a
         // caller can tell it from a failure and still not take them as saved.
-        let mut conflicts: Vec<String> = Vec::new();
+        let mut conflicts: Vec<Message> = Vec::new();
         // A stale snapshot cannot authorize deleting a file it has never seen.
         for id in library.deletions.keys() {
             if let Some(saved) = self.files.get(id).cloned() {
@@ -1048,7 +1039,7 @@ impl Store {
                     && read_optional(&saved.path)
                         .is_ok_and(|bytes| bytes.as_ref() == Some(&saved.bytes));
                 if !unchanged {
-                    errors.push(StoreError::Conflict(vec![saved.note.title()]));
+                    errors.push(StoreError::Conflict(vec![saved.note.title_message()]));
                     continue;
                 }
                 if let Err(error) = self.trash_note(&saved) {
@@ -1084,7 +1075,7 @@ impl Store {
                         errors.push(error);
                     } else {
                         self.disk_won.insert(note.id.clone());
-                        conflicts.push(note.title());
+                        conflicts.push(note.title_message());
                     }
                 }
                 continue;
@@ -1096,7 +1087,11 @@ impl Store {
                 continue;
             }
             if note.read_only.is_some() {
-                errors.push(format!("{} is read-only", note.title()).into());
+                errors.push(
+                    Message::new("error.note-read-only")
+                        .arg("title", note.title_message())
+                        .into(),
+                );
                 continue;
             }
             if saved.is_none() && doc::is_blank(&note.document) {
@@ -1126,11 +1121,14 @@ impl Store {
                             self.disk_won.insert(note.id.clone());
                             self.pending.insert(note.id.clone());
                             self.update_source(&note.id);
-                            conflicts.push(note.title());
+                            conflicts.push(note.title_message());
                         }
-                        Err(e) => {
-                            errors.push(format!("{error}; conflicted copy failed: {e}").into())
-                        }
+                        Err(e) => errors.push(
+                            Message::new("error.conflicted-copy-failed")
+                                .arg("detail", error)
+                                .arg("copy_error", e)
+                                .into(),
+                        ),
                     }
                 } else {
                     errors.push(error);
@@ -1174,11 +1172,9 @@ impl Store {
         if let Some(saved) = saved {
             let current = read_optional(&saved.path).map_err(|e| describe(&saved.path, &e))?;
             if current.as_ref() != Some(&saved.bytes) {
-                return Err(format!(
-                    "“{}” changed on disk, so it was not overwritten.",
-                    note.title()
-                )
-                .into());
+                return Err(Message::new("error.note-changed")
+                    .arg("title", note.title_message())
+                    .into());
             }
         }
         let render_started = std::time::Instant::now();
@@ -1216,14 +1212,14 @@ impl Store {
             None if note.path.is_some() => {
                 let path = note.path.as_ref().unwrap();
                 if !path.is_absolute() {
-                    return Err("Choose an absolute file location.".into());
+                    return Err(Message::new("error.absolute-path").into());
                 }
                 absolute_file(path)?
             }
             None => {
                 let relative = &library.workspace.new_note_directory;
                 if !safe_relative(relative) {
-                    return Err("The new-note location must stay inside the notes folder.".into());
+                    return Err(Message::new("error.new-note-outside").into());
                 }
                 let folder = self.directory.join(relative);
                 reject_symlink_components(&self.directory, &folder)?;
@@ -1332,12 +1328,12 @@ fn render(
         Some(saved) => saved
             .track
             .as_ref()
-            .ok_or_else(|| StoreError::from("This file is not Markdown Markraft can read."))?
+            .ok_or_else(|| StoreError::from(Message::new("error.unreadable-markdown")))?
             .save(doc::schema(), &note.document)
             .map_err(|e| {
-                StoreError::from(format!(
-                    "This edit cannot preserve the original Markdown safely: {e}"
-                ))
+                StoreError::from(
+                    Message::new("error.markdown-preserve").arg("detail", e.to_string()),
+                )
             }),
         None => Ok(format!("{}\n", doc::to_markdown_in(&note.document, house))),
     }
@@ -1379,9 +1375,9 @@ fn absolute_file(path: &Path) -> Result<PathBuf, StoreError> {
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file()) {
         return fs::canonicalize(path).map_err(|e| describe(path, &e));
     }
-    let parent = path.parent().ok_or("The file has no parent")?;
+    let parent = path.parent().ok_or(Message::new("error.no-parent"))?;
     let parent = fs::canonicalize(parent).map_err(|e| describe(parent, &e))?;
-    Ok(parent.join(path.file_name().ok_or("The file has no name")?))
+    Ok(parent.join(path.file_name().ok_or(Message::new("error.no-name"))?))
 }
 pub fn safe_relative(path: &Path) -> bool {
     path.components()
@@ -1391,27 +1387,25 @@ fn reject_symlink_components(root: &Path, path: &Path) -> Result<(), StoreError>
     let mut current = root.to_owned();
     for part in path
         .strip_prefix(root)
-        .map_err(|_| "Path is outside the notes folder")?
+        .map_err(|_| Message::new("error.path-outside"))?
         .components()
     {
         current.push(part);
         if fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err(
-                "A destination directory is a symbolic link; choose a real directory.".into(),
-            );
+            return Err(Message::new("error.symlink-directory").into());
         }
     }
     Ok(())
 }
-fn unsafe_file(path: &Path) -> Result<Option<String>, StoreError> {
+fn unsafe_file(path: &Path) -> Result<Option<Message>, StoreError> {
     use std::os::unix::fs::MetadataExt;
     let m = fs::symlink_metadata(path).map_err(|e| describe(path, &e))?;
     Ok(if m.file_type().is_symlink() {
-        Some("Symbolic links are read-only in Markraft.".into())
+        Some(Message::new("error.symlink-read-only"))
     } else if m.nlink() > 1 {
-        Some("Hard-linked files are read-only in Markraft.".into())
+        Some(Message::new("error.hardlink-read-only"))
     } else if m.permissions().readonly() {
-        Some("This file is read-only.".into())
+        Some(Message::new("error.file-read-only"))
     } else {
         None
     })
@@ -1486,7 +1480,7 @@ fn write_document(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> Result<
     {
         return Err(reason.into());
     }
-    let parent = path.parent().ok_or("The file has no parent")?;
+    let parent = path.parent().ok_or(Message::new("error.no-parent"))?;
     faults::check(path, Stage::Create).map_err(|e| describe(parent, &e))?;
     let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| describe(parent, &e))?;
     faults::check(path, Stage::Write)
@@ -1510,7 +1504,7 @@ fn write_document(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> Result<
         .as_deref()
         != expected
     {
-        return Err("The file changed while saving. Your changes were not written.".into());
+        return Err(Message::new("error.changed-during-save").into());
     }
     faults::check(path, Stage::Persist).map_err(|e| describe(path, &e))?;
     if expected.is_some() {
@@ -1539,14 +1533,14 @@ pub(crate) fn typed_stem(name: &str, extension: &str) -> Result<String, StoreErr
         name
     };
     if stem.is_empty() {
-        return Err("Enter a name.".into());
+        return Err(Message::new("error.empty-name").into());
     }
     if safe_stem(stem) != stem {
-        return Err("A name cannot contain / : \\ [ ] # ^ | or begin or end with a period.".into());
+        return Err(Message::new("error.invalid-name").into());
     }
     // The limit is the file system's, counted in bytes with the extension on.
     if stem.len() + suffix.len() > 255 {
-        return Err("That name is too long.".into());
+        return Err(Message::new("error.long-name").into());
     }
     Ok(stem.to_owned())
 }
@@ -1941,7 +1935,12 @@ mod tests {
         let (store, library) = open(root.path());
         assert_eq!(library.notes.len(), 1);
         assert_eq!(
-            store.notices().take(),
+            store
+                .notices()
+                .take()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
             ["Folder settings were unreadable and have been reset."]
         );
         let aside: Vec<_> = fs::read_dir(manifest.parent().unwrap())
@@ -1980,7 +1979,12 @@ mod tests {
         let (store, library) = open(root.path());
         assert_eq!(library.notes.len(), 1);
         assert_eq!(
-            store.notices().take(),
+            store
+                .notices()
+                .take()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
             ["“Gone.md” was deleted outside Markraft."]
         );
         drop(store);

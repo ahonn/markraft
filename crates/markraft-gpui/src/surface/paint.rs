@@ -210,7 +210,33 @@ pub(super) fn paint_pictures(
     playing
 }
 
-/// Draw one inline atom over the fillers reserving its slot.
+/// Draw formula results and diagnostics over their measured decorations.
+pub(super) fn paint_formulas(row: &LayoutLine, window: &mut Window, cx: &mut App) {
+    for formula in &row.formulas {
+        let local = row.formula_bounds(formula);
+        let bounds = Bounds::new(row.origin + local.origin, local.size);
+        match &formula.content {
+            MathContent::Formula(image) => {
+                let _ =
+                    window.paint_image(bounds, bounds, Corners::default(), image.clone(), 0, false);
+            }
+            MathContent::Error(label) => {
+                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    let _ = label.paint(
+                        bounds.origin,
+                        bounds.size.height,
+                        TextAlign::Left,
+                        Some(bounds.size.width),
+                        window,
+                        cx,
+                    );
+                });
+            }
+        }
+    }
+}
+
+/// Draw one inline atom inside its measured slot.
 pub(super) fn paint_atom(
     row: &LayoutLine,
     atom: &InlineAtom,
@@ -218,7 +244,7 @@ pub(super) fn paint_atom(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let top = row.origin.y + row.line_height * atom.visual_row as f32;
+    let top = row.origin.y + row.visual_text_top(atom.visual_row);
     // An aligned row moves its atoms with its text.
     let left = row.origin.x + atom.left + row.row_shift(atom.visual_row);
     // A picture is drawn with the line's others; see `paint_pictures`.
@@ -226,7 +252,10 @@ pub(super) fn paint_atom(
         return;
     }
     if let Some(frame) = atom.frame {
-        let bounds = Bounds::new(point(left, top), frame);
+        let frame_top = row.origin.y
+            + row.visual_top(atom.visual_row)
+            + (row.visual_height(atom.visual_row) - frame.height) * 0.5;
+        let bounds = Bounds::new(point(left, frame_top), frame);
         window
             .paint_quad(fill(bounds, style.inline_code_background).corner_radii(style.code_radius));
         let icon = PILL_ICON + PILL_ICON_GAP;
@@ -360,7 +389,10 @@ pub(super) fn paint_marker(
         Marker::Task { checked, number } => {
             if let Some(number) = number {
                 let _ = number.paint(
-                    point(bounds.left() - NUMBER_GAP - number.width, row.origin.y),
+                    point(
+                        bounds.left() - NUMBER_GAP - number.width,
+                        row.origin.y + row.visual_text_top(0),
+                    ),
                     row.line_height,
                     TextAlign::Left,
                     None,

@@ -46,7 +46,7 @@ fn edits_meeting_a_rewritten_file_are_kept_as_a_conflicted_copy(cx: &mut TestApp
     let copies = h.other_files("n.md");
     assert_eq!(copies.len(), 1, "{copies:?}");
     assert_eq!(copies[0].1, "hello mine\n");
-    assert_eq!(h.notices(), [crate::storage::CONFLICT_KEPT]);
+    assert_eq!(h.notices(), [crate::storage::conflict_kept().to_string()]);
 }
 
 // The file was rewritten while the note held what the file used to say: the
@@ -83,7 +83,14 @@ fn a_permission_change_keeps_the_edits_on_screen(cx: &mut TestAppContext) {
         note: locked,
     }]);
     assert_eq!(h.markdown(), "hello mine");
-    assert_eq!(h.active_note().read_only.as_deref(), Some("locked"));
+    assert_eq!(
+        h.active_note()
+            .read_only
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("locked")
+    );
     assert_eq!(h.other_files("n.md"), []);
     assert_eq!(h.notices(), Vec::<String>::new());
 }

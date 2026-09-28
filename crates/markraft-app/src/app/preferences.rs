@@ -37,11 +37,7 @@ impl MarkraftApp {
     ) {
         let now = self.preferences.clone();
         if before.language != now.language {
-            self.locale = now.language.locale();
-            crate::locale::set_active(self.locale);
-            if let Some(platform) = &mut self.platform {
-                platform.set_locale(self.locale);
-            }
+            self.apply_locale(crate::locale::I18n::for_preference(&now.language), cx);
         }
         if before.dark_mode != now.dark_mode {
             self.apply_theme(window, cx);
@@ -64,6 +60,13 @@ impl MarkraftApp {
             for editor in self.editors() {
                 editor.update(cx, |editor, cx| {
                     editor.set_animate_images(now.animate_images, cx)
+                });
+            }
+        }
+        if before.auto_number_equations != now.auto_number_equations {
+            for editor in self.editors() {
+                editor.update(cx, |editor, cx| {
+                    editor.set_auto_number_equations(now.auto_number_equations, cx)
                 });
             }
         }
@@ -115,6 +118,39 @@ impl MarkraftApp {
         {
             apply_markdown_style(&self.house, &now);
         }
+    }
+
+    /// Refresh translated presentation without replacing editor state or input text.
+    fn apply_locale(&mut self, i18n: crate::locale::I18n, cx: &mut Context<Self>) {
+        self.i18n = i18n;
+        *self.locale_state.write().expect("the app locale lock") = self.i18n.clone();
+        self.links.invalidate();
+        self.refresh_link_targets();
+        super::set_app_menus(&self.i18n, cx);
+        self.refresh_slash_commands();
+        if let Some(platform) = &mut self.platform {
+            platform.set_locale(&self.i18n);
+        }
+        for session in self.sessions.values() {
+            session.set_locale(&self.i18n, cx);
+        }
+        self.find_editor.update(cx, |editor, cx| {
+            editor.set_messages(self.i18n.editor_messages(), cx);
+            editor.set_placeholder(self.i18n.text("input.find"), cx);
+            editor.set_aria_label(self.i18n.text("input.find-in-note"), cx);
+        });
+        self.refresh_input_language(cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_locale(&mut self, i18n: crate::locale::I18n, cx: &mut Context<Self>) {
+        self.apply_locale(i18n, cx);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_query_text(&self, cx: &gpui::App) -> String {
+        self.query().read(cx).text().to_owned()
     }
 
     /// Register the global shortcut the preferences now name for `which`. One the

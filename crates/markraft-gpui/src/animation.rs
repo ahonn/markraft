@@ -13,20 +13,28 @@
 //!
 //! Every frame is its own [`RenderImage`], because the window's sprite atlas
 //! keeps what it uploads until the image is dropped from it: a frame the player
-//! moves off is [retired](Player::take_retired) so paint can drop it.
+//! moves off is [retired](Player::take_retired) so paint can drop it. Kept
+//! frames stay uploaded while they are replayed and are retired together when
+//! playback stops.
+//!
+//! Playback also stops once the frames it moves to go unpainted for
+//! [`UNPAINTED_LIMIT`]: the editor is hidden or no longer shown, and nothing
+//! else would tell the player so.
 use gpui::RenderImage;
 use image::{
     AnimationDecoder, Frame, Frames,
     codecs::{gif::GifDecoder, png::PngDecoder, webp::WebPDecoder},
+    metadata::LoopCount,
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     io::Cursor,
+    num::NonZeroU32,
     sync::{
         Arc,
         mpsc::{Receiver, SyncSender, TryRecvError, sync_channel},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// The decoded frames of one animation kept for replay. The same order as the
@@ -40,6 +48,8 @@ const STALL_RETRY: Duration = Duration::from_millis(10);
 /// What a frame asking for no delay, or next to none, is shown for. Browsers
 /// agree on this: such files were made for players that ignored the delay.
 const DEFAULT_DELAY: Duration = Duration::from_millis(100);
+/// How long the frames playback moves to may go unpainted before it stops.
+const UNPAINTED_LIMIT: Duration = Duration::from_millis(500);
 
 /// A decoded image as the editor draws it.
 pub(crate) struct Picture {
@@ -67,6 +77,8 @@ struct Animation {
     format: AnimatedFormat,
     bytes: Arc<[u8]>,
     first_delay: Duration,
+    /// How many passes the file asks for; `None` loops while the pointer rests.
+    plays: Option<NonZeroU32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,12 +105,32 @@ impl AnimatedFormat {
         }
     }
 
-    fn frames(self, bytes: Arc<[u8]>) -> image::ImageResult<Frames<'static>> {
+    /// The file's frames, and how many passes it asks for.
+    fn frames(self, bytes: Arc<[u8]>) -> image::ImageResult<(Frames<'static>, Option<NonZeroU32>)> {
+        fn finite(count: LoopCount) -> Option<NonZeroU32> {
+            match count {
+                LoopCount::Infinite => None,
+                LoopCount::Finite(count) => Some(count),
+            }
+        }
         let bytes = Cursor::new(bytes);
         Ok(match self {
-            Self::Gif => GifDecoder::new(bytes)?.into_frames(),
-            Self::Webp => WebPDecoder::new(bytes)?.into_frames(),
-            Self::Apng => PngDecoder::new(bytes)?.apng()?.into_frames(),
+            Self::Gif => {
+                let decoder = GifDecoder::new(bytes)?;
+                // A GIF's count is of repeats after the first pass.
+                let plays = finite(decoder.loop_count()).and_then(|count| count.checked_add(1));
+                (decoder.into_frames(), plays)
+            }
+            Self::Webp => {
+                let decoder = WebPDecoder::new(bytes)?;
+                let plays = finite(decoder.loop_count());
+                (decoder.into_frames(), plays)
+            }
+            Self::Apng => {
+                let decoder = PngDecoder::new(bytes)?.apng()?;
+                let plays = finite(decoder.loop_count());
+                (decoder.into_frames(), plays)
+            }
         })
     }
 }
@@ -116,12 +148,16 @@ impl Picture {
     /// the rest from. `None` when not even the first frame decodes.
     pub(crate) fn animated(format: AnimatedFormat, bytes: Vec<u8>) -> Option<Self> {
         let bytes: Arc<[u8]> = bytes.into();
-        let mut frames = format.frames(bytes.clone()).ok()?.filter_map(Result::ok);
+        let (frames, plays) = format.frames(bytes.clone()).ok()?;
+        // A frame that fails to decode ends the animation: what the decoder
+        // does after an error is not something to loop on.
+        let mut frames = frames.map_while(Result::ok);
         let (poster, first_delay) = render_frame(frames.next()?);
         let animation = frames.next().is_some().then_some(Animation {
             format,
             bytes,
             first_delay,
+            plays,
         });
         Some(Self { poster, animation })
     }
@@ -160,35 +196,47 @@ fn frame_bytes(image: &RenderImage) -> usize {
     image.as_bytes(0).map_or(0, <[u8]>::len)
 }
 
-type Decoded = (Arc<RenderImage>, Duration);
+type Kept = (Arc<RenderImage>, Duration);
+
+/// What the decoding thread sends the player.
+enum Decoded {
+    Frame(Arc<RenderImage>, Duration),
+    /// The last pass the file asks for has been sent.
+    Finished,
+}
 
 /// Decode `animation` pass after pass, sending every frame but the first
 /// pass's first, which the receiver already has as the poster. It stops after
-/// one pass whose frames fit `budget`, since the receiver kept them,
-/// and whenever the receiver is gone.
+/// one pass whose frames fit `budget`, since the receiver kept them and counts
+/// the passes itself, after the passes the file asks for, and whenever the
+/// receiver is gone.
 fn decode(animation: &Animation, budget: usize, frames: SyncSender<Decoded>) {
-    let mut first_pass = true;
+    let mut passes = 0;
     loop {
-        let Ok(pass) = animation.format.frames(animation.bytes.clone()) else {
+        let Ok((pass, _)) = animation.format.frames(animation.bytes.clone()) else {
             return;
         };
         let mut bytes = 0;
         let mut count = 0;
-        for frame in pass.filter_map(Result::ok) {
-            let decoded = render_frame(frame);
-            bytes += frame_bytes(&decoded.0);
+        for frame in pass.map_while(Result::ok) {
+            let (image, delay) = render_frame(frame);
+            bytes += frame_bytes(&image);
             count += 1;
-            if first_pass && count == 1 {
+            if passes == 0 && count == 1 {
                 continue;
             }
-            if frames.send(decoded).is_err() {
+            if frames.send(Decoded::Frame(image, delay)).is_err() {
                 return;
             }
         }
-        if count < 2 || (first_pass && bytes <= budget) {
+        passes += 1;
+        if count < 2 || (passes == 1 && bytes <= budget) {
             return;
         }
-        first_pass = false;
+        if animation.plays.is_some_and(|plays| passes >= plays.get()) {
+            let _ = frames.send(Decoded::Finished);
+            return;
+        }
     }
 }
 
@@ -198,10 +246,30 @@ struct Playing {
     decoded: Receiver<Decoded>,
     /// The first pass's frames, poster first, for as long as they fit the
     /// budget.
-    kept: Option<Vec<Decoded>>,
+    kept: Option<Vec<Kept>>,
     kept_bytes: usize,
     /// Where replay stands once the decoder has stopped with every frame kept.
     replaying: Option<usize>,
+    /// Whole passes shown of a kept animation, which the player replays and
+    /// so counts itself.
+    passes: u32,
+}
+
+impl Playing {
+    /// Whether the file's passes have all been shown.
+    fn done(&self) -> bool {
+        self.picture
+            .animation
+            .as_ref()
+            .and_then(|animation| animation.plays)
+            .is_some_and(|plays| self.passes >= plays.get())
+    }
+
+    fn keeps(&self, image: &Arc<RenderImage>) -> bool {
+        self.kept
+            .as_ref()
+            .is_some_and(|kept| kept.iter().any(|(frame, _)| Arc::ptr_eq(frame, image)))
+    }
 }
 
 /// The frame on screen of the picture playing, if one is.
@@ -234,6 +302,10 @@ pub(crate) struct Player {
     playing: Option<Playing>,
     /// See [`FRAME_BUDGET`].
     budget: usize,
+    /// See [`UNPAINTED_LIMIT`].
+    unpainted_limit: Duration,
+    /// Since when the frame on screen has changed without paint taking it.
+    unpainted_since: Cell<Option<Instant>>,
     /// Frames no longer shown, which paint drops from the atlas.
     retired: RefCell<Vec<Arc<RenderImage>>>,
 }
@@ -243,8 +315,31 @@ impl Default for Player {
         Self {
             playing: None,
             budget: FRAME_BUDGET,
+            unpainted_limit: UNPAINTED_LIMIT,
+            unpainted_since: Cell::new(None),
             retired: RefCell::default(),
         }
+    }
+}
+
+/// One step of playback: when to step again, and whether the frame on screen
+/// changed, which is when the editor has to paint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Tick {
+    pub(crate) delay: Duration,
+    pub(crate) changed: bool,
+}
+
+/// Queue `image` for paint to drop from the atlas, unless it is `poster`,
+/// which the picture keeps drawing, or already queued.
+fn retire(
+    retired: &RefCell<Vec<Arc<RenderImage>>>,
+    poster: &Arc<RenderImage>,
+    image: Arc<RenderImage>,
+) {
+    let mut retired = retired.borrow_mut();
+    if !Arc::ptr_eq(&image, poster) && !retired.iter().any(|queued| Arc::ptr_eq(queued, &image)) {
+        retired.push(image);
     }
 }
 
@@ -277,6 +372,7 @@ impl Player {
             kept: Some(vec![(picture.poster.clone(), first_delay)]),
             kept_bytes: frame_bytes(&picture.poster),
             replaying: None,
+            passes: 0,
         });
         Some(first_delay)
     }
@@ -284,53 +380,116 @@ impl Player {
     /// Stop playing and go back to the poster. Dropping the receiver ends the
     /// decoder at its next frame.
     pub(crate) fn stop(&mut self) {
-        if let Some(playing) = self.playing.take()
-            && !Arc::ptr_eq(&playing.shown, &playing.picture.poster)
-        {
-            self.retired.borrow_mut().push(playing.shown);
+        self.unpainted_since.set(None);
+        let Some(playing) = self.playing.take() else {
+            return;
+        };
+        let poster = &playing.picture.poster;
+        retire(&self.retired, poster, playing.shown);
+        for (frame, _) in playing.kept.into_iter().flatten() {
+            retire(&self.retired, poster, frame);
         }
     }
 
     /// Show the next frame if it is ready, and say when to ask again. `None`
-    /// once there is nothing more to show: nothing plays, or the decoder gave
-    /// out before a pass was kept.
-    pub(crate) fn advance(&mut self) -> Option<Duration> {
+    /// once there is nothing more to show: nothing plays, the file's passes
+    /// are over, which leaves its last frame on screen, the decoder gave out
+    /// before a pass was kept, which goes back to the poster, or paint has
+    /// stopped taking frames, which stops playback.
+    pub(crate) fn advance(&mut self) -> Option<Tick> {
+        if self
+            .unpainted_since
+            .get()
+            .is_some_and(|since| since.elapsed() >= self.unpainted_limit)
+        {
+            self.stop();
+            return None;
+        }
         let playing = self.playing.as_mut()?;
+        let poster = playing.picture.poster.clone();
+        let mut ended = false;
         let (next, delay) = if let Some(at) = playing.replaying {
             let kept = playing.kept.as_ref()?;
-            let at = (at + 1) % kept.len();
+            let mut at = at + 1;
+            if at == kept.len() {
+                playing.passes += 1;
+                if playing.done() {
+                    return None;
+                }
+                at = 0;
+            }
             playing.replaying = Some(at);
-            kept[at].clone()
+            playing.kept.as_ref()?[at].clone()
         } else {
             match playing.decoded.try_recv() {
-                Ok(decoded) => {
+                Ok(Decoded::Frame(image, delay)) => {
                     if let Some(kept) = &mut playing.kept {
-                        playing.kept_bytes += frame_bytes(&decoded.0);
+                        playing.kept_bytes += frame_bytes(&image);
                         if playing.kept_bytes <= self.budget {
-                            kept.push(decoded.clone());
-                        } else {
-                            playing.kept = None;
+                            kept.push((image.clone(), delay));
+                        } else if let Some(kept) = playing.kept.take() {
+                            // Too large to keep: what was kept goes, but the
+                            // frame on screen only once it is replaced.
+                            for (frame, _) in kept {
+                                if !Arc::ptr_eq(&frame, &playing.shown) {
+                                    retire(&self.retired, &poster, frame);
+                                }
+                            }
                         }
                     }
-                    decoded
+                    (image, delay)
                 }
-                Err(TryRecvError::Empty) => return Some(STALL_RETRY),
+                Ok(Decoded::Finished) => return None,
+                Err(TryRecvError::Empty) => {
+                    return Some(Tick {
+                        delay: STALL_RETRY,
+                        changed: false,
+                    });
+                }
                 Err(TryRecvError::Disconnected) => {
-                    let kept = playing.kept.as_ref().filter(|kept| kept.len() > 1)?;
-                    playing.replaying = Some(0);
-                    kept[0].clone()
+                    match playing.kept.as_ref().filter(|kept| kept.len() > 1) {
+                        Some(kept) => {
+                            let first = kept[0].clone();
+                            playing.passes += 1;
+                            if playing.done() {
+                                return None;
+                            }
+                            playing.replaying = Some(0);
+                            first
+                        }
+                        None => {
+                            // The file stopped decoding partway: show the
+                            // poster rather than a frame from the middle.
+                            ended = true;
+                            (poster.clone(), Duration::ZERO)
+                        }
+                    }
                 }
             }
         };
         let previous = std::mem::replace(&mut playing.shown, next);
-        if !Arc::ptr_eq(&previous, &playing.shown) {
-            self.retired.borrow_mut().push(previous);
+        if Arc::ptr_eq(&previous, &playing.shown) {
+            return (!ended).then_some(Tick {
+                delay,
+                changed: false,
+            });
         }
-        Some(delay)
+        if !playing.keeps(&previous) {
+            retire(&self.retired, &poster, previous);
+        }
+        if self.unpainted_since.get().is_none() {
+            self.unpainted_since.set(Some(Instant::now()));
+        }
+        (!ended).then_some(Tick {
+            delay,
+            changed: true,
+        })
     }
 
-    /// What paint is to draw, taken before it starts.
+    /// What paint is to draw, taken before it starts. Taking it is what tells
+    /// the player its frames are still being painted.
     pub(crate) fn shown(&self) -> Shown {
+        self.unpainted_since.set(None);
         Shown(
             self.playing
                 .as_ref()
@@ -349,14 +508,22 @@ impl Player {
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) mod tests {
     use super::*;
-    use image::{Delay, RgbaImage, codecs::gif::GifEncoder};
+    use image::{
+        Delay, RgbaImage,
+        codecs::gif::{GifEncoder, Repeat},
+    };
 
     /// A GIF of `count` frames, each `side` pixels square and filled with its
     /// own shade, shown for `delay_ms`.
     pub(crate) fn gif(count: u8, side: u32, delay_ms: u32) -> Vec<u8> {
+        gif_repeating(count, side, delay_ms, Repeat::Infinite)
+    }
+
+    fn gif_repeating(count: u8, side: u32, delay_ms: u32, repeat: Repeat) -> Vec<u8> {
         let mut bytes = Vec::new();
         {
             let mut encoder = GifEncoder::new(&mut bytes);
+            encoder.set_repeat(repeat).unwrap();
             encoder
                 .encode_frames((0..count).map(|n| {
                     Frame::from_parts(
@@ -384,9 +551,9 @@ pub(crate) mod tests {
     fn next_shade(player: &mut Player, picture: &Arc<Picture>) -> u8 {
         let before = player.shown().image(picture);
         for _ in 0..1000 {
-            let delay = player.advance().expect("still playing");
+            let tick = player.advance().expect("still playing");
             let now = player.shown().image(picture);
-            if !Arc::ptr_eq(&before, &now) || delay != STALL_RETRY {
+            if !Arc::ptr_eq(&before, &now) || tick.changed {
                 return red(&now);
             }
             std::thread::sleep(Duration::from_millis(1));
@@ -423,9 +590,88 @@ pub(crate) mod tests {
             Arc::ptr_eq(&playing.kept.as_ref().unwrap()[0].0, &picture.poster),
             "the poster opens the kept pass"
         );
-        // Every frame moved off waits for paint to drop it from the atlas.
-        assert_eq!(player.take_retired().len(), 7);
+        // Kept frames stay uploaded while they are replayed, so a loop never
+        // uploads a frame the atlas already holds.
         assert!(player.take_retired().is_empty());
+        player.stop();
+        assert_eq!(
+            player.take_retired().len(),
+            2,
+            "every kept frame but the poster"
+        );
+    }
+
+    #[test]
+    fn a_large_animation_retires_each_frame_it_moves_off() {
+        let picture = animated(gif(4, 4, 50));
+        let mut player = Player {
+            budget: 150,
+            ..Player::default()
+        };
+        player.play(&picture);
+        for _ in 0..6 {
+            next_shade(&mut player, &picture);
+        }
+        // Six frames moved to; the first move left the poster, which stays.
+        let retired = player.take_retired();
+        assert_eq!(retired.len(), 5);
+        assert!(
+            retired
+                .iter()
+                .all(|frame| !Arc::ptr_eq(frame, &picture.poster))
+        );
+    }
+
+    #[test]
+    fn a_file_asking_for_passes_stops_on_its_last_frame() {
+        // Two repeats after the first pass: three passes of three frames.
+        for budget in [FRAME_BUDGET, 150] {
+            let picture = animated(gif_repeating(3, 4, 50, Repeat::Finite(2)));
+            let mut player = Player {
+                budget,
+                ..Player::default()
+            };
+            player.play(&picture);
+            let mut shades = Vec::new();
+            loop {
+                match player.advance() {
+                    Some(tick) if tick.changed => shades.push(red(&player.shown().image(&picture))),
+                    Some(_) => std::thread::sleep(Duration::from_millis(1)),
+                    None => break,
+                }
+            }
+            assert_eq!(shades, [10, 20, 0, 10, 20, 0, 10, 20], "budget {budget}");
+            assert_eq!(
+                red(&player.shown().image(&picture)),
+                20,
+                "the last frame stays"
+            );
+            assert!(player.playing().is_some(), "the pointer still rests on it");
+        }
+    }
+
+    #[test]
+    fn frames_nobody_paints_stop_playback() {
+        let picture = animated(gif(3, 4, 50));
+        let mut player = Player {
+            unpainted_limit: Duration::from_millis(20),
+            ..Player::default()
+        };
+        player.play(&picture);
+        next_shade(&mut player, &picture);
+        // Paint takes the frame on screen, which keeps playback going.
+        player.shown();
+        std::thread::sleep(Duration::from_millis(30));
+        next_shade(&mut player, &picture);
+        assert!(player.playing().is_some());
+        // Move on to a frame nothing takes.
+        while !player.advance().expect("still playing").changed {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(player.advance(), None);
+        assert!(player.playing().is_none());
+        assert!(!player.take_retired().is_empty());
     }
 
     #[test]

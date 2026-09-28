@@ -1,0 +1,20 @@
+{
+  "_version": 1,
+  "asset.inside-folder": "請選擇目前資料夾內的圖片資料夾。",
+  "asset.folder-unavailable": "圖片資料夾無法使用。",
+  "asset.outside-folder": "圖片資料夾連結至所選資料夾之外。",
+  "asset.save-first": "請先儲存文件再插入圖片。",
+  "asset.invalid-name": "圖片檔名不是有效的 Unicode。",
+  "asset.images-only": "這裡只能插入圖片檔案。",
+  "asset.too-large": "圖片大小超過 16 MB。",
+  "asset.root-mapping": "不支援 typora-root-url 的 YAML 對應；請使用最上層純量。",
+  "asset.duplicate-root": "typora-root-url 值重複，無法預覽圖片根目錄。",
+  "asset.multiline-root": "不支援多行 typora-root-url；請使用單行路徑。",
+  "asset.merged-root": "不支援透過 YAML 合併繼承的圖片根目錄。",
+  "asset.root-path": "不支援此 typora-root-url 路徑；請使用本機絕對路徑或相對於文件的資料夾。",
+  "asset.remote-root": "無法預覽遠端 typora-root-url；請使用本機資料夾。",
+  "asset.invalid-root": "本機 typora-root-url 無效。",
+  "asset.save-relative": "請先儲存文件再使用相對的 typora-root-url。",
+  "asset.unsupported-value": "不支援此 typora-root-url 的 YAML 值；請使用單行純文字路徑或加上引號的路徑。",
+  "asset.operation-failed": "圖片作業失敗：%{detail}"
+}

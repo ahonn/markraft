@@ -138,7 +138,7 @@ fn main() {
             }
             (Some(store), library, None)
         }
-        Err(error) => (None, Library::default(), Some(error.to_string())),
+        Err(error) => (None, Library::default(), Some(error.into())),
     };
     let sender = instance.sender();
     let application = gpui_platform::application();
@@ -161,7 +161,7 @@ fn main() {
         markraft_vim::bind_keys(cx);
         bind_app_keys(cx);
         cx.set_reduce_motion(Platform::system_reduce_motion());
-        let platform = Platform::new(preferences.language.locale());
+        let platform = Platform::new();
         let size = size(px(480.), px(320.));
         let mut bounds = Bounds::centered(None, size, cx);
         if let Some([x, y, w, h]) = preferences.window_bounds {

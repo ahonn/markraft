@@ -1,0 +1,18 @@
+{
+  "_version": 1,
+  "refusal.bold": "Can't add bold here: ** next to punctuation stays text.",
+  "refusal.italic": "Can't add italic here: * next to punctuation stays text.",
+  "refusal.strikethrough": "Can't add strikethrough here: ~~ next to punctuation stays text.",
+  "refusal.code": "Can't add code here: ` next to punctuation stays text.",
+  "refusal.underline": "Can't add underline here: <u> next to punctuation stays text.",
+  "refusal.highlight": "Can't add highlight here: == next to punctuation stays text.",
+  "refusal.superscript": "Can't add superscript here: ^ next to punctuation stays text.",
+  "refusal.subscript": "Can't add subscript here: ~ next to punctuation stays text.",
+  "refusal.formula": "Can't add formula here: $ next to punctuation stays text.",
+  "refusal.link": "Can't add a link here: […](…) next to punctuation stays text.",
+  "refusal.other": "Can't add this format here: its delimiters next to punctuation stays text.",
+  "refusal.unreadable": "Markdown can't write this formatting here.",
+  "refusal.unsavable": "Can't save this edit without rewriting other Markdown.",
+  "refusal.invalid-file": "This file cannot be edited in Markraft: %{error}",
+  "refusal.no-transaction": "No transaction was produced."
+}

@@ -11,6 +11,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Default)]
 pub(crate) struct AccessibleText {
+    messages: crate::EditorMessages,
     /// What the last update was built from; see [`AccessibleText::update`].
     built: Option<Built>,
     /// What each line no frame laid out reads as, for the projection they
@@ -50,12 +51,12 @@ fn accessible_bounds(bounds: Bounds<Pixels>, scale: f32) -> accesskit::Rect {
 
 /// What a screen reader is told a wiki link is, so it reads as a link to
 /// somewhere rather than as the bare character the projection gives an atom.
-fn wiki_link_label(label: &str) -> String {
+fn wiki_link_label(label: &str, messages: &crate::EditorMessages) -> String {
     let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
     if label.is_empty() {
-        "Empty wiki link".into()
+        messages.text(crate::EditorMessage::EmptyWikiLink)
     } else {
-        format!("Wiki link: {label}")
+        messages.format(crate::EditorMessage::WikiLink, &[("label", &label)])
     }
 }
 
@@ -268,6 +269,10 @@ fn read_unlaid(
 }
 
 impl AccessibleText {
+    pub(crate) fn set_messages(&mut self, messages: crate::EditorMessages) {
+        self.messages = messages;
+        self.release();
+    }
     /// Give back what the last update built, for an editor that is not being
     /// drawn; the next update rebuilds it all anyway.
     pub(crate) fn release(&mut self) {
@@ -346,7 +351,7 @@ impl AccessibleText {
                     let label = crate::wiki::wiki_link_label(node);
                     Some((
                         ControlAction::OpenWikiLink(line.abs(run.start)),
-                        wiki_link_label(label),
+                        wiki_link_label(label, &self.messages),
                     ))
                 } else {
                     None
@@ -376,7 +381,9 @@ impl AccessibleText {
                 self.controls.push(AccessibleControl {
                     node_id: None,
                     action: ControlAction::EnterCallout(row.from),
-                    label: format!("Callout: {label}"),
+                    label: self
+                        .messages
+                        .format(crate::EditorMessage::Callout, &[("label", label)]),
                     checked: None,
                     bounds: accessible_bounds(bounds, scale),
                 });
@@ -386,7 +393,7 @@ impl AccessibleText {
                     node_id: None,
                     action: ControlAction::ToggleTask(row.from),
                     label: if prose.is_empty() {
-                        "Task".into()
+                        self.messages.text(crate::EditorMessage::Task)
                     } else {
                         prose.clone()
                     },
@@ -401,7 +408,7 @@ impl AccessibleText {
                     before.push(inner.end);
                 }
                 let x = f32::from(row.origin.x) * scale;
-                let y = f32::from(row.origin.y + row.line_height * visual as f32) * scale;
+                let y = f32::from(row.origin.y + row.visual_top(visual)) * scale;
                 let offsets = character_offsets(&value);
                 let positions = positions_of(line, &value, &before, &offsets, inner.end);
                 self.runs.push(TextRun {
@@ -425,7 +432,7 @@ impl AccessibleText {
                         x0: f64::from(x),
                         y0: f64::from(y),
                         x1: f64::from(x + f32::from(row.width) * scale),
-                        y1: f64::from(y + f32::from(row.line_height) * scale),
+                        y1: f64::from(y + f32::from(row.visual_height(visual)) * scale),
                     },
                     cell: row.table.map(|cell| (cell.row, cell.column)),
                 });
@@ -584,8 +591,8 @@ impl AccessibleText {
 
 impl crate::EditorView {
     pub(crate) fn active_code_pos(&self) -> Option<usize> {
-        let (index, _) = self.projection.pos_to_line_offset(self.head())?;
-        let line = self.projection.line(index)?;
+        let (index, _) = self.analysis.projection().pos_to_line_offset(self.head())?;
+        let line = self.analysis.projection().line(index)?;
         self.types
             .is_code_block(line)
             .then(|| line.block_before())
@@ -609,7 +616,8 @@ impl crate::EditorView {
         }
         let (index, position) = match action {
             ControlAction::EnterCallout(position) => {
-                let Some((index, _)) = self.projection.pos_to_line_offset(position) else {
+                let Some((index, _)) = self.analysis.projection().pos_to_line_offset(position)
+                else {
                     return;
                 };
                 (index, position)
@@ -618,16 +626,18 @@ impl crate::EditorView {
                 if self.wiki_link_at(position).is_none() {
                     return;
                 }
-                let Some((index, _)) = self.projection.pos_to_line_offset(position) else {
+                let Some((index, _)) = self.analysis.projection().pos_to_line_offset(position)
+                else {
                     return;
                 };
                 (index, position)
             }
             ControlAction::ToggleTask(position) => {
-                let Some((index, _)) = self.projection.pos_to_line_offset(position) else {
+                let Some((index, _)) = self.analysis.projection().pos_to_line_offset(position)
+                else {
                     return;
                 };
-                let Some(line) = self.projection.line(index) else {
+                let Some(line) = self.analysis.projection().line(index) else {
                     return;
                 };
                 if self
@@ -640,14 +650,15 @@ impl crate::EditorView {
                 (index, position)
             }
             ControlAction::CodeLanguage(pos) | ControlAction::CopyCode(pos) => {
-                let Some((index, line)) =
-                    self.projection
-                        .lines()
-                        .iter()
-                        .enumerate()
-                        .find(|(_, line)| {
-                            self.types.is_code_block(line) && line.block_before() == Some(pos)
-                        })
+                let Some((index, line)) = self
+                    .analysis
+                    .projection()
+                    .lines()
+                    .iter()
+                    .enumerate()
+                    .find(|(_, line)| {
+                        self.types.is_code_block(line) && line.block_before() == Some(pos)
+                    })
                 else {
                     return;
                 };
@@ -685,7 +696,7 @@ impl crate::EditorView {
             // callout, and reaching it means reaching its content.
             ControlAction::EnterCallout(_) => {}
             ControlAction::CopyCode(_) => {
-                if let Some(text) = self.projection.line_text(index) {
+                if let Some(text) = self.analysis.projection().line_text(index) {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_owned()));
                     cx.emit(crate::EditorEvent::CodeCopied);
                 }
@@ -766,12 +777,16 @@ mod tests {
         )));
         let rows = crate::surface::shape(
             &crate::surface::ShapeInput {
+                maths: None,
+                equations: None,
+                scale_factor: 1.0,
                 doc: state.doc(),
                 types: &types,
                 projection: &projection,
                 style: &style,
                 single_line: false,
                 images: &images,
+                messages: &crate::EditorMessages::ENGLISH,
                 wiki: None,
                 selection: 0..0,
                 spelling: None,
@@ -811,12 +826,16 @@ mod tests {
         )));
         let rows = crate::surface::shape(
             &crate::surface::ShapeInput {
+                maths: None,
+                equations: None,
+                scale_factor: 1.0,
                 doc: state.doc(),
                 types: &types,
                 projection: &projection,
                 style: &style,
                 single_line: false,
                 images: &images,
+                messages: &crate::EditorMessages::ENGLISH,
                 wiki: None,
                 selection: 0..0,
                 spelling: None,
@@ -877,12 +896,16 @@ mod tests {
             let doc = state.doc();
             let rows = crate::surface::shape(
                 &crate::surface::ShapeInput {
+                    maths: None,
+                    equations: None,
+                    scale_factor: 1.0,
                     doc,
                     types: &types,
                     projection: &projection,
                     style: &style,
                     single_line: false,
                     images: &images,
+                    messages: &crate::EditorMessages::ENGLISH,
                     wiki: None,
                     selection: state.selection().from(doc)..state.selection().to(doc),
                     spelling: None,
@@ -952,6 +975,7 @@ mod tests {
             .map(|&byte| line.offset_to_pos(value[..byte].chars().count()).unwrap())
             .collect();
         let text = AccessibleText {
+            messages: crate::EditorMessages::ENGLISH,
             built: None,
             unlaid: Vec::new(),
             unlaid_of: None,
@@ -993,6 +1017,7 @@ mod tests {
         };
         // Two visual rows of one line holding "你好", then the next block.
         let text = AccessibleText {
+            messages: crate::EditorMessages::ENGLISH,
             built: None,
             unlaid: Vec::new(),
             unlaid_of: None,

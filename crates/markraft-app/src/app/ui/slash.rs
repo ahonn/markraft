@@ -1,7 +1,7 @@
 use super::*;
 use markraft_core::commands::{Command as EditCommand, command};
 use markraft_gpui::{Typeahead, TypeaheadItem, TypeaheadProvider};
-use std::{any::Any, rc::Rc};
+use std::{any::Any, cell::RefCell, rc::Rc};
 
 /// The extension id the `/` menu registers under; it names its edits' origin and its
 /// host events.
@@ -15,6 +15,7 @@ const TRIGGERS: [char; 2] = ['/', '、'];
 #[derive(Clone)]
 pub(super) struct Command {
     pub id: &'static str,
+    /// Message ID, resolved at the surface that displays it.
     pub label: &'static str,
     pub shortcut: &'static str,
     /// What ⌘K runs; `None` keeps the command out of that panel.
@@ -111,19 +112,61 @@ impl Command {
 
 struct Entry {
     item: TypeaheadItem,
+    english_label: String,
     icon: Icon,
     effect: SlashEffect,
     intent: Option<Intent>,
 }
 
-/// Serves the `/` menu from a snapshot of the app's commands. Nothing here reads the
-/// app, so the provider can live in the editor for the session's lifetime.
+/// A translated command cache shared by every open editor. Updating it keeps the
+/// providers registered in their original order and preserves each editor's state.
+#[derive(Clone, Default)]
+pub(in crate::app) struct SlashCommands(Rc<RefCell<SlashCache>>);
+
+#[derive(Default)]
+struct SlashCache {
+    revision: u64,
+    provider: SlashProvider,
+}
+
+impl SlashCommands {
+    fn replace(&self, provider: SlashProvider) {
+        let mut cache = self.0.borrow_mut();
+        cache.provider = provider;
+        cache.revision = cache.revision.wrapping_add(1);
+    }
+}
+
+impl TypeaheadProvider for SlashCommands {
+    fn revision(&self) -> u64 {
+        self.0.borrow().revision
+    }
+
+    fn items(&self, query: &str) -> Vec<TypeaheadItem> {
+        self.0.borrow().provider.items(query)
+    }
+
+    fn leading(&self, item: &TypeaheadItem, color: Hsla) -> Option<AnyElement> {
+        self.0.borrow().provider.leading(item, color)
+    }
+
+    fn accept(&self, item: &TypeaheadItem) -> EditCommand {
+        self.0.borrow().provider.accept(item)
+    }
+
+    fn payload(&self, item: &TypeaheadItem) -> Option<Rc<dyn Any>> {
+        self.0.borrow().provider.payload(item)
+    }
+}
+
+#[derive(Default)]
 struct SlashProvider {
     entries: Vec<Entry>,
 }
 
 impl SlashProvider {
-    fn new(commands: Vec<Command>) -> Self {
+    fn new(commands: Vec<Command>, i18n: &crate::locale::I18n) -> Self {
+        let english = crate::locale::I18n::english();
         let mut ranked: Vec<_> = commands
             .into_iter()
             .filter_map(|command| {
@@ -131,7 +174,9 @@ impl SlashProvider {
                 Some((
                     rank,
                     Entry {
-                        item: TypeaheadItem::new(command.id, command.label).hint(command.shortcut),
+                        item: TypeaheadItem::new(command.id, i18n.text(command.label))
+                            .hint(command.shortcut),
+                        english_label: english.text(command.label),
                         icon: command.intent.as_ref().map_or(Icon::Divider, intent_icon),
                         effect,
                         intent: command.intent,
@@ -157,8 +202,10 @@ impl TypeaheadProvider for SlashProvider {
             .iter()
             .filter_map(|entry| {
                 let label = entry.item.label.to_lowercase();
-                (label.contains(&query) || entry.item.id.to_lowercase().contains(&query))
-                    .then(|| (!label.starts_with(&query), &entry.item))
+                (label.contains(&query)
+                    || entry.english_label.to_lowercase().contains(&query)
+                    || entry.item.id.to_lowercase().contains(&query))
+                .then(|| (!label.starts_with(&query), &entry.item))
             })
             .collect();
         // Stable, so the menu's own ranking decides within each group.
@@ -197,17 +244,18 @@ impl TypeaheadProvider for SlashProvider {
 }
 
 impl MarkraftApp {
+    pub(in crate::app) fn refresh_slash_commands(&self) {
+        self.slash_commands.replace(SlashProvider::new(
+            self.action_items(Caret::default()),
+            &self.i18n,
+        ));
+    }
+
     /// The `/` menu for a note editor, built from the app's one command list.
     pub(in crate::app) fn slash_menu(&self) -> Typeahead {
-        Typeahead::new(
-            SLASH_MENU,
-            TRIGGERS.to_vec(),
-            // The `/` menu is built once per note, before the editor exists, so it takes
-            // the commands that do not depend on where the caret is.
-            SlashProvider::new(self.action_items(Caret::default())),
-        )
-        // Commands are named in phrases — "Code Block", "Bullet List" — searched as typed.
-        .spaces_in_query()
+        Typeahead::new(SLASH_MENU, TRIGGERS.to_vec(), self.slash_commands.clone())
+            // Commands are named in phrases — "Code Block", "Bullet List" — searched as typed.
+            .spaces_in_query()
     }
 
     /// Run what a `/` menu item asked the host to do. The editor has already made its
@@ -238,22 +286,52 @@ mod tests {
     use markraft_core::{EditorState, EditorStateConfig, Extension};
 
     fn provider() -> SlashProvider {
-        SlashProvider::new(vec![
-            Command::new("format-link", "Link", Intent::Link).slash(10, SlashEffect::Host),
-            Command::new(
-                "format-heading",
-                "Heading 1",
-                Intent::Block(doc::Block::Heading(1)),
-            )
-            .slash(1, SlashEffect::Block(doc::Block::Heading(1))),
-            Command::new("new-action", "New Note", Intent::New),
-            Command::editor(
-                "insert-divider",
-                "Divider",
-                9,
-                SlashEffect::Block(doc::Block::Divider),
-            ),
-        ])
+        SlashProvider::new(
+            vec![
+                Command::new("format-link", "command.link", Intent::Link)
+                    .slash(10, SlashEffect::Host),
+                Command::new(
+                    "format-heading",
+                    "command.heading-1",
+                    Intent::Block(doc::Block::Heading(1)),
+                )
+                .slash(1, SlashEffect::Block(doc::Block::Heading(1))),
+                Command::new("new-action", "command.new-note", Intent::New),
+                Command::editor(
+                    "insert-divider",
+                    "command.divider",
+                    9,
+                    SlashEffect::Block(doc::Block::Divider),
+                ),
+            ],
+            &crate::locale::I18n::english(),
+        )
+    }
+
+    #[test]
+    fn locale_changes_invalidate_existing_providers_and_keep_english_aliases() {
+        let shared = super::SlashCommands::default();
+        shared.replace(provider());
+        let existing = shared.clone();
+        let before = existing.revision();
+        shared.replace(SlashProvider::new(
+            vec![
+                Command::new(
+                    "format-heading",
+                    "command.heading-1",
+                    Intent::Block(doc::Block::Heading(1)),
+                )
+                .slash(1, SlashEffect::Block(doc::Block::Heading(1))),
+            ],
+            &crate::locale::I18n::fixture("zh-Hans"),
+        ));
+        assert_ne!(existing.revision(), before);
+        for query in ["测试标题", "heading", "format-heading"] {
+            let items = existing.items(query);
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].label.as_ref(), "测试标题一");
+            assert_eq!(items[0].id.as_ref(), "format-heading");
+        }
     }
 
     fn ids(provider: &SlashProvider, query: &str) -> Vec<String> {

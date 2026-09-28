@@ -52,6 +52,11 @@
     @apply text-link transition-colors duration-150 hover:text-ink;
   }
 
+  /* A link inside a sentence is told apart by more than its colour. */
+  p a {
+    @apply underline decoration-1 underline-offset-[3px];
+  }
+
   a:focus-visible {
     @apply rounded-md outline-2 outline-offset-2 outline-brand;
   }
@@ -86,7 +91,7 @@
     box-shadow:
       inset 0 1px 0 rgb(255 255 255 / 0.18),
       0 1px 2px rgb(31 102 221 / 0.3),
-      0 6px 16px -6px rgb(47 124 246 / 0.55);
+      0 4px 10px -6px rgb(31 102 221 / 0.4);
   }
 
   .btn-primary svg {
@@ -114,7 +119,7 @@
       box-shadow:
         inset 0 1px 0 rgb(255 255 255 / 0.18),
         0 1px 2px rgb(31 102 221 / 0.35),
-        0 10px 22px -8px rgb(47 124 246 / 0.6);
+        0 6px 14px -6px rgb(31 102 221 / 0.45);
     }
 
     .btn-primary:hover svg {

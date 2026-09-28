@@ -153,6 +153,9 @@ pub(crate) fn leading_whitespace(text: &str) -> usize {
 }
 
 fn paragraph_insertions(text: &str) -> Vec<usize> {
+    if crate::math::DisplaySource::parse(text).is_some() {
+        return Vec::new();
+    }
     let lead = leading_whitespace(text);
     let lines = text.split('\n').count();
     let mut insertions: Vec<usize> = Vec::new();

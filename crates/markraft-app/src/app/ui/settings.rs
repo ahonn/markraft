@@ -20,11 +20,11 @@ mod select;
 mod shortcut;
 
 use super::*;
+use crate::locale::{I18n, LanguagePreference, available_languages};
 use crate::platform::Shortcut;
 use crate::storage::{
-    BulletMarker, CodeFence, EditorFont, EmphasisMarker, HardBreakStyle, ImageNaming,
-    LanguagePreference, LineHeight, LineWidth, NoteNaming, OrderedDelimiter, Pref, Preferences,
-    Summon, TabKey,
+    BulletMarker, CodeFence, EditorFont, EmphasisMarker, HardBreakStyle, ImageNaming, LineHeight,
+    LineWidth, NoteNaming, OrderedDelimiter, Pref, Preferences, Summon, TabKey,
 };
 use controls::{
     ChordFace, Palette, button, checkbox, chord_face, error, group_gap, line, metrics::*, row,
@@ -88,11 +88,11 @@ pub(in crate::app) fn bind_keys(cx: &mut App) {
 #[derive(Clone, Default)]
 pub(in crate::app) struct SettingsErrors {
     /// By [`Shortcut`]: the shortcut that shows the note, then the one for a new note.
-    pub(in crate::app) shortcuts: [Option<String>; 2],
-    login: Option<String>,
-    new_notes: Option<String>,
-    images: Option<String>,
-    updates: Option<String>,
+    pub(in crate::app) shortcuts: [Option<Message>; 2],
+    login: Option<Message>,
+    new_notes: Option<Message>,
+    images: Option<Message>,
+    updates: Option<Message>,
 }
 
 #[derive(Clone)]
@@ -124,8 +124,38 @@ fn shortcut_pref(which: Shortcut, shortcut: String) -> Pref {
     }
 }
 
+/// Options preserve requests outside the registry, including regional aliases.
+fn language_options(
+    i18n: &I18n,
+    preference: &LanguagePreference,
+) -> Vec<(String, LanguagePreference)> {
+    let mut languages = vec![(
+        i18n.text("settings.follow-system"),
+        LanguagePreference::System,
+    )];
+    languages.extend(available_languages().iter().map(|language| {
+        (
+            language.name.clone(),
+            LanguagePreference::Locale(language.id.clone()),
+        )
+    }));
+    // A custom tag may resolve to a registered language or English fallback.
+    if let LanguagePreference::Locale(locale) = preference
+        && !languages
+            .iter()
+            .any(|(_, available)| available == preference)
+    {
+        languages.push((
+            i18n.text_with("language.custom", &[("language", locale)]),
+            preference.clone(),
+        ));
+    }
+    languages
+}
+
 /// What a page draws, read from the app once per frame.
 struct Snapshot {
+    i18n: I18n,
     dark: bool,
     preferences: Preferences,
     /// None without the platform layer, which is what answers the question.
@@ -172,7 +202,7 @@ impl MarkraftApp {
             );
             let images = match &workspace.attachments {
                 crate::storage::AttachmentPolicy::Default => {
-                    ("Assets folder beside each note".to_owned(), false)
+                    (self.i18n.text("settings.assets-beside-note"), false)
                 }
                 crate::storage::AttachmentPolicy::WorkspaceFolder(path) => {
                     (folder_label(root, path), true)
@@ -182,6 +212,7 @@ impl MarkraftApp {
         };
         let (new_notes, images) = self.path.as_ref().map(placed).unzip();
         Snapshot {
+            i18n: self.i18n.clone(),
             dark: self.dark,
             preferences: self.preferences.clone(),
             login: self.launch_at_login,
@@ -291,11 +322,11 @@ impl MarkraftApp {
         cx.notify();
     }
 
-    pub(in crate::app) fn set_settings_error_new_notes(&mut self, error: Option<String>) {
+    pub(in crate::app) fn set_settings_error_new_notes(&mut self, error: Option<Message>) {
         self.settings_errors.new_notes = error;
     }
 
-    pub(in crate::app) fn set_settings_error_images(&mut self, error: Option<String>) {
+    pub(in crate::app) fn set_settings_error_images(&mut self, error: Option<Message>) {
         self.settings_errors.images = error;
     }
 }
@@ -386,7 +417,7 @@ fn create(
         window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, extent))),
         display_id: display.map(|(id, _)| id),
         titlebar: Some(TitlebarOptions {
-            title: Some("Settings".into()),
+            title: Some(app.read(cx).i18n.text("settings.title").into()),
             appears_transparent: true,
             traffic_light_position: Some(point(px(12.), px(9.))),
         }),
@@ -463,14 +494,14 @@ impl Page {
         Page::About,
     ];
 
-    fn title(self) -> &'static str {
-        match self {
-            Page::General => "General",
-            Page::Editor => "Editor",
-            Page::Files => "Files",
-            Page::Markdown => "Markdown",
-            Page::About => "About",
-        }
+    fn title(self, i18n: &I18n) -> String {
+        i18n.text(match self {
+            Page::General => "settings.page-general",
+            Page::Editor => "settings.page-editor",
+            Page::Files => "settings.page-files",
+            Page::Markdown => "settings.page-markdown",
+            Page::About => "settings.page-about",
+        })
     }
 
     /// What the preferences remember the page by.
@@ -515,6 +546,7 @@ impl Page {
 
 pub(in crate::app) struct SettingsView {
     link: Link,
+    title: String,
     page: Page,
     /// The toolbar, which the window opens on, so ← and → move between pages.
     toolbar: FocusHandle,
@@ -592,6 +624,7 @@ impl SettingsView {
         // The window opens on the page it was last closed on, as macOS settings do.
         let page = Page::remembered(&app.read(cx).preferences.settings_page);
         Self {
+            title: app.read(cx).i18n.text("settings.title"),
             link,
             page,
             toolbar: cx.focus_handle().tab_stop(true),
@@ -696,7 +729,7 @@ impl SettingsView {
 
     /// The title band and the row of pages under it, drawn as one surface that moves
     /// the window when dragged, the way an AppKit toolbar does.
-    fn header(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    fn header(&self, i18n: &I18n, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("settings-header")
             .flex()
@@ -734,16 +767,16 @@ impl SettingsView {
                     .h(px(TITLE_HEIGHT))
                     .text_size(px(TITLE_SIZE))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(self.page.title()),
+                    .child(self.page.title(i18n)),
             )
-            .child(self.toolbar(p, cx))
+            .child(self.toolbar(i18n, p, cx))
     }
 
-    fn toolbar(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    fn toolbar(&self, i18n: &I18n, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         Tabs::new("settings-pages")
             .key_context(TOOLBAR_CONTEXT)
             .track_focus(&self.toolbar)
-            .aria_label("Settings pages")
+            .aria_label(i18n.text("settings.pages"))
             .on_action(
                 cx.listener(|view, _: &PreviousPage, _, cx| {
                     view.set_page(view.page.step(false), cx)
@@ -759,7 +792,7 @@ impl SettingsView {
                 Tab::new(SharedString::from(format!("settings-page-{index}")))
                     .selected(selected)
                     .set_position(index + 1, Page::ALL.len())
-                    .accessibility_label(page.title())
+                    .accessibility_label(page.title(i18n))
                     .flex_col()
                     .gap(px(TOOLBAR_LABEL_GAP))
                     .min_w(px(TOOLBAR_ITEM_MIN_WIDTH))
@@ -783,7 +816,7 @@ impl SettingsView {
                         if selected { p.accent } else { p.subtitle },
                         TOOLBAR_ICON,
                     ))
-                    .child(page.title())
+                    .child(page.title(i18n))
             }))
     }
 
@@ -793,20 +826,21 @@ impl SettingsView {
         &self,
         which: Shortcut,
         chord: &str,
+        i18n: &I18n,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let bound = !chord.trim().is_empty();
         let face = if self.recording == Some(which) {
-            ChordFace::Recording
+            ChordFace::Recording(i18n.text("settings.press-shortcut"))
         } else if bound {
             ChordFace::Bound(shortcut::glyphs(chord))
         } else {
-            ChordFace::Unbound
+            ChordFace::Unbound(i18n.text("settings.record-shortcut"))
         };
         let name = match which {
-            Shortcut::Toggle => "Show and hide shortcut",
-            Shortcut::NewNote => "New note shortcut",
+            Shortcut::Toggle => i18n.text("settings.toggle-shortcut"),
+            Shortcut::NewNote => i18n.text("settings.new-note-shortcut"),
         };
         let clear = (bound && self.recording != Some(which)).then(|| {
             div()
@@ -815,7 +849,10 @@ impl SettingsView {
                     which as usize
                 )))
                 .role(Role::Button)
-                .aria_label(format!("Clear {}", name.to_lowercase()))
+                .aria_label(i18n.text(match which {
+                    Shortcut::Toggle => "settings.clear-toggle-shortcut",
+                    Shortcut::NewNote => "settings.clear-new-note-shortcut",
+                }))
                 .flex_shrink_0()
                 .cursor_pointer()
                 // Its own click, not the field's: clearing is not recording.
@@ -829,9 +866,12 @@ impl SettingsView {
             .track_focus(&self.recorders[which as usize])
             .role(Role::Button)
             .aria_label(if bound {
-                format!("{name}, {chord}")
+                i18n.text_with(
+                    "settings.bound-shortcut",
+                    &[("name", &name), ("chord", chord)],
+                )
             } else {
-                format!("{name}, none")
+                i18n.text_with("settings.unbound-shortcut", &[("name", &name)])
             })
             .cursor_pointer()
             .on_click(cx.listener(move |view, _, window, cx| {
@@ -848,44 +888,45 @@ impl SettingsView {
         let mut notes = Vec::new();
         if self.recording == Some(which) {
             if let Some(refusal) = self.refusal {
-                notes.push(error(refusal, p));
+                notes.push(error(s.i18n.text(refusal), p));
             }
         } else if let Some(refused) = &s.errors.shortcuts[which as usize] {
-            notes.push(error(refused.clone(), p));
+            notes.push(error(refused.render(&s.i18n), p));
         }
         notes
     }
 
     fn general(&self, s: &Snapshot, p: Palette, cx: &mut Context<Self>) -> Vec<Div> {
-        let theme = segmented(
-            "appearance",
-            "Appearance",
-            &[("Auto", None), ("Light", Some(false)), ("Dark", Some(true))],
-            s.preferences.dark_mode,
-            p,
-            self.sender(|value| Change::Pref(Pref::Theme(value))),
-        );
+        let languages = language_options(&s.i18n, &s.preferences.language);
         let language = self.select(
             "language",
-            "Language",
-            &[
-                ("System", LanguagePreference::System),
-                ("English", LanguagePreference::English),
-                ("简体中文", LanguagePreference::SimplifiedChinese),
-            ],
-            s.preferences.language,
+            s.i18n.text("settings.language"),
+            &languages,
+            s.preferences.language.clone(),
             |value| Change::Pref(Pref::Language(value)),
             p,
             cx,
+        );
+        let theme = segmented(
+            "appearance",
+            s.i18n.text("settings.appearance"),
+            &[
+                (s.i18n.text("settings.auto"), None),
+                (s.i18n.text("settings.light"), Some(false)),
+                (s.i18n.text("settings.dark"), Some(true)),
+            ],
+            s.preferences.dark_mode,
+            p,
+            self.sender(|value| Change::Pref(Pref::Theme(value))),
         );
 
         let (toggle, new_note) = (&s.preferences.hotkey, &s.preferences.new_note_hotkey);
         let summon = self.select(
             "summon",
-            "Show on open",
+            s.i18n.text("settings.show-on-open"),
             &[
-                ("Last Note", Summon::LastNote),
-                ("New Note", Summon::NewNote),
+                (s.i18n.text("settings.last-note"), Summon::LastNote),
+                (s.i18n.text("settings.new-note-option"), Summon::NewNote),
             ],
             s.preferences.summon,
             |value| Change::Pref(Pref::Summon(value)),
@@ -895,6 +936,7 @@ impl SettingsView {
         let mut toggle_lines = vec![line(vec![self.shortcut_field(
             Shortcut::Toggle,
             toggle,
+            &s.i18n,
             p,
             cx,
         )])];
@@ -902,6 +944,7 @@ impl SettingsView {
         let mut new_note_lines = vec![line(vec![self.shortcut_field(
             Shortcut::NewNote,
             new_note,
+            &s.i18n,
             p,
             cx,
         )])];
@@ -910,7 +953,7 @@ impl SettingsView {
         let mut startup = vec![
             checkbox(
                 "launch-at-login",
-                "Launch at login",
+                s.i18n.text("settings.launch-at-login"),
                 s.login.unwrap_or(false),
                 s.login.is_none(),
                 p,
@@ -919,23 +962,28 @@ impl SettingsView {
             .into_any_element(),
         ];
         if let Some(refused) = &s.errors.login {
-            startup.push(error(refused.clone(), p));
+            startup.push(error(refused.render(&s.i18n), p));
         }
 
         // Launching at login comes first: for an app that lives in the menu bar it is
         // what decides whether it is there at all.
         vec![
-            row(Some("Startup"), startup, p),
+            row(Some(s.i18n.text("settings.startup")), startup, p),
+            row(
+                Some(s.i18n.text("settings.language")),
+                vec![line(vec![language])],
+                p,
+            ),
             group_gap(),
-            row(Some("Show and hide"), toggle_lines, p),
-            row(Some("New note"), new_note_lines, p),
+            row(Some(s.i18n.text("settings.show-and-hide")), toggle_lines, p),
+            row(Some(s.i18n.text("settings.new-note")), new_note_lines, p),
             group_gap(),
             row(
-                Some("Note window"),
+                Some(s.i18n.text("settings.note-window")),
                 vec![
                     checkbox(
                         "always-on-top",
-                        "Keep above other windows",
+                        s.i18n.text("settings.always-on-top"),
                         s.preferences.always_on_top,
                         false,
                         p,
@@ -944,7 +992,7 @@ impl SettingsView {
                     .into_any_element(),
                     checkbox(
                         "hide-on-deactivate",
-                        "Hide when another app is used",
+                        s.i18n.text("settings.hide-on-deactivate"),
                         s.preferences.hide_on_deactivate,
                         false,
                         p,
@@ -953,7 +1001,7 @@ impl SettingsView {
                     .into_any_element(),
                     checkbox(
                         "auto-height",
-                        "Grow with the note",
+                        s.i18n.text("settings.auto-height"),
                         s.preferences.auto_height,
                         false,
                         p,
@@ -962,7 +1010,7 @@ impl SettingsView {
                     .into_any_element(),
                     checkbox(
                         "all-spaces",
-                        "Show on all desktops",
+                        s.i18n.text("settings.all-spaces"),
                         s.preferences.all_spaces,
                         false,
                         p,
@@ -971,7 +1019,7 @@ impl SettingsView {
                     .into_any_element(),
                     checkbox(
                         "follow-pointer",
-                        "Open on the display with the pointer",
+                        s.i18n.text("settings.follow-pointer"),
                         s.preferences.follow_pointer,
                         false,
                         p,
@@ -981,14 +1029,17 @@ impl SettingsView {
                 ],
                 p,
             ),
-            row(Some("Show on open"), vec![line(vec![summon])], p),
+            row(
+                Some(s.i18n.text("settings.show-on-open")),
+                vec![line(vec![summon])],
+                p,
+            ),
             group_gap(),
             row(
-                Some("Appearance"),
+                Some(s.i18n.text("settings.appearance")),
                 vec![line(vec![theme.into_any_element()])],
                 p,
             ),
-            row(Some("Language"), vec![line(vec![language])], p),
         ]
     }
 
@@ -999,8 +1050,15 @@ impl SettingsView {
         let mut size_line = vec![
             stepper(
                 "text-size",
-                format!("{size:.0} pt"),
+                s.i18n.text_with(
+                    "settings.text-size-value",
+                    &[("size", &format!("{size:.0}"))],
+                ),
                 (size > *range.start(), size < *range.end()),
+                (
+                    s.i18n.text("settings.smaller"),
+                    s.i18n.text("settings.larger"),
+                ),
                 p,
                 move |delta, _, cx| {
                     link.send(Change::Pref(Pref::TextSize(size + delta as f32)), cx)
@@ -1012,7 +1070,7 @@ impl SettingsView {
             size_line.push(
                 button(
                     "reset-text-size",
-                    "Default",
+                    s.i18n.text("settings.default"),
                     p,
                     self.on_click(Change::Pref(Pref::TextSize(Preferences::DEFAULT_TEXT_SIZE))),
                 )
@@ -1021,12 +1079,12 @@ impl SettingsView {
         }
         let font = self.select(
             "font",
-            "Font",
+            s.i18n.text("settings.font"),
             &[
-                ("System", EditorFont::System),
-                ("Serif", EditorFont::Serif),
-                ("Rounded", EditorFont::Rounded),
-                ("Mono", EditorFont::Mono),
+                (s.i18n.text("settings.font-system"), EditorFont::System),
+                (s.i18n.text("settings.font-serif"), EditorFont::Serif),
+                (s.i18n.text("settings.font-rounded"), EditorFont::Rounded),
+                (s.i18n.text("settings.font-mono"), EditorFont::Mono),
             ],
             s.preferences.font,
             |value| Change::Pref(Pref::Font(value)),
@@ -1035,11 +1093,11 @@ impl SettingsView {
         );
         let line_height = self.select(
             "line-height",
-            "Line height",
+            s.i18n.text("settings.line-height"),
             &[
-                ("Tight", LineHeight::Tight),
-                ("Normal", LineHeight::Normal),
-                ("Relaxed", LineHeight::Relaxed),
+                (s.i18n.text("settings.line-tight"), LineHeight::Tight),
+                (s.i18n.text("settings.line-normal"), LineHeight::Normal),
+                (s.i18n.text("settings.line-relaxed"), LineHeight::Relaxed),
             ],
             s.preferences.line_height,
             |value| Change::Pref(Pref::LineHeight(value)),
@@ -1048,11 +1106,11 @@ impl SettingsView {
         );
         let line_width = self.select(
             "line-width",
-            "Line width",
+            s.i18n.text("settings.line-width"),
             &[
-                ("Narrow", LineWidth::Narrow),
-                ("Normal", LineWidth::Normal),
-                ("Full", LineWidth::Full),
+                (s.i18n.text("settings.line-narrow"), LineWidth::Narrow),
+                (s.i18n.text("settings.line-normal"), LineWidth::Normal),
+                (s.i18n.text("settings.line-full"), LineWidth::Full),
             ],
             s.preferences.line_width,
             |value| Change::Pref(Pref::LineWidth(value)),
@@ -1061,11 +1119,11 @@ impl SettingsView {
         );
         let tab_key = self.select(
             "tab-key",
-            "Tab key",
+            s.i18n.text("settings.tab-key"),
             &[
-                ("Tab", TabKey::Tab),
-                ("2 Spaces", TabKey::TwoSpaces),
-                ("4 Spaces", TabKey::FourSpaces),
+                (s.i18n.text("settings.tab"), TabKey::Tab),
+                (s.i18n.text("settings.two-spaces"), TabKey::TwoSpaces),
+                (s.i18n.text("settings.four-spaces"), TabKey::FourSpaces),
             ],
             s.preferences.tab_key,
             |value| Change::Pref(Pref::TabKey(value)),
@@ -1073,17 +1131,33 @@ impl SettingsView {
             cx,
         );
         vec![
-            row(Some("Text size"), vec![line(size_line)], p),
-            row(Some("Font"), vec![line(vec![font])], p),
-            row(Some("Line height"), vec![line(vec![line_height])], p),
-            row(Some("Line width"), vec![line(vec![line_width])], p),
+            row(
+                Some(s.i18n.text("settings.text-size")),
+                vec![line(size_line)],
+                p,
+            ),
+            row(
+                Some(s.i18n.text("settings.font")),
+                vec![line(vec![font])],
+                p,
+            ),
+            row(
+                Some(s.i18n.text("settings.line-height")),
+                vec![line(vec![line_height])],
+                p,
+            ),
+            row(
+                Some(s.i18n.text("settings.line-width")),
+                vec![line(vec![line_width])],
+                p,
+            ),
             group_gap(),
             row(
-                Some("Editing"),
+                Some(s.i18n.text("settings.editing")),
                 vec![
                     checkbox(
                         "markdown-shortcuts",
-                        "Format Markdown as you type",
+                        s.i18n.text("settings.markdown-shortcuts"),
                         s.preferences.markdown_shortcuts,
                         false,
                         p,
@@ -1092,7 +1166,7 @@ impl SettingsView {
                     .into_any_element(),
                     checkbox(
                         "auto-pair",
-                        "Pair brackets and quotes",
+                        s.i18n.text("settings.auto-pair"),
                         s.preferences.auto_pair,
                         false,
                         p,
@@ -1101,7 +1175,7 @@ impl SettingsView {
                     .into_any_element(),
                     checkbox(
                         "vim-mode",
-                        "Vim mode",
+                        s.i18n.text("settings.vim-mode"),
                         s.preferences.vim_mode,
                         false,
                         p,
@@ -1111,14 +1185,18 @@ impl SettingsView {
                 ],
                 p,
             ),
-            row(Some("Tab in code"), vec![line(vec![tab_key])], p),
+            row(
+                Some(s.i18n.text("settings.tab-in-code")),
+                vec![line(vec![tab_key])],
+                p,
+            ),
             group_gap(),
             row(
-                Some("Images"),
+                Some(s.i18n.text("settings.images")),
                 vec![
                     checkbox(
                         "remote-images",
-                        "Load images linked from the web",
+                        s.i18n.text("settings.remote-images"),
                         s.preferences.remote_images,
                         false,
                         p,
@@ -1127,7 +1205,7 @@ impl SettingsView {
                     .into_any_element(),
                     checkbox(
                         "animate-images",
-                        "Play animated images under the pointer",
+                        s.i18n.text("settings.animate-images"),
                         s.preferences.animate_images,
                         false,
                         p,
@@ -1147,13 +1225,20 @@ impl SettingsView {
         let Some(root) = &s.folder else {
             let choose = self.pop_up(
                 "notes-folder",
-                "Notes folder",
-                "None",
-                vec![MenuItem::action("Choose Folder…", Change::ChooseFolder)],
+                s.i18n.text("settings.notes-folder"),
+                s.i18n.text("settings.none").into(),
+                vec![MenuItem::action(
+                    s.i18n.text("settings.choose-folder"),
+                    Change::ChooseFolder,
+                )],
                 p,
                 cx,
             );
-            return vec![row(Some("Notes folder"), vec![line(vec![choose])], p)];
+            return vec![row(
+                Some(s.i18n.text("settings.notes-folder")),
+                vec![line(vec![choose])],
+                p,
+            )];
         };
         let root_name = root
             .file_name()
@@ -1161,23 +1246,27 @@ impl SettingsView {
             .unwrap_or_else(|| root.display().to_string());
         let notes_folder = self.pop_up(
             "notes-folder",
-            "Notes folder",
-            root_name.clone(),
+            s.i18n.text("settings.notes-folder"),
+            root_name.clone().into(),
             vec![
                 MenuItem::choice(root_name.clone(), None, true),
                 MenuRow::Separator,
-                MenuItem::action("Show in Finder", Change::RevealFolder),
-                MenuItem::action("Choose Folder…", Change::ChooseFolder),
+                MenuItem::action(s.i18n.text("settings.show-in-finder"), Change::RevealFolder),
+                MenuItem::action(s.i18n.text("settings.choose-folder"), Change::ChooseFolder),
             ],
             p,
             cx,
         );
-        let mut page = vec![row(Some("Notes folder"), vec![line(vec![notes_folder])], p)];
+        let mut page = vec![row(
+            Some(s.i18n.text("settings.notes-folder")),
+            vec![line(vec![notes_folder])],
+            p,
+        )];
 
         // A location inside the notes folder: the default, or the folder chosen instead,
         // which the button names by its last component.
         let location = |id: &'static str,
-                        label: &'static str,
+                        label: String,
                         default: String,
                         (place, custom): &(String, bool),
                         reset: Change,
@@ -1193,15 +1282,18 @@ impl SettingsView {
                 rows.push(MenuItem::choice(place.clone(), None, true));
             }
             rows.push(MenuRow::Separator);
-            rows.push(MenuItem::action("Choose Folder…", choose));
-            self.pop_up(id, label, face, rows, p, cx)
+            rows.push(MenuItem::action(
+                s.i18n.text("settings.choose-folder"),
+                choose,
+            ));
+            self.pop_up(id, label, face.into(), rows, p, cx)
         };
 
         if let (Some(new_notes), Some(images)) = (&s.new_notes, &s.images) {
             page.push(group_gap());
             let mut new_note_lines = vec![line(vec![location(
                 "new-note-folder",
-                "Save new notes in",
+                s.i18n.text("settings.save-new-notes"),
                 root_name.clone(),
                 new_notes,
                 Change::ResetNewNoteLocation,
@@ -1209,58 +1301,77 @@ impl SettingsView {
                 cx,
             )])];
             if let Some(refused) = &s.errors.new_notes {
-                new_note_lines.push(error(refused.clone(), p));
+                new_note_lines.push(error(refused.render(&s.i18n), p));
             }
-            page.push(row(Some("Save new notes in"), new_note_lines, p));
+            page.push(row(
+                Some(s.i18n.text("settings.save-new-notes")),
+                new_note_lines,
+                p,
+            ));
             let naming = self.select(
                 "new-note-name",
-                "Name new notes",
+                s.i18n.text("settings.name-new-notes"),
                 &[
-                    ("First Line", NoteNaming::FirstLine),
-                    ("Date and Time", NoteNaming::DateTime),
+                    (s.i18n.text("settings.first-line"), NoteNaming::FirstLine),
+                    (s.i18n.text("settings.date-time"), NoteNaming::DateTime),
                 ],
                 s.new_note_name,
                 Change::NewNoteName,
                 p,
                 cx,
             );
-            page.push(row(Some("Name new notes"), vec![line(vec![naming])], p));
+            page.push(row(
+                Some(s.i18n.text("settings.name-new-notes")),
+                vec![line(vec![naming])],
+                p,
+            ));
 
             page.push(group_gap());
             let mut image_lines = vec![line(vec![location(
                 "image-folder",
-                "Save images in",
-                "Beside Each Note".to_owned(),
+                s.i18n.text("settings.save-images"),
+                s.i18n.text("settings.beside-each-note"),
                 images,
                 Change::ResetImageLocation,
                 Change::ImageLocation,
                 cx,
             )])];
             if let Some(refused) = &s.errors.images {
-                image_lines.push(error(refused.clone(), p));
+                image_lines.push(error(refused.render(&s.i18n), p));
             }
-            page.push(row(Some("Save images in"), image_lines, p));
+            page.push(row(
+                Some(s.i18n.text("settings.save-images")),
+                image_lines,
+                p,
+            ));
             let image_name = self.select(
                 "image-name",
-                "Name images",
+                s.i18n.text("settings.name-images"),
                 &[
-                    ("Random ID", ImageNaming::RandomId),
-                    ("Note Name and Date", ImageNaming::NoteAndDate),
+                    (s.i18n.text("settings.random-id"), ImageNaming::RandomId),
+                    (
+                        s.i18n.text("settings.note-name-date"),
+                        ImageNaming::NoteAndDate,
+                    ),
                 ],
                 s.image_name,
                 Change::ImageName,
                 p,
                 cx,
             );
-            page.push(row(Some("Name images"), vec![line(vec![image_name])], p));
+            page.push(row(
+                Some(s.i18n.text("settings.name-images")),
+                vec![line(vec![image_name])],
+                p,
+            ));
 
             page.push(group_gap());
             page.push(row(
-                Some("Deleting"),
+                Some(s.i18n.text("settings.deleting")),
                 vec![
                     checkbox(
                         "confirm-delete",
-                        "Ask before moving a note to the Trash",
+                        s.i18n.text("settings.confirm-delete"),
                         s.preferences.confirm_delete,
                         false,
                         p,
@@ -1277,11 +1388,11 @@ impl SettingsView {
     fn markdown(&self, s: &Snapshot, p: Palette, cx: &mut Context<Self>) -> Vec<Div> {
         let bullet = self.select(
             "bullet-marker",
-            "Bullet list",
+            s.i18n.text("settings.bullet-list"),
             &[
-                ("-  Item", BulletMarker::Dash),
-                ("*  Item", BulletMarker::Star),
-                ("+  Item", BulletMarker::Plus),
+                (s.i18n.text("settings.bullet-dash"), BulletMarker::Dash),
+                (s.i18n.text("settings.bullet-star"), BulletMarker::Star),
+                (s.i18n.text("settings.bullet-plus"), BulletMarker::Plus),
             ],
             s.preferences.bullet_marker,
             |value| Change::Pref(Pref::Bullet(value)),
@@ -1290,8 +1401,11 @@ impl SettingsView {
         );
         let fence = self.select(
             "code-fence",
-            "Code block",
-            &[("```", CodeFence::Backticks), ("~~~", CodeFence::Tildes)],
+            s.i18n.text("settings.code-block"),
+            &[
+                ("```".to_owned(), CodeFence::Backticks),
+                ("~~~".to_owned(), CodeFence::Tildes),
+            ],
             s.preferences.code_fence,
             |value| Change::Pref(Pref::Fence(value)),
             p,
@@ -1299,10 +1413,16 @@ impl SettingsView {
         );
         let ordered = self.select(
             "ordered-delimiter",
-            "Numbered list",
+            s.i18n.text("settings.numbered-list"),
             &[
-                ("1.  Item", OrderedDelimiter::Period),
-                ("1)  Item", OrderedDelimiter::Parenthesis),
+                (
+                    s.i18n.text("settings.ordered-period"),
+                    OrderedDelimiter::Period,
+                ),
+                (
+                    s.i18n.text("settings.ordered-parenthesis"),
+                    OrderedDelimiter::Parenthesis,
+                ),
             ],
             s.preferences.ordered_delimiter,
             |value| Change::Pref(Pref::OrderedDelimiter(value)),
@@ -1311,10 +1431,10 @@ impl SettingsView {
         );
         let hard_break = self.select(
             "hard-break",
-            "Line break",
+            s.i18n.text("settings.line-break"),
             &[
-                ("Backslash", HardBreakStyle::Backslash),
-                ("Two Spaces", HardBreakStyle::Spaces),
+                (s.i18n.text("settings.backslash"), HardBreakStyle::Backslash),
+                (s.i18n.text("settings.spaces"), HardBreakStyle::Spaces),
             ],
             s.preferences.hard_break,
             |value| Change::Pref(Pref::HardBreak(value)),
@@ -1323,10 +1443,13 @@ impl SettingsView {
         );
         let emphasis = self.select(
             "emphasis-marker",
-            "Emphasis",
+            s.i18n.text("settings.emphasis"),
             &[
-                ("*Italic*  **Bold**", EmphasisMarker::Star),
-                ("_Italic_  __Bold__", EmphasisMarker::Underscore),
+                (s.i18n.text("settings.emphasis-star"), EmphasisMarker::Star),
+                (
+                    s.i18n.text("settings.emphasis-underscore"),
+                    EmphasisMarker::Underscore,
+                ),
             ],
             s.preferences.emphasis_marker,
             |value| Change::Pref(Pref::Emphasis(value)),
@@ -1334,18 +1457,59 @@ impl SettingsView {
             cx,
         );
         vec![
-            row(Some("Bullet list"), vec![line(vec![bullet])], p),
-            row(Some("Numbered list"), vec![line(vec![ordered])], p),
-            row(Some("Code block"), vec![line(vec![fence])], p),
-            row(Some("Emphasis"), vec![line(vec![emphasis])], p),
-            row(Some("Line break"), vec![line(vec![hard_break])], p),
+            row(
+                Some(s.i18n.text("settings.bullet-list")),
+                vec![line(vec![bullet])],
+                p,
+            ),
+            row(
+                Some(s.i18n.text("settings.numbered-list")),
+                vec![line(vec![ordered])],
+                p,
+            ),
+            row(
+                Some(s.i18n.text("settings.code-block")),
+                vec![line(vec![fence])],
+                p,
+            ),
+            row(
+                Some(s.i18n.text("settings.emphasis")),
+                vec![line(vec![emphasis])],
+                p,
+            ),
+            row(
+                Some(s.i18n.text("settings.line-break")),
+                vec![line(vec![hard_break])],
+                p,
+            ),
             group_gap(),
             row(
-                Some("Emoji"),
+                Some(s.i18n.text("settings.math")),
+                vec![
+                    checkbox(
+                        "auto-number-equations",
+                        s.i18n.text("settings.auto-number-equations"),
+                        s.preferences.auto_number_equations,
+                        false,
+                        p,
+                        self.sender(|value| Change::Pref(Pref::AutoNumberEquations(value))),
+                    )
+                    .into_any_element(),
+                    div()
+                        .text_size(px(HELP_SIZE))
+                        .text_color(p.subtitle)
+                        .child(s.i18n.text("settings.math-help"))
+                        .into_any_element(),
+                ],
+                p,
+            ),
+            group_gap(),
+            row(
+                Some(s.i18n.text("settings.emoji")),
                 vec![
                     checkbox(
                         "emoji-characters",
-                        "Insert emoji as characters",
+                        s.i18n.text("settings.emoji-characters"),
                         s.preferences.emoji_characters,
                         false,
                         p,
@@ -1361,8 +1525,13 @@ impl SettingsView {
     fn about(&self, s: &Snapshot, p: Palette) -> Vec<Div> {
         let (version, build) = crate::platform::app_version();
         let version = match build {
-            Some(build) => format!("Version {version} ({build})"),
-            None => format!("Version {version}"),
+            Some(build) => s.i18n.text_with(
+                "settings.version-build",
+                &[("version", &version), ("build", &build)],
+            ),
+            None => s
+                .i18n
+                .text_with("settings.version", &[("version", &version)]),
         };
         let identity = div()
             .flex()
@@ -1390,7 +1559,7 @@ impl SettingsView {
         let mut updates = vec![
             checkbox(
                 "automatic-updates",
-                "Check for updates automatically",
+                s.i18n.text("settings.automatic-updates"),
                 s.automatic_updates.unwrap_or(false),
                 s.automatic_updates.is_none(),
                 p,
@@ -1404,7 +1573,7 @@ impl SettingsView {
         updates.push(line(vec![
             button(
                 "check-for-updates",
-                "Check for Updates…",
+                s.i18n.text("settings.check-updates"),
                 p,
                 self.on_click(Change::CheckForUpdates),
             )
@@ -1413,7 +1582,7 @@ impl SettingsView {
             .into_any_element(),
         ]));
         if let Some(refused) = &s.errors.updates {
-            updates.push(error(refused.clone(), p));
+            updates.push(error(refused.render(&s.i18n), p));
         }
 
         let open = |url: &'static str| {
@@ -1421,14 +1590,26 @@ impl SettingsView {
         };
         let links = vec![
             button("github", "GitHub", p, open(REPOSITORY)).into_any_element(),
-            button("release-notes", "Release Notes", p, open(RELEASES)).into_any_element(),
-            button("report-issue", "Report an Issue", p, open(NEW_ISSUE)).into_any_element(),
+            button(
+                "release-notes",
+                s.i18n.text("settings.release-notes"),
+                p,
+                open(RELEASES),
+            )
+            .into_any_element(),
+            button(
+                "report-issue",
+                s.i18n.text("settings.report-issue"),
+                p,
+                open(NEW_ISSUE),
+            )
+            .into_any_element(),
         ];
         let mut page = vec![
             identity,
             group_gap(),
-            row(Some("Updates"), updates, p),
-            row(Some("Links"), vec![line(links)], p),
+            row(Some(s.i18n.text("settings.updates")), updates, p),
+            row(Some(s.i18n.text("settings.links")), vec![line(links)], p),
         ];
         page.push(
             div()
@@ -1437,14 +1618,14 @@ impl SettingsView {
                 .justify_center()
                 .text_size(px(HELP_SIZE))
                 .text_color(p.subtitle)
-                .child("© 2026 Yuexun Jiang. Released under the MIT License."),
+                .child(s.i18n.text("settings.copyright")),
         );
         page
     }
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(snapshot) = self
             .link
             .app
@@ -1453,6 +1634,11 @@ impl Render for SettingsView {
         else {
             return div();
         };
+        let title = snapshot.i18n.text("settings.title");
+        if self.title != title {
+            window.set_window_title(&title);
+            self.title = title;
+        }
         let p = Palette::new(snapshot.dark);
         let rows = match self.page {
             Page::General => self.general(&snapshot, p, cx),
@@ -1509,7 +1695,7 @@ impl Render for SettingsView {
                 })
                 .detach();
             })
-            .child(self.header(p, cx))
+            .child(self.header(&snapshot.i18n, p, cx))
             .child(
                 div()
                     .id("settings-page")
@@ -1542,8 +1728,43 @@ impl Render for SettingsView {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{Page, placement};
+    use super::{Page, language_options, placement};
+    use crate::locale::{I18n, LanguagePreference, available_languages};
     use gpui::{Bounds, point, px, size};
+
+    #[::core::prelude::v1::test]
+    fn language_choices_keep_native_names_and_do_not_duplicate_a_supported_selection() {
+        let selected = LanguagePreference::Locale("en".into());
+        let choices = language_options(&I18n::english(), &selected);
+        assert_eq!(choices[0].1, LanguagePreference::System);
+        assert_eq!(choices.len(), available_languages().len() + 1);
+        for language in available_languages() {
+            assert!(choices.contains(&(
+                language.name.clone(),
+                LanguagePreference::Locale(language.id.clone()),
+            )));
+        }
+        assert_eq!(
+            choices
+                .iter()
+                .filter(|(_, value)| value == &selected)
+                .count(),
+            1
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn custom_language_requests_remain_visible_without_claiming_they_are_unsupported() {
+        for locale in ["en-AU", "future-Language"] {
+            let selected = LanguagePreference::Locale(locale.into());
+            let choices = language_options(&I18n::english(), &selected);
+            assert_eq!(
+                choices.iter().find(|(_, value)| value == &selected),
+                Some(&(format!("{locale} (custom)"), selected)),
+            );
+            assert_eq!(choices.len(), available_languages().len() + 2);
+        }
+    }
 
     const SCREEN: gpui::Size<gpui::Pixels> = size(px(1440.), px(900.));
     const EXTENT: gpui::Size<gpui::Pixels> = size(px(640.), px(460.));

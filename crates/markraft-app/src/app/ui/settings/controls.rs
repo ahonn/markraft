@@ -146,7 +146,7 @@ impl Palette {
 /// One labelled row: the label right-aligned in its column, and the lines beside it.
 /// A row without a label continues the one above, the way a second checkbox under
 /// "Window:" does.
-pub(super) fn row(label: Option<&'static str>, lines: Vec<AnyElement>, p: Palette) -> Div {
+pub(super) fn row(label: Option<String>, lines: Vec<AnyElement>, p: Palette) -> Div {
     div()
         .flex()
         .items_start()
@@ -161,7 +161,7 @@ pub(super) fn row(label: Option<&'static str>, lines: Vec<AnyElement>, p: Palett
                 .justify_end()
                 .text_size(px(TEXT_SIZE))
                 .text_color(p.text)
-                .children(label.map(|label| format!("{}:", crate::locale::legacy_text(label)))),
+                .children(label.map(|label| format!("{label}:"))),
         )
         .child(
             div()
@@ -205,9 +205,9 @@ pub(super) fn button(
     p: Palette,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Button {
-    let label: SharedString = label.into();
-    let label: SharedString = crate::locale::legacy_text(label.as_ref()).into();
+    let label = label.into();
     Button::new(id)
+        .accessibility_label(label.clone())
         .flex_shrink_0()
         .h(px(CONTROL_HEIGHT))
         .px(px(BUTTON_PAD_X))
@@ -225,13 +225,12 @@ pub(super) fn button(
 /// A labelled checkbox, the classic pane's control for anything on or off.
 pub(super) fn checkbox(
     id: &'static str,
-    label: &'static str,
+    label: String,
     checked: bool,
     disabled: bool,
     p: Palette,
     on_change: impl Fn(bool, &mut Window, &mut App) + 'static,
 ) -> Checkbox {
-    let label = crate::locale::legacy_text(label);
     Checkbox::new(id)
         .checked(checked)
         .disabled(disabled)
@@ -271,8 +270,8 @@ pub(super) fn checkbox(
 /// can be the value.
 pub(super) fn segmented<T: Copy + PartialEq + 'static>(
     id: &'static str,
-    label: &'static str,
-    options: &[(&'static str, T)],
+    label: String,
+    options: &[(String, T)],
     selected: T,
     p: Palette,
     on_change: impl Fn(T, &mut Window, &mut App) + 'static,
@@ -288,12 +287,13 @@ pub(super) fn segmented<T: Copy + PartialEq + 'static>(
         .gap(px(SEGMENTED_PAD))
         .rounded(px(SEGMENTED_RADIUS))
         .bg(p.fill)
-        .children(options.iter().enumerate().map(|(index, &(name, value))| {
+        .children(options.iter().enumerate().map(|(index, (name, value))| {
+            let value = *value;
             let chosen = value == selected;
             let on_change = on_change.clone();
             Radio::new(SharedString::from(format!("{id}-{index}")))
                 .checked(chosen)
-                .accessibility_label(name)
+                .accessibility_label(name.clone())
                 .set_position(index + 1, count)
                 .flex()
                 .items_center()
@@ -322,7 +322,7 @@ pub(super) fn segmented<T: Copy + PartialEq + 'static>(
                         .hover(move |style| style.text_color(p.text))
                 })
                 .on_change(move |_, _, window, cx| on_change(value, window, cx))
-                .child(name)
+                .child(name.clone())
         }))
 }
 
@@ -331,6 +331,7 @@ pub(super) fn stepper(
     id: &'static str,
     shown: impl Into<SharedString>,
     (can_decrease, can_increase): (bool, bool),
+    (decrease_label, increase_label): (String, String),
     p: Palette,
     on_step: impl Fn(i32, &mut Window, &mut App) + 'static,
 ) -> Div {
@@ -339,7 +340,11 @@ pub(super) fn stepper(
         let on_step = on_step.clone();
         Button::new(SharedString::from(format!("{id}-{delta}")))
             .disabled(!enabled)
-            .accessibility_label(if delta < 0 { "Smaller" } else { "Larger" })
+            .accessibility_label(if delta < 0 {
+                decrease_label.clone()
+            } else {
+                increase_label.clone()
+            })
             .size(px(CONTROL_HEIGHT))
             .rounded(px(CONTROL_RADIUS))
             .bg(p.fill)
@@ -370,20 +375,20 @@ pub(super) fn stepper(
 }
 
 pub(super) enum ChordFace {
-    Recording,
+    Recording(String),
     Bound(Vec<String>),
-    Unbound,
+    Unbound(String),
 }
 
 /// A shortcut recorder, drawn as the field macOS utilities use for one: the chord,
 /// or what to do, in a text field whose outline takes the accent while it listens.
 /// `clear` sits at its trailing end while a chord is bound.
 pub(super) fn chord_face(face: ChordFace, clear: Option<AnyElement>, p: Palette) -> Div {
-    let listening = matches!(face, ChordFace::Recording);
+    let listening = matches!(face, ChordFace::Recording(_));
     let (text, color) = match face {
-        ChordFace::Recording => ("Press shortcut…".to_owned(), p.subtitle),
+        ChordFace::Recording(text) => (text, p.subtitle),
         ChordFace::Bound(keys) => (keys.concat(), p.text),
-        ChordFace::Unbound => ("Record Shortcut".to_owned(), p.subtitle),
+        ChordFace::Unbound(text) => (text, p.subtitle),
     };
     div()
         .flex()

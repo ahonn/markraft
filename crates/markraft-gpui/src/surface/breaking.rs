@@ -112,16 +112,29 @@ pub(super) fn never_ends_line(c: char) -> bool {
     )
 }
 
-/// Wrap `line` again where gpui's wrapper broke it before closing punctuation
-/// or after opening punctuation.
+/// Object boundaries and emergency wraps still obey punctuation binding.
+/// ASCII query separators retain their ordinary path-breaking behavior.
+fn punctuation_forbids_break(previous: char, next: char) -> bool {
+    never_ends_line(previous)
+        || never_starts_line(next)
+        || "([{".contains(previous)
+        || ".,=:;!)]}\"".contains(next)
+}
+
+/// Wrap `line` again where gpui's wrapper broke it before closing punctuation,
+/// after opening punctuation, or inside an indivisible `glue` byte range.
 ///
 /// gpui's `LineWrapper` is not configurable, so its boundaries are checked
 /// rather than replaced: a line it wrapped well keeps them. One that breaks a
 /// rule is wrapped afresh, greedily, over the shaped glyphs' own positions,
 /// with the opportunities [`may_break`] allows, and a line with none that fits
-/// breaks at the glyph that overflows, as gpui's does. Spaces hang past the
-/// edge, as they do there.
-pub(super) fn keep_line_breaking_rules(line: &mut WrappedLine, wrap_width: Pixels) {
+/// breaks at the glyph that overflows, as gpui's does, except inside a glued
+/// object or across binding punctuation. Spaces hang past the edge, as they do there.
+pub(super) fn keep_line_breaking_rules(
+    line: &mut WrappedLine,
+    wrap_width: Pixels,
+    glue: &[Range<usize>],
+) {
     let text = line.text.clone();
     let layout = line.unwrapped_layout.clone();
     let char_at = |byte: usize| text.get(byte..).and_then(|rest| rest.chars().next());
@@ -137,9 +150,12 @@ pub(super) fn keep_line_breaking_rules(line: &mut WrappedLine, wrap_width: Pixel
         glyph_byte(boundary).is_some_and(|byte| {
             char_at(byte).is_some_and(never_starts_line)
                 || char_before(byte).is_some_and(never_ends_line)
+                || glue
+                    .iter()
+                    .any(|range| range.start < byte && byte < range.end)
         })
     });
-    if !broken {
+    if !broken && glue.is_empty() {
         return;
     }
     // In text order: a line shaped with fallback fonts holds one run per font,
@@ -159,8 +175,30 @@ pub(super) fn keep_line_breaking_rules(line: &mut WrappedLine, wrap_width: Pixel
         })
         .collect();
     glyphs.sort_by_key(|glyph| glyph.1);
+    let allowed_boundary = |at: usize| {
+        let byte = glyphs[at].1;
+        if glue
+            .iter()
+            .any(|range| range.start < byte && byte < range.end)
+        {
+            return false;
+        }
+        !matches!((char_before(byte), char_at(byte)),
+            (Some(previous), Some(next)) if punctuation_forbids_break(previous, next))
+    };
     let breakable = |at: usize| {
         let byte = glyphs[at].1;
+        if !allowed_boundary(at) {
+            return false;
+        }
+        // An object is a complete layout unit, even when written directly
+        // against text. Its placeholder characters never decide its breaks.
+        if glue
+            .iter()
+            .any(|range| range.start == byte || range.end == byte)
+        {
+            return true;
+        }
         match (char_before(byte), char_at(byte)) {
             (Some(previous), Some(c)) => may_break(previous, c),
             _ => false,
@@ -178,6 +216,12 @@ pub(super) fn keep_line_breaking_rules(line: &mut WrappedLine, wrap_width: Pixel
         }
         let right = glyphs.get(at + 1).map_or(layout.width, |glyph| glyph.2);
         if at > row_start && right - glyphs[row_start].2 > wrap_width {
+            if candidate.is_none() && !allowed_boundary(at) {
+                // Keep an oversized object and its binding punctuation intact.
+                // Overflow is preferable to a split object, a closing mark at
+                // the next row's start, or an opening mark at this row's end.
+                continue;
+            }
             let wrap = candidate.unwrap_or(at);
             boundaries.push(glyphs[wrap].0);
             row_start = wrap;
@@ -215,4 +259,86 @@ pub(super) fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
         || BINDING.contains(c)
         || SCRIPTS.iter().any(|range| range.contains(&c))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{keep_line_breaking_rules, punctuation_forbids_break};
+    use crate::surface::{inline_object::OBJECT, text_layout};
+    use gpui::{NoopTextSystem, TextRun, TextSystem, WindowTextSystem, WrappedLine, font, px};
+    use std::sync::Arc;
+
+    fn object_wrapped(text: &str, column_units: f32, object_units: f32) -> WrappedLine {
+        let system =
+            WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+        let runs = [TextRun {
+            len: text.len(),
+            font: font("Arial"),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }];
+        let mut line = system
+            .shape_text(text.to_owned().into(), px(16.), &runs, None, None)
+            .unwrap()
+            .remove(0);
+        let unit = system
+            .shape_line(
+                "a".into(),
+                px(16.),
+                &[TextRun {
+                    len: 1,
+                    ..runs[0].clone()
+                }],
+                None,
+            )
+            .width;
+        let object = text.find(OBJECT).unwrap();
+        let range = object..object + OBJECT.len_utf8();
+        assert!(text_layout::reserve_inline_widths(
+            &mut line,
+            &[(range.clone(), unit * object_units)]
+        ));
+        keep_line_breaking_rules(&mut line, unit * column_units, &[range]);
+        line
+    }
+
+    fn assert_boundaries(line: &WrappedLine) {
+        assert!(!line.wrap_boundaries.is_empty(), "fixture must wrap");
+        for boundary in &line.wrap_boundaries {
+            let byte = line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index;
+            let previous = line.text[..byte].chars().next_back().unwrap();
+            let next = line.text[byte..].chars().next().unwrap();
+            assert!(
+                !punctuation_forbids_break(previous, next),
+                "forbidden boundary {previous}|{next} in {:?}",
+                line.text
+            );
+        }
+    }
+
+    #[test]
+    fn inline_object_boundaries_keep_surrounding_punctuation() {
+        for text in [
+            "ab\u{fffc}，cd",
+            "a（\u{fffc}后",
+            "ab\u{fffc},cd",
+            "a(\u{fffc}z",
+        ] {
+            assert_boundaries(&object_wrapped(text, 3., 2.));
+        }
+    }
+
+    #[test]
+    fn oversized_object_and_punctuation_overflow_without_forbidden_emergency_wrap() {
+        for text in ["\u{fffc}，后", "（\u{fffc}后", "\u{fffc},z", "(\u{fffc}z"] {
+            assert_boundaries(&object_wrapped(text, 1., 3.));
+        }
+        let single = object_wrapped("\u{fffc}", 1., 3.);
+        assert!(
+            single.wrap_boundaries.is_empty(),
+            "one oversized object never splits"
+        );
+    }
 }

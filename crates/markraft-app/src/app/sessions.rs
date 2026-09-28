@@ -1,11 +1,14 @@
 //! Editor session lifetimes and workspace replacement.
 use super::*;
+use crate::locale::Message;
 use markraft_commonmark::SourceTrack;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub(super) struct Session {
     editor: Entity<EditorView>,
-    read_only: std::rc::Rc<std::cell::RefCell<Option<String>>>,
+    read_only: std::rc::Rc<std::cell::RefCell<Option<Message>>>,
+    image_root: Result<Option<PathBuf>, Message>,
+    edit_messages: EditMessages,
     _changes: Subscription,
     /// Everything else the editor's state does, a selection that moved without an edit
     /// included: the format toolbar reads it.
@@ -22,8 +25,56 @@ pub(super) struct Session {
     vim_mode: markraft_vim::Mode,
 }
 
+/// The reusable editor carries strings; retain app-owned refusals alongside
+/// the exact rejection that carried them, until the app drains its error slot.
+#[derive(Clone, Default)]
+struct EditMessages(Arc<Mutex<Option<(EditRejection, Message)>>>);
+
+impl EditMessages {
+    fn reject(
+        &self,
+        message: Message,
+        i18n: &crate::locale::I18n,
+        kind: fn(String) -> EditRejection,
+    ) -> EditRejection {
+        let rejection = kind(message.render(i18n));
+        *self.0.lock().expect("the session edit-message lock") = Some((rejection.clone(), message));
+        rejection
+    }
+
+    fn take(&self, rejection: Option<&EditRejection>) -> Option<Message> {
+        self.0
+            .lock()
+            .expect("the session edit-message lock")
+            .take()
+            .filter(|(recorded, _)| Some(recorded) == rejection)
+            .map(|(_, message)| message)
+    }
+}
+
 impl Session {
-    pub(super) fn set_read_only(&self, reason: Option<String>) {
+    pub(super) fn take_edit_error(
+        &self,
+        cx: &mut Context<MarkraftApp>,
+    ) -> Option<(EditRejection, Option<Message>)> {
+        let rejection = self.editor.update(cx, |editor, _| editor.take_edit_error());
+        // Drain even when the editor reports no error or a different one. A
+        // callback's prior message must never attach to a later rejection.
+        let message = self.edit_messages.take(rejection.as_ref());
+        rejection.map(|rejection| (rejection, message))
+    }
+
+    pub(super) fn set_locale(&self, i18n: &crate::locale::I18n, cx: &mut Context<MarkraftApp>) {
+        self.editor.update(cx, |editor, cx| {
+            editor.set_messages(i18n.editor_messages(), cx);
+            editor.set_placeholder(i18n.text("input.start-writing"), cx);
+            editor.set_image_root(
+                self.image_root.clone().map_err(|error| error.render(i18n)),
+                cx,
+            );
+        });
+    }
+    pub(super) fn set_read_only(&self, reason: Option<Message>) {
         *self.read_only.borrow_mut() = reason;
     }
     pub(super) fn editor(&self) -> &Entity<EditorView> {
@@ -163,7 +214,7 @@ impl MarkraftApp {
                     }),
                     Err(error) => Err(error),
                 }
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.message())
             });
         let image_root = source
             .as_ref()
@@ -179,12 +230,26 @@ impl MarkraftApp {
             (note.path.is_none() && self.persistence.is_some()).then(|| {
                 markraft_commonmark::SourceDocument::parse(doc::schema(), "")
                     .map(|source| Arc::new(SourceTrack::new(source)))
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| Message::from(error.to_string()))
             })
         });
         let style = self.editor_style();
+        let edit_messages = EditMessages::default();
+        let formatting_messages = edit_messages.clone();
+        let guard_messages = edit_messages.clone();
+        let format_locale = self.locale_state.clone();
         let kind =
-            doc::MarkdownKind::new(self.house.clone(), self.shortcuts.clone(), refusal_message);
+            doc::MarkdownKind::new(self.house.clone(), self.shortcuts.clone(), move |refusal| {
+                formatting_messages
+                    .reject(
+                        refusal_message(refusal),
+                        &format_locale.read().expect("the app locale lock"),
+                        EditRejection::Refused,
+                    )
+                    .message()
+                    .to_owned()
+            });
+        let guard_locale = self.locale_state.clone();
         let editor = cx.new(|cx| {
             EditorView::new(
                 Setup::new(doc::schema().clone())
@@ -195,29 +260,47 @@ impl MarkraftApp {
                 cx,
             )
             .with_style(style)
+            .with_messages(self.i18n.editor_messages())
             .with_image_base(image_base)
-            .with_image_root(image_root)
+            .with_image_root(image_root.clone().map_err(|error| error.render(&self.i18n)))
             .with_file_paste(true)
             .with_transaction_guard(move |transactions| {
+                let locale = guard_locale.read().expect("the app locale lock");
                 if reloading.load(std::sync::atomic::Ordering::Relaxed) {
-                    return Err(EditRejection::ReadOnly("Reloading from disk…".to_owned()));
+                    return Err(guard_messages.reject(
+                        Message::new("notice.reloading"),
+                        &locale,
+                        EditRejection::ReadOnly,
+                    ));
                 }
                 if let Some(reason) = protected.borrow().as_ref() {
-                    return Err(EditRejection::ReadOnly(reason.clone()));
+                    return Err(guard_messages.reject(
+                        reason.clone(),
+                        &locale,
+                        EditRejection::ReadOnly,
+                    ));
                 }
                 match &source {
                     Some(Ok(source)) => source
                         .apply_transactions(doc::schema(), transactions)
-                        .map_err(|_| EditRejection::Protected(UNSAVABLE_EDIT.to_owned())),
+                        .map_err(|_| {
+                            guard_messages.reject(
+                                Message::new(UNSAVABLE_EDIT),
+                                &locale,
+                                EditRejection::Protected,
+                            )
+                        }),
                     // The file was read but its Markdown could not be lined up with
                     // its source, so no keystroke could ever be written back.
-                    Some(Err(error)) => Err(EditRejection::Invalid(format!(
-                        "This file cannot be edited in Markraft: {error}"
-                    ))),
+                    Some(Err(error)) => Err(guard_messages.reject(
+                        Message::new("refusal.invalid-file").arg("error", error),
+                        &locale,
+                        EditRejection::Invalid,
+                    )),
                     None => Ok(()),
                 }
             })
-            .with_placeholder("Start writing…")
+            .with_placeholder(self.i18n.text("input.start-writing"))
         });
         // Only note editors get the menus; the host's query field gets no extension.
         // The `/` menu is registered first: the three typeaheads derive from the same
@@ -233,6 +316,7 @@ impl MarkraftApp {
             editor.set_wiki_resolver(resolver, cx);
             editor.set_remote_images(self.remote_image_fetcher(), cx);
             editor.set_animate_images(self.preferences.animate_images, cx);
+            editor.set_auto_number_equations(self.preferences.auto_number_equations, cx);
             editor.set_indent_text(self.preferences.tab_key.text(), cx);
             [
                 editor.add_extension(menu, cx),
@@ -266,7 +350,7 @@ impl MarkraftApp {
                 }
                 if matches!(event, EditorEvent::CodeCopied) {
                     if this.library.active_id == note_id {
-                        this.inform("Copied code", cx);
+                        this.inform(Message::new("notice.copied-code"), cx);
                     }
                     return;
                 }
@@ -336,6 +420,8 @@ impl MarkraftApp {
             Session {
                 editor,
                 read_only,
+                image_root,
+                edit_messages,
                 _changes: changes,
                 _state_changes: state_changes,
                 _extensions: extensions,
@@ -349,6 +435,41 @@ impl MarkraftApp {
         }
         self.sync_find(cx);
     }
+    /// Apply an application edit through the editor's source guard and history.
+    /// Composition is left untouched; callers can report that note as skipped.
+    pub(super) fn edit_session_document(
+        &mut self,
+        id: &str,
+        document: Node,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(session) = self.sessions.get(id) else {
+            return false;
+        };
+        let editor = session.editor().clone();
+        let accepted = editor.update(cx, |editor, cx| {
+            if editor.is_composing() {
+                return false;
+            }
+            let Some(spec) = doc::document_edit(editor.committed_document(), &document) else {
+                return false;
+            };
+            editor.dispatch_isolated([spec], cx)
+        });
+        if accepted {
+            let title = self.library.note(id).map(|note| note.title());
+            if self
+                .library
+                .set_document(id, editor.read(cx).committed_document().clone())
+            {
+                self.links
+                    .invalidate_if(title != self.library.note(id).map(|note| note.title()));
+                self.schedule_save(cx);
+            }
+        }
+        accepted
+    }
+
     pub(super) fn sync_documents(&mut self, cx: &App) {
         for (id, session) in self.sessions.iter() {
             let document = session.editor().read(cx).committed_document().clone();
@@ -385,5 +506,146 @@ impl MarkraftApp {
         self.preferences
             .remote_images
             .then(crate::remote_images::shared)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EditMessages;
+    use crate::locale::{I18n, LanguagePreference, Message};
+    use markraft_gpui::EditRejection;
+
+    #[test]
+    fn a_pending_rejection_keeps_its_message_when_the_language_changes() {
+        let messages = EditMessages::default();
+        let semantic =
+            Message::new("refusal.invalid-file").arg("error", Message::new("error.file-read-only"));
+        let rejection = messages.reject(semantic.clone(), &I18n::english(), EditRejection::Invalid);
+        let traditional = I18n::for_preference(&LanguagePreference::Locale("zh-Hant".into()));
+        let delivered = messages.take(Some(&rejection)).unwrap();
+        assert_eq!(delivered, semantic);
+        assert_ne!(delivered.render(&traditional), rejection.message());
+        assert!(messages.take(Some(&rejection)).is_none());
+    }
+
+    #[test]
+    fn unmatched_rejections_and_empty_polls_discard_old_message_records() {
+        let messages = EditMessages::default();
+        let rejection = messages.reject(
+            Message::new("refusal.unsavable"),
+            &I18n::english(),
+            EditRejection::Protected,
+        );
+        // Even identical wording from a different error kind is unrelated.
+        let unrelated = EditRejection::Invalid(rejection.message().to_owned());
+        assert!(messages.take(Some(&unrelated)).is_none());
+        assert!(messages.take(Some(&rejection)).is_none());
+        let rejection = messages.reject(
+            Message::new("refusal.unsavable"),
+            &I18n::english(),
+            EditRejection::Protected,
+        );
+        assert!(messages.take(None).is_none());
+        assert!(messages.take(Some(&rejection)).is_none());
+    }
+
+    #[gpui::test]
+    fn an_accepted_host_edit_schedules_its_own_save(cx: &mut gpui::TestAppContext) {
+        let mut h = crate::e2e::harness::open_with(cx, &[("Welcome.md", "Original\n")], |_| {});
+        // The window settles its first size, which is saved as a preference,
+        // on a later frame; let it before the workspace has to be clean.
+        h.pass_time(std::time::Duration::from_secs(1));
+        h.save();
+        let id = h.active_note().id;
+        let app = h.app.clone();
+        h.cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                assert!(!app.save.is_dirty());
+                assert!(app.edit_session_document(&id, crate::doc::from_markdown("Changed"), cx));
+                assert!(app.save.is_dirty());
+                assert!(app.library.changes.contains_key(&id));
+            });
+        });
+        h.keys("cmd-z");
+        assert_eq!(h.markdown(), "Original");
+        h.keys("cmd-shift-z");
+        assert_eq!(h.markdown(), "Changed");
+        h.save();
+        assert_eq!(
+            std::fs::read_to_string(h.notes.join("Welcome.md")).unwrap(),
+            "Changed\n"
+        );
+    }
+
+    #[gpui::test]
+    fn host_dispatch_splits_an_open_typing_group(cx: &mut gpui::TestAppContext) {
+        let mut h = crate::e2e::harness::open_with(cx, &[("Welcome.md", "Original\n")], |_| {});
+        let id = h.active_note().id;
+        let app = h.app.clone();
+        h.cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.editor()
+                    .update(cx, |editor, _| editor.begin_undo_group())
+            });
+        });
+        h.keys("cmd-down cmd-right");
+        h.type_text(" first");
+        h.cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                assert!(app.edit_session_document(&id, crate::doc::from_markdown("Changed"), cx));
+            });
+        });
+        h.keys("cmd-down cmd-right");
+        h.type_text(" last");
+        h.cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.editor().update(cx, |editor, _| editor.end_undo_group())
+            });
+        });
+        for expected in ["Changed", "Original first", "Original"] {
+            h.keys("cmd-z");
+            assert_eq!(h.markdown(), expected);
+        }
+    }
+
+    #[gpui::test]
+    fn a_rejected_host_edit_keeps_document_source_and_dirty_generation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut h = crate::e2e::harness::open_with(cx, &[("Welcome.md", "Original\n")], |_| {});
+        let id = h.active_note().id;
+        let app = h.app.clone();
+        h.cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let before = app.library.active_note().document.clone();
+                let generations = app.library.changes.clone();
+                let track = app
+                    .persistence
+                    .as_ref()
+                    .unwrap()
+                    .source(app.library.active_note().clone())
+                    .unwrap()
+                    .unwrap();
+                let source = track
+                    .snapshot()
+                    .render(crate::doc::schema(), &before)
+                    .unwrap();
+                app.sessions
+                    .get(&id)
+                    .unwrap()
+                    .set_read_only(Some("Protected".into()));
+                assert!(!app.edit_session_document(&id, crate::doc::from_markdown("Changed"), cx));
+                assert_eq!(app.library.active_note().document, before);
+                assert_eq!(app.editor().read(cx).committed_document(), &before);
+                assert_eq!(app.library.changes, generations);
+                assert_eq!(
+                    track
+                        .snapshot()
+                        .render(crate::doc::schema(), &before)
+                        .unwrap(),
+                    source
+                );
+            });
+        });
     }
 }

@@ -1,0 +1,18 @@
+{
+  "_version": 1,
+  "refusal.bold": "无法在此应用粗体：** 紧邻标点符号时会保留为文字。",
+  "refusal.italic": "无法在此应用斜体：* 紧邻标点符号时会保留为文字。",
+  "refusal.strikethrough": "无法在此应用删除线：~~ 紧邻标点符号时会保留为文字。",
+  "refusal.code": "无法在此应用代码：` 紧邻标点符号时会保留为文字。",
+  "refusal.underline": "无法在此应用底线：<u> 紧邻标点符号时会保留为文字。",
+  "refusal.highlight": "无法在此应用醒目提示：== 紧邻标点符号时会保留为文字。",
+  "refusal.superscript": "无法在此应用上标：^ 紧邻标点符号时会保留为文字。",
+  "refusal.subscript": "无法在此应用下标：~ 紧邻标点符号时会保留为文字。",
+  "refusal.formula": "无法在此应用公式：$ 紧邻标点符号时会保留为文字。",
+  "refusal.link": "无法在此应用链接：[…](…) 紧邻标点符号时会保留为文字。",
+  "refusal.other": "无法在此应用此格式：格式分隔符号 紧邻标点符号时会保留为文字。",
+  "refusal.unreadable": "Markdown 无法在此写入这种格式。",
+  "refusal.unsavable": "必须重写其他 Markdown 内容才能保存这次编辑。",
+  "refusal.invalid-file": "无法在 Markraft 中编辑此文件：%{error}",
+  "refusal.no-transaction": "未产生任何编辑操作。"
+}

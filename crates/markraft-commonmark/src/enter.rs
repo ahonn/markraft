@@ -40,8 +40,13 @@ use markraft_core::protocol::event;
 /// cells a table with that header and one empty row, the caret in it. Does
 /// not apply anywhere else, so Enter carries on as usual. A thematic break
 /// becomes a divider with an empty paragraph after it to carry on typing in.
+/// Display math stays in its paragraph: `$$` opens a matching fence, and
+/// Enter inside its source inserts a literal formula line ending.
 pub fn block_from_line() -> Command {
     command(|state| {
+        if let Some(spec) = in_display_math(state) {
+            return Some(spec);
+        }
         if let Some(spec) = out_of_footnote(state) {
             return Some(spec);
         }
@@ -51,6 +56,43 @@ pub fn block_from_line() -> Command {
             .or_else(|| divider(state, &line.text))?;
         line.replace_with(state, block)
     })
+}
+
+/// Display math remains editable Markdown inside a single paragraph. An
+/// opening fence creates its matching fence; Enter within the formula writes
+/// a source newline rather than splitting the paragraph and its delimiters.
+fn in_display_math(state: &EditorState) -> Option<TransactionSpec> {
+    if !state.selection().is_cursor() {
+        return None;
+    }
+    let resolved = state.resolved_head()?;
+    let paragraph = resolved.parent();
+    if paragraph.type_id() != state.schema().node_id(md::PARAGRAPH)? {
+        return None;
+    }
+    let items = Items::from_nodes(state.schema(), paragraph.children());
+    if items.0.iter().any(|item| matches!(item, Item::Atom(_))) {
+        return None;
+    }
+    let text = items.text();
+    let offset = resolved.parent_offset();
+    let insertion = crate::math::enter_insertion(&text, offset)?;
+    Some(insert_math_source(state, insertion))
+}
+
+fn insert_math_source(state: &EditorState, text: &str) -> TransactionSpec {
+    // Line endings use the schema's line-break atom, as parsed Markdown does.
+    // A newline embedded in a text node would save but not read back identically.
+    let nodes = crate::textblock::build(state.schema(), crate::derive::BlockKind::Paragraph, text);
+    TransactionSpec::new()
+        .changes(vec![Change::replace(
+            state.head(),
+            state.head(),
+            Slice::from_fragment(Fragment::from_nodes(nodes)),
+        )])
+        .selection(Selection::cursor(state.head() + 1))
+        .user_event(event::INPUT)
+        .scroll_into_view()
 }
 
 /// An empty paragraph after the footnote definition whose last paragraph the

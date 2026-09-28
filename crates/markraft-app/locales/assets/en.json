@@ -1,0 +1,20 @@
+{
+  "_version": 1,
+  "asset.inside-folder": "Choose an image folder inside the current folder.",
+  "asset.folder-unavailable": "The image folder is unavailable.",
+  "asset.outside-folder": "The image folder links outside the selected folder.",
+  "asset.save-first": "Save the document before inserting images.",
+  "asset.invalid-name": "The image filename is not valid Unicode.",
+  "asset.images-only": "Only image files can be inserted here.",
+  "asset.too-large": "The image exceeds 16 MB.",
+  "asset.root-mapping": "Unsupported typora-root-url YAML mapping; use a top-level scalar.",
+  "asset.duplicate-root": "Duplicate typora-root-url values; image root preview is unavailable.",
+  "asset.multiline-root": "Multiline typora-root-url is unsupported; use a single-line path.",
+  "asset.merged-root": "Image roots inherited through YAML merges are unsupported.",
+  "asset.root-path": "Unsupported typora-root-url path; use a local absolute or document-relative directory.",
+  "asset.remote-root": "Remote typora-root-url preview is unavailable; use a local directory.",
+  "asset.invalid-root": "Invalid local typora-root-url.",
+  "asset.save-relative": "Save the document before using a relative typora-root-url.",
+  "asset.unsupported-value": "Unsupported typora-root-url YAML value; use a single-line plain or quoted path.",
+  "asset.operation-failed": "Image operation failed: %{detail}"
+}

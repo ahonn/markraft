@@ -3,10 +3,10 @@ use super::{
     LayoutLine, LayoutRow, Marker, PREVIEW_GAP, QUOTE_BAR, ROUNDED_FONT, Runs, ShapeInput,
     TABLE_LINE, TableCell, TableScroll, UI_FONT, Widening, atom_label, caret_cell_frame,
     cell_under, chrome_marker, column_demands, column_widths, decoration_of, display_text,
-    drawn_image, file_name, gap_below, max_indent, merge_row_centers, picture_source, place_table,
-    quote_bars, reveal_offset, shape, table_overflows, text_runs, unbreakable_units,
-    visible_strips,
+    drawn_image, gap_below, max_indent, merge_row_centers, picture_source, place_table, quote_bars,
+    reveal_offset, shape, table_overflows, text_runs, unbreakable_units, visible_strips,
 };
+use super::{OBJECT, char_to_byte};
 use crate::style::EditorStyle;
 use crate::typeahead::tests::{at, run, state_of};
 use gpui::{Bounds, NoopTextSystem, Pixels, TextSystem, WindowTextSystem, point, px, size};
@@ -16,6 +16,7 @@ use markraft_core::EditorState;
 use markraft_core::commands::ColumnAlignment;
 use markraft_core::commands::insert_text;
 use markraft_core::kind::DocTypes;
+use markraft_core::kind::reading::file_name;
 use markraft_core::projection::{Line, RunContent, projection_of};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -30,6 +31,7 @@ fn probe(index: usize, line: &markraft_core::projection::Line) -> LayoutLine {
         from: line.from(),
         char_len: line.len(),
         rows: Vec::new(),
+        visuals: Vec::new(),
         origin: point(px(0.), px(0.)),
         line_height: px(10.),
         height: px(10.),
@@ -47,8 +49,10 @@ fn probe(index: usize, line: &markraft_core::projection::Line) -> LayoutLine {
         quote_bars: Vec::new(),
         widenings: Vec::new(),
         atoms: Vec::new(),
+        formulas: Vec::new(),
         table: None,
         reuse: None,
+        math_pending: false,
         rendered: None,
         row_shifts: Vec::new(),
         align: markraft_core::kind::Align::Start,
@@ -218,6 +222,10 @@ fn per_line<T>(
     let spelling = markraft_commonmark::CommonMarkSpelling::new(state.schema().clone());
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
+        maths: None,
+        equations: None,
+        scale_factor: 1.,
         spelling: Some(&spelling),
         wiki: None,
         doc: state.doc(),
@@ -448,6 +456,10 @@ fn shaped_in(
     let style = EditorStyle::notes();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
+        maths: None,
+        equations: None,
+        scale_factor: 1.,
         spelling: Some(&spelling),
         wiki: None,
         doc: state.doc(),
@@ -474,6 +486,10 @@ fn pill_labels(source: &str, resolves: fn(&str) -> bool) -> Vec<String> {
     let wiki: crate::WikiResolver = Box::new(resolves);
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
+        maths: None,
+        equations: None,
+        scale_factor: 1.,
         spelling: Some(&spelling),
         wiki: Some(&wiki),
         doc: state.doc(),
@@ -502,6 +518,10 @@ fn fetching_atoms(source: &str) -> Vec<(String, Option<gpui::Size<Pixels>>)> {
     let style = EditorStyle::notes();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
+        maths: None,
+        equations: None,
+        scale_factor: 1.,
         spelling: Some(&spelling),
         wiki: None,
         doc: state.doc(),
@@ -568,6 +588,10 @@ fn runs_styled(
     let types = callout_types();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
+        maths: None,
+        equations: None,
+        scale_factor: 1.,
         spelling: Some(&spelling),
         wiki: None,
         doc: state.doc(),
@@ -1143,6 +1167,10 @@ fn a_picture_stays_in_view_under_its_spelled_out_source() {
     let types = callout_types();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
+        maths: None,
+        equations: None,
+        scale_factor: 1.,
         spelling: Some(&spelling),
         wiki: None,
         doc: reached.doc(),
@@ -1200,6 +1228,10 @@ fn a_remote_picture_stays_in_view_under_its_spelled_out_source() {
     let shaped = |images: &crate::images::Images| {
         let input = ShapeInput {
             images,
+            messages: &crate::EditorMessages::ENGLISH,
+            maths: None,
+            equations: None,
+            scale_factor: 1.,
             spelling: Some(&spelling),
             wiki: None,
             doc: reached.doc(),
@@ -1312,7 +1344,7 @@ fn a_raw_inline_atom_reserves_the_width_of_its_own_source() {
     // against it exactly as it does after a wiki link.
     let row = &shaped("press <var>K</var> twice")[0];
     assert_eq!(row.rows[0].text(), "press <var>K</var> twice");
-    assert!(!row.rows[0].text().contains(super::PILL_FILLER));
+    assert!(!row.rows[0].text().contains(super::OBJECT));
 }
 
 /// A point inside a tag shown as source finds the tag and how far into it
@@ -1402,7 +1434,7 @@ fn text_after_a_wiki_link_starts_at_the_labels_right_edge() {
     let row = &lines[0];
     // The display text holds the label itself; nothing stands in for it.
     assert_eq!(row.rows[0].text(), "see Missing Page. end");
-    assert!(!row.rows[0].text().contains(super::PILL_FILLER));
+    assert!(!row.rows[0].text().contains(super::OBJECT));
     // Four projection characters — `see ` — then the atom, then `. end`.
     assert_eq!(row.char_len, 4 + 1 + 5);
     let atom = row.rectangles(4..5, false);
@@ -2158,6 +2190,10 @@ fn the_caret_never_swaps_a_marker_for_its_spelling() {
     let heading_pos = projection.lines()[0].from();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
+        maths: None,
+        equations: None,
+        scale_factor: 1.,
         spelling: Some(&spelling),
         doc: state.doc(),
         types: &types,
@@ -2228,6 +2264,10 @@ fn the_caret_never_swaps_a_marker_for_its_spelling() {
     let rows = shape(
         &ShapeInput {
             images: &images,
+            messages: &crate::EditorMessages::ENGLISH,
+            maths: None,
+            equations: None,
+            scale_factor: 1.,
             spelling: Some(&spelling),
             doc: state.doc(),
             types: &types,
@@ -2330,6 +2370,10 @@ fn a_focused_quote_draws_as_it_does_unfocused() {
     let quote_pos = projection.lines()[0].from();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
+        maths: None,
+        equations: None,
+        scale_factor: 1.,
         spelling: Some(&spelling),
         doc: state.doc(),
         types: &types,
@@ -2480,6 +2524,10 @@ fn the_reveal_key_changes_only_with_the_revealed_set() {
         let pos = |offset| projection.lines()[0].offset_to_pos(offset).unwrap();
         let input = ShapeInput {
             images: &images,
+            messages: &crate::EditorMessages::ENGLISH,
+            maths: None,
+            equations: None,
+            scale_factor: 1.,
             spelling: None,
             wiki: None,
             doc: state.doc(),
@@ -2547,6 +2595,10 @@ fn sync_state(
     let selection = state.selection();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
+        maths: None,
+        equations: None,
+        scale_factor: 1.,
         spelling: Some(&spelling),
         wiki: Some(&wiki),
         doc,
@@ -2851,6 +2903,10 @@ fn shaped_revealing(
     let types = callout_types();
     let input = ShapeInput {
         images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
+        maths: None,
+        equations: None,
+        scale_factor: 1.,
         spelling: Some(&spelling),
         wiki: None,
         doc: state.doc(),
@@ -2989,4 +3045,249 @@ fn a_find_hit_has_a_rectangle_on_its_line() {
     if let Some(bold_cell) = bold_cell {
         assert!(rects[0].origin.x > bold_cell.x);
     }
+}
+
+/// Shape against completed native formula results, or leave requests pending.
+fn shaped_math(
+    source: &str,
+    selection: Range<usize>,
+    composition: Option<Range<usize>>,
+    complete: bool,
+    width: Pixels,
+) -> Vec<LayoutLine> {
+    let state = state_of(source);
+    let projection = projection_of(&state);
+    let types = callout_types();
+    let style = EditorStyle::notes();
+    let maths = crate::maths::Maths::default();
+    if complete {
+        for (index, line) in projection.lines().iter().enumerate() {
+            for formula in
+                crate::math_spans::formula_spans(line, projection.line_text(index).unwrap(), &types)
+            {
+                let request = crate::math::MathRequest::new(
+                    formula.tex,
+                    formula.display,
+                    style.font_size(types.heading_level(line), false).into(),
+                    1.,
+                    style.text,
+                );
+                maths.finish(vec![(request.clone(), crate::math::render_math(&request))]);
+            }
+        }
+    }
+    let images = crate::images::Images::default();
+    let input = ShapeInput {
+        images: &images,
+        messages: &crate::EditorMessages::ENGLISH,
+        maths: Some(&maths),
+        equations: None,
+        scale_factor: 1.,
+        doc: state.doc(),
+        types: &types,
+        projection: &projection,
+        style: &style,
+        single_line: false,
+        wiki: None,
+        spelling: None,
+        selection,
+        composition,
+    };
+    shape(&input, width, &text_system())
+}
+
+#[test]
+fn pending_formula_preserves_complete_editable_source() {
+    let rows = shaped_math("before $x^2$ after", 0..0, None, false, px(600.));
+    assert_eq!(rows[0].rows[0].text(), "before $x^2$ after");
+    assert!(rows[0].formulas.is_empty());
+    assert!(rows[0].widenings.is_empty());
+}
+
+#[test]
+fn formula_preview_replaces_the_whole_source_range() {
+    let rows = shaped_math("中文 $x^2$ after", 0..0, None, true, px(600.));
+    let row = &rows[0];
+    assert_eq!(row.formulas.len(), 1);
+    assert_eq!(row.widenings.len(), 1);
+    let replacement = row.widenings[0];
+    assert_eq!(replacement.source, 3);
+    assert_eq!(replacement.source_len, 5);
+    assert_eq!(row.to_source(replacement.display), 3);
+    assert_eq!(row.to_source(replacement.display + replacement.len), 8);
+    assert_eq!(row.to_display(8), replacement.display + replacement.len);
+    assert!(!row.rows[0].text().contains('$'));
+}
+
+#[test]
+fn adjacent_formula_previews_map_independently() {
+    let rows = shaped_math("$a$$b$", 0..0, None, true, px(600.));
+    assert_eq!(rows[0].formulas.len(), 2);
+    assert_eq!(rows[0].widenings.len(), 2);
+    assert_eq!(rows[0].widenings[0].source_len, 3);
+    assert_eq!(rows[0].widenings[1].source, 3);
+}
+
+#[test]
+fn revealed_formula_keeps_source_and_live_preview_below_it() {
+    let rows = shaped_math("before $x^2$ after", 10..10, None, true, px(600.));
+    let row = &rows[0];
+    assert_eq!(row.rows[0].text(), "before $x^2$ after");
+    assert!(row.widenings.is_empty());
+    assert_eq!(row.formulas.len(), 1);
+    assert!(row.formulas[0].bounds.top() >= row.text_height() + PREVIEW_GAP);
+    assert!(row.height >= row.formulas[0].bounds.bottom());
+}
+
+#[test]
+fn composition_reveals_formula_without_moving_selection() {
+    let rows = shaped_math("before $x^2$ after", 0..0, Some(9..11), true, px(600.));
+    assert_eq!(rows[0].rows[0].text(), "before $x^2$ after");
+    assert!(rows[0].widenings.is_empty());
+    assert_eq!(rows[0].formulas.len(), 1);
+}
+
+#[test]
+fn invalid_formula_keeps_source_and_reports_error() {
+    let source = r"before $\unknownCommand{x}$ after";
+    let rows = shaped_math(source, 0..0, None, true, px(600.));
+    assert_eq!(rows[0].rows[0].text(), source);
+    assert!(rows[0].widenings.is_empty());
+    assert!(matches!(
+        rows[0].formulas[0].content,
+        super::MathContent::Error(_)
+    ));
+}
+
+#[test]
+fn tall_inline_formula_fits_above_and_below_its_text_baseline() {
+    let rows = shaped_math(
+        r"Before $\frac{1}{\frac{2}{3}}$ after",
+        0..0,
+        None,
+        true,
+        px(600.),
+    );
+    let row = &rows[0];
+    let formula = &row.formulas[0];
+    assert!(formula.bounds.top() >= -px(0.01));
+    assert!(formula.bounds.bottom() <= row.visual_height(0) + px(0.01));
+    assert!(row.line_height > EditorStyle::notes().body_size);
+}
+
+#[test]
+fn multiline_display_formula_is_one_centered_preview_row() {
+    let rows = shaped_math("$$\nE=mc^2\n$$", 0..0, None, true, px(400.));
+    let row = &rows[0];
+    assert_eq!(row.rows.len(), 1);
+    assert_eq!(row.formulas.len(), 1);
+    assert_eq!(row.widenings[0].source_len, 12);
+    assert!(row.formulas[0].bounds.left() > px(0.));
+    assert!(row.formulas[0].bounds.right() <= row.width);
+}
+
+#[test]
+fn formulas_render_inside_table_cells() {
+    let rows = shaped_math(
+        "| Formula |\n| --- |\n| $x^2$ |",
+        0..0,
+        None,
+        true,
+        px(600.),
+    );
+    let formula_cell = rows.iter().find(|row| !row.formulas.is_empty()).unwrap();
+    assert!(formula_cell.table.is_some());
+    assert_eq!(formula_cell.widenings[0].source_len, 5);
+    assert!(formula_cell.formulas[0].bounds.right() <= formula_cell.width);
+}
+
+#[test]
+fn adjacent_formula_placeholder_stays_on_one_visual_row_in_narrow_paragraphs() {
+    for prefix in ["prefixprefix", "中文段落中文段落"] {
+        let source = format!(
+            r"{prefix}$\frac{{x^2+y^2+z^2+w^2+q^2+r^2+s^2+t^2+u^2+v^2+n^2+m^2+p^2}}{{a+b}}$suffix"
+        );
+        let rows = shaped_math(&source, 0..0, None, true, px(160.));
+        let row = &rows[0];
+        let replacement = row.widenings[0];
+        let rectangles = row.display_rectangles(
+            replacement.display..replacement.display + replacement.len,
+            false,
+        );
+        assert_eq!(rectangles.len(), 1, "{prefix}: a formula cannot span rows");
+        assert!(row.formulas[0].bounds.right() <= row.width + px(0.01));
+        assert!(row.formulas[0].bounds.left() >= px(0.));
+        assert!(row.formulas[0].bounds.bottom() <= row.text_height() + px(0.01));
+        assert_eq!(row.to_source(replacement.display), prefix.chars().count());
+        assert_eq!(
+            row.to_source(replacement.display + replacement.len),
+            source.chars().count() - "suffix".len()
+        );
+    }
+}
+
+#[test]
+fn display_formula_live_preview_is_centered_below_source() {
+    let rows = shaped_math("$$\nE=mc^2\n$$", 5..5, None, true, px(400.));
+    let row = &rows[0];
+    let preview = &row.formulas[0];
+    assert!(preview.bounds.top() > row.text_height());
+    assert!((preview.bounds.center().x - row.width / 2.).abs() < px(0.01));
+}
+
+#[test]
+fn tall_object_only_grows_its_visual_row_and_all_queries_agree() {
+    let source = r"Before ordinary words ordinary words $\frac{1}{\frac{2}{3}}$ after ordinary words ordinary words ordinary words ordinary words";
+    let rows = shaped_math(source, 0..0, None, true, px(180.));
+    let row = &rows[0];
+    assert!(row.visual_rows() >= 3);
+    let object = row.widenings[0];
+    assert_eq!(object.len, 1);
+    assert_eq!(
+        row.rows[0].text().chars().filter(|&c| c == OBJECT).count(),
+        1
+    );
+    let visual = row.visual_for_offset(object.source, false);
+    assert!(row.visual_height(visual) > row.line_height);
+    for index in 0..row.visual_rows() {
+        if index != visual {
+            assert_eq!(row.visual_height(index), row.line_height);
+        }
+        let local_y = row.visual_top(index) + row.visual_height(index) / 2.;
+        assert_eq!(row.visual_at(local_y), index);
+    }
+    let bounds = row.rectangles(object.source..object.source + object.source_len, false);
+    assert_eq!(bounds.len(), 1);
+    assert_eq!(bounds[0].size.height, row.visual_height(visual));
+    let caret = row.caret(object.source, false);
+    assert_eq!(caret.y - row.origin.y, row.visual_text_top(visual));
+    let formula = &row.formulas[0].bounds;
+    assert!(formula.top() >= row.visual_top(visual) - px(0.01));
+    assert!(formula.bottom() <= row.visual_top(visual) + row.visual_height(visual) + px(0.01));
+    let logical = &row.rows[0];
+    let byte = char_to_byte(logical.text(), object.display);
+    let width = logical
+        .line
+        .unwrapped_layout
+        .x_for_index(byte + OBJECT.len_utf8())
+        - logical.line.unwrapped_layout.x_for_index(byte);
+    assert!((width - formula.size.width).abs() < px(0.01));
+}
+
+#[test]
+fn ordinary_text_keeps_the_wrapped_layout_fast_path() {
+    let lines = shaped_in(
+        "Ordinary text stays on the existing shaping path even across several visual rows.",
+        callout_types(),
+        px(200.),
+        0..0,
+    );
+    assert!(lines[0].visual_rows() > 1);
+    assert!(lines.iter().all(|line| line.visuals.is_empty()));
+    assert!(
+        lines
+            .iter()
+            .flat_map(|line| &line.rows)
+            .all(|row| row.paint_rows.is_empty())
+    );
 }

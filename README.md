@@ -31,6 +31,7 @@ Press <kbd>⌥N</kbd> in any app to write, and again to put it away. Notes are p
 - **Floating window.** <kbd>⌥N</kbd> shows or hides it over the current app. It stays on top, grows with the note, and can appear on every Space or on the screen with the pointer. A second hotkey for a new note can be set in Settings.
 - **Live Markdown.** Formatting is shown as you type, in the style of Typora; inline marks such as `**` appear around the caret only.
 - **Tables, links and more.** Tables edited cell by cell, task lists, `[[wiki links]]` with completion, callouts, footnotes, images and highlighted code blocks.
+- **Math.** Native LaTeX formulas with `$…$` inline and `$$…$$` blocks. Type `$$` and press Return to start a block; edit its source with a live preview, then press <kbd>⌘Return</kbd> to continue below it. Move the caret into a formula to edit it again. Invalid formulas keep their source and show an error. Rendering works offline through [RaTeX](https://github.com/erweixin/RaTeX). Enable **Automatically number math blocks** in Settings → Markdown for document-order numbering. Use `\tag{A}` / `\tag*{A}` for manual tags, `\label{eq:energy}` with `$\ref{eq:energy}$` or `$\eqref{eq:energy}$` for references, and ⌘-click a standalone reference to jump to its equation. `\notag`, `\nonumber`, and starred equation environments suppress automatic numbers. Manual tags do not consume the automatic counter. Numbering is derived without rewriting Markdown; this version assigns one number per display block, not AMS per-row numbers.
 - **Plain files.** Each note is a `.md` file. A save rewrites only the lines you edited and leaves the rest of the file unchanged.
 - **Keyboard.** <kbd>⌘K</kbd> lists every action with its shortcut, <kbd>/</kbd> inserts a block, and vim mode can be turned on in Settings.
 - **Native.** Written in Rust and drawn with [GPUI](https://www.gpui.rs), without a web view.
@@ -113,7 +114,9 @@ cargo test --workspace             # run the tests
 cargo xtask bundle                 # build target/debug/bundle/osx/Markraft.app
 ```
 
-The toolchain is pinned in `rust-toolchain.toml`. The workspace is split into `markraft-core` (document model and editing), `markraft-commonmark` (Markdown), `markraft-gpui` (the editor view), `markraft-vim` and `markraft-app`.
+The toolchain is pinned in `rust-toolchain.toml`. The workspace is split into `markraft-core` (document model and editing), `markraft-commonmark` (Markdown), `markraft-gpui` (the editor view), `markraft-math` (window-independent LaTeX typesetting), `markraft-vim` and `markraft-app`. See [the architecture notes](docs/architecture.md) for document, source, analysis and rendering boundaries.
+
+See [the localization guide](docs/localization.md) for message resources, language preferences, and adding a supported language.
 
 ## Acknowledgments
 

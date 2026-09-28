@@ -1,3 +1,4 @@
+use crate::locale::Message;
 mod code;
 mod focus;
 mod formatting;
@@ -203,27 +204,31 @@ fn local(milliseconds: u64) -> u64 {
 
 /// When a note was last written, as the user would say it. Past a week it is a date,
 /// and past this year the date carries it.
-fn relative_day(updated: u64, now: u64, locale: crate::locale::Locale) -> String {
+fn relative_day(updated: u64, now: u64, i18n: &crate::locale::I18n) -> String {
     const DAY: u64 = 86_400_000;
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
     let (updated, now) = (local(updated), local(now));
     // A note written with the clock ahead of this one still reads as today.
     match (now / DAY).saturating_sub(updated / DAY) {
-        0 => crate::locale::Translator::new(locale).text("today"),
-        1 => crate::locale::Translator::new(locale).text("yesterday"),
-        days @ 2..=6 => crate::locale::Translator::new(locale)
-            .text_with("days-ago", &[("days", &days.to_string())]),
+        0 => i18n.text("notes.edited-today"),
+        1 => i18n.text("notes.edited-yesterday"),
+        days @ 2..=6 => i18n.text_with("notes.edited-days-ago", &[("days", &days.to_string())]),
         _ => {
             let (year, month, date, ..) = crate::vault::civil(updated);
-            let month = MONTHS[(month.clamp(1, 12) - 1) as usize];
+            let month = i18n.text(&format!("date.month-{}", month.clamp(1, 12)));
             let (this_year, ..) = crate::vault::civil(now);
-            if year == this_year {
-                format!("{date} {month}")
-            } else {
-                format!("{date} {month} {year}")
-            }
+            let date = i18n.text_with(
+                if year == this_year {
+                    "date.day-month"
+                } else {
+                    "date.day-month-year"
+                },
+                &[
+                    ("day", &date.to_string()),
+                    ("month", &month),
+                    ("year", &year.to_string()),
+                ],
+            );
+            i18n.text_with("notes.edited-date", &[("date", &date)])
         }
     }
 }
@@ -232,29 +237,29 @@ fn relative_day(updated: u64, now: u64, locale: crate::locale::Locale) -> String
 /// as vim spells it. They answer a `:` query only.
 fn ex_commands() -> Vec<Command> {
     vec![
-        Command::new("ex-quit", "Hide Window", Intent::Hide).ex_only(&[("quit", 1)]),
+        Command::new("ex-quit", "command.hide-window", Intent::Hide).ex_only(&[("quit", 1)]),
         Command::new(
             "ex-write-quit",
-            "Save and Hide Window",
+            "command.save-and-hide-window",
             Intent::Then(vec![Intent::Save, Intent::Hide]),
         )
         .ex_only(&[("wq", 2), ("xit", 1), ("exit", 3)]),
-        Command::new("ex-quit-all", "Quit Markraft", Intent::Quit)
+        Command::new("ex-quit-all", "command.quit-markraft", Intent::Quit)
             .ex_only(&[("qall", 2), ("quitall", 5)]),
         Command::new(
             "ex-write-quit-all",
-            "Save and Quit Markraft",
+            "command.save-and-quit-markraft",
             Intent::Then(vec![Intent::Save, Intent::Quit]),
         )
         .ex_only(&[("wqall", 3), ("xall", 2)]),
         Command::new(
             "ex-edit",
-            "Reload from Disk",
+            "command.reload-from-disk",
             Intent::Then(vec![Intent::Back, Intent::Reload]),
         )
         .ex_only(&[("edit", 1)]),
-        Command::new("ex-undo", "Undo", Intent::Undo).ex_only(&[("undo", 1)]),
-        Command::new("ex-redo", "Redo", Intent::Redo).ex_only(&[("redo", 3)]),
+        Command::new("ex-undo", "command.undo", Intent::Undo).ex_only(&[("undo", 1)]),
+        Command::new("ex-redo", "command.redo", Intent::Redo).ex_only(&[("redo", 3)]),
     ]
 }
 
@@ -315,7 +320,7 @@ fn intent_icon(intent: &Intent) -> Icon {
 impl MarkraftApp {
     fn intent(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_reloading() {
-            self.inform("Reloading from disk…", cx);
+            self.inform(Message::new("notice.reloading"), cx);
             return;
         }
         match intent {
@@ -363,7 +368,7 @@ impl MarkraftApp {
                 if let Some(url) = self.editor().read(cx).active_link() {
                     if matches!(intent, Intent::CopyLink) {
                         cx.write_to_clipboard(ClipboardItem::new_string(url));
-                        self.inform("Copied link", cx);
+                        self.inform(Message::new("notice.copied-link"), cx);
                     } else {
                         EditorView::open_link(&url, cx);
                     }
@@ -484,9 +489,8 @@ impl MarkraftApp {
             Intent::UseDefaultFolder => match crate::storage::default_notes_folder() {
                 Some(path) => self.open_folder(path, window, cx),
                 None => {
-                    self.feedback.set_error(
-                        "HOME is unavailable; choose a folder or pass --dir PATH.".to_owned(),
-                    );
+                    self.feedback
+                        .set_error(Message::new("notice.home-unavailable"));
                     cx.notify();
                 }
             },
@@ -635,12 +639,13 @@ impl MarkraftApp {
     fn icon_button(
         &self,
         id: impl Into<SharedString>,
-        label: &'static str,
+        label: impl Into<SharedString>,
         kind: Icon,
         intent: Intent,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let id: SharedString = id.into();
+        let label = label.into();
         let expanded = match intent {
             Intent::Browse => Some(self.interaction.panel() == Panel::Browse),
             Intent::Actions => Some(self.interaction.panel() == Panel::Actions),
@@ -722,7 +727,7 @@ impl MarkraftApp {
         div()
             .id(id)
             .role(Role::Button)
-            .aria_label(label)
+            .aria_label(label.clone())
             .size(px(28.))
             .opacity(0.7)
             .when_some(expanded, |s, expanded| s.aria_expanded(expanded))
@@ -783,7 +788,7 @@ impl MarkraftApp {
         intent: Intent,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let label: SharedString = crate::locale::legacy_text(label.into().as_ref()).into();
+        let label: SharedString = label.into();
         let kind = intent_icon(&intent);
         let destructive = matches!(
             intent,
@@ -855,10 +860,16 @@ impl MarkraftApp {
         let label = if status.query.is_empty() {
             String::new()
         } else if status.total == 0 {
-            "No results".to_owned()
+            self.i18n.text("chrome.find-none").to_owned()
         } else {
             let current = status.current.map(|index| index + 1).unwrap_or(0);
-            format!("{current} of {}", status.total)
+            self.i18n.text_with(
+                "chrome.find-count",
+                &[
+                    ("current", &current.to_string()),
+                    ("total", &status.total.to_string()),
+                ],
+            )
         };
         div()
             .id("find-bar")
@@ -912,14 +923,26 @@ impl MarkraftApp {
                     .text_color(self.muted())
                     .child(label),
             )
-            .child(self.find_step("find-previous", "↑", "Find previous", false, cx))
-            .child(self.find_step("find-next", "↓", "Find next", true, cx))
+            .child(self.find_step(
+                "find-previous",
+                "↑",
+                self.i18n.text("chrome.find-previous"),
+                false,
+                cx,
+            ))
+            .child(self.find_step(
+                "find-next",
+                "↓",
+                self.i18n.text("chrome.find-next"),
+                true,
+                cx,
+            ))
     }
     fn find_step(
         &self,
         id: &'static str,
         label: &'static str,
-        aria: &'static str,
+        aria: String,
         next: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -955,17 +978,13 @@ impl MarkraftApp {
     /// out take the gate's own shape, scaled to a note.
     fn unreadable_file(&self, cx: &mut Context<Self>) -> Option<Div> {
         let note = self.library.active_note();
-        let reason = note.read_only.clone()?;
+        let reason = note.read_only.as_ref()?.render(&self.i18n);
         if !note.document_is_empty() || self.interaction.panel() != Panel::Editor {
             return None;
         }
         let openable = note.path.is_some();
-        // The reason is one sentence naming the trouble and one saying what to do;
-        // the heading takes the first, the body the rest.
-        let (heading, rest) = match reason.split_once(". ") {
-            Some((first, rest)) => (first.to_owned(), rest.to_owned()),
-            None => (reason.clone(), String::new()),
-        };
+        let heading = self.i18n.text("chrome.unreadable-file");
+        let rest = reason;
         Some(
             div()
                 .absolute()
@@ -1003,13 +1022,13 @@ impl MarkraftApp {
                             .gap_2()
                             .child(self.button(
                                 "unreadable-open",
-                                "Open in Default Editor",
+                                self.i18n.text("chrome.open-default"),
                                 Intent::OpenExternally,
                                 cx,
                             ))
                             .child(self.button(
                                 "unreadable-reveal",
-                                "Reveal in Finder",
+                                self.i18n.text("chrome.reveal"),
                                 Intent::RevealNote,
                                 cx,
                             )),
@@ -1028,7 +1047,7 @@ impl MarkraftApp {
             // Rows keep `Role::Button` inside the list: a `ListBoxOption` reaches VoiceOver as
             // static text and its AXPress lands outside the row, closing the panel instead.
             .role(Role::ListBox)
-            .aria_label("Notes")
+            .aria_label(self.i18n.text("notes.title"))
             .track_scroll(self.picker.browse_scroll())
             .overflow_y_scroll()
             .px_2()
@@ -1040,7 +1059,7 @@ impl MarkraftApp {
                     .text_center()
                     .text_size(px(13.))
                     .text_color(self.muted())
-                    .child(crate::locale::legacy_text("No matching notes")),
+                    .child(self.i18n.text("notes.no-matches")),
             );
         }
         for (index, note) in notes.iter().enumerate() {
@@ -1048,10 +1067,9 @@ impl MarkraftApp {
             let current = note.id == self.library.active_id;
             let selected = index == self.picker.row();
             let status = if current {
-                crate::locale::legacy_text("Current")
+                self.i18n.text("notes.current")
             } else {
-                let date = relative_day(note.updated_at, now, self.locale);
-                format!("{} {date}", crate::locale::legacy_text("Edited"))
+                relative_day(note.updated_at, now, &self.i18n)
             };
             let location = note.path.as_ref().map(|path| {
                 shorten_location(
@@ -1065,7 +1083,7 @@ impl MarkraftApp {
                 Some(_) => self.muted(),
                 None => notes_style(self.dark).marker,
             };
-            let location = location.unwrap_or_else(|| crate::locale::legacy_text("No file yet"));
+            let location = location.unwrap_or_else(|| self.i18n.text("notes.no-file"));
             let meta = format!("{status} · {location}");
             let mut controls = div()
                 .absolute()
@@ -1078,11 +1096,11 @@ impl MarkraftApp {
                     .child(
                         self.icon_button(
                             SharedString::from(format!("pin-{id}")),
-                            if note.pinned {
-                                "Unpin Note"
+                            self.i18n.text(if note.pinned {
+                                "command.unpin-note"
                             } else {
-                                "Pin Note"
-                            },
+                                "command.pin-note"
+                            }),
                             Icon::Pin,
                             Intent::PinNote(id.clone()),
                             cx,
@@ -1099,7 +1117,7 @@ impl MarkraftApp {
                     .child(
                         self.icon_button(
                             SharedString::from(format!("trash-{id}")),
-                            "Move to Trash",
+                            self.i18n.text("command.move-to-trash"),
                             Icon::Trash,
                             Intent::TrashNote(id.clone()),
                             cx,
@@ -1126,10 +1144,13 @@ impl MarkraftApp {
                 div()
                     .id(row_id.clone())
                     .role(Role::Button)
-                    .aria_label(format!(
-                        "{}, {meta}{}",
-                        note.title(),
-                        if note.pinned { ", Pinned" } else { "" }
+                    .aria_label(self.i18n.text_with(
+                        if note.pinned {
+                            "notes.pinned-row-label"
+                        } else {
+                            "notes.row-label"
+                        },
+                        &[("title", &note.display_title(&self.i18n)), ("meta", &meta)],
                     ))
                     .aria_selected(selected)
                     .aria_position_in_set(index + 1)
@@ -1167,7 +1188,7 @@ impl MarkraftApp {
                                     .line_height(px(18.))
                                     .text_color(self.control_text())
                                     .truncate()
-                                    .child(note.title()),
+                                    .child(note.display_title(&self.i18n)),
                             )
                             .child(
                                 div()
@@ -1224,7 +1245,7 @@ impl MarkraftApp {
                         .justify_between()
                         .text_size(px(11.))
                         .text_color(self.muted())
-                        .child("Notes"),
+                        .child(self.i18n.text("notes.title")),
                 )
             })
             .child(self.scroll_area(list, self.picker.browse_scroll(), cx))
@@ -1312,122 +1333,158 @@ impl MarkraftApp {
     /// caret already is, so `caret` keeps them out of the panel everywhere else.
     fn action_items(&self, caret: Caret) -> Vec<Command> {
         let mut items = vec![
-            Command::new("new-action", "New Note", Intent::New).ex(&[("enew", 3)]),
+            Command::new("new-action", "command.new-note", Intent::New).ex(&[("enew", 3)]),
             Command::new(
                 "pin-note",
                 if self.library.active_note().pinned {
-                    "Unpin Note"
+                    "command.unpin-note"
                 } else {
-                    "Pin Note"
+                    "command.pin-note"
                 },
                 Intent::Pin,
             ),
-            Command::new("browse-action", "Browse Notes", Intent::Browse).ex(&[
+            Command::new("browse-action", "command.browse-notes", Intent::Browse).ex(&[
                 ("ls", 2),
                 ("buffers", 7),
                 ("files", 5),
             ]),
-            Command::new("save-now", "Save Now", Intent::Save).ex(&[("write", 1)]),
-            Command::new("copy-markdown", "Copy as Markdown", Intent::Copy),
-            Command::new("paste-plain", "Paste as Plain Text", Intent::PastePlain),
-            Command::new("paste-markdown", "Paste as Markdown", Intent::PasteMarkdown),
-            Command::new("export-note", "Export Markdown…", Intent::Export),
-            Command::new("rename-note", "Rename…", Intent::Rename),
+            Command::new("save-now", "command.save-now", Intent::Save).ex(&[("write", 1)]),
+            Command::new("copy-markdown", "command.copy-as-markdown", Intent::Copy),
+            Command::new(
+                "paste-plain",
+                "command.paste-as-plain-text",
+                Intent::PastePlain,
+            ),
+            Command::new(
+                "paste-markdown",
+                "command.paste-as-markdown",
+                Intent::PasteMarkdown,
+            ),
+            Command::new("export-note", "command.export-markdown", Intent::Export),
+            Command::new("rename-note", "command.rename", Intent::Rename),
             Command::new(
                 "open-markdown-action",
-                "Open Markdown…",
+                "command.open-markdown",
                 Intent::OpenMarkdown,
             ),
-            Command::new("report-issue", "Report an Issue…", Intent::ReportIssue),
-            Command::new("copy-debug-info", "Copy Debug Info", Intent::CopyDebugInfo),
-            Command::new("reveal-logs", "Show Logs in Finder", Intent::RevealLogs),
-            Command::new("format-bold", "Bold", Intent::Mark(doc::Inline::Bold)),
-            Command::new("format-italic", "Italic", Intent::Mark(doc::Inline::Italic)),
+            Command::new(
+                "report-issue",
+                "command.report-an-issue",
+                Intent::ReportIssue,
+            ),
+            Command::new(
+                "copy-debug-info",
+                "command.copy-debug-info",
+                Intent::CopyDebugInfo,
+            ),
+            Command::new(
+                "reveal-logs",
+                "command.show-logs-in-finder",
+                Intent::RevealLogs,
+            ),
+            Command::new(
+                "format-bold",
+                "command.bold",
+                Intent::Mark(doc::Inline::Bold),
+            ),
+            Command::new(
+                "format-italic",
+                "command.italic",
+                Intent::Mark(doc::Inline::Italic),
+            ),
             Command::new(
                 "format-strikethrough",
-                "Strikethrough",
+                "command.strikethrough",
                 Intent::Mark(doc::Inline::Strikethrough),
             ),
             Command::new(
                 "format-code",
-                "Inline Code",
+                "command.inline-code",
                 Intent::Mark(doc::Inline::Code),
             ),
-            Command::new("format-link", "Link", Intent::Link).slash(13, SlashEffect::Host),
+            Command::new("format-link", "command.link", Intent::Link).slash(13, SlashEffect::Host),
             Command::new(
                 "format-heading",
-                "Heading 1",
+                "command.heading-1",
                 Intent::Block(doc::Block::Heading(1)),
             )
             .slash(1, SlashEffect::Block(doc::Block::Heading(1))),
             Command::new(
                 "format-heading-2",
-                "Heading 2",
+                "command.heading-2",
                 Intent::Block(doc::Block::Heading(2)),
             )
             .slash(2, SlashEffect::Block(doc::Block::Heading(2))),
             Command::new(
                 "format-heading-3",
-                "Heading 3",
+                "command.heading-3",
                 Intent::Block(doc::Block::Heading(3)),
             )
             .slash(3, SlashEffect::Block(doc::Block::Heading(3))),
             Command::new(
                 "format-heading-4",
-                "Heading 4",
+                "command.heading-4",
                 Intent::Block(doc::Block::Heading(4)),
             )
             .slash(4, SlashEffect::Block(doc::Block::Heading(4))),
             Command::new(
                 "format-heading-5",
-                "Heading 5",
+                "command.heading-5",
                 Intent::Block(doc::Block::Heading(5)),
             )
             .slash(5, SlashEffect::Block(doc::Block::Heading(5))),
             Command::new(
                 "format-heading-6",
-                "Heading 6",
+                "command.heading-6",
                 Intent::Block(doc::Block::Heading(6)),
             )
             .slash(6, SlashEffect::Block(doc::Block::Heading(6))),
-            Command::new("format-quote", "Quote", Intent::Block(doc::Block::Quote))
-                .slash(10, SlashEffect::Block(doc::Block::Quote)),
+            Command::new(
+                "format-quote",
+                "command.quote",
+                Intent::Block(doc::Block::Quote),
+            )
+            .slash(10, SlashEffect::Block(doc::Block::Quote)),
             Command::new(
                 "format-callout",
-                "Callout",
+                "command.callout",
                 Intent::Block(doc::Block::Callout),
             )
             .slash(10, SlashEffect::Block(doc::Block::Callout)),
             Command::new(
                 "format-code-block",
-                "Code Block",
+                "command.code-block",
                 Intent::Block(doc::Block::Code),
             )
             .slash(11, SlashEffect::Block(doc::Block::Code)),
             Command::new(
                 "format-paragraph",
-                "Paragraph",
+                "command.paragraph",
                 Intent::Block(doc::Block::Paragraph),
             )
             .slash(0, SlashEffect::Block(doc::Block::Paragraph)),
             Command::new(
                 "format-ordered",
-                "Ordered List",
+                "command.ordered-list",
                 Intent::Block(doc::Block::Ordered),
             )
             .slash(8, SlashEffect::Block(doc::Block::Ordered)),
             Command::new(
                 "format-bullet",
-                "Bullet List",
+                "command.bullet-list",
                 Intent::Block(doc::Block::Bullet),
             )
             .slash(7, SlashEffect::Block(doc::Block::Bullet)),
-            Command::new("format-task", "Task List", Intent::Block(doc::Block::Task))
-                .slash(9, SlashEffect::Block(doc::Block::Task)),
+            Command::new(
+                "format-task",
+                "command.task-list",
+                Intent::Block(doc::Block::Task),
+            )
+            .slash(9, SlashEffect::Block(doc::Block::Task)),
             // A rule replaces the line it is on, so only the `/` menu offers it.
             Command::editor(
                 "insert-divider",
-                "Divider",
+                "command.divider",
                 12,
                 SlashEffect::Block(doc::Block::Divider),
             ),
@@ -1435,30 +1492,34 @@ impl MarkraftApp {
         // A table cannot nest in another one, and a code block keeps its pipes literal.
         if caret.table.is_none() && !caret.in_code {
             items.push(
-                Command::new("insert-table", "Table", Intent::InsertTable)
+                Command::new("insert-table", "command.table", Intent::InsertTable)
                     .slash(14, SlashEffect::Host),
             );
         }
-        items.extend([Command::new("delete-note", "Move to Trash", Intent::Delete)]);
+        items.extend([Command::new(
+            "delete-note",
+            "command.move-to-trash",
+            Intent::Delete,
+        )]);
         // Each of these reveals a different thing, and only while there is one.
         if self.library.active_note().path.is_some() {
             items.push(Command::new(
                 "reveal-note",
-                "Reveal Note in Finder",
+                "command.reveal-note-in-finder",
                 Intent::RevealNote,
             ));
         }
         if self.path.is_some() {
             items.push(Command::new(
                 "reveal-folder",
-                "Show Folder in Finder",
+                "command.show-folder-in-finder",
                 Intent::Reveal,
             ));
         }
         if caret.in_task {
             items.push(Command::new(
                 "toggle-task",
-                "Toggle Task",
+                "command.toggle-task",
                 Intent::ToggleTask,
             ));
         }
@@ -1466,49 +1527,53 @@ impl MarkraftApp {
             items.extend([
                 Command::new(
                     "code-language",
-                    "Choose Code Language",
+                    "command.choose-code-language",
                     Intent::ChooseCodeLanguage,
                 ),
-                Command::new("copy-code-block", "Copy Code Block", Intent::CopyCodeBlock),
+                Command::new(
+                    "copy-code-block",
+                    "command.copy-code-block",
+                    Intent::CopyCodeBlock,
+                ),
             ]);
         }
         if caret.in_link {
             items.extend([
-                Command::new("copy-link", "Copy Link", Intent::CopyLink),
-                Command::new("open-link", "Open Link", Intent::OpenLink),
-                Command::new("remove-link", "Remove Link", Intent::Unlink),
+                Command::new("copy-link", "command.copy-link", Intent::CopyLink),
+                Command::new("open-link", "command.open-link", Intent::OpenLink),
+                Command::new("remove-link", "command.remove-link", Intent::Unlink),
             ]);
         }
         if let Some(table) = caret.table {
             items.extend([
                 Command::new(
                     "table-row-above",
-                    "Add Row Above",
+                    "command.add-row-above",
                     Intent::Table(TableEdit::RowBefore),
                 ),
                 Command::new(
                     "table-row-below",
-                    "Add Row Below",
+                    "command.add-row-below",
                     Intent::Table(TableEdit::RowAfter),
                 ),
                 Command::new(
                     "table-column-left",
-                    "Add Column Left",
+                    "command.add-column-left",
                     Intent::Table(TableEdit::ColumnBefore),
                 ),
                 Command::new(
                     "table-column-right",
-                    "Add Column Right",
+                    "command.add-column-right",
                     Intent::Table(TableEdit::ColumnAfter),
                 ),
                 Command::new(
                     "table-delete-row",
-                    "Delete Row",
+                    "command.delete-row",
                     Intent::Table(TableEdit::DeleteRow),
                 ),
                 Command::new(
                     "table-delete-column",
-                    "Delete Column",
+                    "command.delete-column",
                     Intent::Table(TableEdit::DeleteColumn),
                 ),
             ]);
@@ -1516,17 +1581,17 @@ impl MarkraftApp {
             for (id, label, alignment) in [
                 (
                     "table-align-left",
-                    "Align Column Left",
+                    "command.align-column-left",
                     ColumnAlignment::Left,
                 ),
                 (
                     "table-align-center",
-                    "Align Column Center",
+                    "command.align-column-center",
                     ColumnAlignment::Center,
                 ),
                 (
                     "table-align-right",
-                    "Align Column Right",
+                    "command.align-column-right",
                     ColumnAlignment::Right,
                 ),
             ] {
@@ -1537,7 +1602,7 @@ impl MarkraftApp {
             }
             items.push(Command::new(
                 "table-delete",
-                "Delete Table",
+                "command.delete-table",
                 Intent::Table(TableEdit::DeleteTable),
             ));
         }
@@ -1545,9 +1610,9 @@ impl MarkraftApp {
         items.push(Command::new(
             "folder-action",
             if self.path.is_some() {
-                "Switch Folder…"
+                "command.switch-folder"
             } else {
-                "Open Folder…"
+                "command.open-folder"
             },
             Intent::ChooseFolder,
         ));
@@ -1555,18 +1620,13 @@ impl MarkraftApp {
         items
     }
     fn count_of(&self, units: usize) -> String {
-        if self.toolbar.counts_words() {
-            format!("{units} {}", if units == 1 { "word" } else { "words" })
-        } else {
-            format!(
-                "{units} {}",
-                if units == 1 {
-                    "character"
-                } else {
-                    "characters"
-                }
-            )
-        }
+        let key = match (self.toolbar.counts_words(), units == 1) {
+            (true, true) => "chrome.word-one",
+            (true, false) => "chrome.word-many",
+            (false, true) => "chrome.character-one",
+            (false, false) => "chrome.character-many",
+        };
+        self.i18n.text_with(key, &[("count", &units.to_string())])
     }
     /// What the footer counts: the note as a reader sees it. See [`doc::Counter`].
     fn note_count(&self, cx: &App) -> String {
@@ -1580,11 +1640,11 @@ impl MarkraftApp {
     /// The labels the actions panel lists, in order, while it is open.
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub(crate) fn test_action_labels(&self, cx: &App) -> Option<Vec<&'static str>> {
+    pub(crate) fn test_action_labels(&self, cx: &App) -> Option<Vec<String>> {
         (self.interaction.panel() == Panel::Actions).then(|| {
             self.filtered_actions(cx)
                 .into_iter()
-                .map(|command| command.label)
+                .map(|command| self.i18n.text(command.label))
                 .collect()
         })
     }
@@ -1623,14 +1683,17 @@ impl MarkraftApp {
             });
             return items.into_iter().map(|(_, command)| command).collect();
         }
+        let english = crate::locale::I18n::english();
         let mut items: Vec<_> = items
             .filter(|command| {
                 command.intent.is_some()
                     && !command.ex_only
-                    && (command.label.to_lowercase().contains(&query)
-                        || crate::locale::legacy_text(command.label)
-                            .to_lowercase()
-                            .contains(&query))
+                    && (self
+                        .i18n
+                        .text(command.label)
+                        .to_lowercase()
+                        .contains(&query)
+                        || english.text(command.label).to_lowercase().contains(&query))
             })
             .collect();
         items.sort_by_key(|command| command.intent.as_ref().map(Intent::action_group));
@@ -1642,7 +1705,7 @@ impl MarkraftApp {
         let mut list = div()
             .id("actions-list")
             .role(Role::ListBox)
-            .aria_label("Actions")
+            .aria_label(self.i18n.text("actions.title"))
             .track_scroll(self.picker.actions_scroll())
             .overflow_y_scroll()
             .px_2()
@@ -1654,7 +1717,7 @@ impl MarkraftApp {
                     .text_center()
                     .text_size(px(13.))
                     .text_color(self.muted())
-                    .child(crate::locale::legacy_text("No matching actions")),
+                    .child(self.i18n.text("actions.no-matches")),
             );
         }
         let mut previous_group = None;
@@ -1685,7 +1748,7 @@ impl MarkraftApp {
                         )
                     })
                     .child(
-                        self.row(id, label, shortcut, ex, intent, cx)
+                        self.row(id, self.i18n.text(label), shortcut, ex, intent, cx)
                             .h(ACTION_ROW_HEIGHT)
                             .text_size(px(14.))
                             .role(Role::Button)
@@ -1816,7 +1879,7 @@ impl Render for MarkraftApp {
             .as_ref()
             .and_then(|path| path.file_stem())
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| note.title());
+            .unwrap_or_else(|| note.display_title(&self.i18n));
         // With no folder open there is no note to name, and a stray "Untitled"
         // over the gate reads as a bug rather than as a state.
         let unopened = self.persistence.is_none();
@@ -1955,7 +2018,7 @@ impl Render for MarkraftApp {
             .child(
                 self.icon_button(
                     "actions",
-                    "Actions · ⌘K",
+                    format!("{} · ⌘K", self.i18n.text("actions.title")),
                     Icon::Command,
                     Intent::Actions,
                     cx,
@@ -1967,7 +2030,7 @@ impl Render for MarkraftApp {
             .child(
                 self.icon_button(
                     "browse",
-                    "Browse Notes · ⌘P",
+                    format!("{} · ⌘P", self.i18n.text("command.browse-notes")),
                     Icon::Notes,
                     Intent::Browse,
                     cx,
@@ -1977,10 +2040,16 @@ impl Render for MarkraftApp {
                 .opacity(1.),
             )
             .child(
-                self.icon_button("new-note", "New Note · ⌘N", Icon::Plus, Intent::New, cx)
-                    .size(px(28.))
-                    .rounded_full()
-                    .opacity(1.),
+                self.icon_button(
+                    "new-note",
+                    format!("{} · ⌘N", self.i18n.text("command.new-note")),
+                    Icon::Plus,
+                    Intent::New,
+                    cx,
+                )
+                .size(px(28.))
+                .rounded_full()
+                .opacity(1.),
             );
         // Both bands are chrome, so the pointer is the window's own arrow and
         // changes only over what can be clicked. A click on the title band stays
@@ -2011,7 +2080,7 @@ impl Render for MarkraftApp {
                         div()
                             .id("note-title")
                             .role(Role::Button)
-                            .aria_label("Rename")
+                            .aria_label(self.i18n.text("notes.rename"))
                             .min_w_0()
                             .truncate()
                             .when(!unopened, |s| {
@@ -2054,16 +2123,15 @@ impl Render for MarkraftApp {
                 })
             });
             let (title, explanation) = (
-                "Your notes could not be opened",
-                "Nothing in the folder was changed. Check that it exists and that no \
-                 other Markraft is using it, then retry or choose another folder.",
+                self.i18n.text("chrome.open-failed"),
+                self.i18n.text("chrome.open-explanation"),
             );
             // Choose Folder is the filled action; Enter takes it.
             let accent = notes_style(self.dark).marker;
             let primary = self
                 .button_with_hover(
                     "choose-folder",
-                    "Choose Folder…",
+                    self.i18n.text("chrome.choose-folder"),
                     Intent::ChooseFolder,
                     accent.opacity(0.85),
                     cx,
@@ -2077,25 +2145,45 @@ impl Render for MarkraftApp {
                 .flex()
                 .flex_wrap()
                 .gap_2()
-                .child(self.button("retry-open", "Retry", Intent::Retry, cx))
+                .child(self.button(
+                    "retry-open",
+                    self.i18n.text("chrome.retry"),
+                    Intent::Retry,
+                    cx,
+                ))
                 .child(primary)
                 .when(offer_default, |s| {
                     s.child(self.button(
                         "use-default-folder",
-                        "Use Documents/Markraft",
+                        self.i18n.text("chrome.default-folder"),
                         Intent::UseDefaultFolder,
                         cx,
                     ))
                 })
-                .child(self.button("open-markdown", "Open Markdown…", Intent::OpenMarkdown, cx))
+                .child(self.button(
+                    "open-markdown",
+                    self.i18n.text("chrome.open-markdown"),
+                    Intent::OpenMarkdown,
+                    cx,
+                ))
                 .when(self.path.is_some(), |s| {
-                    s.child(self.button("reveal-library", "Show Folder", Intent::Reveal, cx))
+                    s.child(self.button(
+                        "reveal-library",
+                        self.i18n.text("chrome.show-folder"),
+                        Intent::Reveal,
+                        cx,
+                    ))
                 });
             let detail = div()
                 .mt_3()
                 .text_size(px(12.))
                 .text_color(self.muted())
-                .child(self.feedback.error().cloned().unwrap_or_default());
+                .child(
+                    self.feedback
+                        .error()
+                        .map(|error| error.render(&self.i18n))
+                        .unwrap_or_default(),
+                );
             return root.child(toolbar).child(
                 div()
                     .flex_1()
@@ -2171,7 +2259,10 @@ impl Render for MarkraftApp {
         root.child(body)
             // Both banners are live regions, so a failure is spoken rather than only shown.
             .when_some(self.feedback.platform_error().cloned(), |s, error| {
-                let message = format!("{error} · Change the shortcut in Settings.");
+                let message = self.i18n.text_with(
+                    "chrome.shortcut-error",
+                    &[("error", &error.render(&self.i18n))],
+                );
                 s.child(
                     div()
                         .id("shortcut-error")
@@ -2186,8 +2277,12 @@ impl Render for MarkraftApp {
             })
             .when_some(self.feedback.notice().cloned(), |s, notice| {
                 let announced = match notice.action() {
-                    Some(action) => format!("{} · {}", notice.text, action.label),
-                    None => notice.text.to_string(),
+                    Some(action) => format!(
+                        "{} · {}",
+                        notice.text.render(&self.i18n),
+                        action.label.render(&self.i18n)
+                    ),
+                    None => notice.text.render(&self.i18n),
                 };
                 let toast = div()
                     .id("notice")
@@ -2209,14 +2304,19 @@ impl Render for MarkraftApp {
                     .shadow(popover_shadow())
                     .text_size(px(12.))
                     .text_color(self.control_text())
-                    .child(div().flex_1().min_w_0().child(notice.text.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(notice.text.render(&self.i18n)),
+                    )
                     .when_some(notice.action().cloned(), |s, action| {
                         let path = action.path.clone();
                         s.child(div().text_color(self.muted()).child("·")).child(
                             div()
                                 .id("notice-reveal")
                                 .role(Role::Button)
-                                .aria_label(action.label.clone())
+                                .aria_label(action.label.render(&self.i18n))
                                 .cursor_pointer()
                                 .hover(|s| s.opacity(0.7))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -2224,7 +2324,7 @@ impl Render for MarkraftApp {
                                     cx.stop_propagation();
                                     cx.reveal_path(&path);
                                 }))
-                                .child(action.label.clone()),
+                                .child(action.label.render(&self.i18n)),
                         )
                     });
                 s.child(
@@ -2390,6 +2490,19 @@ mod shortcut_tests {
     // Not `use super::*`: that would bring gpui's `test` macro in over the built-in one.
     use super::{Command, Intent, TableEdit, shortcut_label};
     use crate::doc;
+
+    #[test]
+    fn locale_date_labels_translate_whole_messages() {
+        let now = 1_700_000_000_000;
+        let english = crate::locale::I18n::english();
+        let translated = crate::locale::I18n::fixture("zh-Hans");
+        assert_eq!(super::relative_day(now, now, &english), "Edited today");
+        assert_eq!(super::relative_day(now, now, &translated), "测试：今天编辑");
+        assert_eq!(
+            super::relative_day(now - 3 * 86_400_000, now, &translated),
+            "测试：3 天前编辑"
+        );
+    }
 
     #[test]
     fn a_command_takes_its_shortcut_from_the_one_table() {

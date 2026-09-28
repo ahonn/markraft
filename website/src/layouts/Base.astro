@@ -1,4 +1,5 @@
 ---
+import { PLAUSIBLE_DOMAIN, PLAUSIBLE_SCRIPT_URL } from 'astro:env/server';
 import '../styles/global.css';
 
 interface Props {
@@ -10,6 +11,7 @@ interface Props {
 const { title, description, structuredData } = Astro.props;
 const canonical = new URL(Astro.url.pathname, Astro.site);
 const image = new URL('/og.jpg', Astro.site);
+const analytics = import.meta.env.PROD && PLAUSIBLE_DOMAIN && PLAUSIBLE_SCRIPT_URL;
 ---
 
 <!doctype html>
@@ -36,6 +38,17 @@ const image = new URL('/og.jpg', Astro.site);
     <meta name="twitter:card" content="summary_large_image" />
 
     {structuredData.map((data) => <script type="application/ld+json" set:html={JSON.stringify(data)} />)}
+
+    {
+      analytics && (
+        <>
+          <script is:inline defer data-domain={PLAUSIBLE_DOMAIN} src={PLAUSIBLE_SCRIPT_URL} />
+          <script is:inline>
+            window.plausible = window.plausible || function () { (window.plausible.q = window.plausible.q || []).push(arguments) };
+          </script>
+        </>
+      )
+    }
   </head>
   <body>
     <slot />

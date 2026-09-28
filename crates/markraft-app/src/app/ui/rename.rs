@@ -76,7 +76,7 @@ impl MarkraftApp {
                 .when(rename.links > 0, |s| {
                     s.child(self.format_button(
                         "rename-links",
-                        "Update links to this note",
+                        self.i18n.text("surfaces.rename.update-links"),
                         Icon::Link,
                         Intent::RenameLinks,
                         Some(rename.update_links),
@@ -85,7 +85,7 @@ impl MarkraftApp {
                 })
                 .child(self.format_button(
                     "rename-apply",
-                    "Rename · ↩",
+                    self.i18n.text("surfaces.rename.apply"),
                     Icon::Check,
                     Intent::ApplyRename,
                     None,

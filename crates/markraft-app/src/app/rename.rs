@@ -5,6 +5,7 @@
 //! the note keep its identity and lets the links that pointed at it follow.
 
 use super::*;
+use crate::locale::Message;
 use markraft_core::Fragment;
 use std::path::Path;
 
@@ -193,7 +194,7 @@ impl MarkraftApp {
             return;
         };
         if note.read_only.is_some() {
-            self.inform("Read-only notes can't be renamed.", cx);
+            self.inform(Message::new("notice.readonly-rename"), cx);
             return;
         }
         let id = note.id.clone();
@@ -224,7 +225,7 @@ impl MarkraftApp {
             }),
             cx,
         );
-        self.set_query(stem, "Name", "File name", cx);
+        self.set_query(stem, cx);
         self.query().update(cx, |query, cx| query.select_all(cx));
         window.focus(&self.query().focus_handle(cx), cx);
         cx.notify();
@@ -282,7 +283,7 @@ impl MarkraftApp {
                     }
                     Err(error) => {
                         this.finish_rename(&operation, false, window, cx);
-                        this.inform(error.to_string(), cx);
+                        this.inform(error, cx);
                     }
                 },
             );
@@ -360,25 +361,24 @@ impl MarkraftApp {
             let Some(mut note) = self.library.note(&note_id).cloned() else {
                 continue;
             };
-            note.document = document.clone();
-            // Asked of the store first: a link inside source it keeps verbatim cannot be
-            // written, and finding that out at save time would leave a note the user
-            // never touched reported as unsaved.
-            let writable = self
-                .persistence
-                .as_ref()
-                .is_some_and(|p| p.markdown(note).is_ok());
-            if !writable || !self.library.set_document(&note_id, document.clone()) {
+            let accepted = if self.sessions.get(&note_id).is_some() {
+                self.edit_session_document(&note_id, document, cx)
+            } else {
+                note.document = document.clone();
+                // Unopened notes need no editor, but still must round-trip before
+                // changing the library. Snapshot validation never advances source.
+                let writable = self.persistence.as_ref().is_some_and(|p| {
+                    p.source(note.clone()).is_ok_and(|source| match source {
+                        Some(track) => track.snapshot().render(doc::schema(), &document).is_ok(),
+                        None => p.markdown(note).is_ok(),
+                    })
+                });
+                writable && self.library.set_document(&note_id, document)
+            };
+            if accepted {
+                updated += links;
+            } else {
                 kept += links;
-                continue;
-            }
-            updated += links;
-            if let Some(session) = self.sessions.get(&note_id) {
-                // The editor owns its document; replacing it costs that note its undo
-                // history, which is the price of the link being right in both places.
-                session
-                    .editor()
-                    .update(cx, |editor, cx| editor.replace_doc(document, cx));
             }
         }
         self.sync_find(cx);
@@ -389,17 +389,21 @@ impl MarkraftApp {
         if updated == 0 && kept == 0 {
             return;
         }
-        let mut message = format!("Renamed to “{stem}”");
+        let mut parts = vec![Message::new("notice.renamed").arg("name", stem)];
         if updated > 0 {
-            message.push_str(&format!(
-                " · {updated} {} updated",
-                if updated == 1 { "link" } else { "links" }
-            ));
+            parts.push(
+                Message::new(if updated == 1 {
+                    "notice.updated-link-one"
+                } else {
+                    "notice.updated-link-many"
+                })
+                .arg("count", updated.to_string()),
+            );
         }
         if kept > 0 {
-            message.push_str(&format!(" · {kept} not changed"));
+            parts.push(Message::new("notice.links-kept").arg("count", kept.to_string()));
         }
-        self.inform(message, cx);
+        self.inform(Message::join(parts, " · "), cx);
     }
 }
 
@@ -459,6 +463,10 @@ mod tests {
         });
         h.wait_for_io();
         assert_eq!(h.active_note().id, active);
+        assert_eq!(h.markdown(), "Backlinks\n\n[[Renamed]]");
+        h.keys("cmd-z");
+        assert_eq!(h.markdown(), "Backlinks\n\n[[Welcome]]");
+        h.keys("cmd-shift-z");
         assert_eq!(h.markdown(), "Backlinks\n\n[[Renamed]]");
         h.keys("cmd-down cmd-right");
         h.type_text(" retained");

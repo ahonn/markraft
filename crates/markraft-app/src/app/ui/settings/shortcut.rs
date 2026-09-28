@@ -14,7 +14,7 @@ pub(super) enum Recorded {
     /// Backspace or Delete on its own: no shortcut at all.
     Cleared,
     Bound(String),
-    /// A chord that cannot be a global shortcut, and the sentence that says why.
+    /// A chord that cannot be a global shortcut, and the message ID that says why.
     Refused(&'static str),
 }
 
@@ -30,11 +30,11 @@ pub(super) fn record(keystroke: &Keystroke) -> Recorded {
         _ => {}
     }
     let Some(key) = key_name(&keystroke.key) else {
-        return Recorded::Refused("That key cannot be part of a global shortcut.");
+        return Recorded::Refused("settings.shortcut-invalid-key");
     };
     // Shift alone would take a capital letter from every app on this Mac.
     if !(held.control || held.alt || held.platform) {
-        return Recorded::Refused("A global shortcut needs ⌃, ⌥ or ⌘.");
+        return Recorded::Refused("settings.shortcut-needs-modifier");
     }
     let mut parts = Vec::new();
     for (on, name) in [

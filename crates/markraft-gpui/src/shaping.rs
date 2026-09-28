@@ -22,8 +22,11 @@ use std::cell::{RefCell, RefMut};
 
 #[derive(Default)]
 pub(crate) struct Shaping {
+    messages: crate::EditorMessages,
     style: EditorStyle,
     images: Images,
+    maths: crate::maths::Maths,
+    scale_factor: Option<f32>,
     /// What the host says a wiki link target can open, so that a link leading
     /// nowhere is not drawn as one that leads somewhere. Absent until the host
     /// says, and then every link is drawn as followable.
@@ -37,6 +40,14 @@ pub(crate) struct Shaping {
 }
 
 impl Shaping {
+    pub(crate) fn messages(&self) -> &crate::EditorMessages {
+        &self.messages
+    }
+
+    pub(crate) fn set_messages(&mut self, messages: crate::EditorMessages) {
+        self.messages = messages;
+        self.changed();
+    }
     pub(crate) fn style(&self) -> &EditorStyle {
         &self.style
     }
@@ -50,6 +61,43 @@ impl Shaping {
         }
         self.style = style;
         self.changed();
+    }
+
+    /// Semantic changes invalidate formula metrics, including whole table grids.
+    pub(crate) fn equations_changed(&mut self, types: &markraft_core::kind::DocTypes) {
+        self.lines.get_mut().forget_all_math(types);
+    }
+
+    pub(crate) fn maths(&self) -> &crate::maths::Maths {
+        &self.maths
+    }
+
+    pub(crate) fn scale_factor(&self) -> f32 {
+        self.scale_factor.unwrap_or(1.0)
+    }
+
+    pub(crate) fn set_scale_factor(&mut self, scale: f32) {
+        if self.scale_factor() != scale {
+            self.scale_factor = Some(scale);
+            self.changed();
+        }
+    }
+
+    pub(crate) fn finish_math(
+        &mut self,
+        types: &markraft_core::kind::DocTypes,
+        equations: &markraft_core::kind::equations::EquationIndex,
+        results: Vec<(
+            crate::math::MathRequest,
+            Result<crate::math::RenderedMath, crate::math::MathError>,
+        )>,
+    ) {
+        let requests: Vec<_> = results.iter().map(|(request, _)| request.clone()).collect();
+        self.maths.finish(results);
+        let turned_away = self.maths.take_turned_away();
+        self.lines
+            .get_mut()
+            .forget_math(types, Some(equations), &requests, turned_away);
     }
 
     pub(crate) fn images(&self) -> &Images {

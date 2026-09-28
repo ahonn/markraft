@@ -14,6 +14,8 @@ mod caret;
 mod clipboard;
 mod completion;
 mod emoji;
+#[cfg(test)]
+mod equation_integration;
 mod extension;
 mod find;
 mod footnotes;
@@ -22,6 +24,11 @@ mod images;
 pub mod ime;
 mod layout;
 mod links;
+mod math;
+mod math_edit;
+mod math_spans;
+mod maths;
+mod messages;
 mod shaping;
 mod shown;
 mod single_line;
@@ -40,6 +47,7 @@ pub use find::FindStatus;
 pub use markraft_core::commands::ColumnAlignment;
 pub use markraft_core::kind::{CalloutAttrs, DocTypes, DocumentKind, Formatting, PlainKind};
 use markraft_core::kind::{chains, conceal};
+pub use messages::{EditorMessage, EditorMessages};
 pub use style::EditorStyle;
 pub use syntax::{canonical_language, code_languages};
 pub use typeahead::{Typeahead, TypeaheadItem, TypeaheadProvider};
@@ -60,7 +68,7 @@ use surface::{EditorSurface, FrameLayout, LayoutLine, ShapeInput};
 const TYPING_GROUP_DELAY: u64 = 750;
 
 /// What an editor calls itself until its host gives it a name of its own.
-const DEFAULT_ARIA_LABEL: &str = "Text editor";
+const DEFAULT_ARIA_LABEL: &str = EditorMessage::TextEditor.english();
 
 // All bindings are scoped so embedding hosts retain their own shortcuts.
 actions!(
@@ -416,6 +424,8 @@ pub enum EditRejection {
     Protected(String),
     /// The transaction itself could not be built.
     Invalid(String),
+    /// An edit did not produce a transaction to apply.
+    NoTransaction,
     /// The document kind has no way to write this edit here — a style its
     /// syntax cannot spell at that spot. Nothing changed.
     Refused(String),
@@ -424,11 +434,13 @@ pub enum EditRejection {
 impl EditRejection {
     /// The sentence the host attached, whichever case it belongs to.
     pub fn message(&self) -> &str {
-        let (Self::ReadOnly(message)
-        | Self::Protected(message)
-        | Self::Invalid(message)
-        | Self::Refused(message)) = self;
-        message
+        match self {
+            Self::ReadOnly(message)
+            | Self::Protected(message)
+            | Self::Invalid(message)
+            | Self::Refused(message) => message,
+            Self::NoTransaction => "No transaction was produced.",
+        }
     }
 }
 
@@ -464,19 +476,65 @@ fn apply_guarded(
     apply_guarded_transactions(state, specs, guard, None)
 }
 
+#[cfg(test)]
 fn apply_guarded_transactions(
     state: &mut EditorState,
     specs: impl IntoIterator<Item = TransactionSpec>,
     guard: Option<&DocumentGuard>,
     transaction_guard: Option<&TransactionGuard>,
 ) -> Result<Vec<Transaction>, EditRejection> {
+    apply_guarded_transactions_with_groups(state, specs, guard, transaction_guard, None)
+}
+
+fn apply_guarded_transactions_with_groups(
+    state: &mut EditorState,
+    specs: impl IntoIterator<Item = TransactionSpec>,
+    guard: Option<&DocumentGuard>,
+    transaction_guard: Option<&TransactionGuard>,
+    isolated_depth: Option<usize>,
+) -> Result<Vec<Transaction>, EditRejection> {
     let started = std::time::Instant::now();
-    let transactions = state
-        .update_with_appended(specs)
-        .map_err(|error| EditRejection::Invalid(error.to_string()))?;
-    let last = transactions
-        .last()
-        .ok_or_else(|| EditRejection::Invalid("No transaction was produced.".to_owned()))?;
+    let invalid = |error: markraft_core::StateError| EditRejection::Invalid(error.to_string());
+    let mut prepared = state.clone();
+    let mut transactions = Vec::new();
+    let depth = isolated_depth.unwrap_or(0);
+    if depth > 0 {
+        let close = prepared
+            .update([TransactionSpec::new()
+                .effects((0..depth).map(|_| markraft_core::history::end_undo_group().of(())))
+                .add_to_history(false)
+                .no_filter()])
+            .map_err(invalid)?;
+        prepared = close.state().clone();
+        transactions.push(close);
+    }
+    let specs = specs.into_iter().map(|spec| {
+        if isolated_depth.is_some() {
+            spec.annotate(
+                markraft_core::protocol::isolate_history()
+                    .of(markraft_core::protocol::IsolateHistory::Both),
+            )
+        } else {
+            spec
+        }
+    });
+    let edits = prepared.update_with_appended(specs).map_err(invalid)?;
+    if let Some(last) = edits.last() {
+        prepared = last.state().clone();
+    }
+    transactions.extend(edits);
+    if depth > 0 {
+        let reopen = prepared
+            .update([TransactionSpec::new()
+                .effects((0..depth).map(|_| markraft_core::history::begin_undo_group().of(())))
+                .add_to_history(false)
+                .no_filter()])
+            .map_err(invalid)?;
+        // Resolve the reopened history before invoking a source guard with effects.
+        let _ = reopen.state();
+        transactions.push(reopen);
+    }
+    let last = transactions.last().ok_or(EditRejection::NoTransaction)?;
     // Resolve every state field before a source guard commits its baseline.
     // After successful guards, publishing the prepared state cannot fail.
     let next = last.state().clone();
@@ -528,7 +586,7 @@ pub struct EditorView {
     edit_error: Option<EditRejection>,
     file_paste: bool,
     state: EditorState,
-    projection: Arc<Projection>,
+    analysis: markraft_core::kind::analysis::DocumentAnalysis,
     /// The find query and its hits. See [`find`].
     find: markraft_core::StateField<find::Find>,
     pub(crate) types: DocTypes,
@@ -553,6 +611,7 @@ pub struct EditorView {
     /// What the editor calls itself to assistive technology. A host that lends one
     /// editor to several surfaces renames it as it hands it over.
     pub(crate) aria_label: SharedString,
+    custom_aria_label: bool,
     pub(crate) single_line: bool,
     pub(crate) focus: FocusHandle,
     /// What the last paint produced; see [`FrameLayout`].
@@ -587,6 +646,13 @@ pub struct EditorView {
     animation_task: Option<gpui::Task<()>>,
     /// See [`EditorView::set_animate_images`].
     animate_images: bool,
+    /// Where the pointer rests over the editor, while it does.
+    pointer: Option<gpui::Point<Pixels>>,
+    /// The view scrolled under a resting pointer: the next paint asks again
+    /// which picture is under it.
+    pub(crate) rehover: std::cell::Cell<bool>,
+    /// Whether releasing the view drops its frames from the window's atlas.
+    release_hooked: bool,
 }
 
 impl EventEmitter<EditorEvent> for EditorView {}
@@ -641,6 +707,12 @@ impl EditorView {
         } = setup;
         let (state, find) = build_state(&schema, &extensions, doc, &types);
         let projection = projection_of(&state);
+        let shaping = shaping::Shaping::default();
+        let analysis = markraft_core::kind::analysis::DocumentAnalysis::new(
+            projection.clone(),
+            &types,
+            Default::default(),
+        );
         Self {
             document_guard: None,
             transaction_guard: None,
@@ -653,12 +725,13 @@ impl EditorView {
             kind,
             extension_selection: state.selection().clone(),
             state,
-            projection,
+            analysis,
             host_extensions: extensions,
             extensions: Vec::new(),
             placeholder: SharedString::default(),
             indent_text: "\t".into(),
             aria_label: DEFAULT_ARIA_LABEL.into(),
+            custom_aria_label: false,
             single_line: false,
             focus: cx.focus_handle(),
             frame: FrameLayout::default(),
@@ -681,7 +754,10 @@ impl EditorView {
             player: animation::Player::default(),
             animation_task: None,
             animate_images: true,
-            shaping: shaping::Shaping::default(),
+            pointer: None,
+            rehover: std::cell::Cell::new(false),
+            release_hooked: false,
+            shaping,
         }
     }
 
@@ -822,18 +898,37 @@ impl EditorView {
             && let Some(first) = self.player.play(&picture)
         {
             self.animation_task = Some(cx.spawn(async move |this, cx| {
-                let mut delay = first;
+                // Frames are due at fixed times from the start, so the time
+                // spent stepping and painting does not add up over a loop.
+                let mut due = std::time::Instant::now() + first;
                 loop {
-                    cx.background_executor().timer(delay).await;
-                    let next = this.update(cx, |this, cx| {
-                        let next = this.player.advance();
-                        cx.notify();
-                        next
+                    let wait = due.saturating_duration_since(std::time::Instant::now());
+                    cx.background_executor().timer(wait).await;
+                    let tick = this.update(cx, |this, cx| {
+                        if cx.reduce_motion() {
+                            this.player.stop();
+                            cx.notify();
+                            return None;
+                        }
+                        let tick = this.player.advance();
+                        // A stall leaves the frame on screen as it is.
+                        if tick.is_none_or(|tick| tick.changed) {
+                            cx.notify();
+                        }
+                        tick
                     });
-                    match next {
-                        Ok(Some(next)) => delay = next,
-                        _ => break,
-                    }
+                    let Ok(Some(tick)) = tick else {
+                        break;
+                    };
+                    let now = std::time::Instant::now();
+                    due = if !tick.changed {
+                        now + tick.delay
+                    } else if due + tick.delay < now {
+                        // Too late to keep time; start counting again.
+                        now + tick.delay
+                    } else {
+                        due + tick.delay
+                    };
                 }
             }));
         }
@@ -863,6 +958,45 @@ impl EditorView {
         }
     }
 
+    /// Typeset a bounded batch off the UI thread. Results stay keyed by source,
+    /// style and scale, so a late completion cannot replace newer input.
+    pub(crate) fn render_math(&mut self, cx: &mut Context<Self>) {
+        let requests = self.shaping.maths().take_requests();
+        if requests.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    requests
+                        .into_iter()
+                        .map(|request| {
+                            let result = math::render_math(&request);
+                            (request, result)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let caret_visible = this.row_at(this.head()).is_some_and(|(row, offset)| {
+                    this.scroll
+                        .bounds()
+                        .contains(&row.caret(offset, this.caret.upstream()))
+                });
+                this.shaping
+                    .finish_math(&this.types, this.analysis.equations(), results);
+                // Async metrics can move the last visible caret below the
+                // viewport even though the reader did not move it.
+                if caret_visible {
+                    this.caret.ask_reveal();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Refresh changed image files without modifying document state or history.
     pub fn refresh_images(&mut self, cx: &mut Context<Self>) {
         if self.shaping.refresh_images() {
@@ -876,10 +1010,36 @@ impl EditorView {
     /// Name this editor for assistive technology, in place of the generic default.
     pub fn with_aria_label(mut self, label: impl Into<SharedString>) -> Self {
         self.aria_label = label.into();
+        self.custom_aria_label = true;
         self
     }
     pub fn set_aria_label(&mut self, label: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.aria_label = label.into();
+        self.custom_aria_label = true;
+        cx.notify();
+    }
+
+    /// Set presentation messages without replacing the document or its undo state.
+    pub fn with_messages(mut self, messages: EditorMessages) -> Self {
+        if !self.custom_aria_label {
+            self.aria_label = messages.text(EditorMessage::TextEditor).into();
+        }
+        self.accessible_text
+            .borrow_mut()
+            .set_messages(messages.clone());
+        self.shaping.set_messages(messages);
+        self
+    }
+
+    pub fn set_messages(&mut self, messages: EditorMessages, cx: &mut Context<Self>) {
+        if !self.custom_aria_label {
+            self.aria_label = messages.text(EditorMessage::TextEditor).into();
+        }
+        self.accessible_text
+            .borrow_mut()
+            .set_messages(messages.clone());
+        self.shaping.set_messages(messages);
+        self.frame.clear();
         cx.notify();
     }
     pub fn set_placeholder(
@@ -906,6 +1066,9 @@ impl EditorView {
     /// assistive apps. Nothing a reader sees changes; the next frame that
     /// draws this editor lays the document out again.
     pub fn release_layout(&mut self) {
+        // Nothing draws a released editor, so nothing would see it play.
+        self.animation_task = None;
+        self.player.stop();
         self.shaping.release();
         self.frame.release_rows();
         self.accessible_text.borrow_mut().release();
@@ -945,8 +1108,12 @@ impl EditorView {
     pub fn find_selection_query(&self) -> Option<String> {
         let doc = self.state.doc();
         let selection = self.state.selection();
-        shown::ShownText::build(&self.projection, &self.types, &conceal::Reveal::nothing())
-            .text_inside(selection.from(doc)..selection.to(doc))
+        shown::ShownText::build(
+            self.analysis.projection(),
+            &self.types,
+            &conceal::Reveal::nothing(),
+        )
+        .text_inside(selection.from(doc)..selection.to(doc))
     }
 
     /// Find `query` and select the first hit at or after the caret. An empty
@@ -1025,17 +1192,52 @@ impl EditorView {
     }
     /// The document's flattened, line-oriented view.
     pub fn projection(&self) -> Arc<Projection> {
-        self.projection.clone()
+        self.analysis.projection().clone()
     }
     /// The same projection, as the handle the laid-out rows are keyed by: a
     /// document that has not changed hands back the very same `Arc`.
     pub(crate) fn projection_arc(&self) -> &Arc<Projection> {
-        &self.projection
+        self.analysis.projection()
     }
     /// The whole document as text, lines joined by `'\n'`.
     pub fn text(&self) -> &str {
-        self.projection.plain_text()
+        self.analysis.projection().plain_text()
     }
+    /// Whether standalone display formulas receive automatic document numbers.
+    pub fn auto_number_equations(&self) -> bool {
+        self.analysis.options().auto_number_equations
+    }
+
+    /// Number standalone display formulas in document order without changing source.
+    /// Manual tags and references remain available when automatic numbering is off.
+    pub fn set_auto_number_equations(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let options = markraft_core::kind::analysis::AnalysisOptions {
+            auto_number_equations: enabled,
+        };
+        if self
+            .analysis
+            .sync(self.analysis.projection().clone(), &self.types, options)
+        {
+            self.shaping.equations_changed(&self.types);
+            self.caret.ask_reveal();
+            cx.notify();
+        }
+    }
+
+    /// Document semantics for the current editing state, independent of layout.
+    /// For saving or export, analyze `committed_document` instead while an IME
+    /// composition is active.
+    pub fn analysis(&self) -> &markraft_core::kind::analysis::DocumentAnalysis {
+        &self.analysis
+    }
+
+    /// Synchronize derived data only after the entire state has been accepted.
+    fn sync_document_analysis(&mut self) {
+        let projection = projection_of(&self.state);
+        self.analysis
+            .sync(projection, &self.types, self.analysis.options());
+    }
+
     /// The style rows are shaped and drawn with.
     pub fn style(&self) -> &crate::style::EditorStyle {
         self.shaping.style()
@@ -1051,10 +1253,14 @@ impl EditorView {
         ShapeInput {
             doc,
             types: &self.types,
-            projection: &self.projection,
+            projection: self.analysis.projection(),
             style: self.shaping.style(),
             single_line: self.single_line,
             images: self.shaping.images(),
+            messages: self.shaping.messages(),
+            maths: Some(self.shaping.maths()),
+            equations: Some(self.analysis.equations()),
+            scale_factor: self.shaping.scale_factor(),
             wiki: self.shaping.wiki(),
             spelling: self.spelling.as_deref(),
             selection: selection.from(doc)..selection.to(doc),
@@ -1127,7 +1333,7 @@ impl EditorView {
     }
     /// The type and attributes every selected block shares; mixed formats give `None`.
     pub fn active_block_type(&self) -> Option<(NodeTypeId, Attrs)> {
-        format_state::active_block_type(&self.state, &self.projection)
+        format_state::active_block_type(&self.state, self.analysis.projection())
     }
 
     /// Replace the document, discarding the undo history with it.
@@ -1151,7 +1357,7 @@ impl EditorView {
         );
         self.find = find;
         self.state = state;
-        self.projection = projection_of(&self.state);
+        self.sync_document_analysis();
         self.extension_selection = self.state.selection().clone();
         self.undo_group_depth = 0;
         self.scroll.set_offset(point(px(0.), px(0.)));
@@ -1179,11 +1385,20 @@ impl EditorView {
         &mut self,
         specs: impl IntoIterator<Item = TransactionSpec>,
     ) -> Option<Vec<Transaction>> {
-        let transactions = match apply_guarded_transactions(
+        self.apply_with_isolation(specs, None)
+    }
+
+    fn apply_with_isolation(
+        &mut self,
+        specs: impl IntoIterator<Item = TransactionSpec>,
+        isolated_depth: Option<usize>,
+    ) -> Option<Vec<Transaction>> {
+        let transactions = match apply_guarded_transactions_with_groups(
             &mut self.state,
             specs,
             self.document_guard.as_ref(),
             self.transaction_guard.as_ref(),
+            isolated_depth,
         ) {
             Ok(transactions) => transactions,
             Err(error) => {
@@ -1191,7 +1406,7 @@ impl EditorView {
                 return None;
             }
         };
-        self.projection = projection_of(&self.state);
+        self.sync_document_analysis();
         Some(transactions)
     }
 
@@ -1205,8 +1420,18 @@ impl EditorView {
         discarding: bool,
         specs: Vec<TransactionSpec>,
     ) -> Option<bool> {
+        self.edit_with_isolation(cx, discarding, specs, None)
+    }
+
+    fn edit_with_isolation(
+        &mut self,
+        cx: &mut Context<Self>,
+        discarding: bool,
+        specs: Vec<TransactionSpec>,
+        isolated_depth: Option<usize>,
+    ) -> Option<bool> {
         let composing = self.is_composing();
-        let transactions = self.apply(specs)?;
+        let transactions = self.apply_with_isolation(specs, isolated_depth)?;
         let changed = transactions.iter().any(Transaction::doc_changed);
         self.caret.moved_by_edit();
         if changed || composing != self.is_composing() {
@@ -1242,6 +1467,23 @@ impl EditorView {
     ) -> bool {
         self.edit(cx, false, specs.into_iter().collect())
             .unwrap_or(false)
+    }
+
+    /// Apply a host edit as a separate undo event, even inside an explicit group.
+    /// The current group resumes after the edit as a fresh segment. All boundary
+    /// and editing states are prepared before guards run; refusal changes nothing.
+    pub fn dispatch_isolated(
+        &mut self,
+        specs: impl IntoIterator<Item = TransactionSpec>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.edit_with_isolation(
+            cx,
+            false,
+            specs.into_iter().collect(),
+            Some(self.undo_group_depth),
+        )
+        .unwrap_or(false)
     }
 
     /// The view's side of [`EditorCx::begin_undo_group`].
@@ -1348,6 +1590,13 @@ impl EditorView {
                     .unwrap_or_default()
                     .to_owned()
             })
+    }
+
+    fn equation_reference_under(&self, point: Point<Pixels>) -> Option<usize> {
+        self.frame
+            .rows()
+            .iter()
+            .find_map(|row| row.equation_target_at(point))
     }
 
     /// Where the definition of the footnote reference drawn under `point`
@@ -1649,7 +1898,7 @@ impl EditorView {
         };
         // Below the last row laid out is the document's end only where that
         // row is the document's last line.
-        let at_end = last.index + 1 >= self.projection.line_count();
+        let at_end = last.index + 1 >= self.analysis.projection().line_count();
         if at_end && point.y >= last.origin.y + last.height {
             return last.offset_to_pos(last.char_len);
         }
@@ -1657,7 +1906,7 @@ impl EditorView {
         if row.in_callout_header(point.y) {
             return row.offset_to_pos(0);
         }
-        row.hit_position(row.char_at(local), &self.projection)
+        row.hit_position(row.char_at(local), self.analysis.projection())
     }
 
     /// The laid-out line `point` falls on, and the point relative to its origin.
@@ -1727,21 +1976,35 @@ impl EditorView {
         let pos = self.hit(target);
         let upstream = self
             .row_at(pos)
-            .map(|(row, offset)| row.caret(offset, false).y > target.y)
+            .map(|(row, offset)| {
+                let visual = row.visual_for_offset(offset, false);
+                row.origin.y + row.visual_top(visual) > target.y
+            })
             .unwrap_or(false);
         (pos, upstream)
     }
 
     /// Every visual row's vertical centre, across the whole laid-out document,
     /// each one listed once however many lines sit on it.
-    fn visual_row_centers(&self) -> Vec<Pixels> {
+    fn visual_row_centers(&self, x: Pixels) -> Vec<Pixels> {
         surface::merge_row_centers(
             self.frame
                 .rows()
                 .iter()
                 .flat_map(|row| {
-                    (0..row.navigable_rows())
-                        .map(move |i| row.origin.y + row.line_height * (i as f32 + 0.5))
+                    (0..row.navigable_rows()).filter_map(move |i| {
+                        let y = row.origin.y + row.visual_top(i) + row.visual_height(i) * 0.5;
+                        // Other columns may have different wrapping or taller
+                        // objects. Only the cell reached at the kept column
+                        // contributes stops to this vertical movement.
+                        if let Some(cell) = row.table
+                            && surface::cell_under(self.frame.rows(), cell.table, point(x, y))
+                                .is_some_and(|under| under.index != row.index)
+                        {
+                            return None;
+                        }
+                        Some(y)
+                    })
                 })
                 .collect(),
         )
@@ -1754,13 +2017,22 @@ impl EditorView {
         let (row, offset) = self.row_at(head)?;
         let caret = row.caret(offset, self.caret.upstream());
         let x = self.caret.preferred_x().unwrap_or(caret.x);
-        let centers = self.visual_row_centers();
+        let centers = self.visual_row_centers(x);
         if centers.is_empty() {
             return None;
         }
+        let visual = row.visual_for_offset(offset, self.caret.upstream());
+        let center = row.origin.y + row.visual_top(visual) + row.visual_height(visual) * 0.5;
         let current = centers
             .iter()
-            .position(|&y| y > caret.y)
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                (**a - center)
+                    .abs()
+                    .partial_cmp(&(**b - center).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(index, _)| index)
             .unwrap_or(centers.len() - 1);
         let next = (current as isize + delta).clamp(0, centers.len() as isize - 1) as usize;
         let target = point(x, centers[next]);
@@ -1771,8 +2043,9 @@ impl EditorView {
     /// Whether `position` shows on the same visual row as the caret.
     fn same_visual_row(&self, position: usize, upstream: bool) -> bool {
         let caret_y = |pos: usize, upstream: bool| {
-            self.row_at(pos)
-                .map(|(row, offset)| row.caret(offset, upstream).y)
+            self.row_at(pos).map(|(row, offset)| {
+                row.origin.y + row.visual_top(row.visual_for_offset(offset, upstream))
+            })
         };
         caret_y(position, upstream) == caret_y(self.motion_head(), self.caret.upstream())
     }
@@ -1781,14 +2054,14 @@ impl EditorView {
     pub(crate) fn line_edge_target(&self, end: bool) -> Option<(usize, bool)> {
         let head = self.motion_head();
         let (row, offset) = self.row_at(head)?;
-        let caret = row.caret(offset, self.caret.upstream());
+        let visual = row.visual_for_offset(offset, self.caret.upstream());
         Some(self.hit_upstream(point(
             if end {
                 row.origin.x + row.width
             } else {
                 row.origin.x
             },
-            caret.y + row.line_height * 0.5,
+            row.origin.y + row.visual_top(visual) + row.visual_height(visual) * 0.5,
         )))
     }
 
@@ -1816,13 +2089,14 @@ impl EditorView {
         }
         let head = self.head();
         let cursor = self.state.selection().is_cursor();
-        let last_line = self.projection.line_count().saturating_sub(1);
+        let last_line = self.analysis.projection().line_count().saturating_sub(1);
         if delta > 0
             && !extend
             && cursor
-            && self.projection.line_at(head) == Some(last_line)
+            && self.analysis.projection().line_at(head) == Some(last_line)
             && self
-                .projection
+                .analysis
+                .projection()
                 .line(last_line)
                 .is_some_and(|line| line.to() == head && self.types.is_verbatim_block(line))
             && let Some(spec) = markraft_core::commands::exit_code()(&self.state)
@@ -1918,9 +2192,9 @@ impl EditorView {
     /// From `head` to the edge of its visual row that `end` names, ordered.
     fn line_edge_range(&self, head: usize, end: bool) -> Option<(usize, usize)> {
         let (row, offset) = self.row_at(head)?;
-        let caret = row.caret(offset, self.caret.upstream());
-        let first = caret.y < row.origin.y + row.line_height;
-        let last = caret.y >= row.origin.y + row.line_height * (row.visual_rows() as f32 - 1.);
+        let visual = row.visual_for_offset(offset, self.caret.upstream());
+        let first = visual == 0;
+        let last = visual + 1 == row.visual_rows();
         let edge = match end {
             false if first => row.from,
             true if last => row.to(),
@@ -2006,7 +2280,13 @@ impl EditorView {
                 )
                 .ok()
         });
-        let spec = if let Some(codecs) = self
+        let spec = if let Some(spec) = clipboard_text
+            .as_ref()
+            .filter(|_| !self.single_line)
+            .and_then(|text| clipboard::math_source_paste(&self.state, &self.types, text))
+        {
+            Some(spec)
+        } else if let Some(codecs) = self
             .codecs
             .clone()
             .filter(|_| in_cell && !self.single_line && clipboard_text.is_some())
@@ -2093,6 +2373,13 @@ impl EditorView {
             Self::open_link(&url, cx);
             return;
         }
+        if event.modifiers.platform
+            && let Some(target) = self.equation_reference_under(event.position)
+        {
+            self.selecting = false;
+            self.go_to(target, cx);
+            return;
+        }
         // ⌘-click on a footnote reference goes to its definition, as it follows
         // a link; the definition's label goes back to the first reference.
         if event.modifiers.platform
@@ -2173,14 +2460,22 @@ impl EditorView {
         }
         let head = self.head();
         if event.click_count >= 3 {
-            if let Some((index, _)) = self.projection.pos_to_line_offset(head)
-                && let Some(line) = self.projection.line(index)
+            if let Some((index, _)) = self.analysis.projection().pos_to_line_offset(head)
+                && let Some(line) = self.analysis.projection().line(index)
             {
                 self.select_range(line.from(), line.to(), cx);
             }
         } else if event.click_count == 2 {
-            let from = self.projection.prev_word_boundary(head).unwrap_or(head);
-            let to = self.projection.next_word_boundary(from).unwrap_or(head);
+            let from = self
+                .analysis
+                .projection()
+                .prev_word_boundary(head)
+                .unwrap_or(head);
+            let to = self
+                .analysis
+                .projection()
+                .next_word_boundary(from)
+                .unwrap_or(head);
             self.select_range(from, to, cx);
         }
         self.reset_caret_blink(cx);
@@ -2199,10 +2494,23 @@ impl EditorView {
         );
     }
 
-    fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.selecting {
             self.select_point(event.position, true, cx);
         }
+        if !self.release_hooked {
+            // The atlas keeps an uploaded frame until it is dropped from it,
+            // and a view released while playing never paints to drop its own.
+            self.release_hooked = true;
+            cx.on_release_in(window, |this, window, _| {
+                this.player.stop();
+                for frame in this.player.take_retired() {
+                    let _ = window.drop_image(frame);
+                }
+            })
+            .detach();
+        }
+        self.pointer = Some(event.position);
         self.hover_picture(Some(event.position), cx);
     }
     fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -2265,6 +2573,7 @@ impl Render for EditorView {
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !*hovered {
+                    this.pointer = None;
                     this.hover_picture(None, cx);
                 }
             }))
@@ -2302,7 +2611,12 @@ impl Render for EditorView {
             })
             .when(!self.single_line, |this| this.overflow_y_scroll())
             .track_scroll(&self.scroll)
-            .on_scroll_wheel(cx.listener(|this, _, _, cx| this.flash_scrollbar(cx)))
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                this.flash_scrollbar(cx);
+                // Scrolling moves the pictures, not the pointer.
+                this.pointer = Some(event.position);
+                this.rehover.set(true);
+            }))
             .p(self.style().padding)
             .pt(self.style().padding + self.style().top_overlay)
             .pb(self.style().padding + self.style().bottom_overlay)
@@ -2575,7 +2889,19 @@ impl EditorView {
             types.bullet_list,
             types.task_item
         ));
-        rich!(ToggleTask, chains::toggle_task);
+        root = root.on_action(cx.listener(|this, _: &ToggleTask, _, cx| {
+            if this.single_line {
+                cx.propagate();
+                return;
+            }
+            let command = markraft_core::commands::chain(vec![
+                math_edit::finish(&this.types),
+                chains::toggle_task(&this.types),
+            ]);
+            if !this.run_command(&command, cx) {
+                cx.propagate();
+            }
+        }));
         root = root
             .on_action(cx.listener(|this, _: &ChooseCodeLanguage, window, cx| {
                 if let Some(pos) = this.active_code_pos() {
@@ -2925,6 +3251,104 @@ mod document_guard_tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(state.doc(), transactions.last().unwrap().new_doc());
         assert_eq!(track.save(&schema, state.doc()).unwrap(), "new!base");
+    }
+
+    #[test]
+    fn isolated_host_edits_split_and_resume_explicit_groups() {
+        let mut state = at(&state_of("base"), 1);
+        for _ in 0..2 {
+            apply_guarded(
+                &mut state,
+                [TransactionSpec::new()
+                    .effect(markraft_core::history::begin_undo_group().of(()))
+                    .add_to_history(false)],
+                None,
+            )
+            .unwrap();
+        }
+        let original = state.doc().clone();
+        let typed = commands::insert_text("first")(&state).unwrap();
+        apply_guarded(&mut state, [typed], None).unwrap();
+        let before_host = state.doc().clone();
+        let host = commands::insert_text("host")(&state).unwrap();
+        super::apply_guarded_transactions_with_groups(&mut state, [host], None, None, Some(2))
+            .unwrap();
+        let after_host = state.doc().clone();
+        for text in ["later", "more"] {
+            let typed = commands::insert_text(text)(&state).unwrap();
+            apply_guarded(&mut state, [typed], None).unwrap();
+        }
+        assert_eq!(undo_depth(&state), 3);
+        for expected in [after_host, before_host, original] {
+            let spec = undo(&state).unwrap();
+            apply_guarded(&mut state, [spec], None).unwrap();
+            assert_eq!(state.doc(), &expected);
+        }
+    }
+
+    #[test]
+    fn rejected_isolated_edits_keep_the_original_group_and_source() {
+        use markraft_commonmark::{SourceDocument, SourceTrack};
+        let schema = commonmark_schema();
+        let source = SourceDocument::parse(&schema, "base").unwrap();
+        let track = Arc::new(SourceTrack::new(source.clone()));
+        let (mut state, _) = build_state(
+            &schema,
+            &markraft_core::Extension::none(),
+            Some(source.document().clone()),
+            &DocTypes::none(),
+        );
+        let schema_for_guard = schema.clone();
+        let track_for_guard = track.clone();
+        let guard: super::TransactionGuard = Box::new(move |transactions| {
+            if schema_for_guard
+                .describe(transactions.last().unwrap().new_doc())
+                .contains("blocked")
+            {
+                return Err(EditRejection::Protected("Rejected host edit".into()));
+            }
+            track_for_guard
+                .apply_transactions(&schema_for_guard, transactions)
+                .map_err(|error| EditRejection::Protected(error.to_string()))
+        });
+        apply_guarded(
+            &mut state,
+            [TransactionSpec::new()
+                .effect(markraft_core::history::begin_undo_group().of(()))
+                .add_to_history(false)],
+            None,
+        )
+        .unwrap();
+        let first = commands::insert_text("first")(&state).unwrap();
+        super::apply_guarded_transactions(&mut state, [first], None, Some(&guard)).unwrap();
+        let before = state.clone();
+        let before_source = track.snapshot().render(&schema, state.doc()).unwrap();
+        let blocked = commands::insert_text("blocked")(&state).unwrap();
+        assert!(
+            super::apply_guarded_transactions_with_groups(
+                &mut state,
+                [blocked],
+                None,
+                Some(&guard),
+                Some(1)
+            )
+            .is_err()
+        );
+        assert_unchanged(&before, &state);
+        assert_eq!(
+            track.snapshot().render(&schema, state.doc()).unwrap(),
+            before_source
+        );
+        let last = commands::insert_text("last")(&state).unwrap();
+        super::apply_guarded_transactions(&mut state, [last], None, Some(&guard)).unwrap();
+        assert_eq!(undo_depth(&state), 1);
+        let undo = undo(&state).unwrap();
+        super::apply_guarded_transactions(&mut state, [undo], None, Some(&guard)).unwrap();
+        assert_eq!(state.doc(), source.document());
+        assert_eq!(
+            track.snapshot().render(&schema, state.doc()).unwrap(),
+            "base"
+        );
     }
 
     #[test]

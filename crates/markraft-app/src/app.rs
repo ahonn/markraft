@@ -1,3 +1,4 @@
+use crate::locale::Message;
 mod assets;
 mod carry;
 mod feedback;
@@ -94,9 +95,9 @@ enum FormatMenu {
     List,
 }
 pub struct MarkraftApp {
-    /// The resolved interface locale for this launch. The preference remains
-    /// stored separately so switching it can be applied without rebuilding the app.
-    pub(crate) locale: crate::locale::Locale,
+    i18n: crate::locale::I18n,
+    locale_state: std::sync::Arc<std::sync::RwLock<crate::locale::I18n>>,
+    slash_commands: ui::slash::SlashCommands,
     library: Library,
     /// This Mac's preferences, kept in the settings file outside the notes folder;
     /// the settings window changes them and [`MarkraftApp::apply_preferences`]
@@ -190,17 +191,18 @@ impl MarkraftApp {
         store: Option<Store>,
         library: Library,
         preferences: Preferences,
-        error: Option<String>,
+        error: Option<Message>,
         // None runs without the menu bar, the shortcuts and the native window: the
         // headless tests, which have none of them.
-        platform: Option<Result<Platform, String>>,
+        platform: Option<Result<Platform, Message>>,
         updater: Updater,
         instance: Instance,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let path = path.map(|path| path.canonicalize().unwrap_or(path));
-        crate::locale::set_active(preferences.language.locale());
+        let i18n = crate::locale::I18n::for_preference(&preferences.language);
+        set_app_menus(&i18n, cx);
         let dark = preferences.dark_mode.unwrap_or(matches!(
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
@@ -209,6 +211,7 @@ impl MarkraftApp {
         let platform = match platform {
             None => None,
             Some(Ok(mut p)) => {
+                p.set_locale(&i18n);
                 if let Err(e) = p
                     .configure_window(window)
                     .and_then(|_| apply_platform_preferences(&mut p, &preferences, window))
@@ -299,9 +302,11 @@ impl MarkraftApp {
         let house = markraft_commonmark::HouseStyleHandle::default();
         apply_markdown_style(&house, &preferences);
         let find_editor = cx.new(|cx| {
-            let mut editor = EditorView::single_line(cx).with_style(query_style(dark));
-            editor.set_placeholder("Find", cx);
-            editor.set_aria_label("Find in note", cx);
+            let mut editor = EditorView::single_line(cx)
+                .with_style(query_style(dark))
+                .with_messages(i18n.editor_messages());
+            editor.set_placeholder(i18n.text("input.find"), cx);
+            editor.set_aria_label(i18n.text("input.find-in-note"), cx);
             editor
         });
         // The note is told on the way through, while the bar is open. A change
@@ -313,7 +318,9 @@ impl MarkraftApp {
             this.sync_find(cx);
         });
         let mut app = Self {
-            locale: preferences.language.locale(),
+            locale_state: std::sync::Arc::new(std::sync::RwLock::new(i18n.clone())),
+            i18n,
+            slash_commands: Default::default(),
             library,
             preferences,
             persistence: store.map(|store| Self::start_persistence(store, house.clone())),
@@ -361,6 +368,7 @@ impl MarkraftApp {
             _activation: activation,
             _quit: quit,
         };
+        app.refresh_slash_commands();
         app.ensure_session(window, cx);
         app.watch_persistence(window, cx);
         if app.persistence.is_some() {
@@ -532,11 +540,14 @@ impl MarkraftApp {
             persistence.acknowledge_changes(acknowledgements);
         }
         if vanished > 0 {
-            self.feedback.queue(if vanished == 1 {
-                "A note's file was deleted outside Markraft.".to_owned()
-            } else {
-                format!("{vanished} notes' files were deleted outside Markraft.")
-            });
+            self.feedback.queue(
+                Message::new(if vanished == 1 {
+                    "notice.deleted-one"
+                } else {
+                    "notice.deleted-many"
+                })
+                .arg("count", vanished.to_string()),
+            );
         }
         cx.notify();
     }
@@ -645,11 +656,16 @@ impl MarkraftApp {
     }
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reconcile_interaction(window, cx);
-        if let Some(rejection) = self
-            .editor()
-            .update(cx, |editor, _| editor.take_edit_error())
+        if let Some((rejection, semantic_message)) = self
+            .sessions
+            .get(&self.library.active_id)
+            .expect("the active note has an editor")
+            .take_edit_error(cx)
         {
             match rejection {
+                EditRejection::NoTransaction => {
+                    self.feedback.queue(Message::new("refusal.no-transaction"))
+                }
                 // The corner already says "Read-only" in words, beside a capsule that
                 // opens the ways out of it. A sentence per keystroke would only say
                 // it again, so the capsule lights instead.
@@ -660,7 +676,8 @@ impl MarkraftApp {
                 EditRejection::Protected(message)
                 | EditRejection::Invalid(message)
                 | EditRejection::Refused(message) => {
-                    self.feedback.queue(message);
+                    self.feedback
+                        .queue(semantic_message.unwrap_or_else(|| message.into()));
                 }
             }
         }
@@ -782,8 +799,7 @@ impl MarkraftApp {
                     } else {
                         this.updater.postpone(continuation);
                         this.show(window, cx);
-                        this.feedback
-                            .queue("Update paused: a note couldn't be saved.".to_owned());
+                        this.feedback.queue(Message::new("notice.update-paused"));
                     }
                 });
             } else {
@@ -953,14 +969,14 @@ impl MarkraftApp {
     /// Put what a bug report needs on the clipboard, and say so.
     pub fn copy_debug_info(&mut self, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(crate::platform::debug_info()));
-        self.feedback.inform("Copied debug info");
+        self.feedback.inform(Message::new("notice.copied-debug"));
         cx.notify();
     }
 
     /// Say something found on the way to the first window — a crash report the
     /// last run left, settings that were set aside — with a button that shows
     /// the file.
-    pub fn announce_with_reveal(&mut self, text: String, path: PathBuf, cx: &mut Context<Self>) {
+    pub fn announce_with_reveal(&mut self, text: Message, path: PathBuf, cx: &mut Context<Self>) {
         self.feedback.queue_with_reveal(text, path);
         cx.notify();
     }
@@ -1012,7 +1028,7 @@ impl MarkraftApp {
             // In vim Escape is how every command is left, and pressed once too often
             // it would put the note away mid-thought. vim itself answers a stray
             // Escape by staying put; the way out is `:q`, which says so.
-            self.inform("Type :q and press Return to hide the window.", cx);
+            self.inform(Message::new("notice.vim-hide"), cx);
         } else {
             self.hide(window, cx);
         }
@@ -1090,11 +1106,14 @@ impl MarkraftApp {
             // would be telling the user something they can see is untrue.
             None => match linked_file(page, from.as_deref(), self.path.as_deref()) {
                 Some(path) => cx.open_with_system(&path),
-                None => {
-                    let what = if embed { "file" } else { "note" };
-                    self.feedback
-                        .queue(format!("No {what} named “{page}” in this folder."))
-                }
+                None => self.feedback.queue(
+                    Message::new(if embed {
+                        "notice.missing-file"
+                    } else {
+                        "notice.missing-note"
+                    })
+                    .arg("name", page),
+                ),
             },
         }
     }
@@ -1116,12 +1135,8 @@ impl MarkraftApp {
         self.set_panel(next, cx);
         self.picker.reopen_browse();
         self.ring.release();
-        let (query, placeholder, label) = match self.interaction.panel() {
-            Panel::Actions => (String::new(), "Search for actions…", "Search actions"),
-            _ => (String::new(), "Search for notes…", "Search notes"),
-        };
         self.close_popover(cx);
-        self.set_query(query, placeholder, label, cx);
+        self.set_query(String::new(), cx);
         if self.interaction.panel() != Panel::Editor {
             window.focus(&self.query().focus_handle(cx), cx);
         } else {
@@ -1138,7 +1153,7 @@ impl MarkraftApp {
         if self.interaction.panel() != Panel::Actions {
             return;
         }
-        self.set_query(":".into(), "Search for actions…", "Search actions", cx);
+        self.set_query(":".into(), cx);
         let query = self.query().clone();
         query.update(cx, |query, cx| {
             let end = markraft_core::Selection::at_end(query.state().schema(), query.state().doc());
@@ -1186,9 +1201,9 @@ impl MarkraftApp {
         let title = self
             .library
             .note(&id)
-            .map(|note| note.title())
+            .map(|note| note.display_title(&self.i18n))
             .filter(|title| !title.trim().is_empty())
-            .unwrap_or_else(|| "this note".to_owned());
+            .unwrap_or_else(|| self.i18n.text("dialog.this-note").to_owned());
         let trash = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
             if from_browse {
                 this.trash_note(&id, window, cx);
@@ -1207,9 +1222,14 @@ impl MarkraftApp {
         }
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("Move “{title}” to the Trash?"),
+            &self
+                .i18n
+                .text_with("dialog.trash-question", &[("title", &title)]),
             None,
-            &["Cancel", "Move to Trash"],
+            &[
+                self.i18n.text("dialog.cancel").as_str(),
+                self.i18n.text("dialog.trash").as_str(),
+            ],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -1273,17 +1293,19 @@ impl MarkraftApp {
     /// carries the reason.
     fn moved_to_trash(&mut self, moved: bool, folder: Option<PathBuf>, cx: &mut Context<Self>) {
         if !moved {
-            self.feedback.inform("Couldn't move to Trash.");
+            self.feedback.inform(Message::new("notice.trash-failed"));
             cx.notify();
             return;
         }
         match self.trashed.first().cloned().or(folder) {
-            Some(path) => self.feedback.inform_with_reveal("Moved to Trash", path),
-            None => self.feedback.inform("Moved to Trash"),
+            Some(path) => self
+                .feedback
+                .inform_with_reveal(Message::new("notice.trashed"), path),
+            None => self.feedback.inform(Message::new("notice.trashed")),
         }
         cx.notify();
     }
-    fn inform(&mut self, text: impl AsRef<str>, cx: &mut Context<Self>) {
+    fn inform(&mut self, text: impl Into<Message>, cx: &mut Context<Self>) {
         self.feedback.inform(text);
         cx.notify();
     }
@@ -1300,7 +1322,7 @@ impl MarkraftApp {
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn shown_error(&self) -> Option<String> {
-        self.feedback.error().cloned()
+        self.feedback.error().map(|error| error.render(&self.i18n))
     }
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1360,7 +1382,7 @@ impl MarkraftApp {
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_queued_notices(&self) -> Vec<String> {
-        self.feedback.queued().map(str::to_owned).collect()
+        self.feedback.queued().collect()
     }
     /// The notice on screen now, whichever way it came.
     #[cfg(test)]
@@ -1368,7 +1390,7 @@ impl MarkraftApp {
     pub(crate) fn test_notice(&self) -> Option<String> {
         self.feedback
             .notice()
-            .map(|notice| notice.text.as_ref().to_owned())
+            .map(|notice| notice.text.render(&self.i18n))
     }
     /// Paths dropped on the window, as Finder drops them.
     #[cfg(test)]
@@ -1487,7 +1509,7 @@ impl MarkraftApp {
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
         self.ring.release();
         self.show_popover(Popover::Link(LinkPopover::Edit), cx);
-        self.set_query(url, "Enter a link…", "Link URL", cx);
+        self.set_query(url, cx);
         window.focus(&self.query().focus_handle(cx), cx);
         cx.notify();
     }
@@ -1517,7 +1539,7 @@ impl MarkraftApp {
             self.editor().read(cx).committed_document(),
             &self.house,
         )));
-        self.inform("Copied as Markdown", cx);
+        self.inform(Message::new("notice.copied-markdown"), cx);
     }
     fn recover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.io.retry.is_empty() {
@@ -1534,7 +1556,7 @@ impl MarkraftApp {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Use Folder".into()),
+            prompt: Some(self.i18n.text("dialog.use-folder").into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(mut paths))) = prompt.await
@@ -1581,7 +1603,7 @@ impl MarkraftApp {
             let persistence = Self::start_persistence(store, house);
             Ok((directory, persistence, library))
         });
-        self.inform("Opening folder…", cx);
+        self.inform(Message::new("notice.opening-folder"), cx);
         self.run_io(task, window, cx, move |this, result, window, cx| {
             if this.io.opening != opening {
                 return;
@@ -1614,20 +1636,24 @@ impl MarkraftApp {
     fn write_copy(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_documents(cx);
         let Some(persistence) = &self.persistence else {
-            self.inform("Open a folder to save notes.", cx);
+            self.inform(Message::new("notice.open-folder-save"), cx);
             return;
         };
         let snapshot = self.library.active_note().clone();
         let original = snapshot.clone();
         let activation = self.io.opening;
         let filename = format!("{}.md", snapshot.title().replace(['/', ':'], "-"));
-        let rendering = persistence.markdown_async(snapshot);
+        let rendering = persistence.snapshot_async(
+            snapshot,
+            self.library.generation,
+            self.preferences.auto_number_equations,
+        );
         let directory = self.path.clone().unwrap_or_default();
         let prompt = cx.prompt_for_new_path(&directory, Some(&filename));
         let executor = cx.background_executor().clone();
         self.run_io(
             async move {
-                let document = rendering.await?;
+                let document = rendering.await?.markdown;
                 let Some(path) = prompt
                     .await
                     .map_err(|e| StoreError::from(e.to_string()))?
@@ -1693,7 +1719,7 @@ impl MarkraftApp {
                         },
                     );
                 }
-                Ok(Some(_)) => this.inform("Exported Markdown", cx),
+                Ok(Some(_)) => this.inform(Message::new("notice.exported"), cx),
                 Ok(None) => {}
                 Err(error) => this.feedback.set_error(error),
             },
@@ -1702,9 +1728,12 @@ impl MarkraftApp {
     fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let answer = window.prompt(
             PromptLevel::Warning,
-            "Reload from disk?",
-            Some("Unsaved changes in Markraft will be lost."),
-            &["Cancel", "Reload"],
+            &self.i18n.text("dialog.reload-question"),
+            Some(&self.i18n.text("dialog.reload-detail")),
+            &[
+                self.i18n.text("dialog.cancel").as_str(),
+                self.i18n.text("dialog.reload").as_str(),
+            ],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -1712,10 +1741,7 @@ impl MarkraftApp {
                 let _ = cx.update(|window, cx| {
                     this.update(cx, |this, cx| {
                         if this.io.pending > 0 {
-                            this.inform(
-                                "Wait for the current file operation before reloading.",
-                                cx,
-                            );
+                            this.inform(Message::new("notice.wait-reload"), cx);
                             return;
                         }
                         this.editor()
@@ -1765,7 +1791,7 @@ impl MarkraftApp {
             files: true,
             directories: false,
             multiple: true,
-            prompt: Some("Open Markdown".into()),
+            prompt: Some(self.i18n.text("dialog.open-markdown").into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = prompt.await {
@@ -1789,19 +1815,17 @@ impl MarkraftApp {
             && dropped.markdown.is_empty())
         .then(|| dropped.folders[0].clone());
         if folder.is_none() && !dropped.folders.is_empty() {
-            self.feedback
-                .queue("Drop a single folder to open it.".to_owned());
+            self.feedback.queue(Message::new("notice.single-folder"));
         }
         if dropped.skipped > 0 {
-            self.feedback.queue(format!(
-                "Skipped {} {} Markraft cannot open.",
-                dropped.skipped,
-                if dropped.skipped == 1 {
-                    "file"
+            self.feedback.queue(
+                Message::new(if dropped.skipped == 1 {
+                    "notice.skipped-one"
                 } else {
-                    "files"
-                }
-            ));
+                    "notice.skipped-many"
+                })
+                .arg("count", dropped.skipped.to_string()),
+            );
         }
         if !dropped.images.is_empty() {
             if self.interaction.panel() == Panel::Editor && self.persistence.is_some() {
@@ -1815,8 +1839,7 @@ impl MarkraftApp {
                     cx,
                 );
             } else {
-                self.feedback
-                    .queue("Open a note to drop images into.".to_owned());
+                self.feedback.queue(Message::new("notice.open-note-images"));
             }
         }
         if !dropped.markdown.is_empty() {
@@ -1836,9 +1859,14 @@ impl MarkraftApp {
             .unwrap_or_else(|| folder.display().to_string());
         let answer = window.prompt(
             PromptLevel::Info,
-            &format!("Open “{name}” instead?"),
-            Some("Markraft shows one folder at a time. Nothing is moved or renamed."),
-            &["Cancel", "Open"],
+            &self
+                .i18n
+                .text_with("dialog.switch-question", &[("name", &name)]),
+            Some(&self.i18n.text("dialog.switch-detail")),
+            &[
+                self.i18n.text("dialog.cancel").as_str(),
+                self.i18n.text("dialog.open").as_str(),
+            ],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -1861,7 +1889,7 @@ impl MarkraftApp {
             return;
         }
         let Some(persistence) = &self.persistence else {
-            self.inform("Open a notes folder before opening files.", cx);
+            self.inform(Message::new("notice.folder-before-files"), cx);
             return;
         };
         self.io.opening += 1;
@@ -1901,9 +1929,11 @@ impl MarkraftApp {
                                     this.library.select(&id);
                                 }
                             }
-                            Err(error) => this
-                                .feedback
-                                .queue(format!("Could not open “{name}”: {error}")),
+                            Err(error) => this.feedback.queue(
+                                Message::new("notice.open-file-failed")
+                                    .arg("name", name)
+                                    .arg("error", error),
+                            ),
                         }
                     }
                     this.ensure_session(window, cx);
@@ -1936,14 +1966,14 @@ impl MarkraftApp {
 
     fn configure_new_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.path.clone() else {
-            self.inform("Open a folder to choose where new notes go.", cx);
+            self.inform(Message::new("notice.folder-new-location"), cx);
             return;
         };
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("New Notes Folder".into()),
+            prompt: Some(self.i18n.text("dialog.new-folder").into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = prompt.await
@@ -1952,11 +1982,11 @@ impl MarkraftApp {
                 let relative = root
                     .canonicalize()
                     .and_then(|root| path.canonicalize().map(|path| (root, path)))
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| Message::from(error.to_string()))
                     .and_then(|(root, path)| {
                         path.strip_prefix(root)
                             .map(ToOwned::to_owned)
-                            .map_err(|_| "Choose a folder inside the notes folder.".to_owned())
+                            .map_err(|_| Message::new("notice.choose-inside-folder"))
                     });
                 let _ = this.update(cx, |this, cx| {
                     match relative {
@@ -1964,9 +1994,9 @@ impl MarkraftApp {
                             this.library.workspace.new_note_directory = relative;
                             this.schedule_save(cx);
                         }
-                        Ok(_) => this.set_settings_error_new_notes(Some(
-                            "The notes folder changed; choose the location again.".into(),
-                        )),
+                        Ok(_) => this.set_settings_error_new_notes(Some(Message::new(
+                            "notice.folder-changed",
+                        ))),
                         Err(error) => this.set_settings_error_new_notes(Some(error)),
                     }
                     cx.notify();
@@ -1978,14 +2008,14 @@ impl MarkraftApp {
 
     fn configure_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.path.clone() else {
-            self.inform("Open a folder to set an image location.", cx);
+            self.inform(Message::new("notice.folder-image-location"), cx);
             return;
         };
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Image Folder".into()),
+            prompt: Some(self.i18n.text("dialog.image-folder").into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = prompt.await
@@ -1994,11 +2024,11 @@ impl MarkraftApp {
                 let relative = root
                     .canonicalize()
                     .and_then(|root| path.canonicalize().map(|path| (root, path)))
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| Message::from(error.to_string()))
                     .and_then(|(root, path)| {
                         path.strip_prefix(root)
                             .map(ToOwned::to_owned)
-                            .map_err(|_| "Choose a folder inside the notes folder.".to_owned())
+                            .map_err(|_| Message::new("notice.choose-inside-folder"))
                     });
                 let _ = this.update(cx, |this, cx| {
                     match relative {
@@ -2007,9 +2037,8 @@ impl MarkraftApp {
                                 crate::storage::AttachmentPolicy::WorkspaceFolder(relative);
                             this.schedule_save(cx);
                         }
-                        Ok(_) => this.set_settings_error_images(Some(
-                            "The notes folder changed; choose the location again.".into(),
-                        )),
+                        Ok(_) => this
+                            .set_settings_error_images(Some(Message::new("notice.folder-changed"))),
                         Err(error) => this.set_settings_error_images(Some(error)),
                     }
                     cx.notify();
@@ -2029,8 +2058,7 @@ impl MarkraftApp {
             return;
         }
         if self.library.active_note().read_only.is_some() {
-            self.feedback
-                .queue("Resolve the file's read-only state before inserting images.".to_owned());
+            self.feedback.queue(Message::new("notice.resolve-readonly"));
             return;
         }
         let id = self.library.active_id.clone();
@@ -2050,7 +2078,7 @@ impl MarkraftApp {
         let id = self.library.active_id.clone();
         let Some(path) = self.library.active_note().path.clone() else {
             self.feedback
-                .queue("Images need a saved note. Type something first.".to_owned());
+                .queue(Message::new("notice.save-before-images"));
             return;
         };
         let root = self
@@ -2101,7 +2129,7 @@ impl MarkraftApp {
                         inserted.urls.join(", ")
                     );
                     (
-                        "Images were saved but couldn't be inserted.".to_owned(),
+                        Message::new("notice.images-not-inserted"),
                         inserted.paths.first().cloned(),
                     )
                 };
@@ -2138,31 +2166,28 @@ impl MarkraftApp {
 }
 /// What to tell someone whose keystroke the source-preserving codec could not
 /// write back. The text stays in the editor, so Export Markdown… still has it.
-const UNSAVABLE_EDIT: &str = "Can't save this edit without rewriting other Markdown.";
+const UNSAVABLE_EDIT: &str = "refusal.unsavable";
 
 /// Why a formatting command left the note alone, naming the syntax that could
 /// not be written where it was asked for.
-fn refusal_message(refusal: &markraft_commonmark::CommandRefusal) -> String {
+fn refusal_message(refusal: &markraft_commonmark::CommandRefusal) -> Message {
     use markraft_commonmark::{CommandRefusal, Inexpressible, schema as md};
     let CommandRefusal::NotExpressible { reason } = refusal;
     match reason {
-        Inexpressible::Delimiters { mark } => {
-            let (format, delimiter) = match *mark {
-                md::STRONG => ("bold", "**"),
-                md::EM => ("italic", "*"),
-                md::STRIKETHROUGH => ("strikethrough", "~~"),
-                md::CODE => ("code", "`"),
-                md::UNDERLINE => ("underline", "<u>"),
-                md::HIGHLIGHT => ("highlight", "=="),
-                md::SUPERSCRIPT => ("superscript", "^"),
-                md::SUBSCRIPT => ("subscript", "~"),
-                md::MATH => ("formula", "$"),
-                md::LINK => ("a link", "[…](…)"),
-                _ => ("this format", "its delimiters"),
-            };
-            format!("Can't add {format} here: {delimiter} next to punctuation stays text.")
-        }
-        Inexpressible::Unreadable => "Markdown can't write this formatting here.".to_owned(),
+        Inexpressible::Delimiters { mark } => Message::new(match *mark {
+            md::STRONG => "refusal.bold",
+            md::EM => "refusal.italic",
+            md::STRIKETHROUGH => "refusal.strikethrough",
+            md::CODE => "refusal.code",
+            md::UNDERLINE => "refusal.underline",
+            md::HIGHLIGHT => "refusal.highlight",
+            md::SUPERSCRIPT => "refusal.superscript",
+            md::SUBSCRIPT => "refusal.subscript",
+            md::MATH => "refusal.formula",
+            md::LINK => "refusal.link",
+            _ => "refusal.other",
+        }),
+        Inexpressible::Unreadable => Message::new("refusal.unreadable"),
     }
 }
 
@@ -2379,7 +2404,7 @@ fn apply_platform_preferences(
     platform: &mut Platform,
     preferences: &crate::storage::Preferences,
     window: &Window,
-) -> Result<(), String> {
+) -> Result<(), Message> {
     let on_top = platform.set_always_on_top(window, preferences.always_on_top);
     let spaces = platform.set_all_spaces(window, preferences.all_spaces);
     let toggle = platform.set_shortcut(Shortcut::Toggle, &preferences.hotkey);
@@ -2509,35 +2534,45 @@ pub fn bind_app_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-0", ResetTextSize, Some("MarkraftApp")),
     ]);
     ui::settings::bind_keys(cx);
+    set_app_menus(&crate::locale::I18n::english(), cx);
+}
+
+fn set_app_menus(i18n: &crate::locale::I18n, cx: &App) {
     cx.set_menus([
         Menu::new("Markraft").items([
-            MenuItem::action("Show Notes", Show),
-            MenuItem::action("Settings…", Settings),
-            MenuItem::action("Check for Updates…", CheckForUpdates),
+            MenuItem::action(i18n.text("menu.show-notes"), Show),
+            MenuItem::action(i18n.text("menu.settings"), Settings),
+            MenuItem::action(i18n.text("menu.updates"), CheckForUpdates),
             MenuItem::separator(),
-            MenuItem::action("Quit Markraft", Quit),
+            MenuItem::action(i18n.text("menu.quit"), Quit),
         ]),
-        Menu::new("File").items([
-            MenuItem::action("New Note", NewNote),
-            MenuItem::action("Browse Notes", Browse),
-            MenuItem::action("Save Now", Save),
-            MenuItem::action("Open Markdown…", OpenMarkdown),
-            MenuItem::action("Export Markdown…", Export),
+        Menu::new(i18n.text("menu.file")).items([
+            MenuItem::action(i18n.text("command.new-note"), NewNote),
+            MenuItem::action(i18n.text("command.browse-notes"), Browse),
+            MenuItem::action(i18n.text("command.save-now"), Save),
+            MenuItem::action(i18n.text("command.open-markdown"), OpenMarkdown),
+            MenuItem::action(i18n.text("command.export-markdown"), Export),
         ]),
-        Menu::new("Edit").items([
-            MenuItem::action("Undo", markraft_gpui::Undo),
-            MenuItem::action("Redo", markraft_gpui::Redo),
+        Menu::new(i18n.text("menu.edit")).items([
+            MenuItem::action(i18n.text("command.undo"), markraft_gpui::Undo),
+            MenuItem::action(i18n.text("command.redo"), markraft_gpui::Redo),
             MenuItem::separator(),
-            MenuItem::action("Cut", markraft_gpui::Cut),
-            MenuItem::action("Copy", markraft_gpui::Copy),
-            MenuItem::action("Paste", markraft_gpui::Paste),
-            MenuItem::action("Paste as Plain Text", markraft_gpui::PastePlain),
-            MenuItem::action("Paste as Markdown", markraft_gpui::PasteMarkdown),
-            MenuItem::action("Select All", markraft_gpui::SelectAll),
+            MenuItem::action(i18n.text("menu.cut"), markraft_gpui::Cut),
+            MenuItem::action(i18n.text("menu.copy"), markraft_gpui::Copy),
+            MenuItem::action(i18n.text("menu.paste"), markraft_gpui::Paste),
+            MenuItem::action(
+                i18n.text("command.paste-as-plain-text"),
+                markraft_gpui::PastePlain,
+            ),
+            MenuItem::action(
+                i18n.text("command.paste-as-markdown"),
+                markraft_gpui::PasteMarkdown,
+            ),
+            MenuItem::action(i18n.text("menu.select-all"), markraft_gpui::SelectAll),
             MenuItem::separator(),
-            MenuItem::action("Find…", Find),
-            MenuItem::action("Find Next", FindNext),
-            MenuItem::action("Find Previous", FindPrevious),
+            MenuItem::action(i18n.text("menu.find"), Find),
+            MenuItem::action(i18n.text("menu.find-next"), FindNext),
+            MenuItem::action(i18n.text("menu.find-previous"), FindPrevious),
         ]),
     ]);
 }
@@ -2739,7 +2774,8 @@ mod tests {
         // A formatting command Markdown cannot spell names the delimiters that
         // would not be read, in a sentence of their own.
         use markraft_commonmark::{CommandRefusal, Inexpressible, schema as md};
-        let refused = |reason| refusal_message(&CommandRefusal::NotExpressible { reason });
+        let refused =
+            |reason| refusal_message(&CommandRefusal::NotExpressible { reason }).to_string();
         let formats = [
             (md::STRONG, "**"),
             (md::EM, "*"),

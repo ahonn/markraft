@@ -9,6 +9,9 @@
 //! the formats its toolbar and slash menu offer; each resolves to a command from
 //! the editor's catalogue.
 
+mod snapshot;
+pub use snapshot::{DocumentSnapshot, PendingSnapshot};
+
 use markraft_commonmark::{
     CommandRefusal, CommonMarkCodecs, CommonMarkSpelling, Formatter, HouseStyleHandle,
     commonmark_doc_type_names, commonmark_schema, commonmark_serializer, holds_definitions,
@@ -119,19 +122,19 @@ pub struct MarkdownKind {
     /// Whether typed Markdown becomes formatting — what Enter's block rule
     /// answers to, as the input rules do.
     shortcuts: Arc<AtomicBool>,
-    refusal: fn(&CommandRefusal) -> String,
+    refusal: Arc<dyn Fn(&CommandRefusal) -> String + Send + Sync>,
 }
 
 impl MarkdownKind {
     pub fn new(
         house: HouseStyleHandle,
         shortcuts: Arc<AtomicBool>,
-        refusal: fn(&CommandRefusal) -> String,
+        refusal: impl Fn(&CommandRefusal) -> String + Send + Sync + 'static,
     ) -> MarkdownKind {
         MarkdownKind {
             house,
             shortcuts,
-            refusal,
+            refusal: Arc::new(refusal),
         }
     }
 
@@ -151,7 +154,10 @@ impl DocumentKind for MarkdownKind {
     }
 
     fn toggle_mark(&self, ty: MarkTypeId, _attrs: Attrs) -> Option<Formatting> {
-        Some(worded(self.formatter().toggle_style(ty), self.refusal))
+        Some(worded(
+            self.formatter().toggle_style(ty),
+            self.refusal.clone(),
+        ))
     }
 
     /// By editing the link's source.
@@ -161,7 +167,7 @@ impl DocumentKind for MarkdownKind {
             Some(url) => formatter.set_link(url, ""),
             None => formatter.unlink(),
         };
-        Some(worded(command, self.refusal))
+        Some(worded(command, self.refusal.clone()))
     }
 
     /// Every style open at the caret is closed before the cut and opened again
@@ -194,7 +200,7 @@ impl DocumentKind for MarkdownKind {
 /// A kind's formatting command, its refusal put in the application's words.
 fn worded(
     command: markraft_commonmark::FormatCommand,
-    refusal: fn(&CommandRefusal) -> String,
+    refusal: Arc<dyn Fn(&CommandRefusal) -> String + Send + Sync>,
 ) -> Formatting {
     Arc::new(move |state| command(state).map_err(|error| refusal(&error)))
 }
@@ -229,6 +235,60 @@ pub fn to_markdown(doc: &Node) -> String {
 /// `doc` as Markdown, new syntax spelled in `house`'s style.
 pub fn to_markdown_in(doc: &Node, house: &HouseStyleHandle) -> String {
     commonmark_serializer(schema(), house).serialize(doc)
+}
+
+/// Describe a host-generated document edit through the normal transaction path.
+/// Unchanged subtrees retain their positions, history and selection mappings.
+/// Full document resets remain reserved for adopting an external document.
+pub fn document_edit(before: &Node, after: &Node) -> Option<markraft_core::TransactionSpec> {
+    use markraft_core::{Change, TransactionSpec};
+    fn collect(before: &Node, after: &Node, pos: usize, changes: &mut Vec<Change>) {
+        if before == after {
+            return;
+        }
+        if before.is_container()
+            && before.markup() == after.markup()
+            && before.child_count() == after.child_count()
+        {
+            let mut offset = pos + 1;
+            for (old, new) in before.children().zip(after.children()) {
+                collect(old, new, offset, changes);
+                offset += old.node_size();
+            }
+        } else {
+            changes.push(Change::replace(
+                pos,
+                pos + before.node_size(),
+                Slice::from_fragment(Fragment::from_node(after.clone())),
+            ));
+        }
+    }
+    if before == after || before.markup() != after.markup() {
+        return None;
+    }
+    let mut changes = Vec::new();
+    if before.child_count() == after.child_count() {
+        let mut offset = 0;
+        for (old, new) in before.children().zip(after.children()) {
+            collect(old, new, offset, &mut changes);
+            offset += old.node_size();
+        }
+    } else {
+        changes.push(Change::replace(
+            0,
+            before.content_size(),
+            Slice::from_fragment(after.content().clone()),
+        ));
+    }
+    Some(
+        TransactionSpec::new()
+            .changes(changes)
+            .user_event("input.document")
+            .annotate(
+                markraft_core::protocol::isolate_history()
+                    .of(markraft_core::protocol::IsolateHistory::Both),
+            ),
+    )
 }
 
 pub fn plain_text(doc: &Node) -> String {

@@ -41,6 +41,8 @@ struct Slot {
     line: Option<LayoutLine>,
     /// Whether the line draws a picture, whose size arrives when its file does.
     picture: bool,
+    /// Whether the line was last shaped with a formula render outstanding.
+    math_pending: bool,
 }
 
 /// Every line of one projection, at one width, under one revision of what
@@ -191,7 +193,7 @@ impl Lines {
                     }
                     None => {
                         let mut line = shape_line(input, index, width, None, text_system);
-                        line.reuse = line_key(input, index);
+                        line.reuse = line_key(input, index).filter(|_| !line.math_pending);
                         self.store(index, line);
                         index += 1;
                     }
@@ -242,6 +244,7 @@ impl Lines {
         slot.measured = Measured::Shaped(line.reuse.clone());
         // A rendered page may hold pictures, whose sizes arrive with them.
         slot.picture |= line.preview.is_some() || line.rendered.is_some();
+        slot.math_pending = line.math_pending;
         slot.line = Some(line);
     }
 
@@ -387,6 +390,102 @@ impl Lines {
         }
     }
 
+    pub(crate) fn forget_all_math(&mut self, types: &DocTypes) {
+        let Some(projection) = &self.projection else {
+            return;
+        };
+        let affected = projection
+            .lines()
+            .iter()
+            .map(|line| has_math(types, line))
+            .collect();
+        self.forget_math_lines(types, affected);
+    }
+
+    /// Completed formulas invalidate only the blocks that requested them and
+    /// their table grids, whose column widths and row heights are shared.
+    /// Resetting all measured lines would continually requeue evicted raster
+    /// results in notes larger than the math cache.
+    ///
+    /// `turned_away` says the bounded queue refused a request since the last
+    /// batch. Lines still waiting on a render are then shaped again, which is
+    /// what asks for their formulas once more now that the queue has room.
+    /// A line waiting on formulas it does not hold itself — an HTML block's
+    /// page — is shaped again after every batch, since which of its
+    /// formulas a batch finished is not known here.
+    pub(crate) fn forget_math(
+        &mut self,
+        types: &DocTypes,
+        equations: Option<&markraft_core::kind::equations::EquationIndex>,
+        requests: &[crate::math::MathRequest],
+        turned_away: bool,
+    ) {
+        let Some(projection) = &self.projection else {
+            return;
+        };
+        let slots = &self.slots;
+        let affected = projection
+            .lines()
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                if slots.get(index).is_some_and(|slot| slot.math_pending)
+                    && (turned_away || !has_math(types, line))
+                {
+                    return true;
+                }
+                let Some(source) = projection.line_text(index) else {
+                    return false;
+                };
+                crate::math_spans::formula_spans(line, source, types)
+                    .iter()
+                    .any(|span| {
+                        let equation =
+                            equations.and_then(|indexing| indexing.get(index, span.source.start));
+                        let source = equation.map_or(span.tex.as_str(), |equation| {
+                            equation.render_source.as_str()
+                        });
+                        requests.iter().any(|request| {
+                            request.source.as_ref() == source
+                                || equation.and_then(|equation| equation.tag.as_deref())
+                                    == Some(request.source.as_ref())
+                        })
+                    })
+            })
+            .collect();
+        self.forget_math_lines(types, affected);
+    }
+
+    fn forget_math_lines(&mut self, types: &DocTypes, mut affected: Vec<bool>) {
+        let Some(projection) = &self.projection else {
+            return;
+        };
+        let mut index = 0;
+        while index < projection.line_count() {
+            let Some((table, _, _)) = types.table_cell_of(&projection.lines()[index]) else {
+                index += 1;
+                continue;
+            };
+            let start = index;
+            while index < projection.line_count()
+                && types
+                    .table_cell_of(&projection.lines()[index])
+                    .is_some_and(|(at, _, _)| at == table)
+            {
+                index += 1;
+            }
+            if affected[start..index].iter().any(|&value| value) {
+                affected[start..index].fill(true);
+            }
+        }
+        for (slot, affected) in self.slots.iter_mut().zip(affected) {
+            if affected {
+                forget(slot);
+                self.tops_stale = true;
+            }
+        }
+    }
+
     /// Every line's rows, for a test that shaped them all.
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -476,7 +575,7 @@ pub(crate) fn kept_ends(before: &[Line], now: &[Line]) -> KeptEnds {
 ///
 /// A table cell has no key, since its size is settled by the whole grid, but
 /// `intact` says every cell of its grid survived: the grid reads nothing
-/// outside itself, so the cell's height still holds. Its rows do not — a cell
+/// outside itself unless it contains math, so the cell's height still holds. Its rows do not — a cell
 /// records where the grid placed it — and the grid is laid out again whole
 /// when it is next shown.
 fn kept_for(input: &ShapeInput<'_>, index: usize, mut slot: Slot, intact: bool) -> Slot {
@@ -498,7 +597,8 @@ fn kept_for(input: &ShapeInput<'_>, index: usize, mut slot: Slot, intact: bool) 
 }
 
 /// For each line of `input`'s projection, whether it is a cell of a grid
-/// every cell of which `is_kept` says survived the edit.
+/// every cell of which `is_kept` says survived the edit. Math references can
+/// depend on labels outside a grid, so those grids must be measured again.
 fn intact_cells(input: &ShapeInput<'_>, is_kept: impl Fn(usize) -> bool) -> Vec<bool> {
     let count = input.projection.line_count();
     let mut intact = vec![false; count];
@@ -512,10 +612,17 @@ fn intact_cells(input: &ShapeInput<'_>, is_kept: impl Fn(usize) -> bool) -> Vec<
         while index < count && table_cell(input, index).is_some_and(|(at, _, _)| at == table) {
             index += 1;
         }
-        let kept = (start..index).all(&is_kept);
+        let kept = (start..index)
+            .all(|at| is_kept(at) && !has_math(input.types, &input.projection.lines()[at]));
         intact[start..index].fill(kept);
     }
     intact
+}
+
+fn has_math(types: &DocTypes, line: &Line) -> bool {
+    types
+        .math
+        .is_some_and(|math| line.runs().iter().any(|run| run.marks.contains_type(math)))
 }
 
 /// Forget what shaping said of a line; its height stays as the estimate.
@@ -531,6 +638,7 @@ fn estimated(input: &ShapeInput<'_>, index: usize, width: Pixels) -> Slot {
         measured: Measured::Estimated,
         line: None,
         picture,
+        math_pending: false,
     }
 }
 
@@ -679,7 +787,7 @@ pub(super) fn estimate_height(
         px(0.)
     };
     let above = index.checked_sub(1).map(|above| &projection.lines()[above]);
-    let header = if crate::callout::header_of(types, line, above).is_some() {
+    let header = if crate::callout::header_of(types, line, above, input.messages).is_some() {
         CALLOUT_HEADER_HEIGHT
     } else {
         px(0.)
@@ -700,4 +808,324 @@ fn is_wide(c: char) -> bool {
         | 0xFFE0..=0xFFE6
         | 0x1F300..=0x1FAFF
         | 0x20000..=0x3FFFD)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod math_tests {
+    use super::Lines;
+    use crate::{style::EditorStyle, surface::ShapeInput};
+    use gpui::{NoopTextSystem, TextSystem, WindowTextSystem, px};
+    use markraft_commonmark::{commonmark_doc_type_names, commonmark_schema, from_markdown};
+    use markraft_core::{kind::DocTypes, projection::Projection};
+    use std::{collections::HashSet, sync::Arc, time::Duration};
+
+    const TABLES: &str = "$$x\\tag{A}\\label{eq}$$
+
+| Reference | Numbered |
+|---|---|
+| $\\ref{eq}$ | $$y\\tag{T}$$ |
+
+| Separate | Grid |
+|---|---|
+| $z$ | other |
+
+| Plain | Grid |
+|---|---|
+| one | two |
+
+$w$";
+
+    fn sync_state(state: &markraft_core::EditorState, lines: &mut Lines, measure: bool) {
+        let projection = markraft_core::projection::projection_of(state);
+        let types = DocTypes::from_schema_names(state.schema(), &commonmark_doc_type_names());
+        let equations =
+            markraft_core::kind::equations::EquationIndex::build(&projection, &types, false);
+        let images = crate::images::Images::default();
+        let style = EditorStyle::notes();
+        let input = ShapeInput {
+            images: &images,
+            messages: &crate::EditorMessages::ENGLISH,
+            maths: None,
+            equations: Some(&equations),
+            scale_factor: 1.,
+            doc: state.doc(),
+            types: &types,
+            projection: &projection,
+            style: &style,
+            single_line: false,
+            wiki: None,
+            spelling: None,
+            selection: 0..0,
+            composition: None,
+        };
+        lines.sync(&input, &projection, px(400.), 0);
+        if measure {
+            let text_system =
+                WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+            lines.lay_out_range(&input, 0..lines.len(), &text_system);
+        }
+    }
+
+    #[test]
+    fn an_external_tag_edit_invalidates_offscreen_math_table_heights() {
+        use crate::typeahead::tests::{at, run, state_of};
+        use markraft_core::{commands::insert_text, projection::projection_of};
+        let state = state_of(TABLES);
+        let projection = projection_of(&state);
+        let tag = projection.line_text(0).unwrap().find("{A}").unwrap() + 2;
+        let state = at(&state, projection.lines()[0].offset_to_pos(tag).unwrap());
+        let mut lines = Lines::default();
+        sync_state(&state, &mut lines, true);
+        assert_eq!(lines.estimated(), 0);
+        lines.release();
+        let edited = run(&state, &insert_text(" longer"));
+        let next = projection_of(&edited);
+        let types = DocTypes::from_schema_names(state.schema(), &commonmark_doc_type_names());
+        let dependent = next
+            .lines()
+            .iter()
+            .enumerate()
+            .find(|(index, _)| next.line_text(*index).unwrap().contains("\\ref{eq}"))
+            .unwrap()
+            .0;
+        assert!(
+            projection.lines()[dependent].same_body(&next.lines()[dependent]),
+            "the reference source did not change"
+        );
+        sync_state(&edited, &mut lines, false);
+        let table = types.table_cell_of(&next.lines()[dependent]).unwrap().0;
+        for (index, line) in next.lines().iter().enumerate() {
+            if types
+                .table_cell_of(line)
+                .is_some_and(|(at, _, _)| at == table)
+            {
+                assert!(
+                    matches!(lines.slots[index].measured, super::Measured::Estimated),
+                    "dependent grid cell {index} must be remeasured"
+                );
+            }
+        }
+        let plain = next
+            .lines()
+            .iter()
+            .enumerate()
+            .find(|(index, _)| next.line_text(*index) == Some("Plain"))
+            .unwrap()
+            .0;
+        assert!(
+            matches!(lines.slots[plain].measured, super::Measured::Shaped(_)),
+            "unrelated plain grid stays measured"
+        );
+    }
+
+    #[test]
+    fn completed_reference_or_tag_invalidates_only_its_entire_grid() {
+        let state = crate::typeahead::tests::state_of(TABLES);
+        let projection = markraft_core::projection::projection_of(&state);
+        let types = DocTypes::from_schema_names(state.schema(), &commonmark_doc_type_names());
+        let equations =
+            markraft_core::kind::equations::EquationIndex::build(&projection, &types, false);
+        let dependent = projection
+            .lines()
+            .iter()
+            .enumerate()
+            .find(|(index, _)| projection.line_text(*index).unwrap().contains("\\ref{eq}"))
+            .unwrap()
+            .0;
+        let table = types
+            .table_cell_of(&projection.lines()[dependent])
+            .unwrap()
+            .0;
+        let mut lines = Lines::default();
+        for source in ["{A}", "(T)"] {
+            sync_state(&state, &mut lines, true);
+            lines.release();
+            lines.forget_math(
+                &types,
+                Some(&equations),
+                &[crate::math::MathRequest::new(
+                    source,
+                    false,
+                    14.,
+                    1.,
+                    gpui::black(),
+                )],
+                false,
+            );
+            for (index, line) in projection.lines().iter().enumerate() {
+                let affected = types
+                    .table_cell_of(line)
+                    .is_some_and(|(at, _, _)| at == table);
+                assert_eq!(
+                    matches!(lines.slots[index].measured, super::Measured::Estimated),
+                    affected,
+                    "request {source}, line {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn numbering_preference_invalidates_math_grids_but_preserves_plain_grids() {
+        let state = crate::typeahead::tests::state_of(TABLES);
+        let projection = markraft_core::projection::projection_of(&state);
+        let types = DocTypes::from_schema_names(state.schema(), &commonmark_doc_type_names());
+        let math_tables: HashSet<_> = projection
+            .lines()
+            .iter()
+            .filter(|line| super::has_math(&types, line))
+            .filter_map(|line| types.table_cell_of(line).map(|(table, _, _)| table))
+            .collect();
+        let mut lines = Lines::default();
+        sync_state(&state, &mut lines, true);
+        lines.release();
+        lines.forget_all_math(&types);
+        for (index, line) in projection.lines().iter().enumerate() {
+            let affected = super::has_math(&types, line)
+                || types
+                    .table_cell_of(line)
+                    .is_some_and(|(table, _, _)| math_tables.contains(&table));
+            assert_eq!(
+                matches!(lines.slots[index].measured, super::Measured::Estimated),
+                affected,
+                "line {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn more_formulas_than_the_raster_cache_settle_without_idle_render_churn() {
+        const FORMULAS: usize = 240;
+        let source = (0..FORMULAS)
+            .map(|index| format!("$$x_{{{index}}}$$"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let schema = commonmark_schema();
+        let doc = from_markdown(&schema, &source).unwrap();
+        let projection = Arc::new(Projection::of(&doc, &schema));
+        let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
+        let maths = crate::maths::Maths::default();
+        let images = crate::images::Images::default();
+        let style = EditorStyle::notes();
+        let input = ShapeInput {
+            images: &images,
+            messages: &crate::EditorMessages::ENGLISH,
+            maths: Some(&maths),
+            equations: None,
+            scale_factor: 1.,
+            doc: &doc,
+            types: &types,
+            projection: &projection,
+            style: &style,
+            single_line: false,
+            wiki: None,
+            spelling: None,
+            selection: 0..0,
+            composition: None,
+        };
+        let text_system =
+            WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+        let mut lines = Lines::default();
+        let mut rendered = HashSet::new();
+        lines.sync(&input, &projection, px(400.), 0);
+        for _ in 0..FORMULAS {
+            lines.measure_some(&input, 0, Duration::from_secs(1), &text_system);
+            let requests = maths.take_requests();
+            if requests.is_empty() {
+                break;
+            }
+            for request in &requests {
+                assert!(
+                    rendered.insert(request.clone()),
+                    "idle layout must not requeue an evicted formula"
+                );
+            }
+            let results = requests
+                .iter()
+                .map(|request| (request.clone(), crate::math::render_math(request)))
+                .collect();
+            maths.finish(results);
+            lines.forget_math(&types, None, &requests, maths.take_turned_away());
+            lines.sync(&input, &projection, px(400.), 0);
+        }
+        assert_eq!(rendered.len(), FORMULAS);
+        assert_eq!(lines.estimated(), 0);
+        assert!(maths.take_requests().is_empty());
+        for _ in 0..3 {
+            lines.sync(&input, &projection, px(400.), 0);
+            assert!(!lines.measure_some(&input, 0, Duration::from_secs(1), &text_system));
+            assert!(maths.take_requests().is_empty());
+        }
+    }
+
+    #[test]
+    fn moving_the_caret_between_prose_lines_keeps_every_formula_line() {
+        const FORMULAS: usize = 240;
+        let source = (0..FORMULAS)
+            .map(|index| format!("p{index}\n\n$$x_{{{index}}}$$"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let schema = commonmark_schema();
+        let doc = from_markdown(&schema, &source).unwrap();
+        let projection = Arc::new(Projection::of(&doc, &schema));
+        let types = DocTypes::from_schema_names(&schema, &commonmark_doc_type_names());
+        let equations =
+            markraft_core::kind::equations::EquationIndex::build(&projection, &types, true);
+        let maths = crate::maths::Maths::default();
+        let images = crate::images::Images::default();
+        let style = EditorStyle::notes();
+        let text_system =
+            WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+        let input_at = |caret: usize| ShapeInput {
+            images: &images,
+            messages: &crate::EditorMessages::ENGLISH,
+            maths: Some(&maths),
+            equations: Some(&equations),
+            scale_factor: 1.,
+            doc: &doc,
+            types: &types,
+            projection: &projection,
+            style: &style,
+            single_line: false,
+            wiki: None,
+            spelling: None,
+            selection: caret..caret,
+            composition: None,
+        };
+        let first = projection.lines()[0].from();
+        let mut lines = Lines::default();
+        let input = input_at(first);
+        lines.sync(&input, &projection, px(400.), 0);
+        for _ in 0..FORMULAS {
+            lines.measure_some(&input, 0, Duration::from_secs(1), &text_system);
+            let requests = maths.take_requests();
+            if requests.is_empty() {
+                break;
+            }
+            let results = requests
+                .iter()
+                .map(|request| (request.clone(), crate::math::render_math(request)))
+                .collect();
+            maths.finish(results);
+            lines.forget_math(
+                &types,
+                Some(&equations),
+                &requests,
+                maths.take_turned_away(),
+            );
+            lines.sync(&input, &projection, px(400.), 0);
+        }
+        assert_eq!(lines.estimated(), 0);
+        // Walk the caret down a few prose lines, as holding an arrow key does.
+        for line in [2, 4, 6] {
+            let input = input_at(projection.lines()[line].from());
+            let before = crate::surface::tests::SHAPED_LINES.with(|count| count.get());
+            lines.sync(&input, &projection, px(400.), 0);
+            while lines.measure_some(&input, 0, Duration::from_secs(1), &text_system) {}
+            let shaped = crate::surface::tests::SHAPED_LINES.with(|count| count.get()) - before;
+            assert!(maths.take_requests().is_empty(), "caret on line {line}");
+            assert!(shaped <= 4, "caret on line {line} reshaped {shaped} lines");
+        }
+    }
 }

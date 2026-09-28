@@ -1,6 +1,6 @@
 use super::*;
 
-type FormatItem = (&'static str, &'static str, Intent, bool);
+type FormatItem = (String, &'static str, Intent, bool);
 
 /// How many capsules stand beside the mode badge before the rest fold into a count.
 const CAPSULES_SHOWN: usize = 2;
@@ -34,14 +34,17 @@ pub(super) struct FileState {
     /// losing work for as long as it holds.
     pub urgent: bool,
     /// What the card offers, left to right.
-    pub actions: Vec<(&'static str, Intent)>,
+    pub actions: Vec<(String, Intent)>,
 }
 
 impl FileState {
     /// The whole state as assistive technology hears it: the label alone is two
     /// words and says too little on its own.
-    pub(super) fn announced(&self) -> String {
-        format!("{}. {}", self.label, self.detail)
+    pub(super) fn announced(&self, i18n: &crate::locale::I18n) -> String {
+        i18n.text_with(
+            "surfaces.file.announced",
+            &[("label", &self.label), ("detail", &self.detail)],
+        )
     }
 }
 
@@ -142,29 +145,29 @@ impl MarkraftApp {
         };
         let items: Vec<(&'static str, Intent, bool)> = match self.interaction.format_menu() {
             Some(FormatMenu::Block) => {
-                let mut items = vec![block("Paragraph", doc::Block::Paragraph)];
+                let mut items = vec![block("command.paragraph", doc::Block::Paragraph)];
                 for (level, label) in [
-                    (1, "Heading 1"),
-                    (2, "Heading 2"),
-                    (3, "Heading 3"),
-                    (4, "Heading 4"),
-                    (5, "Heading 5"),
-                    (6, "Heading 6"),
+                    (1, "command.heading-1"),
+                    (2, "command.heading-2"),
+                    (3, "command.heading-3"),
+                    (4, "command.heading-4"),
+                    (5, "command.heading-5"),
+                    (6, "command.heading-6"),
                 ] {
                     items.push(block(label, doc::Block::Heading(level)));
                 }
                 items
             }
             Some(FormatMenu::Inline) => vec![
-                mark("Bold", doc::Inline::Bold),
-                mark("Italic", doc::Inline::Italic),
-                mark("Strikethrough", doc::Inline::Strikethrough),
+                mark("command.bold", doc::Inline::Bold),
+                mark("command.italic", doc::Inline::Italic),
+                mark("command.strikethrough", doc::Inline::Strikethrough),
             ],
             Some(FormatMenu::List) => vec![
-                block("No List", doc::Block::Paragraph),
-                block("Ordered List", doc::Block::Ordered),
-                block("Bullet List", doc::Block::Bullet),
-                block("Task List", doc::Block::Task),
+                block("surfaces.format.no-list", doc::Block::Paragraph),
+                block("command.ordered-list", doc::Block::Ordered),
+                block("command.bullet-list", doc::Block::Bullet),
+                block("command.task-list", doc::Block::Task),
             ],
             None => vec![],
         };
@@ -173,12 +176,14 @@ impl MarkraftApp {
             .map(|(label, intent, active)| {
                 // "No List" is the paragraph again, but the row is about leaving the
                 // list, not about ⌘0, so it carries no hint.
-                let shortcut = if label == "No List" {
+                let shortcut = if self.interaction.format_menu() == Some(FormatMenu::List)
+                    && matches!(intent, Intent::Block(doc::Block::Paragraph))
+                {
                     ""
                 } else {
                     super::shortcut_label(&intent)
                 };
-                (label, shortcut, intent, active)
+                (self.i18n.text(label), shortcut, intent, active)
             })
             .collect()
     }
@@ -211,7 +216,7 @@ impl MarkraftApp {
     pub(super) fn format_button(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: String,
         kind: Icon,
         intent: Intent,
         toggled: Option<bool>,
@@ -225,7 +230,7 @@ impl MarkraftApp {
     fn format_button_base(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: String,
         kind: Icon,
         intent: Intent,
         toggled: Option<bool>,
@@ -252,7 +257,7 @@ impl MarkraftApp {
         div()
             .id(id)
             .role(Role::Button)
-            .aria_label(label)
+            .aria_label(label.clone())
             .when_some(menu, |s, _| s.aria_expanded(expanded))
             // A control that opens a menu reports whether the menu is open; it is
             // not a toggle, whatever fill the format in force gives it.
@@ -290,7 +295,7 @@ impl MarkraftApp {
     fn toolbar_button(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: String,
         kind: Icon,
         intent: Intent,
         toggled: Option<bool>,
@@ -360,7 +365,7 @@ impl MarkraftApp {
                     div()
                         .id("word-count")
                         .role(Role::Button)
-                        .aria_label("Toggle character and word count")
+                        .aria_label(self.i18n.text("surfaces.format.toggle-count"))
                         .h(px(24.))
                         .px_2()
                         .flex()
@@ -394,9 +399,9 @@ impl MarkraftApp {
                             self.icon_button(
                                 "format-toolbar-toggle",
                                 if self.toolbar.shown() {
-                                    "Hide Formatting Toolbar"
+                                    self.i18n.text("surfaces.format.hide-toolbar")
                                 } else {
-                                    "Show Formatting Toolbar"
+                                    self.i18n.text("surfaces.format.show-toolbar")
                                 },
                                 if self.toolbar.shown() {
                                     Icon::Close
@@ -427,7 +432,7 @@ impl MarkraftApp {
                         .gap(px(4.))
                         .child(self.toolbar_button(
                             "format-block-menu",
-                            "Headings",
+                            self.i18n.text("surfaces.format.headings"),
                             Icon::Heading,
                             Intent::FormatMenu(FormatMenu::Block),
                             Some(matches!(kind, Some(doc::Block::Heading(_)))),
@@ -436,7 +441,7 @@ impl MarkraftApp {
                         .child(
                             self.toolbar_button(
                                 "format-inline-menu",
-                                "Text Formatting",
+                                self.i18n.text("surfaces.format.text"),
                                 Icon::Italic,
                                 Intent::FormatMenu(FormatMenu::Inline),
                                 Some(
@@ -453,7 +458,7 @@ impl MarkraftApp {
                         )
                         .child(self.toolbar_button(
                             "format-link",
-                            "Link · ⌘L",
+                            self.i18n.text("surfaces.format.link"),
                             Icon::Link,
                             Intent::Link,
                             Some(linked),
@@ -461,7 +466,7 @@ impl MarkraftApp {
                         ))
                         .child(self.toolbar_button(
                             "format-inline-code",
-                            "Inline Code · ⌘E",
+                            self.i18n.text("surfaces.format.inline-code"),
                             Icon::Code,
                             Intent::Mark(doc::Inline::Code),
                             Some(doc::Inline::Code.is_active(&marks)),
@@ -470,7 +475,7 @@ impl MarkraftApp {
                         .child(self.format_divider())
                         .child(self.toolbar_button(
                             "format-code-block",
-                            "Code Block · ⌥⌘C",
+                            self.i18n.text("surfaces.format.code-block"),
                             Icon::CodeBlock,
                             Intent::Block(doc::Block::Code),
                             Some(kind == Some(doc::Block::Code)),
@@ -478,7 +483,7 @@ impl MarkraftApp {
                         ))
                         .child(self.toolbar_button(
                             "format-quote",
-                            "Quote · ⇧⌘B",
+                            self.i18n.text("surfaces.format.quote"),
                             Icon::Quote,
                             Intent::Block(doc::Block::Quote),
                             Some(kind == Some(doc::Block::Quote)),
@@ -487,7 +492,7 @@ impl MarkraftApp {
                         .child(self.format_divider())
                         .child(self.toolbar_button(
                             "format-list-menu",
-                            "Lists",
+                            self.i18n.text("surfaces.format.lists"),
                             match kind {
                                 Some(doc::Block::Task) => Icon::Task,
                                 Some(doc::Block::Ordered) => Icon::Ordered,
@@ -534,13 +539,13 @@ impl MarkraftApp {
             states.push(FileState {
                 id: "state-unsaved",
                 icon: Icon::Alert,
-                label: "Not saved".into(),
-                detail: error.clone(),
+                label: self.i18n.text("surfaces.file.not-saved"),
+                detail: error.render(&self.i18n),
                 urgent: true,
                 actions: vec![
-                    ("Retry", Intent::Retry),
-                    ("Save As…", Intent::SaveAs),
-                    ("Reload from Disk…", Intent::Reload),
+                    (self.i18n.text("surfaces.file.retry"), Intent::Retry),
+                    (self.i18n.text("surfaces.file.save-as"), Intent::SaveAs),
+                    (self.i18n.text("surfaces.file.reload"), Intent::Reload),
                 ],
             });
         }
@@ -548,13 +553,16 @@ impl MarkraftApp {
             states.push(FileState {
                 id: "state-read-only",
                 icon: Icon::Lock,
-                label: "Read-only".into(),
-                detail: reason.clone(),
+                label: self.i18n.text("surfaces.file.read-only"),
+                detail: reason.render(&self.i18n),
                 urgent: false,
                 actions: if note.path.is_some() {
                     vec![
-                        ("Open in Default Editor", Intent::OpenExternally),
-                        ("Reveal", Intent::RevealNote),
+                        (
+                            self.i18n.text("surfaces.file.open-externally"),
+                            Intent::OpenExternally,
+                        ),
+                        (self.i18n.text("surfaces.file.reveal"), Intent::RevealNote),
                     ]
                 } else {
                     Vec::new()
@@ -597,7 +605,10 @@ impl MarkraftApp {
                     .text_size(px(11.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(self.muted())
-                    .child(format!("+{}", states.len() - shown))
+                    .child(self.i18n.text_with(
+                        "surfaces.file.more",
+                        &[("count", &(states.len() - shown).to_string())],
+                    ))
                     .into_any_element(),
             );
         }
@@ -625,7 +636,7 @@ impl MarkraftApp {
         div()
             .id(state.id)
             .role(Role::Button)
-            .aria_label(state.announced())
+            .aria_label(state.announced(&self.i18n))
             .aria_expanded(self.interaction.file_status())
             .flex_shrink_0()
             .h(CAPSULE_HEIGHT)
@@ -751,7 +762,7 @@ impl MarkraftApp {
                                 state.actions.iter().map(|(label, intent)| {
                                     self.button(
                                         SharedString::from(format!("{}-{label}", state.id)),
-                                        *label,
+                                        label.clone(),
                                         intent.clone(),
                                         cx,
                                     )
@@ -779,7 +790,7 @@ impl MarkraftApp {
         let mut list = div()
             .id("format-menu-items")
             .role(Role::ListBox)
-            .aria_label("Formatting")
+            .aria_label(self.i18n.text("surfaces.format.title"))
             .track_scroll(self.format.scroll())
             .overflow_y_scroll()
             .size_full()
@@ -790,7 +801,7 @@ impl MarkraftApp {
                 div()
                     .id(stop.clone())
                     .role(Role::Button)
-                    .aria_label(label)
+                    .aria_label(label.clone())
                     .aria_selected(index == self.format.row())
                     .aria_position_in_set(index + 1)
                     .aria_size_of_set(total)

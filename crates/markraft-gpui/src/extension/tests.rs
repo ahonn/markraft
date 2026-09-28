@@ -287,6 +287,33 @@ fn vim_rows_leave_a_final_code_block_as_the_arrow_does(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn vertical_motion_ignores_extra_rows_in_a_neighboring_table_column(cx: &mut TestAppContext) {
+    let (view, cx) = laid_out(
+        cx,
+        "| First | Second |\n| --- | --- |\n| one | a<br>b<br>c |\n| next | last |",
+    );
+    let one = view.read_with(cx, |view, _| line_start(view, "one"));
+    let next = view.read_with(cx, |view, _| line_start(view, "next"));
+    place_caret(&view, cx, one);
+    view.read_with(cx, |view, _| {
+        assert!(view.frame.rows().iter().any(|row| {
+            row.table
+                .is_some_and(|cell| cell.row == 1 && cell.column == 1)
+                && row.navigable_rows() > 1
+        }));
+    });
+    arrow_down(&view, cx);
+    assert_eq!(
+        caret(&view, cx),
+        next,
+        "one Down reaches the next cell in this column"
+    );
+    view.update(cx, |view, cx| view.vertical(-1, false, cx));
+    cx.run_until_parked();
+    assert_eq!(caret(&view, cx), one, "one Up returns to the previous cell");
+}
+
+#[gpui::test]
 fn vim_rows_leave_a_final_table_as_the_arrow_does(cx: &mut TestAppContext) {
     let source = "| a | b |\n| - | - |\n| c | d |";
     let cell = |view: &EditorView| line_start(view, "c");

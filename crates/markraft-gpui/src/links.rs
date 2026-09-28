@@ -8,50 +8,11 @@
 
 use markraft_core::protocol::event;
 use markraft_core::{
-    Attrs, Change, EditorState, Fragment, Mark, MarkSet, MarkTypeId, Node, Selection, Slice,
+    Attrs, Change, EditorState, Fragment, Mark, MarkSet, MarkTypeId, Selection, Slice,
     TransactionSpec,
 };
-use std::ops::Range;
 
-/// The link mark covering `pos`, as a position range and its href.
-///
-/// The range is the whole run of inline content carrying the *same* link mark,
-/// which is what a link editor has to replace.
-pub(crate) fn link_at(doc: &Node, ty: MarkTypeId, pos: usize) -> Option<(Range<usize>, Mark)> {
-    let resolved = doc.resolve(pos).ok()?;
-    for depth in (1..=resolved.depth()).rev() {
-        if let Some(mark) = resolved.node(depth).marks().get(ty) {
-            return Some((resolved.before(depth)..resolved.after(depth), mark.clone()));
-        }
-    }
-    let parent = resolved.parent();
-    let start = resolved.pos() - resolved.parent_offset();
-    let mut found: Option<(Range<usize>, Mark)> = None;
-    let mut offset = 0usize;
-    for child in parent.children() {
-        let range = start + offset..start + offset + child.node_size();
-        offset += child.node_size();
-        let Some(mark) = child.marks().get(ty) else {
-            if found.is_some() && range.start > pos {
-                break;
-            }
-            found = None;
-            continue;
-        };
-        match &mut found {
-            Some((span, existing)) if existing == mark && span.end == range.start => {
-                span.end = range.end;
-            }
-            _ => {
-                if found.as_ref().is_some_and(|(span, _)| span.end > pos) {
-                    break;
-                }
-                found = Some((range, mark.clone()));
-            }
-        }
-    }
-    found.filter(|(span, _)| span.start <= pos && pos <= span.end)
-}
+pub(crate) use markraft_core::kind::footnotes::marked_range_at as link_at;
 
 /// The href every part of the selection shares, or the one the caret sits in.
 pub(crate) fn active_link(state: &EditorState, ty: MarkTypeId) -> Option<String> {

@@ -1,3 +1,14 @@
+## 0.1.2 (2026-09-27)
+
+### Features
+
+- Animated images show their first frame and play while the pointer rests on them, keeping notes with GIFs from using hundreds of megabytes of memory.
+- Render inline and display LaTeX formulas natively, with optional document-wide equation numbers and references.
+
+### Fixes
+
+- Link updates from renaming a note can be undone on their own, and exports no longer pick up edits made while they run.
+
 ## 0.1.1 (2026-09-26)
 
 ### Features

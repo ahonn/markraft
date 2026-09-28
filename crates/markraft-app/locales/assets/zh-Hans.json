@@ -1,0 +1,20 @@
+{
+  "_version": 1,
+  "asset.inside-folder": "请选择当前文件夹内的图片文件夹。",
+  "asset.folder-unavailable": "图片文件夹无法使用。",
+  "asset.outside-folder": "图片文件夹链接至所选文件夹之外。",
+  "asset.save-first": "请先保存文件再插入图片。",
+  "asset.invalid-name": "图片文件名不是有效的 Unicode。",
+  "asset.images-only": "这里只能插入图片文件。",
+  "asset.too-large": "图片大小超过 16 MB。",
+  "asset.root-mapping": "不支持 typora-root-url 的 YAML 对应；请使用最上层纯量。",
+  "asset.duplicate-root": "typora-root-url 值重复，无法预览图片根目录。",
+  "asset.multiline-root": "不支持多行 typora-root-url；请使用单行路径。",
+  "asset.merged-root": "不支持透过 YAML 合并继承的图片根目录。",
+  "asset.root-path": "不支持此 typora-root-url 路径；请使用本机绝对路径或相对于文件的文件夹。",
+  "asset.remote-root": "无法预览远端 typora-root-url；请使用本机文件夹。",
+  "asset.invalid-root": "本机 typora-root-url 无效。",
+  "asset.save-relative": "请先保存文件再使用相对的 typora-root-url。",
+  "asset.unsupported-value": "不支持此 typora-root-url 的 YAML 值；请使用单行纯文本路径或加上引号的路径。",
+  "asset.operation-failed": "图片操作失败：%{detail}"
+}

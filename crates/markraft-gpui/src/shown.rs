@@ -1,234 +1,17 @@
-//! The text a reader sees, and the document range each of its characters
-//! stands for.
-//!
-//! Concealment, atom labels and the accessibility tree each used to decide
-//! that text on their own. This is the one reading: text runs come from
-//! [`conceal::pieces`](markraft_core::kind::conceal::pieces), atoms from
-//! [`shown_atom_label`](crate::surface::shown_atom_label), which is what the row
-//! shapes. Layout — pill fillers, wrapping, line height — stays in the
-//! surface and is not part of the index, so a search position does not move
-//! when the column gets wider.
-//!
-//! A run that displays something other than its own characters, an entity or
-//! a wiki-link label, maps every displayed character onto the whole source
-//! run. A selection can only take or leave that run whole, which is the same
-//! rule the accessibility tree already follows.
+//! Reading-text compatibility imports for the editor surface.
 
-use markraft_core::kind::DocTypes;
-use markraft_core::kind::conceal::{self, Reveal};
-use markraft_core::projection::{Line, Projection, RunContent};
-use std::ops::Range;
-
-use crate::surface::shown_atom_label;
-
-/// One stretch of what a line shows.
-pub(crate) struct ShownPiece {
-    /// `char` offsets into the line's projected text.
-    pub(crate) source: Range<usize>,
-    /// What is shown for it.
-    pub(crate) text: String,
-    /// Whether `text` is the source itself, character for character.
-    pub(crate) own: bool,
-}
-
-/// What line `index` shows under `reveal`.
-pub(crate) fn line_pieces(
-    projection: &Projection,
-    types: &DocTypes,
-    index: usize,
-    reveal: &Reveal,
-) -> Vec<ShownPiece> {
-    let Some(line) = projection.line(index) else {
-        return Vec::new();
-    };
-    let source = projection.line_text(index).unwrap_or("");
-    let shown = conceal::shown(types.syntax, line, reveal);
-    let pieces = conceal::pieces(line, source, &shown);
-    line.runs()
-        .iter()
-        .zip(pieces)
-        .filter_map(|(run, piece)| {
-            let (text, own) = if let RunContent::Atom(node) = &run.content {
-                (
-                    shown_atom_label(types, node).unwrap_or("").to_owned(),
-                    false,
-                )
-            } else {
-                (piece.text.to_owned(), piece.own)
-            };
-            (!text.is_empty()).then_some(ShownPiece {
-                source: piece.source,
-                text,
-                own,
-            })
-        })
-        .collect()
-}
-
-/// The document as a reader sees it.
-pub(crate) struct ShownText {
-    text: String,
-    /// The document range each character of [`ShownText::text`] stands for,
-    /// in order.
-    spans: Vec<Range<usize>>,
-}
-
-impl ShownText {
-    /// `reveal` says which concealed spans show their source. Search passes
-    /// [`Reveal::nothing`], so a caret resting in a span does not change what
-    /// can be found.
-    pub(crate) fn build(projection: &Projection, types: &DocTypes, reveal: &Reveal) -> Self {
-        let mut text = String::new();
-        let mut spans = Vec::new();
-        let count = projection.line_count();
-        for index in 0..count {
-            let Some(line) = projection.line(index) else {
-                continue;
-            };
-            for piece in line_pieces(projection, types, index, reveal) {
-                push_piece(&mut text, &mut spans, line, &piece);
-            }
-            if index + 1 < count {
-                let end = line.to();
-                let next = projection
-                    .line(index + 1)
-                    .map(|line| line.from())
-                    .unwrap_or(end);
-                text.push('\n');
-                spans.push(end..next.max(end));
-            }
-        }
-        debug_assert_eq!(text.chars().count(), spans.len());
-        ShownText { text, spans }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn text(&self) -> &str {
-        &self.text
-    }
-
-    /// The shown characters whose ranges sit wholly inside `range`, when they
-    /// do not cross a line. What ⌘F offers as the query for a selection.
-    pub(crate) fn text_inside(&self, range: Range<usize>) -> Option<String> {
-        if range.start == range.end {
-            return None;
-        }
-        let mut out = String::new();
-        for (span, ch) in self.spans.iter().zip(self.text.chars()) {
-            if span.start >= range.start && span.end <= range.end {
-                out.push(ch);
-            }
-        }
-        (!out.is_empty() && !out.contains('\n')).then_some(out)
-    }
-
-    /// Non-overlapping matches of `query`, case-folded per character. Each
-    /// range is the document span to select. An empty query matches nothing.
-    pub(crate) fn matches(&self, query: &str) -> Vec<Range<usize>> {
-        let folded_query = fold(query);
-        if folded_query.text.is_empty() || self.text.is_empty() {
-            return Vec::new();
-        }
-        let folded = fold(&self.text);
-        let mut from = 0usize;
-        let mut hits = Vec::new();
-        while let Some(at) = folded.text[from..].find(&folded_query.text) {
-            let start_byte = from + at;
-            let end_byte = start_byte + folded_query.text.len();
-            let start = folded.origin[char_index(&folded.text, start_byte)];
-            // Convert the exclusive UTF-8 boundary before stepping back a character.
-            let end = folded.origin[char_index(&folded.text, end_byte) - 1] + 1;
-            let range = self.spans[start].start..self.spans[end - 1].end;
-            if range.start < range.end {
-                hits.push(range);
-            }
-            from = end_byte;
-        }
-        hits
-    }
-}
-
-fn push_piece(text: &mut String, spans: &mut Vec<Range<usize>>, line: &Line, piece: &ShownPiece) {
-    if piece.own {
-        for (index, ch) in piece.text.chars().enumerate() {
-            let at = piece.source.start + index;
-            let Some(start) = line.offset_to_pos(at) else {
-                continue;
-            };
-            let Some(end) = line.offset_to_pos(at + 1) else {
-                continue;
-            };
-            if start < end {
-                text.push(ch);
-                spans.push(start..end);
-            }
-        }
-        return;
-    }
-    let (Some(start), Some(end)) = (
-        line.offset_to_pos(piece.source.start),
-        line.offset_to_pos(piece.source.end),
-    ) else {
-        return;
-    };
-    if start >= end {
-        return;
-    }
-    for ch in piece.text.chars() {
-        text.push(ch);
-        spans.push(start..end);
-    }
-}
-
-struct Folded {
-    text: String,
-    /// The original character index each character of `text` came from.
-    origin: Vec<usize>,
-}
-
-/// Case-fold `text` one character at a time. A fold that grows — `İ`
-/// becoming `i` plus a combining dot — keeps the base letter and drops the
-/// mark, so `İstanbul` is found by `ist`, and that `i` still points at `İ`.
-/// Folding the whole string at once can disagree with that.
-fn fold(text: &str) -> Folded {
-    let mut folded = Folded {
-        text: String::new(),
-        origin: Vec::new(),
-    };
-    for (index, ch) in text.chars().enumerate() {
-        for lower in ch.to_lowercase() {
-            if is_combining_mark(lower) {
-                continue;
-            }
-            folded.text.push(lower);
-            folded.origin.push(index);
-        }
-    }
-    folded
-}
-
-fn is_combining_mark(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{0300}'..='\u{036F}'
-            | '\u{1AB0}'..='\u{1AFF}'
-            | '\u{1DC0}'..='\u{1DFF}'
-            | '\u{20D0}'..='\u{20FF}'
-            | '\u{FE20}'..='\u{FE2F}'
-    )
-}
-
-fn char_index(text: &str, byte: usize) -> usize {
-    text[..byte].chars().count()
-}
+pub(crate) use markraft_core::kind::reading::{ShownPiece, ShownText, line_pieces};
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use markraft_commonmark::{commonmark_doc_type_names, commonmark_schema, from_markdown};
+    use markraft_core::kind::{DocTypes, conceal::Reveal};
+    use markraft_core::projection::RunContent;
     use markraft_core::projection::projection_of;
     use markraft_core::{EditorState, EditorStateConfig};
+    use std::ops::Range;
 
     fn shown(source: &str) -> (ShownText, markraft_core::projection::Projection) {
         let schema = commonmark_schema();
@@ -259,11 +42,11 @@ mod tests {
         let line = &projection.lines()[0];
         // The same source offsets the accessibility tree reports for this line.
         assert_eq!(
-            text.spans[2],
+            text.matches("a")[0],
             line.offset_to_pos(4).unwrap()..line.offset_to_pos(5).unwrap()
         );
         assert_eq!(
-            text.spans[5],
+            text.matches("&")[0],
             line.offset_to_pos(9).unwrap()..line.offset_to_pos(14).unwrap(),
             "the ampersand selects the whole entity"
         );
@@ -340,5 +123,84 @@ mod tests {
         let word = line.offset_to_pos(4).unwrap()..line.offset_to_pos(6).unwrap();
         assert_eq!(text.text_inside(word).as_deref(), Some("ab"));
         assert_eq!(text.text_inside(0..0), None);
+    }
+
+    #[test]
+    fn replacement_mapping_distinguishes_literals_whole_atoms_and_partial_labels() {
+        use markraft_core::kind::reading::MatchMapping;
+        let (text, _) = shown("plain [[Notes|Notebook]] &amp; tail");
+        let mapping = |query| text.mapped_matches(query)[0].mapping;
+        assert_eq!(mapping("plain"), MatchMapping::Exact);
+        assert_eq!(mapping("Notebook"), MatchMapping::WholeSourceSpan);
+        assert_eq!(mapping("Note"), MatchMapping::Composite);
+        assert_eq!(mapping("&"), MatchMapping::WholeSourceSpan);
+        assert_eq!(mapping("& tail"), MatchMapping::Composite);
+    }
+
+    #[test]
+    fn replacement_mapping_rejects_hidden_syntax_and_structural_boundaries() {
+        use markraft_core::kind::reading::MatchMapping;
+        let (text, _) = shown("a **bold** z\n\nnext");
+        assert_eq!(text.mapped_matches("bold")[0].mapping, MatchMapping::Exact);
+        assert_eq!(
+            text.mapped_matches("a bold")[0].mapping,
+            MatchMapping::Composite
+        );
+        assert_eq!(
+            text.mapped_matches("z\nnext")[0].mapping,
+            MatchMapping::Composite
+        );
+    }
+
+    #[test]
+    fn replacement_mapping_keeps_unicode_coordinates_and_grapheme_boundaries() {
+        use markraft_core::kind::reading::{MatchMapping, ShownRange};
+        let (text, projection) = shown("中🙂 e\u{301} 👩‍💻");
+        let hit = &text.mapped_matches("中🙂")[0];
+        assert_eq!(hit.shown, ShownRange(0..2));
+        assert_eq!(
+            hit.document.0,
+            line_offset(&projection, 0)..line_offset(&projection, 2)
+        );
+        assert_eq!(hit.mapping, MatchMapping::Exact);
+        assert_eq!(text.mapped_matches("e")[0].mapping, MatchMapping::Composite);
+        assert_eq!(
+            text.mapped_matches("👩")[0].mapping,
+            MatchMapping::Composite
+        );
+        assert_eq!(text.mapped_matches("👩‍💻")[0].mapping, MatchMapping::Exact);
+    }
+
+    #[test]
+    fn reading_policy_keeps_math_source_and_descriptive_image_labels() {
+        use markraft_core::kind::reading::MatchMapping;
+        let (text, _) = shown("math $x^2$ ![Diagram](chart.png) ![[image.png|Cover]] :smile:");
+        assert!(text.text().contains("x^2"));
+        assert!(text.text().contains("Diagram"));
+        assert!(text.text().contains("Cover"));
+        assert!(text.text().contains("😄"));
+        assert_eq!(
+            text.mapped_matches("Diagram")[0].mapping,
+            MatchMapping::WholeSourceSpan
+        );
+        assert_eq!(
+            text.mapped_matches("Dia")[0].mapping,
+            MatchMapping::Composite
+        );
+    }
+
+    #[test]
+    fn table_cell_matches_do_not_make_cross_cell_replacement_exact() {
+        use markraft_core::kind::reading::MatchMapping;
+        let (text, _) = shown("| left | right |\n| --- | --- |\n| one | two |\n");
+        assert_eq!(text.mapped_matches("left")[0].mapping, MatchMapping::Exact);
+        assert_eq!(text.mapped_matches("right")[0].mapping, MatchMapping::Exact);
+        let left = text.text().find("left").unwrap();
+        let right = text.text().find("right").unwrap() + "right".len();
+        let across_cells = &text.text()[left..right];
+        assert_eq!(
+            text.mapped_matches(across_cells)[0].mapping,
+            MatchMapping::Composite
+        );
     }
 }

@@ -66,6 +66,12 @@ impl MarkraftApp {
             return None;
         }
         let mode = self.sessions.get(&self.library.active_id)?.vim_mode();
+        let full_label = self.i18n.text(match mode {
+            Mode::Normal => "surfaces.vim.normal",
+            Mode::Insert => "surfaces.vim.insert",
+            Mode::Visual => "surfaces.vim.visual",
+            Mode::VisualLine => "surfaces.vim.visual-line",
+        });
         let label = if compact {
             match mode {
                 Mode::Normal => "N",
@@ -74,16 +80,19 @@ impl MarkraftApp {
                 Mode::VisualLine => "V-L",
             }
         } else {
-            mode.label()
+            &full_label
         };
         Some(
             div()
                 .id("vim-mode-indicator")
                 .role(Role::Status)
-                .aria_label(format!("Vim: {}", mode.label()))
+                .aria_label(
+                    self.i18n
+                        .text_with("surfaces.vim.announced", &[("mode", &full_label)]),
+                )
                 // The full mode name is already the badge's text. Only the
                 // abbreviation needs the hover label.
-                .when(compact, |s| s.tooltip(self.hint(mode.label())))
+                .when(compact, |s| s.tooltip(self.hint(full_label.clone())))
                 .flex_shrink_0()
                 .h(px(18.))
                 .px(px(6.))
@@ -93,7 +102,7 @@ impl MarkraftApp {
                 .bg(self.hover_color())
                 .text_size(px(10.))
                 .text_color(self.muted())
-                .child(label),
+                .child(label.to_owned()),
         )
     }
 }

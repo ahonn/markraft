@@ -1,315 +1,443 @@
-//! Application localisation primitives.
-//!
-//! Translation resources intentionally live beside the application binary.  The
-//! small Fluent-like parser here supports the `key = value` messages used by the
-//! UI and `{name}` substitutions, while keeping the application independent of
-//! a runtime locale installation.
+//! Application translations. Preferences are persisted; resolved locale values
+//! are immutable snapshots passed to each surface, never process-global state.
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::sync::LazyLock;
 
-#[cfg(target_os = "macos")]
-use std::process::Command;
-use std::{
-    collections::HashMap,
-    env,
-    sync::atomic::{AtomicU8, Ordering},
-};
+/// A presentation message retained as data until a view chooses its language.
+/// Literal values are reserved for user content and external diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Message {
+    Literal(String),
+    Template {
+        key: &'static str,
+        args: Vec<(&'static str, Message)>,
+    },
+    Joined(Vec<Message>, &'static str),
+}
 
-const EN: &str = include_str!("../locales/en.ftl");
-const ZH_HANS: &str = include_str!("../locales/zh-Hans.ftl");
-static ACTIVE_LOCALE: AtomicU8 = AtomicU8::new(0);
+impl Message {
+    pub fn new(key: &'static str) -> Self {
+        Self::Template {
+            key,
+            args: Vec::new(),
+        }
+    }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+    pub fn is_key(&self, expected: &str) -> bool {
+        matches!(self, Self::Template { key, .. } if *key == expected)
+    }
+
+    pub fn arg(mut self, name: &'static str, value: impl Into<Message>) -> Self {
+        if let Self::Template { args, .. } = &mut self {
+            args.push((name, value.into()));
+        }
+        self
+    }
+
+    pub fn join(messages: Vec<Message>, separator: &'static str) -> Self {
+        Self::Joined(messages, separator)
+    }
+
+    pub fn render(&self, i18n: &I18n) -> String {
+        match self {
+            Self::Literal(text) => text.clone(),
+            Self::Template { key, args } => {
+                let values: Vec<_> = args
+                    .iter()
+                    .map(|(name, value)| (*name, value.render(i18n)))
+                    .collect();
+                let args: Vec<_> = values
+                    .iter()
+                    .map(|(name, value)| (*name, value.as_str()))
+                    .collect();
+                i18n.text_with(key, &args)
+            }
+            Self::Joined(messages, separator) => messages
+                .iter()
+                .map(|message| message.render(i18n))
+                .collect::<Vec<_>>()
+                .join(separator),
+        }
+    }
+}
+
+impl std::fmt::Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.render(&I18n::english()))
+    }
+}
+
+impl From<String> for Message {
+    fn from(text: String) -> Self {
+        Self::Literal(text)
+    }
+}
+
+impl From<&str> for Message {
+    fn from(text: &str) -> Self {
+        Self::Literal(text.to_owned())
+    }
+}
+
+impl From<&Message> for Message {
+    fn from(message: &Message) -> Self {
+        message.clone()
+    }
+}
+
+mod catalog {
+    // The macro embeds every resource at compile time and initializes its lookup
+    // tables once. Do not set a default locale: that would mutate global state.
+    rust_i18n::i18n!("locales", fallback = "en");
+
+    pub(super) fn text(locale: &str, key: &str) -> String {
+        _rust_i18n_try_translate(locale, key)
+            .map(std::borrow::Cow::into_owned)
+            .unwrap_or_else(|| key.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod fixtures {
+    rust_i18n::i18n!("tests/locale-fixtures", fallback = "en");
+
+    pub(super) fn text(locale: &str, key: &str) -> String {
+        _rust_i18n_try_translate(locale, key)
+            .map(std::borrow::Cow::into_owned)
+            .unwrap_or_else(|| super::catalog::text("en", key))
+    }
+}
+
+/// Persist the request rather than its current resolution: a language missing
+/// from this version can become available in a later update without losing it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum LanguagePreference {
     #[default]
     System,
-    English,
-    SimplifiedChinese,
+    Locale(String),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Locale {
-    #[default]
-    En,
-    ZhHans,
-}
-
-impl LanguagePreference {
-    pub fn locale(self) -> Locale {
-        match self {
-            Self::System => system_locale(),
-            Self::English => Locale::En,
-            Self::SimplifiedChinese => Locale::ZhHans,
-        }
-    }
-}
-
-pub fn set_active(locale: Locale) {
-    ACTIVE_LOCALE.store(
-        if locale == Locale::ZhHans { 1 } else { 0 },
-        Ordering::Relaxed,
-    );
-}
-
-/// Translate legacy UI labels while the call sites are migrated to keyed messages.
-/// Keeping this small table here lets the settings and command chrome respond to a
-/// language change immediately without making every GPUI helper locale-aware first.
-pub fn legacy_text(text: &str) -> String {
-    if ACTIVE_LOCALE.load(Ordering::Relaxed) == 0 {
-        return text.to_owned();
-    }
-    match text {
-        "Startup" => "启动",
-        "Show and hide" => "显示与隐藏",
-        "New note" => "新建笔记",
-        "Note window" => "笔记窗口",
-        "Appearance" => "外观",
-        "Language" => "语言",
-        "General" => "通用",
-        "Editor" => "编辑器",
-        "Files" => "文件",
-        "Markdown" => "Markdown",
-        "About" => "关于",
-        "Auto" => "自动",
-        "Light" => "浅色",
-        "Dark" => "深色",
-        "System" => "跟随系统",
-        "Default" => "默认",
-        "Editing" => "编辑",
-        "Images" => "图片",
-        "Show on open" => "打开时显示",
-        "Last Note" => "上次笔记",
-        "Launch at login" => "登录时启动",
-        "Keep above other windows" => "保持在其他窗口上方",
-        "Hide when another app is used" => "使用其他应用时隐藏",
-        "Grow with the note" => "随笔记内容增长",
-        "Show on all desktops" => "显示在所有桌面",
-        "Open on the display with the pointer" => "在指针所在屏幕打开",
-        "No matching actions" => "没有匹配的操作",
-        "No matching notes" => "没有匹配的笔记",
-        "Edited" => "编辑于",
-        "Current" => "当前",
-        "No file yet" => "尚未保存文件",
-        "Font" => "字体",
-        "Line height" => "行高",
-        "Line width" => "行宽",
-        "Tab key" => "Tab 键",
-        "Tight" => "紧凑",
-        "Normal" => "正常",
-        "Relaxed" => "宽松",
-        "Narrow" => "窄",
-        "Full" => "全宽",
-        "2 Spaces" => "2 个空格",
-        "4 Spaces" => "4 个空格",
-        "Serif" => "衬线",
-        "Rounded" => "圆体",
-        "Mono" => "等宽",
-        "Settings" => "设置",
-        "Save Now" => "立即保存",
-        "Browse Notes" => "浏览笔记",
-        "Show Folder in Finder" => "在 Finder 中显示文件夹",
-        "Toggle Task" => "切换任务",
-        "Choose Code Language" => "选择代码语言",
-        "Copy Code Block" => "复制代码块",
-        "Copy Link" => "复制链接",
-        "Open Link" => "打开链接",
-        "Remove Link" => "移除链接",
-        "Add Row Above" => "在上方添加行",
-        "Add Row Below" => "在下方添加行",
-        "Add Column Left" => "在左侧添加列",
-        "Add Column Right" => "在右侧添加列",
-        "Delete Row" => "删除行",
-        "Delete Column" => "删除列",
-        "Delete Table" => "删除表格",
-        "Align Column Left" => "列左对齐",
-        "Align Column Center" => "列居中对齐",
-        "Align Column Right" => "列右对齐",
-        "Switch Folder…" => "切换文件夹…",
-        "Open Folder…" => "打开文件夹…",
-        "Hide Window" => "隐藏窗口",
-        "Show Window" => "显示窗口",
-        "Quit" => "退出",
-        "Undo" => "撤销",
-        "Redo" => "重做",
-        "Cut" => "剪切",
-        "Copy" => "复制",
-        "Paste" => "粘贴",
-        "Select All" => "全选",
-        "Find" => "查找",
-        "New Note" => "新建笔记",
-        "Delete Note" => "删除笔记",
-        "Rename Note" => "重命名笔记",
-        "Save" => "保存",
-        "Close" => "关闭",
-        "Check for Updates…" => "检查更新…",
-        "Report an Issue…" => "报告问题…",
-        _ => text,
-    }
-    .to_owned()
-}
-
-/// Resolve the user's preferred system language. Unknown languages use English.
-pub fn system_locale() -> Locale {
-    let mut values = Vec::new();
-    #[cfg(target_os = "macos")]
-    if let Ok(output) = Command::new("defaults")
-        .args(["read", "-g", "AppleLanguages"])
-        .output()
-    {
-        values.extend(extract_language_tags(&String::from_utf8_lossy(
-            &output.stdout,
-        )));
-    }
-    if values.is_empty() {
-        if let Some(value) = env::var_os("LC_ALL").or_else(|| env::var_os("LANG")) {
-            values.push(value.to_string_lossy().into_owned());
-        }
-    }
-    for value in values {
-        let value = value.to_ascii_lowercase().replace('_', "-");
-        if value.starts_with("zh-hant") || value.starts_with("zh-tw") || value.starts_with("zh-hk")
-        {
-            return Locale::En;
-        }
-        if value.starts_with("zh") || value.starts_with("chinese") {
-            return Locale::ZhHans;
-        }
-        if value.starts_with("en") {
-            return Locale::En;
-        }
-    }
-    Locale::En
-}
-
-fn extract_language_tags(value: &str) -> Vec<String> {
-    value
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-        .filter(|part| {
-            let p = part.to_ascii_lowercase();
-            p == "zh" || p.starts_with("zh-") || p == "en" || p.starts_with("en-")
+impl Serialize for LanguagePreference {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Self::System => "system",
+            Self::Locale(locale) => locale,
         })
-        .map(str::to_owned)
-        .collect()
+    }
+}
+
+impl<'de> Deserialize<'de> for LanguagePreference {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match String::deserialize(deserializer)?.as_str() {
+            "system" => Self::System,
+            locale => Self::Locale(locale.to_owned()),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Language {
+    pub id: String,
+    /// Native display name; language choices must remain readable in any locale.
+    pub name: String,
+}
+
+/// Shared with the packaging tool, which emits CFBundleLocalizations from this
+/// same file. English is first so Foundation uses it when no preference matches.
+pub fn available_languages() -> &'static [Language] {
+    static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
+        serde_json::from_str(include_str!("../locale_catalog.json"))
+            .expect("the bundled language catalog is validated by tests")
+    });
+    &LANGUAGES
 }
 
 #[derive(Clone, Debug)]
-pub struct Translator {
-    #[allow(dead_code)]
-    pub locale: Locale,
-    #[allow(dead_code)]
-    pub fallback: Locale,
-    messages: HashMap<String, String>,
-    fallback_messages: HashMap<String, String>,
+pub struct I18n {
+    locale: String,
+    // An immutable compiled catalog, shared by all normal application instances.
+    // Tests can use a separate catalog without registering fixture languages.
+    catalog: fn(&str, &str) -> String,
 }
 
-impl Translator {
-    pub fn new(locale: Locale) -> Self {
-        let fallback = Locale::En;
-        let fallback_messages = parse_messages(EN);
-        let messages = if locale == Locale::En {
-            fallback_messages.clone()
-        } else {
-            parse_messages(ZH_HANS)
+impl I18n {
+    pub fn editor_messages(&self) -> markraft_gpui::EditorMessages {
+        let i18n = self.clone();
+        markraft_gpui::EditorMessages::new(move |message, args| i18n.text_with(message.key(), args))
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture(locale: &str) -> Self {
+        Self {
+            locale: locale.to_owned(),
+            catalog: fixtures::text,
+        }
+    }
+
+    pub fn english() -> Self {
+        Self {
+            locale: "en".to_owned(),
+            catalog: catalog::text,
+        }
+    }
+
+    pub fn for_preference(preference: &LanguagePreference) -> Self {
+        let supported: Vec<_> = available_languages()
+            .iter()
+            .map(|language| language.id.as_str())
+            .collect();
+        let locale = match preference {
+            LanguagePreference::System => crate::platform::locale::preferred_language(&supported),
+            LanguagePreference::Locale(requested) => {
+                crate::platform::locale::resolve(&supported, Some(&[requested.as_str()]))
+            }
         };
         Self {
             locale,
-            fallback,
-            messages,
-            fallback_messages,
+            catalog: catalog::text,
         }
     }
 
-    #[allow(dead_code)]
-    pub fn for_preference(preference: LanguagePreference) -> Self {
-        Self::new(preference.locale())
+    pub fn locale(&self) -> &str {
+        &self.locale
     }
 
     pub fn text(&self, key: &str) -> String {
-        self.messages
-            .get(key)
-            .or_else(|| self.fallback_messages.get(key))
-            .cloned()
-            .unwrap_or_else(|| key.to_owned())
+        (self.catalog)(self.locale(), key)
     }
 
+    /// Values are inserted once by rust-i18n, so user text containing `%{name}`
+    /// stays literal instead of becoming another round of interpolation.
     pub fn text_with(&self, key: &str, args: &[(&str, &str)]) -> String {
-        let mut value = self.text(key);
-        for (name, replacement) in args {
-            value = value.replace(&format!("{{{name}}}"), replacement);
-        }
-        value
+        let (patterns, values): (Vec<_>, Vec<_>) = args
+            .iter()
+            .map(|(name, value)| (*name, (*value).to_owned()))
+            .unzip();
+        rust_i18n::replace_patterns(&self.text(key), &patterns, &values)
     }
-
-    #[allow(dead_code)]
-    pub fn validate(&self, key: &str, args: &[&str]) -> bool {
-        let value = self.text(key);
-        args.iter()
-            .all(|name| value.contains(&format!("{{{name}}}")))
-    }
-}
-
-fn parse_messages(source: &str) -> HashMap<String, String> {
-    source
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                return None;
-            }
-            let (key, value) = line.split_once('=')?;
-            Some((key.trim().to_owned(), value.trim().to_owned()))
-        })
-        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
+
     #[test]
-    fn translates_and_falls_back() {
-        let zh = Translator::new(Locale::ZhHans);
-        assert_eq!(zh.text("language"), "语言");
-        assert_eq!(zh.text("missing.key"), "missing.key");
-        assert_eq!(zh.text_with("greeting", &[("name", "Ada")]), "你好，Ada");
+    fn editor_defaults_match_application_resources() {
+        let english = I18n::english();
+        for message in markraft_gpui::EditorMessage::ALL {
+            assert_eq!(english.text(message.key()), message.english());
+        }
     }
+
     #[test]
-    fn preference_round_trips() {
-        let json = serde_json::to_string(&LanguagePreference::SimplifiedChinese).unwrap();
-        assert_eq!(json, "\"simplified_chinese\"");
-        assert_eq!(
-            serde_json::from_str::<LanguagePreference>(&json).unwrap(),
-            LanguagePreference::SimplifiedChinese
+    fn retained_messages_render_with_the_current_language() {
+        let message = Message::new("error.file-unavailable")
+            .arg("name", "user %{detail}.md")
+            .arg("detail", Message::new("error.untitled-note"));
+        let english = I18n::english();
+        let chinese = I18n::for_preference(&LanguagePreference::Locale("zh-Hant".into()));
+        assert_ne!(message.render(&english), message.render(&chinese));
+        assert!(message.render(&chinese).contains("user %{detail}.md"));
+        assert!(
+            message
+                .render(&chinese)
+                .contains(&chinese.text("error.untitled-note"))
         );
     }
 
     #[test]
-    fn legacy_labels_follow_active_locale() {
-        set_active(Locale::ZhHans);
-        assert_eq!(legacy_text("Settings"), "设置");
-        assert_eq!(legacy_text("No matching notes"), "没有匹配的笔记");
-        set_active(Locale::En);
-        assert_eq!(legacy_text("No matching notes"), "No matching notes");
+    fn preference_round_trip_preserves_unknown_languages() {
+        for value in ["system", "en", "zh-Hans", "zh-Hant", "future-Language"] {
+            let json = serde_json::to_string(value).unwrap();
+            let preference: LanguagePreference = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&preference).unwrap(), json);
+        }
+        assert_eq!(LanguagePreference::default(), LanguagePreference::System);
+        let preference = LanguagePreference::Locale("future-Language".into());
+        assert_eq!(I18n::for_preference(&preference).locale(), "en");
+        assert_eq!(
+            preference,
+            LanguagePreference::Locale("future-Language".into())
+        );
     }
 
     #[test]
-    fn locale_resources_cover_the_base_catalog() {
-        let english = parse_messages(EN);
-        let chinese = parse_messages(ZH_HANS);
-        let missing: Vec<_> = english
-            .keys()
-            .filter(|key| !chinese.contains_key(*key))
+    fn production_preferences_resolve_registered_language_regions() {
+        for (requested, expected) in [
+            ("en", "en"),
+            ("en-AU", "en"),
+            ("zh-Hans", "zh-Hans"),
+            ("zh-CN", "zh-Hans"),
+            ("zh-SG", "zh-Hans"),
+            ("zh-Hans-CN", "zh-Hans"),
+            ("zh-Hant", "zh-Hant"),
+            ("zh-TW", "zh-Hant"),
+            ("zh-HK", "zh-Hant"),
+            ("zh-Hant-HK", "zh-Hant"),
+        ] {
+            let preference = LanguagePreference::Locale(requested.into());
+            let i18n = I18n::for_preference(&preference);
+            assert_eq!(i18n.locale(), expected, "{requested}");
+            assert_eq!(preference, LanguagePreference::Locale(requested.into()));
+        }
+    }
+
+    #[test]
+    fn production_catalog_translates_registered_languages_independently() {
+        let english = I18n::for_preference(&LanguagePreference::Locale("en".into()));
+        let simplified = I18n::for_preference(&LanguagePreference::Locale("zh-Hans".into()));
+        let traditional = I18n::for_preference(&LanguagePreference::Locale("zh-Hant".into()));
+
+        assert_eq!(english.text("command.new-note"), "New Note");
+        assert_eq!(simplified.text("command.new-note"), "新建笔记");
+        assert_eq!(simplified.text("settings.language"), "语言");
+        assert_eq!(
+            simplified.text_with("notes.edited-days-ago", &[("days", "12")]),
+            "12 天前编辑"
+        );
+        assert_eq!(traditional.text("command.new-note"), "新增筆記");
+        assert_eq!(traditional.text("settings.language"), "語言");
+        assert_eq!(
+            traditional.text_with("notes.edited-days-ago", &[("days", "12")]),
+            "12 天前編輯"
+        );
+        assert_eq!(
+            english.text_with("notes.edited-days-ago", &[("days", "12")]),
+            "Edited 12 days ago"
+        );
+        assert_eq!(english.text("command.new-note"), "New Note");
+        assert_eq!(traditional.text("command.new-note"), "新增筆記");
+    }
+
+    #[test]
+    fn instances_translate_independently_and_fall_back_per_message() {
+        let english = I18n::fixture("en");
+        let chinese = I18n::fixture("zh-Hans");
+        assert_eq!(
+            english.text_with("greeting", &[("name", "Ada")]),
+            "Hello, Ada"
+        );
+        assert_eq!(
+            chinese.text_with("greeting", &[("name", "Ada")]),
+            "你好，Ada"
+        );
+        assert_eq!(chinese.text("only-english"), "English fallback");
+        assert_eq!(chinese.text("unknown-key"), "unknown-key");
+        assert_eq!(
+            english.text_with("greeting", &[("name", "Ada")]),
+            "Hello, Ada"
+        );
+        assert_eq!(
+            english.text_with("greeting", &[("name", "%{name}")]),
+            "Hello, %{name}"
+        );
+    }
+
+    fn read_messages(directory: &Path, messages: &mut BTreeMap<String, BTreeMap<String, String>>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                read_messages(&path, messages);
+                continue;
+            }
+            assert_eq!(path.extension().unwrap(), "json", "{}", path.display());
+            let locale = path.file_stem().unwrap().to_str().unwrap().to_owned();
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let object = value.as_object().unwrap();
+            assert_eq!(
+                object.get("_version"),
+                Some(&serde_json::json!(1)),
+                "{}",
+                path.display()
+            );
+            let catalog = messages.entry(locale).or_default();
+            for (key, value) in object {
+                if key == "_version" {
+                    continue;
+                }
+                flatten_messages(key, value, catalog);
+            }
+        }
+    }
+
+    fn flatten_messages(
+        key: &str,
+        value: &serde_json::Value,
+        catalog: &mut BTreeMap<String, String>,
+    ) {
+        match value {
+            serde_json::Value::String(text) => {
+                assert!(
+                    catalog.insert(key.into(), text.clone()).is_none(),
+                    "duplicate key: {key}"
+                );
+            }
+            serde_json::Value::Object(children) => {
+                for (child, value) in children {
+                    flatten_messages(&format!("{key}.{child}"), value, catalog);
+                }
+            }
+            _ => panic!("message {key} must be a string or a namespace"),
+        }
+    }
+
+    fn placeholders(text: &str) -> BTreeSet<&str> {
+        text.split("%{")
+            .skip(1)
+            .map(|part| {
+                let (name, _) = part
+                    .split_once('}')
+                    .expect("unclosed interpolation parameter");
+                assert!(!name.is_empty(), "empty interpolation parameter");
+                name
+            })
+            .collect()
+    }
+
+    #[test]
+    fn registered_resources_have_unique_keys_and_matching_parameters() {
+        let languages = available_languages();
+        assert_eq!(
+            languages.first().unwrap().id,
+            "en",
+            "English must be the fallback"
+        );
+        let ids: BTreeSet<_> = languages
+            .iter()
+            .map(|language| language.id.as_str())
             .collect();
-        assert!(missing.is_empty(), "zh-Hans is missing keys: {missing:?}");
-    }
-
-    #[test]
-    fn system_language_uses_order_and_rejects_traditional_chinese() {
-        assert_eq!(
-            extract_language_tags("( en-US, zh-Hans )"),
-            vec!["en-US", "zh-Hans"]
+        assert_eq!(ids.len(), languages.len(), "duplicate language identifier");
+        assert!(
+            languages
+                .iter()
+                .all(|language| !language.name.trim().is_empty())
+        );
+        let mut messages = BTreeMap::new();
+        read_messages(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("locales")
+                .as_path(),
+            &mut messages,
         );
         assert_eq!(
-            extract_language_tags("( zh-Hant, en-US )"),
-            vec!["zh-Hant", "en-US"]
+            messages.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            ids
         );
+        let english = &messages["en"];
+        for (locale, translations) in &messages {
+            for (key, text) in translations {
+                let source = english
+                    .get(key)
+                    .unwrap_or_else(|| panic!("unknown key {locale}:{key}"));
+                assert_eq!(placeholders(text), placeholders(source), "{locale}:{key}");
+                assert_eq!(
+                    catalog::text(locale, key),
+                    *text,
+                    "compiled resource {locale}:{key}"
+                );
+            }
+        }
     }
 }

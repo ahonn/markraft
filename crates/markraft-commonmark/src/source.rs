@@ -977,18 +977,52 @@ impl SourceDocument {
 /// the save can write.
 #[derive(Debug)]
 pub struct SourceTrack {
-    origin: SourceDocument,
+    origin: std::sync::Arc<SourceDocument>,
     /// The file as last written; `None` while that is the file read, so a
     /// note never edited holds one copy of its text.
-    current: std::sync::Mutex<Option<SourceDocument>>,
+    current: std::sync::Mutex<Option<std::sync::Arc<SourceDocument>>>,
+}
+
+/// An immutable source baseline captured independently of subsequent edits.
+#[derive(Clone, Debug)]
+pub struct SourceSnapshot {
+    origin: std::sync::Arc<SourceDocument>,
+    current: Option<std::sync::Arc<SourceDocument>>,
+}
+
+impl SourceSnapshot {
+    /// Render a committed document without advancing any editing track.
+    pub fn render(&self, schema: &Schema, document: &Node) -> Result<String, SourceError> {
+        if document == self.origin.document() {
+            return Ok(self.origin.source().to_owned());
+        }
+        self.current
+            .as_deref()
+            .unwrap_or(&self.origin)
+            .render(schema, document)
+            .or_else(|_| self.origin.render(schema, document))
+    }
 }
 
 impl SourceTrack {
     /// A track that starts at `origin`, the file as read.
     pub fn new(origin: SourceDocument) -> Self {
         Self {
-            origin,
+            origin: std::sync::Arc::new(origin),
             current: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Freeze the source under a short lock. Rendering happens after releasing it.
+    pub fn snapshot(&self) -> SourceSnapshot {
+        let current = self
+            .current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        SourceSnapshot {
+            origin: self.origin.clone(),
+            current,
         }
     }
 
@@ -1057,7 +1091,7 @@ impl SourceTrack {
             *held = None;
             return Ok(self.origin.source.clone());
         }
-        let current = held.as_ref().unwrap_or(&self.origin);
+        let current = held.as_deref().unwrap_or(&self.origin);
         if document == &current.document {
             return Ok(current.source.clone());
         }
@@ -1079,7 +1113,11 @@ impl SourceTrack {
             Some((rendered, bytes)) => (current, rendered, Some(bytes)),
             None => match current.step(schema, document) {
                 Ok(rendered) => (current, rendered, None),
-                Err(_) => (&self.origin, self.origin.step(schema, document)?, None),
+                Err(_) => (
+                    self.origin.as_ref(),
+                    self.origin.step(schema, document)?,
+                    None,
+                ),
             },
         };
         // Build the next baseline before publishing it. A failed preparation
@@ -1087,7 +1125,7 @@ impl SourceTrack {
         let next = base
             .advanced_in(schema, rendered.clone(), bytes)
             .ok_or(SourceError::UnsupportedEdit)?;
-        *held = Some(next.adopting(schema, document));
+        *held = Some(std::sync::Arc::new(next.adopting(schema, document)));
         Ok(rendered)
     }
 
@@ -2612,6 +2650,51 @@ mod tests {
         assert_eq!(
             next.read,
             SourceDocument::parse(&schema, &patched).unwrap().read
+        );
+    }
+
+    #[test]
+    fn a_frozen_snapshot_keeps_exact_bytes_without_advancing_the_live_track() {
+        use markraft_core::{EditorState, EditorStateConfig, Selection, commands};
+        let schema = commonmark_schema();
+        let text = "---\r\ntitle: exact\r\n---\r\n\r\noriginal\r\n";
+        let source = SourceDocument::parse(&schema, text).unwrap();
+        let state = EditorState::create(
+            EditorStateConfig::new(schema.clone())
+                .doc(source.document.clone())
+                .selection(Selection::cursor(2)),
+        )
+        .unwrap();
+        let track = super::SourceTrack::new(source);
+        let frozen = track.snapshot();
+        let change = state
+            .update([commands::insert_text("a")(&state).unwrap()])
+            .unwrap();
+        // Even rendering a future document only mutates the returned string.
+        assert!(
+            frozen
+                .render(&schema, change.new_doc())
+                .unwrap()
+                .contains("oariginal")
+        );
+        assert!(track.current.lock().unwrap().is_none());
+        track
+            .apply_transactions(&schema, std::slice::from_ref(&change))
+            .unwrap();
+        assert_eq!(frozen.render(&schema, state.doc()).unwrap(), text);
+        assert!(
+            track
+                .current
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .document
+                .ptr_eq(change.new_doc())
+        );
+        assert_eq!(
+            track.snapshot().render(&schema, change.new_doc()).unwrap(),
+            frozen.render(&schema, change.new_doc()).unwrap()
         );
     }
 
