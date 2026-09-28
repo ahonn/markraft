@@ -267,6 +267,10 @@ mod tests {
         for (requested, expected) in [
             ("en", "en"),
             ("en-AU", "en"),
+            ("zh-Hans", "zh-Hans"),
+            ("zh-CN", "zh-Hans"),
+            ("zh-SG", "zh-Hans"),
+            ("zh-Hans-CN", "zh-Hans"),
             ("zh-Hant", "zh-Hant"),
             ("zh-TW", "zh-Hant"),
             ("zh-HK", "zh-Hant"),
@@ -280,11 +284,18 @@ mod tests {
     }
 
     #[test]
-    fn production_catalog_translates_english_and_traditional_chinese_independently() {
+    fn production_catalog_translates_registered_languages_independently() {
         let english = I18n::for_preference(&LanguagePreference::Locale("en".into()));
+        let simplified = I18n::for_preference(&LanguagePreference::Locale("zh-Hans".into()));
         let traditional = I18n::for_preference(&LanguagePreference::Locale("zh-Hant".into()));
 
         assert_eq!(english.text("command.new-note"), "New Note");
+        assert_eq!(simplified.text("command.new-note"), "新建笔记");
+        assert_eq!(simplified.text("settings.language"), "语言");
+        assert_eq!(
+            simplified.text_with("notes.edited-days-ago", &[("days", "12")]),
+            "12 天前编辑"
+        );
         assert_eq!(traditional.text("command.new-note"), "新增筆記");
         assert_eq!(traditional.text("settings.language"), "語言");
         assert_eq!(

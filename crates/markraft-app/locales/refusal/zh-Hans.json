@@ -1,0 +1,18 @@
+{
+  "_version": 1,
+  "refusal.bold": "无法在此添加粗体：** 紧邻标点时会保留为普通文本。",
+  "refusal.italic": "无法在此添加斜体：* 紧邻标点时会保留为普通文本。",
+  "refusal.strikethrough": "无法在此添加删除线：~~ 紧邻标点时会保留为普通文本。",
+  "refusal.code": "无法在此添加代码：` 紧邻标点时会保留为普通文本。",
+  "refusal.underline": "无法在此添加下划线：<u> 紧邻标点时会保留为普通文本。",
+  "refusal.highlight": "无法在此添加高亮：== 紧邻标点时会保留为普通文本。",
+  "refusal.superscript": "无法在此添加上标：^ 紧邻标点时会保留为普通文本。",
+  "refusal.subscript": "无法在此添加下标：~ 紧邻标点时会保留为普通文本。",
+  "refusal.formula": "无法在此添加公式：$ 紧邻标点时会保留为普通文本。",
+  "refusal.link": "无法在此添加链接：[…](…) 紧邻标点时会保留为普通文本。",
+  "refusal.other": "无法在此添加这种格式：其分隔符紧邻标点时会保留为普通文本。",
+  "refusal.unreadable": "Markdown 无法在此写入这种格式。",
+  "refusal.unsavable": "必须重写其他 Markdown 内容才能保存这次编辑。",
+  "refusal.invalid-file": "无法在 Markraft 中编辑此文件：%{error}",
+  "refusal.no-transaction": "未产生任何编辑操作。"
+}
