@@ -389,7 +389,7 @@ impl MarkraftApp {
         if updated == 0 && kept == 0 {
             return;
         }
-        let mut parts = vec![Message::new("notice.renamed").arg("name", stem)];
+        let mut parts = Vec::new();
         if updated > 0 {
             parts.push(
                 Message::new(if updated == 1 {

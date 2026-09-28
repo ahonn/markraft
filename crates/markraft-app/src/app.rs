@@ -1027,8 +1027,7 @@ impl MarkraftApp {
         } else if self.preferences.vim_mode {
             // In vim Escape is how every command is left, and pressed once too often
             // it would put the note away mid-thought. vim itself answers a stray
-            // Escape by staying put; the way out is `:q`, which says so.
-            self.inform(Message::new("notice.vim-hide"), cx);
+            // Escape by staying put; the way out is `:q`.
         } else {
             self.hide(window, cx);
         }
@@ -1603,7 +1602,6 @@ impl MarkraftApp {
             let persistence = Self::start_persistence(store, house);
             Ok((directory, persistence, library))
         });
-        self.inform(Message::new("notice.opening-folder"), cx);
         self.run_io(task, window, cx, move |this, result, window, cx| {
             if this.io.opening != opening {
                 return;
@@ -1719,8 +1717,7 @@ impl MarkraftApp {
                         },
                     );
                 }
-                Ok(Some(_)) => this.inform(Message::new("notice.exported"), cx),
-                Ok(None) => {}
+                Ok(Some(_) | None) => {}
                 Err(error) => this.feedback.set_error(error),
             },
         );

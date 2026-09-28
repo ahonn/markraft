@@ -319,8 +319,9 @@ fn intent_icon(intent: &Intent) -> Icon {
 
 impl MarkraftApp {
     fn intent(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
+        // The reload replaces the note within moments; an action taken meanwhile
+        // would land on content about to be discarded.
         if self.is_reloading() {
-            self.inform(Message::new("notice.reloading"), cx);
             return;
         }
         match intent {

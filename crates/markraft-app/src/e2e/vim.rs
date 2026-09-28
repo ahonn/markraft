@@ -133,17 +133,14 @@ fn vim_colon_commands_keep_to_the_command_line(cx: &mut TestAppContext) {
 }
 
 // In vim Escape leaves every command, so one pressed too often in Normal mode keeps
-// the window and says how to hide it; the test platform cannot hide a window, so a
-// hide here would fail the test outright.
+// the window, and quietly: vim users press it by habit. The test platform cannot
+// hide a window, so a hide here would fail the test outright.
 #[gpui::test]
-fn vim_escape_in_normal_mode_points_to_colon_q(cx: &mut TestAppContext) {
+fn vim_escape_in_normal_mode_stays_put_quietly(cx: &mut TestAppContext) {
     let mut h = open_with(cx, &[("e.md", "one\n")], |p| p.vim_mode = true);
     h.keys("cmd-up i escape escape escape");
     let notice = h.app.update(h.cx, |app, _| app.test_notice());
-    assert_eq!(
-        notice.as_deref(),
-        Some("Type :q and press Return to hide the window.")
-    );
+    assert_eq!(notice, None);
     h.type_text("x");
     assert_eq!(h.markdown(), "ne");
 }
