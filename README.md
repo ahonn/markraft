@@ -105,7 +105,9 @@ Logs and crash reports are written to `~/Library/Logs/Markraft` and stay on your
 
 ## Contributing
 
-Bug reports and pull requests are welcome. For a change in behavior, please open an issue to discuss it first.
+Bug reports and feature requests are welcome as issues. Pull requests are open to collaborators only, so to propose a change, please open an issue and describe it there.
+
+To build from source:
 
 ```sh
 bash scripts/download-sparkle.sh   # fetch the Sparkle framework into target/sparkle
@@ -116,7 +118,7 @@ cargo xtask bundle                 # build target/debug/bundle/osx/Markraft.app
 
 The toolchain is pinned in `rust-toolchain.toml`. The workspace is split into `markraft-core` (document model and editing), `markraft-commonmark` (Markdown), `markraft-gpui` (the editor view), `markraft-math` (window-independent LaTeX typesetting), `markraft-vim` and `markraft-app`. See [the architecture notes](docs/architecture.md) for document, source, analysis and rendering boundaries.
 
-See [the localization guide](docs/localization.md) for message resources, language preferences, and adding a supported language.
+See [the localization guide](docs/localization.md) for message resources, language preferences, and adding a supported language. To contribute a translation, attach the message files to an issue.
 
 ## Acknowledgments
 
