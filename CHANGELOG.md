@@ -1,3 +1,10 @@
+## 0.1.5 (2026-09-30)
+
+### Fixes
+
+- When a note can't be moved to the Trash, it stays in the list and saving and quitting keep working.
+- Keep Settings menus within the window, with scrolling for long lists and keyboard navigation that keeps the highlighted option visible.
+
 ## 0.1.4 (2026-09-28)
 
 ### Features

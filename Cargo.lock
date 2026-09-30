@@ -4137,7 +4137,7 @@ dependencies = [
 
 [[package]]
 name = "markraft-app"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "futures-channel",
@@ -4171,7 +4171,7 @@ dependencies = [
 
 [[package]]
 name = "markraft-commonmark"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "comrak",
  "emojis",
@@ -4185,7 +4185,7 @@ dependencies = [
 
 [[package]]
 name = "markraft-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "emojis",
  "serde",
@@ -4196,7 +4196,7 @@ dependencies = [
 
 [[package]]
 name = "markraft-gpui"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "emojis",
  "gpui-pre",
@@ -4216,7 +4216,7 @@ dependencies = [
 
 [[package]]
 name = "markraft-math"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ratex-layout",
  "ratex-parser",
@@ -4226,7 +4226,7 @@ dependencies = [
 
 [[package]]
 name = "markraft-vim"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "gpui-pre",
  "markraft-commonmark",
