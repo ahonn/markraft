@@ -1283,9 +1283,11 @@ impl MarkraftApp {
             .note(id)
             .and_then(|note| note.path.as_ref())
             .and_then(|path| path.parent().map(ToOwned::to_owned));
+        let was_active = self.library.active_id == id;
         if self.library.delete(id) {
             self.sessions.remove(id);
             self.ensure_session(window, cx);
+            let successor = was_active.then(|| self.library.active_id.clone());
             let query = self.search_text(cx);
             let root = self.path.clone();
             self.picker
@@ -1294,8 +1296,8 @@ impl MarkraftApp {
             window.focus(&self.query().focus_handle(cx), cx);
             self.notes_changed(cx);
             let id = id.to_owned();
-            self.flush_then(window, cx, move |this, _, cx| {
-                this.moved_to_trash(&id, folder, cx)
+            self.flush_then(window, cx, move |this, window, cx| {
+                this.moved_to_trash(&id, successor, folder, window, cx)
             });
         }
     }
@@ -1313,11 +1315,12 @@ impl MarkraftApp {
         if self.library.delete(&id) {
             self.sessions.remove(&id);
             self.ensure_session(window, cx);
+            let successor = Some(self.library.active_id.clone());
             self.set_panel(Panel::Editor, cx);
             self.focus_editor(window, cx);
             self.notes_changed(cx);
-            self.flush_then(window, cx, move |this, _, cx| {
-                this.moved_to_trash(&id, folder, cx)
+            self.flush_then(window, cx, move |this, window, cx| {
+                this.moved_to_trash(&id, successor, folder, window, cx)
             });
         }
     }
@@ -1325,8 +1328,29 @@ impl MarkraftApp {
     /// button reveals; without an address from the platform the folder it left is the
     /// nearest thing to show. A note the store would not delete is back in the list
     /// by now, its file untouched, and that is what has to be said instead.
-    fn moved_to_trash(&mut self, id: &str, folder: Option<PathBuf>, cx: &mut Context<Self>) {
+    ///
+    /// `successor` is the note that took the deleted one's place as the active note,
+    /// when it had that place. While it still does, the note that came back takes its
+    /// place again, so the refusal is said over the note it is about; a note the user
+    /// has moved to since is left alone.
+    fn moved_to_trash(
+        &mut self,
+        id: &str,
+        successor: Option<String>,
+        folder: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.library.note(id).is_some() {
+            if successor.as_deref() == Some(self.library.active_id.as_str()) {
+                if self.interaction.panel() == Panel::Editor {
+                    self.select_note(id, window, cx);
+                } else if self.library.select(id) {
+                    self.io.opening += 1;
+                    self.ensure_session(window, cx);
+                    self.notes_changed(cx);
+                }
+            }
             self.feedback.inform(Message::new("notice.trash-failed"));
             cx.notify();
             return;

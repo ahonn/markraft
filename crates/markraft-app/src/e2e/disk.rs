@@ -489,8 +489,9 @@ fn flush_completes(h: &mut Harness) -> bool {
 }
 
 // A file another program changed after it was read is not the file the user
-// asked to delete. It stays, the note comes back with what the file now holds,
-// the user is told, and later saves are not held up by the refused deletion.
+// asked to delete. It stays, the note comes back open with what the file now
+// holds, the user is told, and later saves are not held up by the refused
+// deletion.
 #[gpui::test]
 fn a_file_changed_elsewhere_is_not_trashed_and_its_note_comes_back(cx: &mut TestAppContext) {
     let mut h = open_with(
@@ -512,6 +513,12 @@ fn a_file_changed_elsewhere_is_not_trashed_and_its_note_comes_back(cx: &mut Test
         .update(h.cx, |app, _| app.test_note(&note.id))
         .expect("the note is back in the list");
     assert_eq!(crate::doc::to_markdown(&back.document), "changed elsewhere");
+    assert_eq!(
+        h.active_note().id,
+        note.id,
+        "the note that came back is open again"
+    );
+    assert_eq!(h.markdown(), "changed elsewhere");
     assert_eq!(
         h.app.update(h.cx, |app, _| app.test_notice()).as_deref(),
         Some("Couldn't move to Trash.")
@@ -546,6 +553,12 @@ fn a_file_the_trash_refuses_keeps_its_note(cx: &mut TestAppContext) {
             .is_some(),
         "the note is back in the list"
     );
+    assert_eq!(
+        h.active_note().id,
+        note.id,
+        "the note that came back is open again"
+    );
+    assert_eq!(h.markdown(), "alpha");
     assert_eq!(
         h.app.update(h.cx, |app, _| app.test_notice()).as_deref(),
         Some("Couldn't move to Trash.")
