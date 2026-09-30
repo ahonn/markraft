@@ -92,7 +92,7 @@ pub(super) fn text_runs(
             }
         }
         let atom = matches!(run.content, RunContent::Atom(_));
-        // What an atom's placeholder holds: a pill is painted over its fillers,
+        // What an atom's placeholder holds: a pill is painted over its placeholder,
         // and the other shapes are the row's own text. A wiki link's label is
         // prose, so it keeps the face this run already decided on — the
         // heading's weight, the emphasis around it — in the link colour an atom
@@ -111,8 +111,8 @@ pub(super) fn text_runs(
         if widened && is_math {
             face = font(UI_FONT);
         }
-        // A pill's fillers reserve the width `filler_width` measured in the
-        // chrome face, so they are shaped in it whatever the note's face is.
+        // A pill's placeholder is shaped in the chrome face, whatever the
+        // note's face is.
         if widened && !is_code {
             face.family = UI_FONT.into();
         }

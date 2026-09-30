@@ -143,7 +143,7 @@ pub enum AttrKind {
     Bool,
     /// Integers.
     Int,
-    /// Floats. Also accepts [`AttrValue::Int`], which is widened on validation.
+    /// Floats. Also accepts [`AttrValue::Int`], which is kept as given.
     Float,
     /// Strings.
     Str,

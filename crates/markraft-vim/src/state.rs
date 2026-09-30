@@ -79,7 +79,7 @@ impl Pending {
     }
 
     /// The count typed since the operator, without consuming anything. `gg` and `G` read
-    /// it as the block to go to, which is not a repetition.
+    /// it as the line to go to, which is not a repetition.
     pub(crate) fn count(self) -> Option<usize> {
         self.count
     }

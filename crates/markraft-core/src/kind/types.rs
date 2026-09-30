@@ -10,7 +10,7 @@ use crate::kind::TABLE_ALIGNMENTS_ATTR;
 use crate::projection::{Ancestor, Line};
 use crate::{Attrs, EditorState, MarkTypeId, Node, NodeTypeId, Schema, kind::DocTypeNames};
 
-/// The conventional schema names of the two roles [`DocTypeNames`] has no
+/// The conventional schema names of the three roles [`DocTypeNames`] has no
 /// entry for.
 const RAW_INLINE: &str = "raw_inline";
 const WIKI_LINK: &str = "wiki_link";
@@ -44,7 +44,7 @@ pub struct CalloutAttrs {
 #[derive(Clone, Debug, Default)]
 pub struct DocTypes {
     /// The default textblock. Without it a block toggle cannot return to a
-    /// plain block, so ⌘⌥0 and the second press of every block binding do
+    /// plain block, so ⌘0 and the second press of every block binding do
     /// nothing, and literal multi-line text is inserted as one block.
     pub paragraph: Option<NodeTypeId>,
     /// A heading, carrying a `level` attribute. Without it the heading
@@ -120,7 +120,8 @@ pub struct DocTypes {
     pub code: Option<MarkTypeId>,
     /// Strikethrough. Without it ⌘⇧S does nothing.
     pub strikethrough: Option<MarkTypeId>,
-    /// Underline. Present for HTML paste; Markdown write strips it.
+    /// Underline, drawn with a line under the text. Without it the text is
+    /// drawn without one.
     pub underline: Option<MarkTypeId>,
     /// A key or key combination, drawn as a pill in the prose face, as a code
     /// span is in the code face. Without it the keys are drawn as prose.

@@ -310,9 +310,9 @@ impl MarkraftApp {
         stops.iter().position(|stop| stop.row == Some(row))
     }
 
-    /// Move the open surface's list to `row`, keeping it in view. Every path that
-    /// changes a selection goes through here — the ring, the arrow keys and the
-    /// pointer.
+    /// Move the open surface's list to `row`, keeping it in view: the ring and Browse's
+    /// arrow keys come through here. The pointer only points at the row it is on, which
+    /// needs no scroll.
     pub(super) fn select_row(&mut self, row: usize) {
         match self.surface() {
             Surface::Format => self.format.select(row),

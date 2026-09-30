@@ -883,8 +883,6 @@ fn insert_table_at_cursor(
     )
 }
 
-/// Stop a Backspace or Delete chain at a cell's edge.
-///
 /// Keep every table a grid, whatever produced the edit.
 ///
 /// The commands in this module never break the invariant, but the general

@@ -176,7 +176,8 @@ impl MarkraftApp {
         self.set_panel(Panel::Editor, cx);
         self.ring.release();
         let note = self.library.active_note();
-        // A note with no file yet has nothing to rename; the next autosave files it.
+        // A note with no file yet has nothing to rename: one with text is saved first,
+        // and the pill opens once that save has given it a file.
         let Some(path) = note.path.clone() else {
             if !note.document_is_empty() {
                 let id = note.id.clone();

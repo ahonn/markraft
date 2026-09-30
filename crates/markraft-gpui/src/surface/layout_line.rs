@@ -290,7 +290,7 @@ impl LayoutRow {
 /// One projection line, laid out.
 #[derive(Clone)]
 pub(crate) struct LayoutLine {
-    /// The projection used to shape this frame, including inline position maps.
+    /// The projection line used to shape this frame, including inline position maps.
     pub(super) source: Line,
     /// The projection line this was built from.
     pub index: usize,

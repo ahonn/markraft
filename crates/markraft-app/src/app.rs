@@ -606,6 +606,19 @@ impl MarkraftApp {
         if completion == SaveCompletion::Ignored {
             return;
         }
+        // Before acknowledging: a refused deletion's generation would otherwise
+        // take the note with it.
+        let mut restored = false;
+        for id in &saved.kept {
+            restored |= self.library.restore_deleted(id);
+        }
+        if restored {
+            self.links.invalidate();
+            // The file may hold what another program wrote; disk wins as usual.
+            if let Some(persistence) = &self.persistence {
+                persistence.refresh();
+            }
+        }
         if saved.result.is_ok() {
             self.library.acknowledge_saved(&saved.changes);
         }
@@ -1280,8 +1293,9 @@ impl MarkraftApp {
             self.ring.release();
             window.focus(&self.query().focus_handle(cx), cx);
             self.notes_changed(cx);
+            let id = id.to_owned();
             self.flush_then(window, cx, move |this, _, cx| {
-                this.moved_to_trash(true, folder, cx)
+                this.moved_to_trash(&id, folder, cx)
             });
         }
     }
@@ -1303,17 +1317,16 @@ impl MarkraftApp {
             self.focus_editor(window, cx);
             self.notes_changed(cx);
             self.flush_then(window, cx, move |this, _, cx| {
-                this.moved_to_trash(true, folder, cx)
+                this.moved_to_trash(&id, folder, cx)
             });
         }
     }
     /// Say where the note went. The Trash holds the file itself, so that is what the
     /// button reveals; without an address from the platform the folder it left is the
-    /// nearest thing to show. A save that did not go through took the note off the
-    /// list without taking the file anywhere, and has to say so — the file status
-    /// carries the reason.
-    fn moved_to_trash(&mut self, moved: bool, folder: Option<PathBuf>, cx: &mut Context<Self>) {
-        if !moved {
+    /// nearest thing to show. A note the store would not delete is back in the list
+    /// by now, its file untouched, and that is what has to be said instead.
+    fn moved_to_trash(&mut self, id: &str, folder: Option<PathBuf>, cx: &mut Context<Self>) {
+        if self.library.note(id).is_some() {
             self.feedback.inform(Message::new("notice.trash-failed"));
             cx.notify();
             return;
@@ -2783,8 +2796,8 @@ mod tests {
             )
         };
         assert_eq!(resolve("Plan").as_deref(), Some("b"));
-        // With no folder there is nothing for a path to be relative to, so the
-        // last component is all that is matched.
+        // With no folder there is nothing for a path to be relative to, so a
+        // target holding a `/` is matched as a stem and names nothing.
         assert_eq!(resolve("two/Plan").as_deref(), None);
         assert_eq!(resolve("Plan.md").as_deref(), Some("b"));
     }

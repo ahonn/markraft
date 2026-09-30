@@ -4,11 +4,13 @@
 
 use super::*;
 
-/// Rectangular floating surfaces: the panel card and the two menus. The link pill is a
-/// capsule around one line of controls and keeps the radius its height gives it.
+/// Rectangular floating surfaces: the panel card, the two menus and the file status
+/// card. The link pill is a capsule around one line of controls and keeps the radius
+/// its height gives it.
 pub(super) const POPOVER_RADIUS: Pixels = px(12.);
-/// One list row: the ⌘K and Settings rows, the format menu, the language menu. A Browse
-/// row carries a title and a line of metadata, so it has a height of its own.
+/// One list row: the format menu, the language menu. A ⌘K row is taller, a Browse row
+/// carries a title and a line of metadata, and the Settings window's menus have their
+/// own metrics, so each has a height of its own.
 pub(super) const ROW_HEIGHT: Pixels = px(32.);
 pub(super) const ROW_RADIUS: Pixels = px(6.);
 

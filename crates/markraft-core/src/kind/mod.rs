@@ -3,7 +3,7 @@
 //! the reading of its conceal contract, the key chains a view binds over
 //! those roles, and the hooks a kind fills in.
 //!
-//! Neither item names a concrete document kind, a platform or a schema type, so
+//! Nothing here names a concrete document kind, a platform or a schema type, so
 //! a view can be built against them and a host plugs its own kind in. The
 //! CommonMark implementations live in `markraft-commonmark`.
 //!

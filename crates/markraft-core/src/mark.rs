@@ -3,7 +3,7 @@
 //! Each inline node carries a canonical set of marks. Schemas may also use
 //! inline containers to preserve nested semantic scopes, including the same
 //! mark on both an ancestor and its child. A [`MarkSet`] is sorted by
-//! `(rank, type id, attrs)` within each individual scope.
+//! `(rank, type id)` within each individual scope.
 
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
@@ -41,7 +41,8 @@ impl Mark {
     }
 }
 
-/// A canonically ordered set holding at most one mark per mark type.
+/// A canonically ordered set holding at most one mark of each type that
+/// excludes itself, as every type does unless its `excludes` says otherwise.
 ///
 /// Cloning is a reference-count bump; the empty set does not allocate.
 #[derive(Debug, Clone, Default)]
@@ -108,9 +109,9 @@ impl MarkSet {
 
     /// Add `mark`, honouring `excludes`.
     ///
-    /// A mark of the same type is replaced. When an existing mark excludes the
-    /// new one, the set is returned unchanged; otherwise every mark the new one
-    /// excludes is dropped.
+    /// A mark of the same type is replaced when that type excludes itself.
+    /// When an existing mark excludes the new one, the set is returned
+    /// unchanged; otherwise every mark the new one excludes is dropped.
     pub fn add(&self, schema: &Schema, mark: Mark) -> MarkSet {
         let new_type = schema.mark_type(mark.ty);
         let new_key = mark.sort_key(schema);
@@ -187,8 +188,7 @@ impl MarkSet {
         }
     }
 
-    /// Whether two sets hold the same marks. Equivalent to `==`, spelled out to
-    /// match the guide's vocabulary.
+    /// Whether two sets hold the same marks. Equivalent to `==`.
     pub fn same_set(&self, other: &MarkSet) -> bool {
         self == other
     }

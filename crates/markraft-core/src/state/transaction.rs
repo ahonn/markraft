@@ -640,28 +640,23 @@ fn apply_change_filters(tr: Transaction) -> Result<Transaction, StateError> {
 
 /// Let the configured extenders add to the transaction.
 ///
-/// Extenders run in reverse configuration order, each seeing the *original*
-/// transaction, and what they return is merged sequentially: their positions
-/// refer to the document produced so far, and the changes they add are composed
-/// exactly. Extenders may add changes, not only effects and annotations, which
-/// is what lets [`Correction`](crate::corrections::Correction) be one.
+/// Extenders run in reverse configuration order. Each sees the transaction as
+/// the extenders before it left it, and what it returns is merged sequentially:
+/// its positions refer to that transaction's [`Transaction::new_doc`], and the
+/// changes it adds are composed exactly. Extenders may add changes, not only
+/// effects and annotations, which is what lets
+/// [`Correction`](crate::corrections::Correction) be one.
 fn extend_transaction(tr: Transaction) -> Result<Transaction, StateError> {
     let state = tr.start_state().clone();
     let extenders = state.facet(filters::transaction_extender()).clone();
-    if extenders.is_empty() {
-        return Ok(tr);
-    }
-    let mut acc = tr.resolved();
-    let mut extended = false;
+    let mut current = tr;
     for extender in extenders.iter().rev() {
-        let Some(spec) = extender(&tr) else { continue };
-        let base = acc.changes.apply(state.doc())?;
-        let next = resolve_inner(&state, &spec, &base)?;
-        acc = merge(&state, acc, next, true)?;
-        extended = true;
+        let Some(spec) = extender(&current) else {
+            continue;
+        };
+        let next = resolve_inner(&state, &spec, current.new_doc())?;
+        let merged = merge(&state, current.resolved(), next, true)?;
+        current = Transaction::create(&state, merged)?;
     }
-    if !extended {
-        return Ok(tr);
-    }
-    Transaction::create(&state, acc)
+    Ok(current)
 }

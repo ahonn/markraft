@@ -288,7 +288,8 @@ fn transform_always_produces_applicable_valid_change_sets() {
             .unwrap_or_else(|err| panic!("seed {seed}: b' left an invalid document: {err}"));
 
         // Changes that do not touch the same stretch of document always
-        // converge. Overlapping ones may not; see `transform_diverges_only_on_        // overlapping_conflicts`.
+        // converge. Overlapping ones may not; see
+        // `transform_diverges_only_on_overlapping_conflicts`.
         let disjoint = match (touched_span(&a), touched_span(&b)) {
             (Some((a_lo, a_hi)), Some((b_lo, b_hi))) => a_hi < b_lo || b_hi < a_lo,
             _ => true,

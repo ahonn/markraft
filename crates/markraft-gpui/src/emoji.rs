@@ -233,7 +233,7 @@ fn is_code(state: &EditorState, types: &DocTypes, from: usize, to: usize) -> boo
 }
 
 /// The emoji whose shortcodes match `query`, best first: the whole shortcode, then its
-/// start, then a match inside it. Within each, the shorter shortcode — the one the
+/// start, then the start of a later word in it. Within each, the shorter shortcode — the one the
 /// query is nearer to spelling out — comes first, so `:smil` offers `:smile:` before
 /// `:smiley:`; ties keep the CLDR order [`emojis::iter`] yields. The list is capped at
 /// [`LIMIT`].
@@ -318,7 +318,7 @@ mod tests {
             .to_owned()
     }
 
-    /// The replacement at the end of a plain paragraph holding `source`.
+    /// The replacement whose closing colon `caret` sits after in `state`.
     fn found_in(state: &EditorState, caret: usize) -> Option<(Range<usize>, &'static str)> {
         let types = crate::typeahead::tests::types_of(state);
         let state = at(state, caret);

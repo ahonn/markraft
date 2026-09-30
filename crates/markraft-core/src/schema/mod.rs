@@ -270,7 +270,7 @@ struct SchemaData {
 /// fresh, each would be an allocation of its own.
 ///
 /// Both tables stop growing at [`SHARED_LIMIT`] entries, past which values are
-/// built unshared as before. Nothing in them is ever released, which the limit
+/// built unshared. Nothing in them is ever released, which the limit
 /// keeps small: shared types recur with a handful of values by definition.
 #[derive(Debug, Default)]
 struct Shared {

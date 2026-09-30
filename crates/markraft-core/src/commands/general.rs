@@ -55,7 +55,7 @@ pub fn delete_selection() -> Command {
 
 /// Delete backwards over the boundary before the cursor.
 ///
-/// Joins the current textblock with what comes before it, lifting or unwrapping
+/// Joins the current textblock with what comes before it, lifting or wrapping
 /// when a plain join would not produce valid content. Applies only to a cursor
 /// at the start of a textblock.
 pub fn join_backward() -> Command {
@@ -193,8 +193,9 @@ fn join_textblocks_around(state: &EditorState, cut: usize, event: &str) -> Optio
 }
 
 /// The heart of [`join_backward`]/[`join_forward`]: remove the boundary at
-/// `cut`, choosing between joining, unwrapping, lifting and merging
-/// textblocks, trying them in that order.
+/// `cut`, choosing between removing an empty container, joining, wrapping the
+/// node after into the one before, lifting and merging textblocks, trying them
+/// in that order.
 fn delete_barrier(
     state: &EditorState,
     cut: usize,

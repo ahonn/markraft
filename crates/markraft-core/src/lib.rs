@@ -140,8 +140,9 @@
 //! These two are a **presentation contract, not part of the document model**.
 //! The model, the change system and every command in the [`commands`]
 //! catalogue are parameterised by [`NodeTypeId`] and [`MarkTypeId`] and never
-//! consult a role table. The one place that does is [`kind::chains`], by
-//! design: it is what a view binds to its keys, built on the catalogue and
+//! consult a role table; only the [`kind`] module does. Within it,
+//! [`kind::chains`] is the one place that builds commands from a role table,
+//! by design: it is what a view binds to its keys, built on the catalogue and
 //! choosing from it by the roles a kind fills. They live here so that a view
 //! crate and a document-kind crate can be written against the same vocabulary
 //! without depending on one another — and that vocabulary, the roles

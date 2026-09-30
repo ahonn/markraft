@@ -1,6 +1,6 @@
 //! Shaping: one projection line into one [`LayoutLine`]. Takes the
 //! [`ShapeInput`] the view assembles; hands [`LayoutLine`]s to
-//! [`Lines`](super::Lines), which keeps them, and to tables.
+//! [`Lines`], which keeps them, and to tables.
 
 use super::*;
 
@@ -359,9 +359,6 @@ pub(super) fn shape_line(
             text_system,
         )
     });
-    // A callout says what kind of note it is on a line of its own above the
-    // block it opens. The line is chrome: it holds no caret stop, so it lives
-    // in the room the block reserves above itself rather than in the text.
     // A picture whose source the caret was let into: the source is the line's
     // text now, and the picture stays in view under it — where the picture had
     // the line to itself, as it is drawn full size only there.
@@ -385,6 +382,9 @@ pub(super) fn shape_line(
             )
         })
         .flatten();
+    // A callout says what kind of note it is on a line of its own above the
+    // block it opens. The line is chrome: it holds no caret stop, so it lives
+    // in the room the block reserves above itself rather than in the text.
     let above = index.checked_sub(1).map(|above| &projection.lines()[above]);
     let callout_header =
         crate::callout::header_of(types, line, above, input.messages).map(|head| CalloutHeader {

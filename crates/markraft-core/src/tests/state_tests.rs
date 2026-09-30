@@ -556,6 +556,42 @@ fn no_filter_bypasses_the_filters() {
     assert_eq!(schema.describe(tr.new_doc()), r#"doc(paragraph("hAello"))"#);
 }
 
+/// Each extender addresses the document the extenders before it produced, so
+/// each has to be shown that document.
+#[test]
+fn a_later_extender_sees_what_an_earlier_one_changed() {
+    let schema = shared_schema();
+    let prefix: TransactionExtenderFn = Arc::new(|tr| {
+        if !tr.doc_changed() {
+            return None;
+        }
+        let schema = tr.start_state().schema().clone();
+        Some(TransactionSpec::new().changes([insert_text(&schema, 1, "<")]))
+    });
+    let suffix: TransactionExtenderFn = Arc::new(|tr| {
+        if !tr.doc_changed() {
+            return None;
+        }
+        let schema = tr.start_state().schema().clone();
+        let end = tr.new_doc().content_size() - 1;
+        Some(TransactionSpec::new().changes([insert_text(&schema, end, "!")]))
+    });
+    let state = state(
+        sample_doc(&schema),
+        Extension::all([
+            Prec::high(transaction_extender().of(suffix)),
+            Prec::low(transaction_extender().of(prefix)),
+        ]),
+    );
+    let tr = state
+        .update([TransactionSpec::new().changes([insert_text(&schema, 1, "A")])])
+        .unwrap();
+    assert_eq!(
+        schema.describe(tr.new_doc()),
+        r#"doc(paragraph("<Ahello!"))"#
+    );
+}
+
 #[test]
 fn extenders_run_from_the_lowest_precedence_to_the_highest() {
     let schema = shared_schema();

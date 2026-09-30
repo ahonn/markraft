@@ -269,8 +269,6 @@ mod tests {
         );
     }
 
-    /// The same sentence queued twice is said once: a folder that reports the
-    /// same thing about ten files should not make the user read it ten times.
     #[test]
     fn a_queued_sentence_can_carry_a_button() {
         let mut feedback = Feedback::default();
@@ -284,6 +282,8 @@ mod tests {
         );
     }
 
+    /// The same sentence queued twice is said once: a folder that reports the
+    /// same thing about ten files should not make the user read it ten times.
     #[test]
     fn the_same_sentence_is_queued_once() {
         let mut feedback = Feedback::default();

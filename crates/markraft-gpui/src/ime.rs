@@ -33,9 +33,9 @@ pub fn printable(text: &str) -> Cow<'_, str> {
 /// type `text` over it, and end the composition.
 ///
 /// The selection spec only establishes what the insertion replaces, so it says
-/// nothing about the history: an earlier version annotated it
-/// `add_to_history(false)`, which the merge then applied to the whole
-/// transaction and so kept every committed candidate out of the history.
+/// nothing about the history: annotated `add_to_history(false)`, it would have
+/// the merge apply that to the whole transaction and so keep every committed
+/// candidate out of the history.
 ///
 /// Closing a composition is the *last step of that composition*, so the
 /// transaction carries the compose user event and folds into the entry the

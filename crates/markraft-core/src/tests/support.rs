@@ -9,7 +9,7 @@ use crate::schema::{BreakKind, MarkTypeSpec, NodeTypeSpec, Schema, SchemaSpec};
 use crate::slice::{Slice, Token};
 
 /// A schema with the building blocks the tests exercise: paragraphs, headings,
-/// blockquotes, lists, code blocks, images, hard breaks and three mark types.
+/// blockquotes, lists, code blocks, images, hard breaks and four mark types.
 pub fn test_schema() -> Schema {
     Schema::new(
         SchemaSpec::new()

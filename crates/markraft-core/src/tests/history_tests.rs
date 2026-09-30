@@ -575,6 +575,44 @@ fn the_history_field_round_trips_through_json() {
     assert_eq!(schema.describe(undone.doc()), r#"doc(paragraph("hello"))"#);
 }
 
+/// A remote edit rebases only the top entry and leaves the rebase the entries
+/// below it owe on that entry; a round trip through JSON must not lose it.
+#[test]
+fn a_rebase_still_owed_survives_a_round_trip_through_json() {
+    use crate::state::{EditorStateConfig, StateJsonFields};
+
+    let schema = shared_schema();
+    let start = history_state(doc(
+        &schema,
+        [n(&schema, "paragraph", [t(&schema, "hello")])],
+    ));
+    let state = run(&start, typed(&schema, 1, "A", 0));
+    let state = run(&state, typed(&schema, 7, "B", 5_000));
+    assert_eq!(undo_depth(&state), 2);
+    let state = run(
+        &state,
+        TransactionSpec::new()
+            .changes([insert_text(&schema, 1, "XY")])
+            .add_to_history(false),
+    );
+    assert_eq!(
+        schema.describe(state.doc()),
+        r#"doc(paragraph("XYAhelloB"))"#
+    );
+
+    let fields = StateJsonFields::new().add("history", crate::history::history_field());
+    let restored = EditorState::from_json(
+        &state.to_json(&fields),
+        EditorStateConfig::new(schema.clone()).extensions(history(HistoryConfig::default())),
+        &fields,
+    )
+    .unwrap();
+    let once = run(&restored, undo(&restored).expect("something to undo"));
+    assert_eq!(schema.describe(once.doc()), r#"doc(paragraph("XYAhello"))"#);
+    let twice = run(&once, undo(&once).expect("something left to undo"));
+    assert_eq!(schema.describe(twice.doc()), r#"doc(paragraph("XYhello"))"#);
+}
+
 /// What an input method does inside a modal editor's insert session: compose a
 /// candidate, close the composition with the text it settled on, and keep
 /// typing. The session is one entry and undoing it leaves nothing behind.

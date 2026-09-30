@@ -197,8 +197,8 @@ pub(super) fn ordered_list_len(doc: &Node, types: &DocTypes, line: &Line) -> Opt
 /// Every ancestor between the item and the line has to be the first child of
 /// the one above it, not just the line's own block: a table or a quote inside an
 /// item is a container whose own first block starts it, and asking only about
-/// the immediate parent drew a bullet beside every row of such a table and a
-/// second check box beside such a quote.
+/// the immediate parent would draw a bullet beside every row of such a table and
+/// a second check box beside such a quote.
 pub(super) fn starts_item(types: &DocTypes, line: &Line) -> bool {
     let Some(item) = line
         .ancestors()
@@ -273,7 +273,7 @@ pub(super) fn shape_source_label(
 /// the `- `, `1. ` or `- [ ] ` it is spelled with, nor a heading its hashes:
 /// they are not text the caret can reach, so showing them would only suggest
 /// an edit that cannot be made, and swapping a drawn marker for its spelling
-/// as the caret came and went moved the line's text under it.
+/// as the caret came and went would move the line's text under it.
 pub(super) fn chrome_marker(
     types: &DocTypes,
     line: &Line,

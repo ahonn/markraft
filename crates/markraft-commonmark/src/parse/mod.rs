@@ -37,11 +37,14 @@
 //!   the delimiter row's alignments on the table. The first row is the header
 //!   row, and every row is squared off to the column count the alignments
 //!   declare — see [`crate::table`].
-//! * Anything else — footnote definitions, HTML blocks, whatever a comrak
+//! * A **footnote definition** becomes a `footnote_definition` holding its
+//!   blocks and label, where the source wrote it rather than where comrak moves
+//!   it; see `parse_ast`.
+//! * Anything else — HTML blocks, whatever a comrak
 //!   extension produces — is kept as source text: a `raw_block` whose text is
 //!   that source where a block is expected. Inline HTML has its own raw
 //!   primitive.
-//! * A container nested deeper than [`MAX_BLOCK_DEPTH`] is kept as source
+//! * A container nested deeper than `MAX_BLOCK_DEPTH` is kept as source
 //!   text too, in a `raw_block`: every pass over the tree after this one
 //!   recurses once per level, and a file of nothing but `>` would otherwise
 //!   take the stack with it.

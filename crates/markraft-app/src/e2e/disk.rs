@@ -1,7 +1,7 @@
 //! What reaches the disk: saves, the guard that holds edits to what a file can
 //! say, undo after a save, and a file changed or removed by another program.
 
-use super::harness::{open, open_with};
+use super::harness::{Harness, open, open_with};
 use gpui::TestAppContext;
 
 /// Restore the folder even when a fault-injection assertion panics.
@@ -463,4 +463,95 @@ fn saving_and_opening_a_file_say_nothing_when_all_is_well(cx: &mut TestAppContex
     std::fs::write(&outside, "beta\n").expect("a writable temp directory");
     h.open_path(&outside);
     assert_eq!(notice(&mut h), None);
+}
+
+/// Move the active note to the Trash and wait for the save that does it.
+fn trash_active(h: &mut Harness) -> crate::storage::Note {
+    let note = h.active_note();
+    h.keys("cmd-k");
+    h.type_text("Move to Trash");
+    h.keys("enter");
+    h.wait_for_io();
+    h.cx.run_until_parked();
+    h.wait_for_io();
+    note
+}
+
+/// Whether a flush barrier started now runs its continuation, which is what ⌘Q,
+/// ⌘S and a rename wait on.
+fn flush_completes(h: &mut Harness) -> bool {
+    let app = h.app.clone();
+    let done =
+        h.cx.update(|window, cx| app.update(cx, |app, cx| app.test_flush(window, cx)));
+    h.cx.run_until_parked();
+    h.wait_for_io();
+    done.get()
+}
+
+// A file another program changed after it was read is not the file the user
+// asked to delete. It stays, the note comes back with what the file now holds,
+// the user is told, and later saves are not held up by the refused deletion.
+#[gpui::test]
+fn a_file_changed_elsewhere_is_not_trashed_and_its_note_comes_back(cx: &mut TestAppContext) {
+    let mut h = open_with(
+        cx,
+        &[("alpha.md", "alpha\n"), ("beta.md", "beta\n")],
+        |preferences| preferences.confirm_delete = false,
+    );
+    h.save();
+    let path = h.active_note().path.expect("a saved note");
+    std::fs::write(&path, "changed elsewhere\n").unwrap();
+    let note = trash_active(&mut h);
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "changed elsewhere\n"
+    );
+    let back = h
+        .app
+        .update(h.cx, |app, _| app.test_note(&note.id))
+        .expect("the note is back in the list");
+    assert_eq!(crate::doc::to_markdown(&back.document), "changed elsewhere");
+    assert_eq!(
+        h.app.update(h.cx, |app, _| app.test_notice()).as_deref(),
+        Some("Couldn't move to Trash.")
+    );
+    assert_eq!(h.error(), None);
+    assert!(
+        flush_completes(&mut h),
+        "a flush after the refusal never finished"
+    );
+}
+
+// The Trash can refuse a file, here because its folder cannot be written. The
+// note comes back as it was and saving goes on.
+#[cfg(unix)]
+#[gpui::test]
+fn a_file_the_trash_refuses_keeps_its_note(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut h = open_with(cx, &[("sub/alpha.md", "alpha\n")], |preferences| {
+        preferences.confirm_delete = false
+    });
+    h.save();
+    let folder = h.notes.join("sub");
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let note = trash_active(&mut h);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(folder.join("alpha.md").exists());
+    assert!(
+        h.app
+            .update(h.cx, |app, _| app.test_note(&note.id))
+            .is_some(),
+        "the note is back in the list"
+    );
+    assert_eq!(
+        h.app.update(h.cx, |app, _| app.test_notice()).as_deref(),
+        Some("Couldn't move to Trash.")
+    );
+    assert!(
+        flush_completes(&mut h),
+        "a flush after the refusal never finished"
+    );
 }

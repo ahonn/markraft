@@ -204,6 +204,8 @@ pub struct Store {
     disk_won: HashSet<String>,
     /// Where the last save's deletions landed in the Trash, for the window to reveal.
     trashed: Vec<PathBuf>,
+    /// Notes the last save was asked to delete and left in place.
+    kept: Vec<String>,
     manifest: Manifest,
     manifest_bytes: Vec<u8>,
     sources: Arc<Sources>,
@@ -273,6 +275,7 @@ impl Store {
             removed: HashMap::new(),
             disk_won: HashSet::new(),
             trashed: Vec::new(),
+            kept: Vec::new(),
             manifest,
             manifest_bytes: Vec::new(),
             sources: Arc::default(),
@@ -314,6 +317,12 @@ impl Store {
     /// did not say, which is not a failure: the file is still gone.
     pub fn trashed(&self) -> Vec<PathBuf> {
         self.trashed.clone()
+    }
+    /// Notes the last save was asked to delete and left in place: another program
+    /// changed the file since it was read, or the Trash refused it. The file still
+    /// holds the note, so the deletion is dropped rather than retried.
+    pub fn kept(&self) -> Vec<String> {
+        self.kept.clone()
     }
     pub fn paths(&self) -> Vec<(String, PathBuf)> {
         self.files
@@ -876,8 +885,6 @@ impl Store {
     pub fn markdown(&self, note: &Note) -> Result<String, StoreError> {
         render(self.baseline(note), note, &self.house)
     }
-    /// The track `note`'s edits are written through, for its editor to check
-    /// each keystroke against: `None` for a note with no file yet.
     /// The file `note`'s edits are written against. A note that already says
     /// what the file on disk says — the disk version an external change was
     /// just adopted as — takes those bytes as its baseline. The pre-change
@@ -1059,8 +1066,8 @@ impl Store {
         let current = self.state.join("recovery").join(format!("{id}.json"));
         let _ = fs::remove_file(current);
     }
-    /// Write the library out. New non-blank notes are filed under their title
-    /// immediately. Mid-write disk conflicts keep a conflicted copy of local edits
+    /// Write the library out. New non-blank notes are filed immediately, under the
+    /// name the folder's naming setting gives them. Mid-write disk conflicts keep a conflicted copy of local edits
     /// and keep the disk version. After a note has a file, renaming is explicit —
     /// not driven by later title edits.
     pub fn save(&mut self, library: &Library, preferences: &Preferences) -> Result<(), StoreError> {
@@ -1069,6 +1076,7 @@ impl Store {
         self.manifest.workspace = library.workspace.clone();
         self.disk_won.clear();
         self.trashed.clear();
+        self.kept.clear();
         let mut errors: Vec<StoreError> = Vec::new();
         // The notes disk won over, by title: one conflict error at the end, so a
         // caller can tell it from a failure and still not take them as saved.
@@ -1080,11 +1088,12 @@ impl Store {
                     && read_optional(&saved.path)
                         .is_ok_and(|bytes| bytes.as_ref() == Some(&saved.bytes));
                 if !unchanged {
-                    errors.push(StoreError::Conflict(vec![saved.note.title_message()]));
+                    self.kept.push(id.clone());
                     continue;
                 }
                 if let Err(error) = self.trash_note(&saved) {
-                    errors.push(error);
+                    log::warn!("{} could not be trashed: {error}", saved.path.display());
+                    self.kept.push(id.clone());
                 }
             }
         }
@@ -1659,7 +1668,7 @@ fn already_kept_beside(original: &Path, bytes: &[u8]) -> bool {
         .any(|path| fs::read(&path).is_ok_and(|existing| existing == bytes))
 }
 
-/// Dropbox-style sibling for local edits when disk wins:
+/// The sibling that keeps local edits when disk wins:
 /// `{stem} (conflicted copy YYYY-MM-DD).md`, with ` 2`, ` 3`, … on collision.
 fn conflicted_copy_path(original: &Path) -> PathBuf {
     let parent = original.parent().unwrap_or(Path::new("."));
@@ -1900,7 +1909,10 @@ mod tests {
         let id = library.active_id.clone();
         assert!(library.delete(&id));
         fs::write(&path, b"Changed elsewhere").unwrap();
-        assert!(store.save(&library, &Preferences::default()).is_err());
+        // The refusal is reported as a kept note, not as a failed save: a failed
+        // save would hold up every barrier until the deletion went through.
+        store.save(&library, &Preferences::default()).unwrap();
+        assert_eq!(store.kept(), std::slice::from_ref(&id));
         assert_eq!(fs::read(&path).unwrap(), b"Changed elsewhere");
         assert!(store.files.contains_key(&id));
     }

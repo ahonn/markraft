@@ -379,7 +379,7 @@ impl Command {
 }
 
 /// Every action and the command it runs. It makes the extension's handlers, and
-/// [`command_of`], which the tests read a bound action back through.
+/// `command_of`, which the tests read a bound action back through.
 macro_rules! commands { ($($action:ident => $command:expr),* $(,)?) => {
     fn handlers(vim: &Vim) -> Vec<ActionHandler> {
         vec![$(vim.handler($action, $command)),*]

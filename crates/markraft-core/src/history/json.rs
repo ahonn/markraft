@@ -6,9 +6,10 @@
 //! ```
 //!
 //! Only the inverted changes and the selection before each event survive. A
-//! rebase an event still owes to the events below it, the selections made after
-//! it, and inverted effects are all dropped: they only mean something relative
-//! to a live document that a reloaded state no longer has.
+//! rebase an event still owes to the events below it is paid before writing, so
+//! every stored event is in the current document's frame. The selections made
+//! after an event and its inverted effects are dropped: they only mean
+//! something relative to a live document that a reloaded state no longer has.
 
 use serde_json::{Map, Value};
 
@@ -17,11 +18,28 @@ use crate::error::NodeError;
 use crate::schema::Schema;
 use crate::selection::Selection;
 
-use super::state::{HistEvent, HistoryState};
+use super::state::{HistEvent, HistoryState, map_branch};
+
+/// Pay every rebase the branch still owes, top down, so no event depends on a
+/// document the JSON does not carry. `None` when a rebase fails, which leaves
+/// nothing in the branch that could be applied.
+fn settled(schema: &Schema, events: &[HistEvent]) -> Option<Vec<HistEvent>> {
+    let mut rest = events.to_vec();
+    let mut settled = Vec::with_capacity(rest.len());
+    while let Some(mut event) = rest.pop() {
+        if let Some((doc, mapping)) = event.mapped.take() {
+            rest = map_branch(schema, rest, &doc, &mapping)?;
+        }
+        settled.push(event);
+    }
+    settled.reverse();
+    Some(settled)
+}
 
 fn events_to_json(events: &[HistEvent], schema: &Schema) -> Value {
     Value::Array(
-        events
+        settled(schema, events)
+            .unwrap_or_default()
             .iter()
             .filter_map(|event| {
                 let changes = event.changes.as_ref()?;

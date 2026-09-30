@@ -242,8 +242,8 @@ impl MarkraftApp {
         };
         let expanded = menu.is_some() && self.interaction.format_menu() == menu;
         let active = toggled == Some(true);
-        // A control that takes the whole table away is written in the destructive ink,
-        // as its ⌘K row is.
+        // A control that takes a row, a column or the whole table away is written in
+        // the destructive ink, as its ⌘K row is.
         let ink = if matches!(
             intent,
             Intent::Table(TableEdit::DeleteTable | TableEdit::DeleteRow | TableEdit::DeleteColumn)
@@ -674,8 +674,8 @@ impl MarkraftApp {
     /// Every state the file and its folder are in, each with what to do about it.
     ///
     /// One card for all of them rather than one control per state: they are the same
-    /// kind of thing, they stack, and a person dealing with a conflict wants to know
-    /// the save also failed.
+    /// kind of thing, they stack, and a person dealing with a read-only file wants to
+    /// know the save also failed.
     pub(super) fn file_status_card(
         &self,
         window: &Window,

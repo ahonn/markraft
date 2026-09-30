@@ -236,7 +236,7 @@ pub(super) fn keep_line_breaking_rules(
 }
 
 /// Whether the line wrapper treats `c` as part of a word, which is what decides
-/// where a cell's text may break.
+/// where a line's text may break.
 ///
 /// Mirrors gpui's own `LineWrapper::is_word_char`, which is not public: Latin,
 /// Cyrillic, Vietnamese and Bengali letters, digits, the punctuation that binds

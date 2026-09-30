@@ -2,10 +2,12 @@
 //!
 //! An event holds the **inverted** change set of the transaction it records —
 //! applying it to the document that transaction produced gives the document
-//! back — plus the selection from before the transaction, the document that
-//! change set applies to, and any inverted effects.
+//! back — plus the selection from before the transaction and any inverted
+//! effects. Once the event has been rebased it also holds the rebase the events
+//! below it still owe: the document they were recorded against, and the change
+//! that moves it into the current frame.
 //!
-//! Keeping the document with the event is what lets a rebase repair itself:
+//! Keeping that document with the event is what lets a rebase repair itself:
 //! [`ChangeSet::transform`] needs a document, and an event deeper in the branch
 //! lives in a document frame that no longer exists. The document handle costs
 //! one pointer, and the trees it keeps alive are the ones the event's inverted

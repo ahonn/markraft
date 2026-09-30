@@ -634,6 +634,18 @@ impl Library {
         true
     }
 
+    /// Put back a note whose deletion the store refused. Its file was never
+    /// touched, so there is nothing left to save for it.
+    pub fn restore_deleted(&mut self, id: &str) -> bool {
+        let Some(note) = self.deletions.remove(id) else {
+            return false;
+        };
+        self.changes.remove(id);
+        self.notes.push(note);
+        self.ensure_active();
+        true
+    }
+
     pub fn mark_changed(&mut self, id: &str) {
         self.generation += 1;
         self.changes.insert(id.to_owned(), self.generation);

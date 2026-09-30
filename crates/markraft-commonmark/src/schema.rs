@@ -176,7 +176,7 @@ pub const TASK_ITEM: &str = "task_item";
 /// A thematic break. A selectable block leaf.
 pub const HORIZONTAL_RULE: &str = "horizontal_rule";
 /// Source text for a block construct the model does not interpret — an HTML
-/// block, an HTML comment, a footnote definition: `text*`, no marks,
+/// block, an HTML comment, a run of link reference definitions: `text*`, no marks,
 /// `code: true`, like [`CODE_BLOCK`] and with no attributes at all.
 ///
 /// Its text *is* the source, line endings and all, with no trailing one, and is

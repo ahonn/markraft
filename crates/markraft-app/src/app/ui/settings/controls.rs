@@ -1,7 +1,7 @@
 //! The Settings window's page grammar, as a classic macOS settings pane draws it: a
 //! column of right-aligned labels, the controls beside them, a line of secondary text
-//! where a control needs one, and hairlines between groups. Behaviour and semantics
-//! come from `gpui-base`; every colour comes from the note's own palette.
+//! where a control needs one, and space between groups. Behaviour and semantics
+//! come from `gpui-base`; every colour comes from the window's own [`Palette`].
 
 use gpui::{prelude::*, *};
 use gpui_base::{Button, Checkbox, Radio, RadioGroup};

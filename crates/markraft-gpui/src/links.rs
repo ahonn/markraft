@@ -59,8 +59,9 @@ fn href(mark: &Mark) -> String {
 /// [`set_link`](crate::DocumentKind::set_link) answers nothing.
 ///
 /// A caret edits the link it touches, and so does a selection inside one link;
-/// elsewhere the URL is inserted as the linked text itself, which is what
-/// pasting a bare URL onto nothing does.
+/// any other selection is linked as it stands, and a caret outside a link has
+/// the URL inserted as the linked text itself, which is what pasting a bare URL
+/// onto nothing does.
 pub(crate) fn set_link(
     state: &EditorState,
     ty: MarkTypeId,

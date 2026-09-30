@@ -548,7 +548,8 @@ impl DateLocale {
         }
     }
 
-    /// The first day of the week (0 is Sunday) and the January day always in week 1.
+    /// The first day of the week (0 is Sunday) and Moment.js's `doy`: week 1 always
+    /// holds January `7 + dow - doy`.
     fn week_rule(self) -> (u32, u32) {
         match self {
             DateLocale::German

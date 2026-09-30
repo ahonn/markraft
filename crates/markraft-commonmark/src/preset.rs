@@ -266,19 +266,6 @@ fn thematic_break(state: &SerializerState<'_>, node: &Node) -> &'static str {
     }
 }
 
-/// A block quote, with its callout marker on the first quoted line when it has
-/// one.
-///
-/// The marker and the body's first line are one source line apart, not a blank
-/// line apart, so the separation is written here rather than left to the block
-/// flush a paragraph would ask for. A quote whose whole content is the empty
-/// paragraph standing for an empty container writes nothing after the marker,
-/// so `> [!note]` stays one line and reads back as itself.
-///
-/// The marker is written unescaped because the codec spells it; text that only
-/// *looks* like one at the start of an ordinary quote goes out with a
-/// backslash before its `[`, so no edit can turn a quote into a callout behind
-/// the user's back.
 /// `[^label]: ` before the first line, and the content column four columns in,
 /// which is where CommonMark reads a definition's later blocks.
 fn footnote_definition(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: usize) {
@@ -294,6 +281,19 @@ fn footnote_definition(state: &mut SerializerState<'_>, node: &Node, _: Option<&
     });
 }
 
+/// A block quote, with its callout marker on the first quoted line when it has
+/// one.
+///
+/// The marker and the body's first line are one source line apart, not a blank
+/// line apart, so the separation is written here rather than left to the block
+/// flush a paragraph would ask for. A quote whose whole content is the empty
+/// paragraph standing for an empty container writes nothing after the marker,
+/// so `> [!note]` stays one line and reads back as itself.
+///
+/// The marker is written unescaped because the codec spells it; text that only
+/// *looks* like one at the start of an ordinary quote goes out with a
+/// backslash before its `[`, so no edit can turn a quote into a callout behind
+/// the user's back.
 fn blockquote(state: &mut SerializerState<'_>, node: &Node, _: Option<&Node>, _: usize) {
     let callout = crate::callout::Callout {
         kind: attr_str(node, "callout", "").to_string(),

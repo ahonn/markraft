@@ -82,7 +82,7 @@ const PAIRS: [(char, char); 8] = [
 ];
 
 /// What may follow the caret for an opener to pair there, besides whitespace
-/// and the end of the block: a closing bracket or punctuation, before which
+/// and the end of the block: a closing bracket, before which
 /// a closer cannot be read as the start of the next word.
 const BEFORE_PAIRING: &str = ")]}>）」》】";
 

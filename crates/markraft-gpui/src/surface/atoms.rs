@@ -551,8 +551,7 @@ pub(super) fn display_text_mode(
                 }
                 // An atom the row can shape *is* its text: writing the label
                 // into the display text gives it exactly the width its glyphs
-                // advance, so what follows sits against it. A placeholder
-                // rounded up to whole fillers would leave a gap behind.
+                // advance, so what follows sits against it.
                 let count = if atom.shape.is_own_text() && !atom.text.is_empty() {
                     text.push_str(&atom.text);
                     run_bytes.push(atom.text.len());

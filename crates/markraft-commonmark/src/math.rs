@@ -153,7 +153,7 @@ impl SourceBlocks {
         self.literal.push(lines);
     }
 
-    /// A paragraph that begins on `start` and continues past it.
+    /// A paragraph that begins on `lines.start` and continues past it.
     pub(crate) fn add_paragraph(&mut self, lines: Range<usize>) {
         if lines.len() > 1 {
             self.multiline_paragraph_starts.push(lines.start);

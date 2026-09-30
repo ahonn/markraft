@@ -444,8 +444,8 @@ mod tests {
         }
     }
 
-    /// The default preset's muted text once matched its body text, which left
-    /// placeholders and list markers indistinguishable from content.
+    /// The default preset's muted text differs from its body text, so
+    /// placeholders and list markers stay distinguishable from content.
     #[test]
     fn the_default_palette_has_readable_muted_text() {
         let style = EditorStyle::default();

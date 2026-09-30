@@ -167,7 +167,7 @@ pub(super) fn column_widths(
 
 /// Put every cell where its column and row say it goes.
 ///
-/// `prepaint` stacks lines by adding each one's `top_gap` and `height` to a
+/// [`Lines`] stacks lines by adding each one's `top_gap` and `height` to a
 /// running y, so a grid is expressed in those terms: every cell of a row keeps
 /// the same y offset within it and only the row's last cell carries the row's
 /// height, which makes the stack advance one row per row rather than one per

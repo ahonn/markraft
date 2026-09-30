@@ -35,18 +35,18 @@
 //! around it, reading the block with [`derive`](fn@derive) to find the spans the caret
 //! is in:
 //!
-//! * Outside every span of the style, it writes the style's empty pair and
-//!   puts the caret between the two runs — `**|**` — so what is typed next is
-//!   styled.
-//! * At the edge of a span's content — `**abc|**`, `**|abc**` — it steps the
-//!   caret over the delimiter, out of the span, so what is typed next is not.
-//!   Delimiters of spans nested inside it are stepped over with it:
-//!   `***abc|***` with emphasis outside strong leaves both for ⌘I.
-//! * Strictly inside a span — `**ab|c**` — it closes the span at the caret and
-//!   opens it again, the caret between: `**ab**|**c**`.
-//! * At the end of what was typed in a pair it wrote that a reader does not
-//!   take as the style — `**ni |**` — it steps out past the closing runs,
-//!   which leaving the pair moves before the whitespace: `**ni** |`.
+//! * Anywhere inside a span of the style — at either edge of its content,
+//!   strictly inside it, or right after its closing run — it takes the style
+//!   off the whole span, the caret staying where it was in the text:
+//!   `**ab|c**` becomes `ab|c`.
+//! * In a word outside every span of the style, it puts the style on the
+//!   whole word, the caret staying where it was in it.
+//! * Anywhere else, it writes the style's empty pair and puts the caret
+//!   between the two runs — `**|**` — so what is typed next is styled.
+//! * At the end of what was typed in a pair it wrote, it steps out past the
+//!   closing runs, so what is typed next is not styled. Where a reader does
+//!   not take what was typed as the style — `**ni |**` — leaving the pair
+//!   moves the runs before the whitespace: `**ni** |`.
 //! * Between the runs of a pair it wrote, it takes that style's runs off —
 //!   `**|**` goes — or, for another style, nests that style's pair inside.
 //!   An empty pair already in the text, which a reader sees as characters, is
@@ -56,7 +56,7 @@
 //! command refuses where the letter would not carry what was asked or another
 //! character would change: inside a code span, whose content is plain text
 //! to a reader, only the code toggle applies. Where a new pair is not read
-//! because it touches a span of the same style — `**abc**|` — the caret goes
+//! because it touches a span of the same style — `|**abc**` — the caret goes
 //! into that span instead. A pair the command writes stays pending until
 //! something is typed in it, and goes when the caret leaves it empty; see the
 //! `pending` module.
@@ -163,13 +163,15 @@ impl Formatter {
     /// running from one bold span to another loses both.
     ///
     /// With a cursor the command works on the delimiters around the caret: it
-    /// writes the style's empty pair to type into, steps out of a span at the
-    /// edge of its content, splits one around a caret strictly inside it, and
-    /// takes back a pair it wrote. The pair stays until something is typed in it
-    /// and goes when the caret leaves it empty.
+    /// takes the style off a span the caret is in, puts it on the word the caret
+    /// is in, writes the style's empty pair to type into elsewhere, steps out of
+    /// a pair it wrote once something is typed in it, and takes back one still
+    /// empty. The pair stays until something is typed in it and goes when the
+    /// caret leaves it empty.
     ///
-    /// Strong, emphasis, strikethrough, code and underline have delimiters; for
-    /// any other mark type the command does not apply.
+    /// Code and every style of the crate's style table — strong, emphasis,
+    /// strikethrough, underline, highlight, superscript, subscript and keyboard —
+    /// have delimiters; for any other mark type the command does not apply.
     pub fn toggle_style(&self, mark_type: MarkTypeId) -> FormatCommand {
         let house = self.house.clone();
         Arc::new(move |state| {

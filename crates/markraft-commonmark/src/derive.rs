@@ -33,19 +33,20 @@
 //!   other line ending is a soft break.
 //! * [`Derived::atoms`] — the runs of text a reader takes for something the
 //!   tree holds as an atom: an image, a wiki link (the `![[…]]` embed
-//!   included), an `<img>` tag, a raw HTML tag read as nothing else. Typed as
-//!   text, they are what the canonicalising correction turns into atoms. A
-//!   `<u>` or `</u>` with no partner stays text: it is half of a style being
-//!   typed.
+//!   included), a `:shortcode:` emoji, an `<img>` tag, a raw HTML tag read as
+//!   nothing else. Typed as text, they are what the canonicalising correction
+//!   turns into atoms. A `<u>` or `</u>` with no partner stays text: it is half
+//!   of a style being typed.
 //!
 //! # Inline HTML
 //!
-//! A tag a reader renders as a style is that style: a `<u>`, `<em>`,
-//! `<strong>`, `<del>`, `<mark>`, `<sup>` or `<a href>` paired with its closing
-//! tag among the same node's children styles what lies between, and the two
+//! A tag a reader renders as a style is that style: a tag of the style table
+//! — `<u>`, `<em>`, `<strong>`, `<del>`, `<mark>`, `<sup>`, `<sub>`, `<kbd>`, or
+//! an alias such as `<b>` — or an `<a href>`, paired with its closing tag
+//! among the same node's children, styles what lies between, and the two
 //! tags are the span's concealed delimiters. A `<br>` a line ending follows is that line
 //! ending's hard-break spelling. Every other tag — a style tag without its
-//! partner included — is an atom.
+//! partner included, save a lone `<u>` or `</u>` — is an atom.
 //!
 //! # Where comrak's positions need help
 //!
@@ -134,7 +135,7 @@ pub enum Style {
     Strong,
     /// `*…*`, `_…_` or a paired `<em>`…`</em>`.
     Emphasis,
-    /// `~~…~~`, `~…~` or a paired `<del>`…`</del>`.
+    /// `~~…~~` or a paired `<del>`…`</del>`.
     Strikethrough,
     /// A code span.
     Code,

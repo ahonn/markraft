@@ -32,7 +32,7 @@ pub struct NodeTypeSpec {
     pub inline: bool,
     /// Attribute declarations, in the order given.
     pub attrs: Vec<AttrSpec>,
-    /// Marks this as the schema's text type. Exactly one type may set it.
+    /// Marks this as the schema's text type. At most one type may set it.
     pub text: bool,
     /// The node counts as a single opaque unit for selection and editing even
     /// though it may have content.

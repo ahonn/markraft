@@ -514,8 +514,8 @@ pub enum Block {
     Heading(u8),
     Quote,
     /// A callout, which is a quote carrying a type. The interface
-    /// offers the default `note`; changing an existing one's type, fold or
-    /// title is not something v1 does.
+    /// offers the default `note`; it offers no way to change an existing one's
+    /// type, fold or title.
     Callout,
     Code,
     Ordered,
@@ -664,7 +664,8 @@ pub enum Inline {
     Italic,
     Code,
     Strikethrough,
-    /// Present when HTML paste carries underline; Markdown write drops it.
+    /// Present when HTML paste carries underline, which Markdown spells as
+    /// `<u>…</u>`; no control of the interface offers it.
     #[allow(dead_code)]
     Underline,
 }

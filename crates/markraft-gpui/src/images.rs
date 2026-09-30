@@ -483,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn typora_root_only_changes_slash_prefixed_urls() {
+    fn an_image_root_only_changes_slash_prefixed_urls() {
         let mut images = Images::new(Some(PathBuf::from("/notes/posts")));
         images.set_root(Ok(Some(PathBuf::from("/website"))));
         assert_eq!(

@@ -502,7 +502,6 @@ pub(crate) fn to_line_end(state: &mut State, cx: &mut impl Host, operator: Opera
 /// pastes here; it counts as linewise only while it still holds the last yank, which is
 /// what remembers that whole lines were taken.
 fn register(state: &State, cx: &mut impl Host) -> Option<Register> {
-    let _schema = cx.state().schema().clone();
     let Some(slice) = cx.read_clipboard() else {
         return state.register.clone();
     };

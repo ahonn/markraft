@@ -1,6 +1,6 @@
 //! The editing behaviour that belongs to Markdown rather than to the model.
 //!
-//! [`commonmark_extensions`] bundles four things:
+//! [`commonmark_extensions`] bundles five things:
 //!
 //! * **Input rules** — the conversions a Markdown writer expects while typing:
 //!   `# ` through `###### `, `- `/`* `/`+ `, `1. `, `> `, `---`,
@@ -19,6 +19,9 @@
 //! * **Pending pairs** — the empty delimiter pair a cursor toggle writes is
 //!   deleted again when the caret leaves it with nothing typed in it, so it
 //!   never reaches the file as literal `****`. See the `pending` module.
+//! * **Atom unfolding** — an atom the caret reaches is replaced by the source
+//!   it was read from, so the caret can walk into it and edit it. See the
+//!   `unfold` module.
 //! * **The table invariant** — every row of a table as wide as the rest,
 //!   held by refusing any edit that would leave a table ragged; see
 //!   [`markraft_core::commands::table_invariant`]. The key
@@ -500,7 +503,7 @@ fn task_rule() -> InputRule {
 /// before it, `[!note]-` may still be growing a fold marker. Only an ordinary
 /// quote converts, and only from its own first block, which is where a reader
 /// looks for the marker too. A title is not typed here — it is not text once
-/// the quote is a callout, and v1 has no way to edit one.
+/// the quote is a callout, and nothing edits one.
 fn callout_rule() -> InputRule {
     InputRule::new(
         |before| {

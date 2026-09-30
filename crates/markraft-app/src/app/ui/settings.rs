@@ -1386,9 +1386,9 @@ impl SettingsView {
         ]
     }
 
-    /// Where the notes are and where new files go, each a folder pop-up the way Safari
-    /// picks its download folder: the folder on the button, and what can be done
-    /// with it — show it, choose another, go back to the default — in its menu.
+    /// Where the notes are and where new files go, each a folder pop-up: the folder on
+    /// the button, and what can be done with it — show it, choose another, go back to
+    /// the default — in its menu.
     fn files(&self, s: &Snapshot, p: Palette, cx: &mut Context<Self>) -> Vec<Div> {
         let Some(root) = &s.folder else {
             let choose = self.pop_up(

@@ -106,7 +106,7 @@ pub fn read_wiki_link(source: &str) -> Option<(WikiLink, usize)> {
         embed,
     };
     // A link spanning a line ending is not one; refusing it here keeps every
-    // caller — the parser, the guard and the input rule — of one mind.
+    // caller — the parse rule and `derive` — of one mind.
     (!link.target.contains('\n') && !link.alias.contains('\n')).then_some((link, at))
 }
 

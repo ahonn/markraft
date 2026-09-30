@@ -280,7 +280,7 @@ impl Platform {
     }
 
     /// Let go of the shortcuts without forgetting them, so a recorder can hear a chord
-    /// either of them holds.
+    /// any of them holds.
     pub fn suspend_shortcuts(&mut self) {
         if self.suspended {
             return;
@@ -778,7 +778,7 @@ const MENU_BAR_IMAGE_POINTS: f64 = 18.;
 
 /// The parallel-cut M as a template image, which macOS tints for the menu bar's
 /// appearance. Each representation is drawn on its own pixel grid and AppKit picks
-/// one per display; `assets/icon/README.md` has the render commands.
+/// one per display; each is rendered from the SVG of the same name in `assets/icon/`.
 fn menu_bar_image() -> Option<Retained<NSImage>> {
     const REPRESENTATIONS: [&[u8]; 2] = [
         include_bytes!("../../../assets/icon/markraft-menubar.png"),

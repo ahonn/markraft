@@ -242,11 +242,10 @@ pub fn correction() -> &'static Facet<Correction> {
 /// extender, so the rounds below stay a single fixed-point loop over all of
 /// them.
 ///
-/// The changes it contributes address [`Transaction::new_doc`]. A configuration
-/// that also registers a [`transaction_extender`]
-/// which changes the document must give that extender a *higher* precedence, so
-/// corrections run first; otherwise the transaction is rejected with a length
-/// mismatch rather than silently mis-positioned.
+/// The changes it contributes address [`Transaction::new_doc`]. Another
+/// [`transaction_extender`] that changes the document may sit at any
+/// precedence: each extender is shown the transaction the ones before it
+/// produced.
 pub fn corrections(corrections: impl IntoIterator<Item = Correction>) -> Extension {
     let mut items: Vec<Extension> = corrections
         .into_iter()

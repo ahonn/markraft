@@ -258,8 +258,9 @@ impl MarkraftApp {
             .spaces_in_query()
     }
 
-    /// Run what a `/` menu item asked the host to do. The editor has already made its
-    /// edit, so this only opens the popover the command needs.
+    /// Run what a `/` menu item asked the host to do. The editor has already taken the
+    /// trigger text away, so this only runs the command's intent: the link popover, or
+    /// a new table.
     pub(in crate::app) fn slash_effect(
         &mut self,
         payload: &markraft_gpui::ExtensionPayload,

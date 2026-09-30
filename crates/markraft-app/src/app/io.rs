@@ -171,4 +171,18 @@ impl MarkraftApp {
     pub(crate) fn test_io_pending(&self) -> bool {
         self.io.pending > 0
     }
+
+    /// Start a flush barrier; the returned cell turns true once it completes.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn test_flush(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> std::rc::Rc<std::cell::Cell<bool>> {
+        let done = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = done.clone();
+        self.flush_then(window, cx, move |_, _, _| flag.set(true));
+        done
+    }
 }

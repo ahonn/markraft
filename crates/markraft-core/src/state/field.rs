@@ -41,9 +41,8 @@ pub struct StateFieldConfig<T> {
 impl<T> StateFieldConfig<T> {
     /// A configuration with an initial value and a reducer.
     ///
-    /// `create` may read facets and fields that the configuration places before
-    /// this field; reading a field that depends on this one is a cycle and
-    /// panics.
+    /// `create` may read other facets and fields, which are resolved first;
+    /// reading one that depends on this field is a cycle and panics.
     pub fn new(
         create: impl Fn(&EditorState) -> T + Send + Sync + 'static,
         update: impl Fn(&T, &Transaction) -> T + Send + Sync + 'static,

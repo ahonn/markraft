@@ -21,6 +21,11 @@
 //! | `data-same-ordinal` | `<ol>` | every item written with the first one's number |
 //! | `data-fence`, `data-fence-length` | `<pre>` | the code fence's spelling |
 //! | `data-type="rawBlock"` | `<pre>` | source the model does not interpret |
+//! | `data-callout`, `data-callout-fold`, `data-callout-title` | `<blockquote>` | a callout's marker |
+//! | `data-type="wikiLink"`, `data-target`, `data-alias`, `data-embed` | `<a>` | a wiki link's parts |
+//! | `data-type="emoji"`, `data-code` | `<span>` | an emoji's shortcode |
+//! | `data-type="rawInline"`, `data-source` | `<span>` | an inline HTML tag as written |
+//! | `data-type="softBreak"` | `<span>` | a line ending of the source |
 //!
 //! Each is written only when it differs from what the reader would assume, so
 //! the common shapes stay plain.
@@ -31,8 +36,8 @@
 //!
 //! # Known losses
 //!
-//! HTML collapses whitespace, so a run of spaces or a line ending *inside*
-//! inline content comes back as one space. Text inside `<pre>` is exempt and
+//! HTML collapses whitespace, so a run of spaces *inside* inline content comes
+//! back as one space. Text inside `<pre>` is exempt and
 //! survives byte for byte. Everything else — structure, attributes and marks —
 //! round trips exactly.
 //!

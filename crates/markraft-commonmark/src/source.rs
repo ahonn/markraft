@@ -115,7 +115,7 @@ impl SourceDocument {
     ///
     /// Choosing a spelling only reads the stretches an edit changed, which
     /// stands for the whole file by how CommonMark reads blocks; see
-    /// [`SourceDocument::validate_near`]. What is written is read back whole
+    /// `SourceDocument::validate_near`. What is written is read back whole
     /// first — a save is not a keystroke — and a file that would not read as
     /// `document` is refused rather than written.
     pub fn render(&self, schema: &Schema, document: &Node) -> Result<String, SourceError> {
@@ -1606,9 +1606,9 @@ fn fence_of(line: &str) -> Option<&str> {
 }
 
 /// Find where `leaf`'s lines stand in `lines` from `cursor` on, moving the
-/// cursor past them. `Some(None)` is a leaf with no lines of its own — an
-/// empty paragraph, an empty code block — and `None` a leaf whose lines could
-/// not be found, so the block cannot be patched.
+/// cursor past them. `Some(None)` is a text leaf with no lines of its own —
+/// an empty paragraph not alone on an item's marker line — and `None` a leaf
+/// whose lines could not be found, so the block cannot be patched.
 fn locate(
     leaf: &Leaf<'_>,
     lines: &[(String, String)],
@@ -2128,8 +2128,8 @@ fn patch_level(prefix: String, was: &Node, now: &Node) -> Option<String> {
 
 /// A top-level table's source, `raw`, rewritten row by row from `old` to
 /// `new`, or `None` when the two differ other than in their rows — a column
-/// added or aligned — or `raw` is not one line per row, and the caller falls
-/// back to patching the table whole.
+/// added or aligned — or `raw` is not one line per row, and the writer spells
+/// the table instead.
 ///
 /// The rows are matched as a diff would match lines: those equal at either end
 /// keep their lines byte for byte, and those between pair up in order, the
@@ -2419,8 +2419,8 @@ fn block_lines<'a>(
     out
 }
 
-/// `node` without the spaces and tabs ending each paragraph's and heading's
-/// text, which a reader drops.
+/// `node` without the spaces and tabs ending each paragraph's, heading's and
+/// table cell's text, which a reader drops.
 ///
 /// While a caret stands at the end of a block they are real content — the
 /// next keystroke can make them internal — and the correction only settles

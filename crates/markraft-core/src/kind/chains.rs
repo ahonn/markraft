@@ -1,9 +1,10 @@
 //! What each bound action does, as a chain of catalogue commands: the key
 //! chains a view binds for a document kind described by [`DocTypes`].
 //!
-//! This is the one place in the crate that consults a role table. The
-//! [`commands`](crate::commands) catalogue below it never does; the chains
-//! are built on that catalogue and pick from it by the roles a kind fills.
+//! This is the one place in the crate that builds commands from a role
+//! table. The [`commands`](crate::commands) catalogue below it never does; the
+//! chains are built on that catalogue and pick from it by the roles a kind
+//! fills.
 //!
 //! Besides the usual base and list bindings, the chains settle these cases:
 //! Backspace at the start of a list item joins it to the item before — or,

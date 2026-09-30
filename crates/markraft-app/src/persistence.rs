@@ -44,6 +44,8 @@ pub struct Saved {
     pub conflicts: Vec<String>,
     /// Where this save's deletions landed in the Trash, when the platform said.
     pub trashed: Vec<std::path::PathBuf>,
+    /// Notes this save was asked to delete and left in place; see [`Store::kept`].
+    pub kept: Vec<String>,
 }
 pub enum Event {
     Saved(Saved),
@@ -542,6 +544,7 @@ fn save_snapshot(
         paths: store.paths(),
         conflicts: store.conflicts(),
         trashed: store.trashed(),
+        kept: store.kept(),
     }
 }
 
@@ -1110,8 +1113,8 @@ mod tests {
         std::fs::write(directory.path().join("notes/dropped.md"), "Dropped in").unwrap();
         persistence.refresh();
 
-        // Paths are refreshed as the watcher names them, so one write may be
-        // reported more than once; wait for both files rather than for two events.
+        // One refresh may report both files in a single event; wait for both files
+        // rather than for two events.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut texts = Vec::new();
         let wanted = ["From another editor", "Dropped in"];

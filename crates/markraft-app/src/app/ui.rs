@@ -558,8 +558,8 @@ impl MarkraftApp {
             }
         }
     }
-    /// What a destructive control is written in: deleting a note, emptying the trash,
-    /// taking a table away.
+    /// What a destructive control is written in: deleting a note, taking a table away,
+    /// and a file status that needs attention.
     fn danger(&self) -> Hsla {
         if self.dark {
             rgb(0xf18a8a)

@@ -10,9 +10,9 @@
 //!    configuration order, so the highest-precedence filter runs last and has
 //!    the final say.
 //! 3. [`transaction_extender`] — adds to a transaction. Extenders also run in
-//!    reverse configuration order, each seeing the original transaction, and
-//!    their specs are merged sequentially so the changes they add compose
-//!    exactly.
+//!    reverse configuration order, each seeing the transaction the extenders
+//!    before it produced, and their specs are merged sequentially so the
+//!    changes they add compose exactly.
 //!
 //! 4. [`transaction_appender`] — reacts to a finished transaction by producing
 //!    *another* one. Appended transactions are separate transactions applied in

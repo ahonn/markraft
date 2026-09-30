@@ -354,9 +354,8 @@ fn a_list_in_a_quote_keeps_the_quote_bar_at_its_edge() {
     assert_eq!(bar(&rows[2]), bar(&rows[0]), "the code block's bar");
 }
 
-/// The view keeps HTML verbatim and shows it as source, so a raw block is
-/// drawn like a paragraph of monospace text: nothing behind it, and the
-/// ordinary gap below.
+/// The view keeps HTML verbatim, so a raw block is spaced and backed like a
+/// paragraph: nothing behind it, and the ordinary gap below.
 #[test]
 fn a_raw_block_is_drawn_as_a_plain_block() {
     let style = spaced_style();
@@ -1072,9 +1071,9 @@ fn pictures_alone_on_a_line_keep_their_size_side_by_side() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// A picture as wide as the column reserves no more than the column: rounding
-/// its reserved width up to whole fillers would push the last of them onto a
-/// row of its own, as tall as the picture and empty.
+/// A picture as wide as the column reserves no more than the column, so it
+/// stays on one row rather than spilling onto a row of its own, as tall as the
+/// picture and empty.
 #[test]
 fn a_picture_as_wide_as_the_column_keeps_to_one_row() {
     let path = std::env::temp_dir().join("markraft-surface-wide.png");
@@ -1287,9 +1286,9 @@ fn an_image_falls_back_to_the_name_of_its_file() {
     assert_eq!(file_name(""), None);
 }
 
-/// A drawn atom needs far more room than the one character it is, so the
-/// display text holds a run of fillers in its place. Every geometry query
-/// still speaks in projection offsets, which the two maps have to preserve.
+/// An atom may take more display characters than the one projection
+/// character it is — a label the row shapes as its own text. Every geometry
+/// query still speaks in projection offsets, which the two maps have to preserve.
 #[test]
 fn an_atom_placeholder_stays_one_caret_stop() {
     let mut rows = rows_of("ab![alt](x.png)cd");
@@ -1426,8 +1425,7 @@ fn a_wiki_link_atom_is_drawn_as_its_label_and_nothing_around_it() {
 }
 
 /// A wiki link is shaped as the text it reads as, so the punctuation after
-/// it sits against it rather than after a placeholder rounded up to whole
-/// fillers.
+/// it sits against the label's right edge.
 #[test]
 fn text_after_a_wiki_link_starts_at_the_labels_right_edge() {
     let lines = shaped("see [[Missing Page]]. end");
@@ -2288,8 +2286,8 @@ fn the_caret_never_swaps_a_marker_for_its_spelling() {
 }
 
 /// A code block spells no fences, focused or not: its panel reaches only
-/// its padding past its text, and focusing it adds a language tag that
-/// hangs over what follows. Nothing below it moves.
+/// its padding past its text, and focusing it adds a language tag drawn
+/// inside the panel. Nothing below it moves.
 #[test]
 fn a_code_block_is_as_tall_focused_as_it_is_unfocused() {
     let source = "```rust\nfn main() {}\n```\n\nafter";
@@ -2961,10 +2959,9 @@ fn the_caret_cell_frame_covers_the_grid_lines_it_borders() {
     assert_eq!(frame(2, 2), (left, top, px(140.), px(70.)), "over both");
 }
 
-/// The index search reads is the line the reader sees, once the fillers a
-/// pill reserves are taken back out.
+/// The index search reads is the line the reader sees.
 #[test]
-fn shown_text_matches_the_shaped_line_apart_from_pill_fillers() {
+fn shown_text_matches_the_shaped_line() {
     let source = "x **ab** &amp; [[a/b|Alias]] :smile:\n";
     let types = callout_types();
     let rows = shaped_in(source, types.clone(), px(600.), 0..0);
@@ -2980,7 +2977,7 @@ fn shown_text_matches_the_shaped_line_apart_from_pill_fillers() {
         .map(|row| {
             row.rows
                 .iter()
-                .map(|inner| inner.text().replace('\u{00a0}', ""))
+                .map(|inner| inner.text())
                 .collect::<String>()
         })
         .collect::<Vec<_>>()
