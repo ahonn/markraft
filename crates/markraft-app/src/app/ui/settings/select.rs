@@ -1,6 +1,7 @@
 //! Pop-up buttons: one value out of a short list, drawn the way AppKit's pop-up button
-//! is. The button shows the value and a pair of chevrons; the menu opens over it with
-//! the value under the pointer and a checkmark beside it.
+//! is. The button shows the value and a pair of chevrons; the menu hangs from the
+//! button, or stands on it where the window has no room below, with a checkmark
+//! beside the value and scrolling for longer lists.
 //!
 //! `gpui-base` supplies the behaviour — [`Select`] for the keyboard, focus and
 //! accessibility, [`Popup`] for placing the menu above the page — and this module the
@@ -11,7 +12,8 @@ use super::{Change, SettingsView};
 use crate::app::ui::icons::{Icon, sized_icon};
 use gpui::{prelude::*, *};
 use gpui_base::actions::{SelectDown, SelectUp};
-use gpui_base::{Popup, Select};
+use gpui_base::{ElementExt as _, Popup, Select};
+use std::cell::Cell;
 use std::rc::Rc;
 
 /// Every pop-up button the pages hold. Each has its own place in the focus order.
@@ -36,13 +38,38 @@ const IDS: [&str; 18] = [
     "emphasis-marker",
 ];
 
+/// What `Popup` keeps between a menu and the window's edge.
+const POPUP_MARGIN: Pixels = px(8.);
+
 pub(super) struct Selects {
     open: Option<&'static str>,
     /// The row the keyboard or the pointer is on while a menu is open.
     lit: usize,
     /// Where the keyboard goes while a menu is open.
     menu: FocusHandle,
+    scroll: ScrollHandle,
     triggers: Vec<FocusHandle>,
+    /// Where each button was last drawn.
+    spots: Vec<Rc<Cell<Spot>>>,
+}
+
+/// Where a pop-up button was drawn and how tall its window was: what says which
+/// side of the button has room for the menu.
+#[derive(Clone, Copy, Default)]
+struct Spot {
+    button: Bounds<Pixels>,
+    window: Pixels,
+}
+
+/// An open menu before it is placed: the surface that is painted and, inside its
+/// padding, the list that scrolls when the rows are taller than the room there is.
+struct Menu {
+    surface: Div,
+    list: Stateful<Div>,
+    /// The rows' heights added up.
+    rows_height: f32,
+    /// Where the lit row ends, from the top of the list.
+    lit_bottom: f32,
 }
 
 impl Selects {
@@ -51,7 +78,9 @@ impl Selects {
             open: None,
             lit: 0,
             menu: cx.focus_handle(),
+            scroll: ScrollHandle::new(),
             triggers: IDS.iter().map(|_| cx.focus_handle()).collect(),
+            spots: IDS.iter().map(|_| Rc::default()).collect(),
         }
     }
 
@@ -59,13 +88,72 @@ impl Selects {
         self.open = None;
     }
 
-    fn trigger(&self, id: &str) -> &FocusHandle {
-        let index = IDS
-            .iter()
-            .position(|known| *known == id)
-            .expect("every pop-up button is listed in IDS");
-        &self.triggers[index]
+    fn highlight(&mut self, row: usize) {
+        self.lit = row;
+        self.scroll.scroll_to_item(row);
     }
+
+    fn index(id: &str) -> usize {
+        IDS.iter()
+            .position(|known| *known == id)
+            .expect("every pop-up button is listed in IDS")
+    }
+
+    fn trigger(&self, id: &str) -> &FocusHandle {
+        &self.triggers[Self::index(id)]
+    }
+
+    /// The button and, while it is open, its menu. The popup places the surface, so
+    /// which row is lit never moves the menu.
+    fn popup(&self, id: &'static str, trigger: Stateful<Div>, menu: Option<Menu>) -> Popup {
+        let spot = self.spots[Self::index(id)].clone();
+        let drawn = spot.get();
+        let trigger = trigger.on_prepaint(move |button, window, _| {
+            spot.set(Spot {
+                button,
+                window: window.viewport_size().height,
+            })
+        });
+        let popup = Popup::new(SharedString::from(format!("{id}-popup")), trigger);
+        let Some(menu) = menu else {
+            return popup;
+        };
+        // The padding and the border, above the list and below it.
+        let frame = px(SELECT_MENU_PAD * 2. + 2.);
+        let wanted = (px(menu.rows_height) + frame).min(px(SELECT_MENU_MAX_HEIGHT));
+        let (anchor, height) = place(drawn, wanted);
+        let viewport = (height - frame).max(px(0.));
+        // GPUI handles scroll_to_item before initializing overflow on the first
+        // layout. Seed the offset from our fixed row heights to reveal the value
+        // immediately, and again should the room for the menu change under it;
+        // subsequent keyboard navigation uses the measured bounds.
+        if (self.scroll.bounds().size.height - viewport).abs() > px(0.5) {
+            self.scroll
+                .set_offset(point(px(0.), -(px(menu.lit_bottom) - viewport).max(px(0.))));
+        }
+        popup.anchor(anchor).content(
+            menu.surface.h(height).child(
+                menu.list
+                    .h(viewport)
+                    .track_scroll(&self.scroll)
+                    .overflow_y_scroll(),
+            ),
+        )
+    }
+}
+
+/// Which corner of the button a menu `wanted` tall hangs from, and how tall it may
+/// be there: under the button where it fits, over it where it fits only there, and
+/// otherwise on the side with more room, cut to that room.
+fn place(spot: Spot, wanted: Pixels) -> (Anchor, Pixels) {
+    let below = spot.window - POPUP_MARGIN - spot.button.bottom();
+    let above = spot.button.top() - POPUP_MARGIN;
+    let (anchor, room) = if wanted <= below || below >= above {
+        (Anchor::TopLeft, below)
+    } else {
+        (Anchor::BottomLeft, above)
+    };
+    (anchor, wanted.min(room.floor()).max(px(0.)))
 }
 
 /// A row of a pop-up button's menu.
@@ -221,7 +309,7 @@ impl SettingsView {
                 .map(|row| row.item().and_then(|item| item.change.clone()))
                 .collect(),
         );
-        let menu = open.then(|| self.select_menu(id, rows, chosen, changes.clone(), p, cx));
+        let menu = open.then(|| self.select_menu(id, rows, changes.clone(), p, cx));
         let on_open = this.clone();
         let on_confirm = this.clone();
         Select::new(id)
@@ -246,53 +334,30 @@ impl SettingsView {
                     view.choose(change, window, cx);
                 });
             })
-            .child(
-                Popup::new(SharedString::from(format!("{id}-popup")), trigger)
-                    .anchor(Anchor::TopLeft)
-                    .when_some(menu, |popup, menu| popup.content(menu)),
-            )
+            .child(self.selects.popup(id, trigger, menu))
             .into_any_element()
     }
 
-    /// The open menu, lifted so that the value it holds sits over the button.
+    /// The open menu: its surface, and the rows in a list of their own.
     fn select_menu(
         &self,
         id: &'static str,
         rows: Vec<MenuRow>,
-        chosen: usize,
         changes: Rc<Vec<Option<Change>>>,
         p: Palette,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Menu {
         let lit = self.selects.lit;
-        let above: f32 = rows[..chosen].iter().map(MenuRow::height).sum();
-        let height = SELECT_MENU_PAD * 2. + 2. + rows.iter().map(MenuRow::height).sum::<f32>();
-        let lift = SELECT_HEIGHT / 2. + 1. + SELECT_MENU_PAD + above + SELECT_ROW_HEIGHT / 2.;
+        let rows_height = rows.iter().map(MenuRow::height).sum();
+        let lit_bottom = rows.iter().take(lit + 1).map(MenuRow::height).sum();
         // Which rows the keyboard can land on: the items, not the separators.
         let kinds: Rc<Vec<bool>> = Rc::new(rows.iter().map(|row| row.item().is_some()).collect());
         let (down, up) = (kinds.clone(), kinds);
-        let menu = div()
-            .id(SharedString::from(format!("{id}-menu")))
-            .track_focus(&self.selects.menu)
-            .role(Role::ListBox)
+        let surface = div()
             .occlude()
-            // The host sits under the button, so the menu is lifted by the button's
-            // height and then far enough that the row it holds is centred on the button,
-            // the way AppKit opens a pop-up button's menu.
-            .absolute()
-            .top(px(-lift))
-            // The labels line up with the button's, past the checkmark column.
-            .left(px(-(SELECT_MENU_PAD
-                + SELECT_CHECK_WIDTH
-                + SELECT_ROW_PAD_X
-                - BUTTON_PAD_X)))
             .p(px(SELECT_MENU_PAD))
-            // As wide as the button from its label on, and the checkmark column besides.
-            .min_w(px(SELECT_WIDTH
-                + SELECT_MENU_PAD * 2.
-                + SELECT_CHECK_WIDTH
-                + SELECT_ROW_PAD_X
-                - BUTTON_PAD_X))
+            // No narrower than the button it hangs from.
+            .min_w(px(SELECT_WIDTH))
             .flex()
             .flex_col()
             .rounded(px(SELECT_MENU_RADIUS))
@@ -302,18 +367,25 @@ impl SettingsView {
             .shadow_lg()
             .text_size(px(TEXT_SIZE))
             .text_color(p.text)
+            .on_mouse_down_out(cx.listener(|view, _, window, cx| view.close_select(window, cx)));
+        let list = div()
+            .id(SharedString::from(format!("{id}-menu")))
+            .track_focus(&self.selects.menu)
+            .role(Role::ListBox)
+            .flex()
+            .flex_col()
             .on_action(cx.listener(move |view, _: &SelectDown, _, cx| {
-                view.selects.lit = step(&down, view.selects.lit, true);
+                view.selects.highlight(step(&down, view.selects.lit, true));
                 cx.notify();
             }))
             .on_action(cx.listener(move |view, _: &SelectUp, _, cx| {
-                view.selects.lit = step(&up, view.selects.lit, false);
+                view.selects.highlight(step(&up, view.selects.lit, false));
                 cx.notify();
             }))
-            .on_mouse_down_out(cx.listener(|view, _, window, cx| view.close_select(window, cx)))
             .children(rows.into_iter().enumerate().map(|(row, entry)| {
                 let Some(item) = entry.item() else {
                     return div()
+                        .flex_shrink_0()
                         .h(px(SELECT_SEPARATOR_HEIGHT))
                         .flex()
                         .items_center()
@@ -330,6 +402,7 @@ impl SettingsView {
                     .aria_selected(item.checked)
                     .when(lit, |item| item.aria_active_descendant())
                     .flex()
+                    .flex_shrink_0()
                     .items_center()
                     .h(px(SELECT_ROW_HEIGHT))
                     .pr(px(SELECT_ROW_PAD_X))
@@ -358,14 +431,12 @@ impl SettingsView {
                     .child(item.label.clone())
                     .into_any_element()
             }));
-        // The positioner places what it holds by that element's own bounds, so the
-        // menu is shifted inside a host rather than moved itself. The host is as tall
-        // as the menu reaches below the button: near the window's foot the positioner
-        // then lifts it, menu and all, rather than letting the window cut it off.
-        div()
-            .h(px((height - lift).max(0.)))
-            .child(menu)
-            .into_any_element()
+        Menu {
+            surface,
+            list,
+            rows_height,
+            lit_bottom,
+        }
     }
 
     fn open_select(
@@ -376,7 +447,8 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         self.selects.open = Some(id);
-        self.selects.lit = chosen;
+        self.selects.scroll = ScrollHandle::new();
+        self.selects.highlight(chosen);
         window.focus(&self.selects.menu, cx);
         cx.notify();
     }
@@ -400,7 +472,186 @@ impl SettingsView {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::step;
+    use super::super::controls::metrics::{SELECT_HEIGHT, SELECT_MENU_PAD, SELECT_ROW_HEIGHT};
+    use super::{Menu, Selects, Spot, place, step};
+    use gpui::{
+        Anchor, Bounds, Context, InteractiveElement, IntoElement, ParentElement, Render,
+        ScrollDelta, ScrollWheelEvent, Styled, TestAppContext, VisualTestContext, Window, div,
+        point, px, size,
+    };
+
+    /// A button 120 down the window, and its menu open.
+    struct MenuHarness {
+        selects: Selects,
+        rows: usize,
+    }
+
+    impl Render for MenuHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().pt(px(120.)).pl(px(30.)).child(
+                self.selects.popup(
+                    "language",
+                    div()
+                        .id("test-button")
+                        .debug_selector(|| "button".into())
+                        .w(px(200.))
+                        .h(px(SELECT_HEIGHT)),
+                    Some(Menu {
+                        surface: div()
+                            .debug_selector(|| "menu".into())
+                            .w(px(200.))
+                            .flex()
+                            .flex_col()
+                            .p(px(SELECT_MENU_PAD))
+                            .border_1(),
+                        list: div()
+                            .id("test-menu")
+                            .flex()
+                            .flex_col()
+                            .children((0..self.rows).map(|row| {
+                                div()
+                                    .flex_shrink_0()
+                                    .h(px(SELECT_ROW_HEIGHT))
+                                    .child(row.to_string())
+                            })),
+                        rows_height: self.rows as f32 * SELECT_ROW_HEIGHT,
+                        lit_bottom: (self.selects.lit + 1) as f32 * SELECT_ROW_HEIGHT,
+                    }),
+                ),
+            )
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        // Capture the anchor, then lay out the menu.
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn spot(top: f32, window: f32) -> Spot {
+        Spot {
+            button: Bounds::new(point(px(30.), px(top)), size(px(180.), px(24.))),
+            window: px(window),
+        }
+    }
+
+    #[test]
+    fn a_menu_opens_on_the_side_of_its_button_that_has_room() {
+        // Under the button while it fits there, even where there is more room above.
+        assert_eq!(place(spot(300., 500.), px(84.)), (Anchor::TopLeft, px(84.)));
+        assert_eq!(
+            place(spot(300., 500.), px(168.)),
+            (Anchor::TopLeft, px(168.))
+        );
+        // Above it once the window ends too soon below.
+        assert_eq!(
+            place(spot(300., 400.), px(84.)),
+            (Anchor::BottomLeft, px(84.))
+        );
+        // Fitting neither side, the side with more room, as tall as that room.
+        assert_eq!(
+            place(spot(300., 400.), px(304.)),
+            (Anchor::BottomLeft, px(292.))
+        );
+        assert_eq!(
+            place(spot(100., 400.), px(304.)),
+            (Anchor::TopLeft, px(268.))
+        );
+    }
+
+    #[gpui::test]
+    fn a_menu_stays_where_it_opened_while_the_selection_moves(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MenuHarness {
+            selects: Selects::new(cx),
+            rows: 10,
+        });
+        cx.simulate_resize(size(px(500.), px(420.)));
+        draw(cx);
+        let button = cx.debug_bounds("button").unwrap();
+        let before = cx.debug_bounds("menu").unwrap();
+        assert_eq!(before.top(), button.bottom());
+        assert_eq!(before.left(), button.left());
+        assert_eq!(before.size.height, px(252.));
+        view.update(cx, |view, cx| {
+            view.selects.highlight(8);
+            cx.notify();
+        });
+        draw(cx);
+        assert_eq!(cx.debug_bounds("menu").unwrap(), before);
+        assert_eq!(
+            view.update(cx, |view, _| view.selects.scroll.offset().y),
+            px(0.)
+        );
+    }
+
+    #[gpui::test]
+    fn a_menu_with_no_room_below_stands_on_its_button(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, cx| MenuHarness {
+            selects: Selects::new(cx),
+            rows: 3,
+        });
+        cx.simulate_resize(size(px(500.), px(220.)));
+        draw(cx);
+        let button = cx.debug_bounds("button").unwrap();
+        let menu = cx.debug_bounds("menu").unwrap();
+        assert_eq!(menu.bottom(), button.top());
+        assert_eq!(menu.left(), button.left());
+        assert_eq!(menu.size.height, px(84.));
+    }
+
+    #[gpui::test]
+    fn constrained_menu_scrolls_and_keeps_keyboard_selection_visible(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let mut selects = Selects::new(cx);
+            selects.highlight(19);
+            MenuHarness { selects, rows: 20 }
+        });
+        cx.simulate_resize(size(px(500.), px(220.)));
+        draw(cx);
+        // More room above the button than below it, and not enough for the rows.
+        let bounds = cx.debug_bounds("menu").unwrap();
+        assert_eq!(bounds.top(), px(8.));
+        assert_eq!(bounds.bottom(), cx.debug_bounds("button").unwrap().top());
+        let scroll = view.update(cx, |view, _| view.selects.scroll.clone());
+        assert!(
+            scroll.offset().y < px(0.),
+            "bounds {:?}, max {:?}, last {:?}",
+            scroll.bounds(),
+            scroll.max_offset(),
+            scroll.bounds_for_item(19)
+        );
+        // The rows scroll inside the menu's padding, not under its edge.
+        let inset = px(SELECT_MENU_PAD + 1.);
+        assert_eq!(scroll.bounds().top(), bounds.top() + inset);
+        assert_eq!(scroll.bounds().bottom(), bounds.bottom() - inset);
+        assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+        let last = scroll.bounds_for_item(19).unwrap();
+        assert_eq!(last.bottom() + scroll.offset().y, scroll.bounds().bottom());
+        assert_eq!(last.size.height, px(SELECT_ROW_HEIGHT));
+
+        view.update(cx, |view, cx| {
+            view.selects.highlight(0);
+            cx.notify();
+        });
+        draw(cx);
+        let first = scroll.bounds_for_item(0).unwrap();
+        assert!(first.top() + scroll.offset().y >= scroll.bounds().top());
+        assert!(first.bottom() + scroll.offset().y <= scroll.bounds().bottom());
+        assert_eq!(cx.debug_bounds("menu").unwrap(), bounds);
+
+        let before_wheel = scroll.offset().y;
+        cx.simulate_event(ScrollWheelEvent {
+            position: bounds.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-80.))),
+            ..Default::default()
+        });
+        draw(cx);
+        assert!(
+            scroll.offset().y < before_wheel,
+            "the wheel must scroll the menu"
+        );
+        assert_eq!(cx.debug_bounds("menu").unwrap(), bounds);
+    }
 
     #[test]
     fn the_keyboard_walks_the_items_past_separators_and_stops_at_the_ends() {

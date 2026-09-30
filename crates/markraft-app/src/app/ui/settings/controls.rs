@@ -77,6 +77,8 @@ pub(super) mod metrics {
     pub const SELECT_CHEVRON: f32 = 10.;
     pub const SELECT_MENU_PAD: f32 = 5.;
     pub const SELECT_MENU_RADIUS: f32 = 10.;
+    /// Past this the menu scrolls; a row cut short at the edge says there is more.
+    pub const SELECT_MENU_MAX_HEIGHT: f32 = 304.;
     pub const SELECT_ROW_HEIGHT: f32 = 24.;
     pub const SELECT_ROW_PAD_X: f32 = 8.;
     pub const SELECT_ROW_RADIUS: f32 = 6.;
