@@ -212,6 +212,12 @@ fn configure_metadata(info: &mut Dictionary, public_key: &str, mock: bool) -> Re
     info.insert("CFBundleDevelopmentRegion".into(), development_region);
     info.insert("CFBundleLocalizations".into(), localizations.into());
     info.insert("LSUIElement".into(), true.into());
+    // The print panel looks for printers on the network, which macOS asks
+    // about in this app's name.
+    info.insert(
+        "NSLocalNetworkUsageDescription".into(),
+        "Markraft looks for printers on your network when you print a note.".into(),
+    );
     // Advertise Open With support without claiming to be the default editor.
     let mut markdown = Dictionary::new();
     markdown.insert("CFBundleTypeName".into(), "Markdown document".into());

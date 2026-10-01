@@ -56,7 +56,7 @@ pub fn types() -> &'static DocTypes {
 
 /// How the clipboard reads and writes this document kind, spelling new syntax
 /// in `house`'s style as it stands at each write.
-fn codecs(house: &HouseStyleHandle) -> Arc<dyn Codecs> {
+pub fn codecs(house: &HouseStyleHandle) -> Arc<dyn Codecs> {
     Arc::new(CommonMarkCodecs::new(schema().clone(), house.clone()))
 }
 

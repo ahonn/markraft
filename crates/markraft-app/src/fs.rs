@@ -292,11 +292,57 @@ pub(crate) fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
 }
 
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    write_through_temporary(path, bytes, &tempfile::Builder::new())
+}
+
+/// [`atomic_write`] for a file that is the person's own rather than the
+/// store's, such as an export: a file it replaces keeps its permissions, and a
+/// new one gets the ones any app's new file gets (the process umask applied
+/// to read-write for all), where a temporary file is private to its owner.
+///
+/// A symbolic link is followed, so the file it points at is replaced and the
+/// link kept. A file with other hard links is replaced by a new one under its
+/// name, and the others keep the old contents; extended attributes and ACLs
+/// are not carried over.
+pub(crate) fn atomic_write_shared(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    let linked = fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink());
+    let resolved = if linked {
+        fs::canonicalize(path).map_err(|error| describe(path, &error))?
+    } else {
+        path.to_owned()
+    };
+    let path = resolved.as_path();
+    let replaced = fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    let mut temporary = tempfile::Builder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary.permissions(fs::Permissions::from_mode(0o666));
+    }
+    write_through_temporary(path, bytes, &temporary)?;
+    match replaced {
+        Some(permissions) => {
+            fs::set_permissions(path, permissions).map_err(|error| describe(path, &error))
+        }
+        None => Ok(()),
+    }
+}
+
+/// Write `bytes` to a temporary file `temporary` makes beside `path`, then
+/// rename it over `path`, so a reader sees the old file or the new one whole.
+fn write_through_temporary(
+    path: &Path,
+    bytes: &[u8],
+    temporary: &tempfile::Builder<'_, '_>,
+) -> Result<(), StoreError> {
     let parent = path.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent).map_err(|error| describe(parent, &error))?;
     faults::check(path, faults::Stage::Create).map_err(|error| describe(parent, &error))?;
-    let mut output =
-        tempfile::NamedTempFile::new_in(parent).map_err(|error| describe(parent, &error))?;
+    let mut output = temporary
+        .tempfile_in(parent)
+        .map_err(|error| describe(parent, &error))?;
     faults::check(path, faults::Stage::Write)
         .and_then(|_| output.write_all(bytes))
         .and_then(|_| output.as_file().sync_all())
@@ -392,6 +438,40 @@ pub(crate) mod faults {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shared_write_through_a_link_replaces_what_it_points_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.html");
+        fs::write(&target, b"old").unwrap();
+        let link = dir.path().join("link.html");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        atomic_write_shared(&link, b"new").unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_shared_write_is_readable_like_any_new_file_and_keeps_a_replaced_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let new = dir.path().join("new.html");
+        atomic_write_shared(&new, b"one").unwrap();
+        // A file any program creates here gets the umask applied to rw for all.
+        let reference = dir.path().join("reference");
+        fs::write(&reference, b"").unwrap();
+        assert_eq!(mode(&new), mode(&reference));
+        assert_ne!(mode(&new), 0o600, "a temporary file's private mode leaked");
+        let kept = dir.path().join("kept.html");
+        fs::write(&kept, b"old").unwrap();
+        fs::set_permissions(&kept, fs::Permissions::from_mode(0o640)).unwrap();
+        atomic_write_shared(&kept, b"two").unwrap();
+        assert_eq!(mode(&kept), 0o640);
+        assert_eq!(fs::read(&kept).unwrap(), b"two");
+    }
 
     #[test]
     fn a_failure_is_worded_by_its_kind_and_names_only_the_file() {

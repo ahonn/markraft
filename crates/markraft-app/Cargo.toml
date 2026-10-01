@@ -20,6 +20,9 @@ gpui-base.workspace = true
 markraft-core.workspace = true
 markraft-commonmark.workspace = true
 markraft-gpui.workspace = true
+markraft-math.workspace = true
+markraft-media.workspace = true
+markraft-syntax.workspace = true
 markraft-vim.workspace = true
 tempfile = "3"
 unicode-segmentation = "1.12"
@@ -32,6 +35,11 @@ notify = "8"
 url = "2"
 ureq = "3"
 rust-i18n = "4"
+base64 = "0.22"
+# Formulas become PNGs for readers that do not draw SVG; gpui links the same version.
+resvg = { version = "0.46", default-features = false }
+# Preserve the logical size of 2x formula images in native rich-text readers.
+png = "0.17"
 
 [dev-dependencies]
 # The app's own flows run headless against GPUI's test platform; see src/e2e.rs.
@@ -45,11 +53,17 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSBitmapImageRep", "NSButton", "NSColor", "NSControl", "NSFontDescriptor",
     "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSResponder",
-    "NSStatusBarButton", "NSStatusItem", "NSView", "objc2-core-foundation",
+    "NSStatusBarButton", "NSStatusItem", "NSView", "NSPrintInfo", "NSPrintOperation", "NSWindow",
+    "objc2-core-foundation",
+] }
+# Printing lays notes out with WebKit, which paginates HTML.
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+    "WKNavigation", "WKNavigationDelegate", "WKPreferences", "WKWebView",
+    "WKWebViewConfiguration", "objc2-app-kit", "objc2-core-foundation",
 ] }
 raw-window-handle = "0.6"
 sparkle-updater = "=0.1.0"
-objc2-foundation = { version = "0.3", features = ["NSBundle", "NSData", "NSString"] }
+objc2-foundation = { version = "0.3", features = ["NSBundle", "NSData", "NSError", "NSString", "NSURL"] }
 
 [package.metadata.bundle]
 name = "Markraft"

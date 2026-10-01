@@ -3,6 +3,7 @@
 //! Create and use this object on AppKit's main thread. GPUI owns the native
 //! window; native pointers below are borrowed only for the duration of a call.
 pub(crate) mod locale;
+pub(crate) mod print;
 pub(crate) mod symbols;
 
 use crate::locale::Message;

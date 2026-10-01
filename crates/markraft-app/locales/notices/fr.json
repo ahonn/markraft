@@ -5,6 +5,8 @@
   "notice.trash-failed": "Impossible de placer dans la corbeille.",
   "notice.trashed": "Note placée dans la corbeille",
   "notice.copied-markdown": "Copié en Markdown",
+  "notice.copied-rich-text": "Copié en texte enrichi",
+  "notice.exported": "« %{name} » exporté",
   "notice.open-folder-save": "Ouvrez un dossier pour enregistrer des notes.",
   "notice.wait-reload": "Attendez la fin de l’opération en cours sur le fichier avant de recharger.",
   "notice.single-folder": "Déposez un seul dossier pour l’ouvrir.",

@@ -47,9 +47,13 @@ enum Intent {
     PinNote(String),
     TrashNote(String),
     Copy,
+    CopyRichText,
     PastePlain,
     PasteMarkdown,
     Export,
+    ExportHtml,
+    ExportPdf,
+    Print,
     /// The pill under the title, and the two things done inside it.
     Rename,
     ApplyRename,
@@ -157,9 +161,12 @@ impl Intent {
             | Self::DailyNext
             | Self::Browse
             | Self::Pin => ActionGroup::Notes,
-            Self::Copy | Self::PastePlain | Self::PasteMarkdown | Self::Undo | Self::Redo => {
-                ActionGroup::Editing
-            }
+            Self::Copy
+            | Self::CopyRichText
+            | Self::PastePlain
+            | Self::PasteMarkdown
+            | Self::Undo
+            | Self::Redo => ActionGroup::Editing,
             Self::Mark(_) | Self::Block(_) | Self::Link | Self::InsertTable => {
                 ActionGroup::Formatting
             }
@@ -173,6 +180,9 @@ impl Intent {
             | Self::CopyCodeBlock => ActionGroup::Context,
             Self::Save
             | Self::Export
+            | Self::ExportHtml
+            | Self::ExportPdf
+            | Self::Print
             | Self::Rename
             | Self::OpenMarkdown
             | Self::Reveal
@@ -282,8 +292,9 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::Browse => Icon::Notes,
         Intent::Pin => Icon::Pin,
         Intent::Delete | Intent::TrashNote(_) => Icon::Trash,
-        Intent::Copy | Intent::CopyLink => Icon::Copy,
-        Intent::Export => Icon::Export,
+        Intent::Copy | Intent::CopyRichText | Intent::CopyLink => Icon::Copy,
+        Intent::Export | Intent::ExportHtml | Intent::ExportPdf => Icon::Export,
+        Intent::Print => Icon::Print,
         Intent::Rename => Icon::Edit,
         Intent::OpenMarkdown => Icon::Document,
         Intent::Settings => Icon::Settings,
@@ -460,6 +471,10 @@ impl MarkraftApp {
                 self.copy_markdown(cx);
                 self.intent(Intent::Back, window, cx);
             }
+            Intent::CopyRichText => {
+                self.intent(Intent::Back, window, cx);
+                self.copy_rich_text(window, cx);
+            }
             Intent::PastePlain | Intent::PasteMarkdown => {
                 self.intent(Intent::Back, window, cx);
                 let action: Box<dyn Action> = if matches!(intent, Intent::PastePlain) {
@@ -471,7 +486,19 @@ impl MarkraftApp {
             }
             Intent::Export => {
                 self.intent(Intent::Back, window, cx);
-                self.export(window, cx);
+                self.export(exports::ExportFormat::Markdown, window, cx);
+            }
+            Intent::ExportHtml => {
+                self.intent(Intent::Back, window, cx);
+                self.export(exports::ExportFormat::Html, window, cx);
+            }
+            Intent::ExportPdf => {
+                self.intent(Intent::Back, window, cx);
+                self.print_note(true, window, cx);
+            }
+            Intent::Print => {
+                self.intent(Intent::Back, window, cx);
+                self.print_note(false, window, cx);
             }
             Intent::Rename => self.open_rename(window, cx),
             Intent::ApplyRename => self.apply_rename(window, cx),
@@ -1375,6 +1402,11 @@ impl MarkraftApp {
             Command::new("save-now", "command.save-now", Intent::Save).ex(&[("write", 1)]),
             Command::new("copy-markdown", "command.copy-as-markdown", Intent::Copy),
             Command::new(
+                "copy-rich-text",
+                "command.copy-as-rich-text",
+                Intent::CopyRichText,
+            ),
+            Command::new(
                 "paste-plain",
                 "command.paste-as-plain-text",
                 Intent::PastePlain,
@@ -1385,6 +1417,9 @@ impl MarkraftApp {
                 Intent::PasteMarkdown,
             ),
             Command::new("export-note", "command.export-markdown", Intent::Export),
+            Command::new("export-html", "command.export-html", Intent::ExportHtml),
+            Command::new("export-pdf", "command.export-pdf", Intent::ExportPdf),
+            Command::new("print-note", "command.print", Intent::Print),
             Command::new("rename-note", "command.rename", Intent::Rename),
             Command::new(
                 "open-markdown-action",
@@ -1766,9 +1801,9 @@ impl MarkraftApp {
         let vim = self.preferences.vim_mode;
         for (index, command) in items.into_iter().enumerate() {
             let ex = vim.then(|| command.ex_label()).flatten();
+            let label = self.i18n.text(command.label);
             let Command {
                 id,
-                label,
                 shortcut,
                 intent,
                 checked,
@@ -1790,7 +1825,7 @@ impl MarkraftApp {
                         )
                     })
                     .child(
-                        self.row(id, self.i18n.text(label), shortcut, ex, intent, cx)
+                        self.row(id, label, shortcut, ex, intent, cx)
                             .h(ACTION_ROW_HEIGHT)
                             .text_size(px(14.))
                             .role(Role::Button)
@@ -2028,6 +2063,13 @@ impl Render for MarkraftApp {
             )
             .on_action(cx.listener(|this, _: &Link, w, cx| this.intent(Intent::Link, w, cx)))
             .on_action(cx.listener(|this, _: &Export, w, cx| this.intent(Intent::Export, w, cx)))
+            .on_action(
+                cx.listener(|this, _: &ExportHtml, w, cx| this.intent(Intent::ExportHtml, w, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ExportPdf, w, cx| this.intent(Intent::ExportPdf, w, cx)),
+            )
+            .on_action(cx.listener(|this, _: &Print, w, cx| this.intent(Intent::Print, w, cx)))
             .on_action(cx.listener(|this, _: &IncreaseTextSize, w, cx| {
                 this.set_preference(Pref::TextSize(this.preferences.text_size + 1.), w, cx)
             }))

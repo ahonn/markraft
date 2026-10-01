@@ -5,6 +5,8 @@
   "notice.trash-failed": "ゴミ箱に入れられませんでした。",
   "notice.trashed": "ゴミ箱に入れました",
   "notice.copied-markdown": "Markdownとしてコピーしました",
+  "notice.copied-rich-text": "リッチテキストとしてコピーしました",
+  "notice.exported": "“%{name}”を書き出しました",
   "notice.open-folder-save": "ノートを保存するにはフォルダを開いてください。",
   "notice.wait-reload": "現在のファイル操作が終わってから再読み込みしてください。",
   "notice.single-folder": "開くにはフォルダを1つだけドロップしてください。",
