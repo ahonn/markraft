@@ -62,10 +62,17 @@ pub use rules::{
     html_attrs_fn, html_match_fn, html_text_fn,
 };
 pub use serialize::{
-    HtmlMarkRule, HtmlMarkRules, HtmlNodeRule, HtmlNodeRules, HtmlSerializer, HtmlState,
-    commonmark_html_mark_rules, commonmark_html_node_rules, commonmark_html_serializer,
+    HtmlAtomRule, HtmlMarkRule, HtmlMarkRules, HtmlNodeRule, HtmlNodeRules, HtmlSerializer,
+    HtmlState, commonmark_html_mark_rules, commonmark_html_node_rules, commonmark_html_serializer,
     escape_attr, escape_text,
 };
+
+/// An HTML block's source as the document the editor draws in its place, or
+/// `None` when the editor shows it as source (see [`preview`]'s rules).
+pub fn render_html_block(schema: &Schema, source: &str) -> Option<markraft_core::kind::Rendered> {
+    let parser = HtmlParser::commonmark(schema.clone(), &HouseStyleHandle::default());
+    preview::render(&parser, source)
+}
 
 use markraft_core::{Attrs, BreakKind, Fragment, Mark, MarkSet, Node, NodeTypeId, Schema, Slice};
 use scraper::{ElementRef, Html, Node as HtmlNode};

@@ -4,6 +4,8 @@ members = [
     "crates/markraft-core",
     "crates/markraft-commonmark",
     "crates/markraft-math",
+    "crates/markraft-media",
+    "crates/markraft-syntax",
     "crates/markraft-gpui",
     "crates/markraft-vim",
     "crates/markraft-app",
@@ -24,6 +26,8 @@ gpui-base = "=0.6.6"
 markraft-core = { path = "crates/markraft-core" }
 markraft-commonmark = { path = "crates/markraft-commonmark" }
 markraft-math = { path = "crates/markraft-math" }
+markraft-media = { path = "crates/markraft-media" }
+markraft-syntax = { path = "crates/markraft-syntax" }
 markraft-gpui = { path = "crates/markraft-gpui" }
 markraft-vim = { path = "crates/markraft-vim" }
 

@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-const MAX_BYTES: u64 = 16 * 1024 * 1024;
+use markraft_media::{ImageType, LocateError, MAX_IMAGE_BYTES, Root, is_fetchable};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImageError {
@@ -45,6 +45,16 @@ impl ImageError {
             Self::Unsupported => ImageUnsupported,
             Self::Unreadable => ImageUnreadable,
             Self::UnsupportedRoot => ImageUnsupportedRoot,
+        }
+    }
+}
+
+impl From<LocateError> for ImageError {
+    fn from(error: LocateError) -> Self {
+        match error {
+            LocateError::Remote => ImageError::Remote,
+            LocateError::InvalidPath => ImageError::InvalidPath,
+            LocateError::UnsupportedRoot => ImageError::UnsupportedRoot,
         }
     }
 }
@@ -130,33 +140,12 @@ impl Images {
     }
 
     fn resolve(&self, source: &str) -> Result<PathBuf, ImageError> {
-        if source.starts_with("//") {
-            return Err(ImageError::Remote);
-        }
-        if let Ok(url) = url::Url::parse(source) {
-            return if url.scheme() == "file" {
-                url.to_file_path().map_err(|_| ImageError::InvalidPath)
-            } else {
-                Err(ImageError::Remote)
-            };
-        }
-        let path = Path::new(source);
-        let (base, source) = if path.is_absolute() {
-            if self.root_invalid {
-                return Err(ImageError::UnsupportedRoot);
-            }
-            match self.root.as_deref() {
-                Some(root) => (root, source.trim_start_matches('/')),
-                None => (Path::new("/"), source),
-            }
-        } else {
-            (self.base.as_deref().ok_or(ImageError::InvalidPath)?, source)
+        let root = match (self.root_invalid, self.root.as_deref()) {
+            (true, _) => Root::Unusable,
+            (false, Some(root)) => Root::At(root),
+            (false, None) => Root::None,
         };
-        let base = url::Url::from_directory_path(base).map_err(|_| ImageError::InvalidPath)?;
-        base.join(source)
-            .map_err(|_| ImageError::InvalidPath)?
-            .to_file_path()
-            .map_err(|_| ImageError::InvalidPath)
+        Ok(markraft_media::resolve(source, self.base.as_deref(), root)?)
     }
 
     pub(crate) fn load(&self, source: &str) -> ImageResult {
@@ -285,25 +274,12 @@ fn decode(path: &Path) -> ImageResult {
     if !metadata.is_file() {
         return Err(ImageError::Missing);
     }
-    if metadata.len() > MAX_BYTES {
+    if metadata.len() > MAX_IMAGE_BYTES {
         return Err(ImageError::TooLarge);
     }
-    let format = match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("png") => ImageFormat::Png,
-        Some("jpg" | "jpeg") => ImageFormat::Jpeg,
-        Some("webp") => ImageFormat::Webp,
-        Some("gif") => ImageFormat::Gif,
-        Some("svg") => ImageFormat::Svg,
-        Some("bmp") => ImageFormat::Bmp,
-        Some("tif" | "tiff") => ImageFormat::Tiff,
-        Some("ico") => ImageFormat::Ico,
-        _ => return Err(ImageError::Unsupported),
-    };
+    let format = ImageType::of_path(path)
+        .map(gpui_format)
+        .ok_or(ImageError::Unsupported)?;
     let bytes = std::fs::read(path).map_err(|_| ImageError::Unreadable)?;
     decode_bytes(format, bytes)
 }
@@ -322,58 +298,31 @@ fn decode_bytes(format: ImageFormat, bytes: Vec<u8>) -> ImageResult {
         .map_err(|_| ImageError::Unreadable)
 }
 
-/// Whether `source` names an image a [`RemoteImageFetcher`](crate::RemoteImageFetcher)
-/// can fetch: an `http:` or `https:` URL, or a protocol-relative `//host/…`.
-fn is_fetchable(source: &str) -> bool {
-    source.starts_with("//")
-        || url::Url::parse(source).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
-}
-
-/// The URL a fetchable source is fetched from: a protocol-relative one over HTTPS.
-pub(crate) fn fetch_url(source: &str) -> String {
-    match source.strip_prefix("//") {
-        Some(rest) => format!("https://{rest}"),
-        None => source.to_owned(),
+/// The format gpui decodes a picture of `kind` as.
+fn gpui_format(kind: ImageType) -> ImageFormat {
+    match kind {
+        ImageType::Png => ImageFormat::Png,
+        ImageType::Jpeg => ImageFormat::Jpeg,
+        ImageType::Gif => ImageFormat::Gif,
+        ImageType::Webp => ImageFormat::Webp,
+        ImageType::Svg => ImageFormat::Svg,
+        ImageType::Bmp => ImageFormat::Bmp,
+        ImageType::Tiff => ImageFormat::Tiff,
+        ImageType::Ico => ImageFormat::Ico,
     }
 }
 
 /// Fetch `source` with `fetcher` and decode it. Runs on a background thread.
 pub(crate) fn fetch(fetcher: &crate::RemoteImageFetcher, source: &str) -> ImageResult {
-    let bytes = fetcher(&fetch_url(source)).map_err(|_| ImageError::RemoteFailed)?;
-    if bytes.len() as u64 > MAX_BYTES {
+    let bytes =
+        fetcher(&markraft_media::fetch_url(source)).map_err(|_| ImageError::RemoteFailed)?;
+    if bytes.len() as u64 > MAX_IMAGE_BYTES {
         return Err(ImageError::TooLarge);
     }
-    let format = sniff(&bytes).ok_or(ImageError::Unsupported)?;
+    let format = ImageType::sniff(&bytes)
+        .map(gpui_format)
+        .ok_or(ImageError::Unsupported)?;
     decode_bytes(format, bytes)
-}
-
-/// The format `bytes` start like. A URL often names no extension, and a server's
-/// content type is not always right, so the bytes are what decide.
-fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
-    let starts = |prefix: &[u8]| bytes.starts_with(prefix);
-    Some(if starts(b"\x89PNG\r\n\x1a\n") {
-        ImageFormat::Png
-    } else if starts(b"\xff\xd8\xff") {
-        ImageFormat::Jpeg
-    } else if starts(b"GIF87a") || starts(b"GIF89a") {
-        ImageFormat::Gif
-    } else if starts(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
-        ImageFormat::Webp
-    } else if starts(b"BM") {
-        ImageFormat::Bmp
-    } else if starts(b"II*\0") || starts(b"MM\0*") {
-        ImageFormat::Tiff
-    } else if starts(b"\0\0\x01\0") {
-        ImageFormat::Ico
-    } else {
-        let head = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]);
-        let head = head.trim_start_matches('\u{feff}').trim_start();
-        if head.starts_with('<') && head.contains("<svg") {
-            ImageFormat::Svg
-        } else {
-            return None;
-        }
-    })
 }
 
 #[cfg(test)]
@@ -443,13 +392,6 @@ mod tests {
             fetch(&text, "https://a.example/x.png"),
             Err(ImageError::Unsupported)
         );
-        assert_eq!(
-            fetch_url("//example.com/a.png"),
-            "https://example.com/a.png"
-        );
-        assert_eq!(sniff(b"\x89PNG\r\n\x1a\n...."), Some(ImageFormat::Png));
-        assert_eq!(sniff(b"\xff\xd8\xff\xe0"), Some(ImageFormat::Jpeg));
-        assert_eq!(sniff(b"RIFF\0\0\0\0WEBPVP8 "), Some(ImageFormat::Webp));
     }
 
     #[test]

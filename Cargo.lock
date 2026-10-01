@@ -4139,6 +4139,7 @@ dependencies = [
 name = "markraft-app"
 version = "0.1.5"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "futures-channel",
  "futures-util",
@@ -4151,12 +4152,17 @@ dependencies = [
  "markraft-commonmark",
  "markraft-core",
  "markraft-gpui",
+ "markraft-math",
+ "markraft-media",
+ "markraft-syntax",
  "markraft-vim",
  "notify",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "objc2-web-kit",
  "raw-window-handle",
+ "resvg",
  "rust-i18n",
  "serde",
  "serde_json",
@@ -4205,11 +4211,11 @@ dependencies = [
  "markraft-commonmark",
  "markraft-core",
  "markraft-math",
+ "markraft-media",
+ "markraft-syntax",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "serde_json",
- "syntect",
- "two-face",
  "unicode-segmentation",
  "url",
 ]
@@ -4222,6 +4228,21 @@ dependencies = [
  "ratex-parser",
  "ratex-svg",
  "ratex-types",
+]
+
+[[package]]
+name = "markraft-media"
+version = "0.1.5"
+dependencies = [
+ "url",
+]
+
+[[package]]
+name = "markraft-syntax"
+version = "0.1.5"
+dependencies = [
+ "syntect",
+ "two-face",
 ]
 
 [[package]]
@@ -5049,6 +5070,19 @@ dependencies = [
  "block2 0.6.2",
  "objc2 0.6.4",
  "objc2-core-location",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-web-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2e5aaab980c433cf470df9d7af96a7b46a9d892d521a2cbbb2f8a4c16751e7f"
+dependencies = [
+ "bitflags 2.13.2",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
 ]
 

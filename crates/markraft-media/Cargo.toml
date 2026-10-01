@@ -1,0 +1,16 @@
+[package]
+name = "markraft-media"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Where a note's pictures are and what kind they are, independent of any renderer"
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+url = "2"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }

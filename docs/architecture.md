@@ -42,7 +42,7 @@ document into its `Library` and a single worker thread writes it back through
 the same `SourceTrack`, patching only the bytes the edit touched.
 
 The dependency graph points one way: `app → vim → gpui → core ← commonmark`,
-with `gpui → math` and `app → commonmark`. `markraft-gpui` uses
+with `gpui → math`, `gpui → syntax`, `gpui → media` and `app → commonmark`. `markraft-gpui` uses
 `markraft-commonmark` only in tests. It learns about a concrete document kind
 through core's `kind` contracts, which the app fills in.
 
@@ -146,6 +146,25 @@ RaTeX. It owns source-size, complexity and layout limits.
 **Invariant:** no GPUI, no window system, no raster decisions. A future export
 or formula-copy consumer can use the same artifact.
 
+### `crates/markraft-syntax`
+
+`highlight` splits code into spans that each carry a `Tone` (text, keyword,
+name, string, comment) using syntect grammars, with a bounded per-thread cache.
+`Tone::rgb` gives the colour for a light or a dark background.
+
+**Invariant:** spans name roles, never colours, so one pass serves every
+appearance and every renderer.
+
+### `crates/markraft-media`
+
+Where a note's pictures are and what kind they are: `locate`/`resolve` read an
+image source against the note's directory and `typora-root-url`, `ImageType`
+names the formats the editor draws (by extension or by sniffing bytes), and
+`MAX_IMAGE_BYTES` bounds them. `relative_url` writes a path back as a link.
+
+**Invariant:** the view, exports and pasting all read pictures through this
+crate, so a picture the editor shows is one an export carries.
+
 ### `crates/markraft-gpui`
 
 The native editor view (`EditorView`). It owns:
@@ -155,7 +174,7 @@ The native editor view (`EditorView`). It owns:
 - layout: projection lines → `LayoutLine` → visual rows, shaped lazily around
   the viewport and reused while their `LineKey` matches;
 - painting, find, AccessKit text and caret blink;
-- screen resources: image loading, syntect highlighting, and a bounded math
+- screen resources: image loading, code highlighting colours, and a bounded math
   work queue with raster caches.
 
 It talks to its host through `EditorEvent` (`Changed`, `LinkClicked`,
@@ -169,7 +188,7 @@ Vim implement `markraft_gpui::Extension`.
 state's projection.
 
 **Invariant:** the view does not know about notes, saving or paths, except the
-image directories it resolves pictures against. What a wiki link names and
+image directories it hands `markraft-media` to resolve pictures against. What a wiki link names and
 what a pasted file becomes are the host's questions.
 
 **Invariant:** screen geometry does not define document positions. Wrapping,

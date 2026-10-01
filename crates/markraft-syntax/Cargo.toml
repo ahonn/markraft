@@ -1,0 +1,17 @@
+[package]
+name = "markraft-syntax"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Code highlighting as colour roles, independent of any renderer"
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-onig"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }

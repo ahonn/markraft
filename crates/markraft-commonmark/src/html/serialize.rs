@@ -48,7 +48,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use markraft_core::kind::SYNTAX_DISPLAY_ATTR;
+use markraft_core::kind::{SYNTAX_DISPLAY_ATTR, SYNTAX_SPAN_ATTR};
 use markraft_core::{Mark, MarkTypeId, Node, NodeTypeId, Schema, Slice};
 
 use crate::house::HouseStyleHandle;
@@ -62,6 +62,14 @@ use crate::table::{Alignment, alignments_of};
 pub type HtmlNodeRule = Arc<dyn Fn(&mut HtmlState<'_>, &Node, Option<&Node>) + Send + Sync>;
 /// The opening and closing tags one mark wraps its content in.
 pub type HtmlMarkRule = Arc<dyn Fn(&Mark) -> (String, String) + Send + Sync>;
+/// Writes a whole formula-like run of inline content in one go.
+///
+/// The run is the stretch of inline children carrying one mark, delimiters
+/// included. The rule gets the mark, the run's text with its concealed spelling
+/// left out and line breaks as `\n`, and the document position where that text
+/// begins (`None` inside a tree written with [`HtmlState::render_detached`]);
+/// what it writes stands in for the entire run.
+pub type HtmlAtomRule = Arc<dyn Fn(&mut HtmlState<'_>, &Mark, &str, Option<usize>) + Send + Sync>;
 /// Node rules keyed by schema type name.
 pub type HtmlNodeRules = HashMap<String, HtmlNodeRule>;
 /// Mark rules keyed by schema type name.
@@ -102,6 +110,7 @@ pub struct HtmlSerializer {
     schema: Schema,
     nodes: Vec<Option<HtmlNodeRule>>,
     marks: Vec<Option<HtmlMarkRule>>,
+    atoms: Vec<Option<HtmlAtomRule>>,
 }
 
 impl HtmlSerializer {
@@ -123,11 +132,33 @@ impl HtmlSerializer {
                 mark_rules[id.index()] = Some(rule);
             }
         }
+        let atoms = vec![None; schema.mark_types().len()];
         HtmlSerializer {
             schema,
             nodes: node_rules,
             marks: mark_rules,
+            atoms,
         }
+    }
+
+    /// Replace the rule for one node type, keyed by schema type name. A name
+    /// the schema does not declare is ignored.
+    pub fn with_node_rule(mut self, name: &str, rule: HtmlNodeRule) -> HtmlSerializer {
+        if let Some(id) = self.schema.node_id(name) {
+            self.nodes[id.index()] = Some(rule);
+        }
+        self
+    }
+
+    /// Write every run carrying the mark named `name` through `rule` instead of
+    /// wrapping it in tags (see [`HtmlAtomRule`]). A name the schema does not
+    /// declare is ignored.
+    pub fn with_atom_rule(mut self, name: &str, rule: HtmlAtomRule) -> HtmlSerializer {
+        if let Some(id) = self.schema.mark_id(name) {
+            self.marks[id.index()] = None;
+            self.atoms[id.index()] = Some(rule);
+        }
+        self
     }
 
     /// A serialiser with the CommonMark/GFM rule tables, writing in `house`'s
@@ -160,6 +191,8 @@ impl HtmlSerializer {
         let mut state = HtmlState {
             serializer: self,
             out: String::new(),
+            at: None,
+            detached: false,
         };
         state.render_content(doc);
         state.out
@@ -182,9 +215,65 @@ impl HtmlSerializer {
 pub struct HtmlState<'a> {
     serializer: &'a HtmlSerializer,
     out: String,
+    // Where the node being rendered starts; `None` while writing the root's
+    // content, which starts at 0.
+    at: Option<usize>,
+    // Whether the nodes being written belong to some other tree than the one
+    // handed to `serialize`, so positions say nothing about that document.
+    detached: bool,
 }
 
 impl HtmlState<'_> {
+    /// The document position where the node being rendered starts, as the
+    /// document handed to [`HtmlSerializer::serialize`] counts positions, or
+    /// `None` inside a tree written with [`Self::render_detached`].
+    pub fn position(&self) -> Option<usize> {
+        (!self.detached).then(|| self.at.unwrap_or(0))
+    }
+
+    /// Run `f` with the `index`th child of `parent` — the node being rendered —
+    /// as the node being rendered, so positions inside it count from where it
+    /// starts. A rule that walks its node's children itself, rather than
+    /// through [`Self::render_content`] or [`Self::render_inline`], goes through
+    /// this for each child it writes.
+    pub fn within_child<R>(
+        &mut self,
+        parent: &Node,
+        index: usize,
+        f: impl FnOnce(&mut Self, &Node) -> R,
+    ) -> R {
+        let child = parent.child(index);
+        let start = self.content_start()
+            + parent
+                .children()
+                .take(index)
+                .map(Node::node_size)
+                .sum::<usize>();
+        let at = self.at.replace(start);
+        let result = f(self, child);
+        self.at = at;
+        result
+    }
+
+    /// Write the `index`th child of `parent` through its rule, with its position.
+    pub fn render_child(&mut self, parent: &Node, index: usize) {
+        self.within_child(parent, index, |state, child| {
+            state.render(child, Some(parent))
+        });
+    }
+
+    /// Write `node`, from a tree that is not the document's — such as what an
+    /// HTML block renders to — through the same rules, without positions.
+    pub fn render_detached(&mut self, node: &Node, parent: Option<&Node>) {
+        let detached = std::mem::replace(&mut self.detached, true);
+        self.render(node, parent);
+        self.detached = detached;
+    }
+
+    fn content_start(&self) -> usize {
+        self.at.map_or(0, |at| at + 1)
+    }
+
     /// The schema being written.
     pub fn schema(&self) -> &Schema {
         &self.serializer.schema
@@ -226,13 +315,18 @@ impl HtmlState<'_> {
 
     /// Write `parent`'s children as blocks, one per line.
     pub fn render_content(&mut self, parent: &Node) {
+        let parent_at = self.at;
+        let mut child_at = self.content_start();
         let mut first = true;
         for child in parent.children() {
             let before = self.out.len();
             if !first {
                 self.write("\n");
             }
+            self.at = Some(child_at);
             self.render(child, Some(parent));
+            self.at = parent_at;
+            child_at += child.node_size();
             // A block that wrote nothing takes its separator back with it.
             if self.out.len() == before + usize::from(!first) {
                 self.out.truncate(before);
@@ -252,21 +346,20 @@ impl HtmlState<'_> {
     /// reads back as one. Style marks that
     /// are already open are kept as a prefix even when rank order would
     /// otherwise close them — nested `*a **b** c*` must write
-    /// `<em>a <strong>b</strong> c</em>`, not reopen `<em>` around `b`.
+    /// `<em>a <strong>b</strong> c</em>`, not reopen `<em>` around `b`. A run
+    /// carrying a mark with an [`HtmlAtomRule`] is written by that rule alone.
     pub fn render_inline(&mut self, parent: &Node) {
         let mut open: Vec<Mark> = Vec::new();
         let schema = self.schema();
         let syntax = schema.mark_id(crate::schema::SYNTAX);
         let line_break = schema.node_id(crate::schema::LINE_BREAK);
         let hard = hard_break_indexes(schema, parent);
-        for (index, child) in parent.children().enumerate() {
-            let display = syntax.and_then(|ty| child.marks().get(ty)).map(|mark| {
-                mark.attrs
-                    .get(SYNTAX_DISPLAY_ATTR)
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default()
-                    .to_string()
-            });
+        let children: Vec<&Node> = parent.children().collect();
+        let parent_at = self.at;
+        let mut child_at = self.content_start();
+        let mut index = 0;
+        while index < children.len() {
+            let child = children[index];
             let marks = self.ordered_marks(&open, child.marks());
             let keep = open
                 .iter()
@@ -282,6 +375,25 @@ impl HtmlState<'_> {
                 self.write(&open_tag);
                 open.push(mark);
             }
+            if let Some((mark, rule)) = self.atom_of(child) {
+                let end = atom_end(&children, index, &mark, syntax);
+                let (text, start) = atom_text(&children[index..end], child_at, syntax, line_break);
+                let start = (!self.detached).then_some(start);
+                rule(self, &mark, &text, start);
+                child_at += children[index..end]
+                    .iter()
+                    .map(|child| child.node_size())
+                    .sum::<usize>();
+                index = end;
+                continue;
+            }
+            let display = syntax.and_then(|ty| child.marks().get(ty)).map(|mark| {
+                mark.attrs
+                    .get(SYNTAX_DISPLAY_ATTR)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            });
             // A concealed run still opens and closes the marks around it, so
             // a link that is all spelling is still a link.
             if let Some(display) = display {
@@ -293,13 +405,28 @@ impl HtmlState<'_> {
                     "<span data-type=\"softBreak\"> </span>"
                 });
             } else {
+                self.at = Some(child_at);
                 self.render(child, Some(parent));
+                self.at = parent_at;
             }
+            child_at += child.node_size();
+            index += 1;
         }
         for mark in open.into_iter().rev() {
             let close = self.mark_tags(&mark).1;
             self.write(&close);
         }
+    }
+
+    /// The first of `child`'s marks written by an atom rule, with that rule.
+    fn atom_of(&self, child: &Node) -> Option<(Mark, HtmlAtomRule)> {
+        child.marks().iter().find_map(|mark| {
+            self.serializer
+                .atoms
+                .get(mark.ty.index())
+                .and_then(Option::as_ref)
+                .map(|rule| (mark.clone(), rule.clone()))
+        })
     }
 
     /// Reorder `marks` so every mark still in `open` stays as a prefix.
@@ -326,6 +453,58 @@ impl HtmlState<'_> {
             None => (String::new(), String::new()),
         }
     }
+}
+
+/// Where the atom run starting at `children[start]` ends: the children that
+/// carry `mark`, cut where a second pair of delimiters opens. Two formulas can
+/// touch (`$a$$b$`) with equal marks; their delimiters' span numbers differ.
+fn atom_end(children: &[&Node], start: usize, mark: &Mark, syntax: Option<MarkTypeId>) -> usize {
+    let span_of = |child: &Node| {
+        syntax
+            .and_then(|ty| child.marks().get(ty))
+            .and_then(|syntax| syntax.attrs.get(SYNTAX_SPAN_ATTR))
+            .and_then(|value| value.as_int())
+    };
+    let opening = span_of(children[start]);
+    let mut end = start + 1;
+    while let Some(child) = children.get(end) {
+        if child.marks().get(mark.ty) != Some(mark) {
+            break;
+        }
+        if let Some(span) = span_of(child)
+            && opening.is_some_and(|opening| opening != span)
+        {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
+/// The text an atom run says, with its concealed spelling left out and line
+/// breaks as `\n`, and the position where that text begins.
+fn atom_text(
+    run: &[&Node],
+    run_at: usize,
+    syntax: Option<MarkTypeId>,
+    line_break: Option<NodeTypeId>,
+) -> (String, usize) {
+    let mut text = String::new();
+    let mut start = None;
+    let mut at = run_at;
+    for child in run {
+        let concealed = syntax.is_some_and(|ty| child.marks().get(ty).is_some());
+        if !concealed {
+            start.get_or_insert(at);
+            if let Some(value) = child.text() {
+                text.push_str(value);
+            } else if Some(child.type_id()) == line_break {
+                text.push('\n');
+            }
+        }
+        at += child.node_size();
+    }
+    (text, start.unwrap_or(run_at))
 }
 
 fn hard_break_indexes(schema: &Schema, parent: &Node) -> Vec<usize> {
@@ -482,8 +661,8 @@ pub fn commonmark_html_node_rules(house: &HouseStyleHandle) -> HtmlNodeRules {
         md::TABLE_ROW.to_string(),
         rule(|state, node, _| {
             state.write("<tr>");
-            for cell in node.children() {
-                state.render(cell, Some(node));
+            for index in 0..node.child_count() {
+                state.render_child(node, index);
             }
             state.write("</tr>");
         }),
@@ -659,37 +838,40 @@ fn task_item(state: &mut HtmlState<'_>, node: &Node, _: Option<&Node>) {
 /// row in its `<thead>` and the alignments on the cells that have one.
 fn table(state: &mut HtmlState<'_>, node: &Node, _: Option<&Node>) {
     let alignments = alignments_of(node);
-    let mut rows = node.children();
     state.write("<table>\n<thead>\n");
-    if let Some(header) = rows.next() {
-        table_row(state, header, &alignments, "th");
+    if node.child_count() > 0 {
+        state.within_child(node, 0, |state, header| {
+            table_row(state, header, &alignments, "th")
+        });
         state.write("\n");
     }
     state.write("</thead>");
-    let body: Vec<&Node> = rows.collect();
-    if !body.is_empty() {
+    if node.child_count() > 1 {
         state.write("\n<tbody>\n");
-        for (index, row) in body.iter().enumerate() {
-            if index > 0 {
+        for index in 1..node.child_count() {
+            if index > 1 {
                 state.write("\n");
             }
-            table_row(state, row, &alignments, "td");
+            state.within_child(node, index, |state, row| {
+                table_row(state, row, &alignments, "td")
+            });
         }
         state.write("\n</tbody>");
     }
     state.write("\n</table>");
 }
 
+/// One row, written while it is the node being rendered.
 fn table_row(state: &mut HtmlState<'_>, row: &Node, alignments: &[Alignment], tag: &str) {
     state.write("<tr>");
-    for (index, cell) in row.children().enumerate() {
+    for index in 0..row.child_count() {
         let alignment = alignments.get(index).copied().unwrap_or_default();
         state.write(&format!("<{tag}"));
         if alignment != Alignment::None {
             state.attr("align", alignment.name());
         }
         state.write(">");
-        state.render_inline(cell);
+        state.within_child(row, index, |state, cell| state.render_inline(cell));
         state.write(&format!("</{tag}>"));
     }
     state.write("</tr>");

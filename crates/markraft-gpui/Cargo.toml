@@ -12,10 +12,10 @@ log = "0.4"
 gpui.workspace = true
 markraft-core.workspace = true
 markraft-math.workspace = true
+markraft-media.workspace = true
 unicode-segmentation = "1.12"
 serde_json = "1"
-syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
-two-face = { version = "0.5", default-features = false, features = ["syntect-onig"] }
+markraft-syntax.workspace = true
 emojis = "0.9"
 url = "2"
 # gpui decodes images with the same crate; these formats are the animated ones.

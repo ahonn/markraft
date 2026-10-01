@@ -250,7 +250,7 @@ pub(super) fn shape_line(
             text_system,
             render_objects,
         );
-        let runs = text_runs(input, line, &text, heading, code, font_size, style);
+        let runs = text_runs(input, line, &text, heading, code, style);
         let shaped = text_system
             .shape_text(
                 text.text.clone().into(),

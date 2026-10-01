@@ -21,7 +21,7 @@ use markraft_core::projection::{Ancestor, Line};
 /// [`EditorStyle::callout_tones`](crate::EditorStyle::callout_tones) holds one
 /// accent per variant, in the order they are declared here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Tone {
+pub enum Tone {
     /// note, info, todo — and anything the table does not know.
     Note,
     /// abstract, summary, tldr, tip, hint, important.
@@ -39,6 +39,30 @@ pub(crate) enum Tone {
 }
 
 impl Tone {
+    /// A stable lowercase name, for class names and the like.
+    pub fn name(self) -> &'static str {
+        match self {
+            Tone::Note => "note",
+            Tone::Summary => "summary",
+            Tone::Success => "success",
+            Tone::Caution => "caution",
+            Tone::Danger => "danger",
+            Tone::Example => "example",
+            Tone::Quote => "quote",
+        }
+    }
+
+    /// Every tone, in declaration order.
+    pub const ALL: [Tone; 7] = [
+        Tone::Note,
+        Tone::Summary,
+        Tone::Success,
+        Tone::Caution,
+        Tone::Danger,
+        Tone::Example,
+        Tone::Quote,
+    ];
+
     /// Its place in [`EditorStyle::callout_tones`](crate::EditorStyle::callout_tones).
     pub(crate) fn index(self) -> usize {
         match self {
@@ -67,6 +91,35 @@ pub(crate) fn tone_of(kind: &str) -> Tone {
     }
 }
 
+/// The tone a callout type is drawn in, for hosts that draw callouts outside
+/// the view, such as an export.
+pub fn callout_tone(kind: &str) -> Tone {
+    tone_of(kind)
+}
+
+/// What a callout's heading reads: its own `title`; otherwise its type's name in
+/// the interface language, where `translated` gives one that differs from
+/// English; otherwise the type as the author wrote it, capitalised, so `NOTE`
+/// stays `NOTE` and a custom type keeps its own spelling.
+///
+/// `translated` is asked with the type in lower case.
+pub fn callout_heading(
+    kind: &str,
+    title: &str,
+    translated: impl FnOnce(&str) -> Option<String>,
+) -> String {
+    match title.trim() {
+        "" => translated(&kind.to_lowercase()).unwrap_or_else(|| {
+            let mut chars = kind.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        }),
+        title => title.to_owned(),
+    }
+}
+
 /// A callout's header: what it reads as, and the tone it is drawn in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Head {
@@ -80,10 +133,7 @@ fn localized_head(kind: &str, title: &str, messages: &crate::EditorMessages) -> 
     if kind.is_empty() {
         return None;
     }
-    let label = match title.trim() {
-        "" => messages.callout_title(kind),
-        title => title.to_owned(),
-    };
+    let label = callout_heading(kind, title, |kind| messages.callout_translation(kind));
     Some(Head {
         label,
         tone: tone_of(kind),
