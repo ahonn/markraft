@@ -1,13 +1,3 @@
-## 0.1.6 (2026-10-01)
-
-### Features
-
-- Export notes as HTML or PDF, print them, copy them as rich text, and send them to Obsidian.
-
-### Fixes
-
-- Show the new version's changelog in the update dialog.
-
 ## 0.1.5 (2026-09-30)
 
 ### Fixes
