@@ -61,6 +61,8 @@
     "save-and-hide-window": "저장하고 윈도우 가리기",
     "save-and-quit-markraft": "저장하고 Markraft 종료",
     "save-now": "지금 저장",
+    "send-to-obsidian": "Obsidian으로 보내기",
+    "send-to-obsidian-vault": "Obsidian으로 보내기: %{vault}",
     "show-folder-in-finder": "Finder에서 폴더 보기",
     "show-logs-in-finder": "Finder에서 로그 보기",
     "strikethrough": "취소선",

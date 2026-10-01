@@ -61,6 +61,8 @@
     "save-and-hide-window": "保存并隐藏窗口",
     "save-and-quit-markraft": "保存并退出 Markraft",
     "save-now": "立即保存",
+    "send-to-obsidian": "发送到 Obsidian",
+    "send-to-obsidian-vault": "发送到 Obsidian：%{vault}",
     "show-folder-in-finder": "在访达中显示文件夹",
     "show-logs-in-finder": "在访达中显示日志",
     "strikethrough": "删除线",

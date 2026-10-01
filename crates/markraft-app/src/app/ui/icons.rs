@@ -55,6 +55,7 @@ define_icons! {
     Copy => "doc.on.clipboard",
     Export => "square.and.arrow.up",
     Print => "printer",
+    Send => "paperplane",
     Document => "doc.text",
     Settings => "gearshape",
     // The Settings pages for the editor and for the syntax it writes: typing, and the

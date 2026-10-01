@@ -54,6 +54,7 @@ enum Intent {
     ExportHtml,
     ExportPdf,
     Print,
+    SendToObsidian(PathBuf),
     /// The pill under the title, and the two things done inside it.
     Rename,
     ApplyRename,
@@ -183,6 +184,7 @@ impl Intent {
             | Self::ExportHtml
             | Self::ExportPdf
             | Self::Print
+            | Self::SendToObsidian(_)
             | Self::Rename
             | Self::OpenMarkdown
             | Self::Reveal
@@ -295,6 +297,7 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::Copy | Intent::CopyRichText | Intent::CopyLink => Icon::Copy,
         Intent::Export | Intent::ExportHtml | Intent::ExportPdf => Icon::Export,
         Intent::Print => Icon::Print,
+        Intent::SendToObsidian(_) => Icon::Send,
         Intent::Rename => Icon::Edit,
         Intent::OpenMarkdown => Icon::Document,
         Intent::Settings => Icon::Settings,
@@ -499,6 +502,10 @@ impl MarkraftApp {
             Intent::Print => {
                 self.intent(Intent::Back, window, cx);
                 self.print_note(false, window, cx);
+            }
+            Intent::SendToObsidian(vault) => {
+                self.intent(Intent::Back, window, cx);
+                self.send_to_obsidian(vault, window, cx);
             }
             Intent::Rename => self.open_rename(window, cx),
             Intent::ApplyRename => self.apply_rename(window, cx),
@@ -1548,6 +1555,44 @@ impl MarkraftApp {
                 SlashEffect::Block(doc::Block::Divider),
             ),
         ];
+        let vaults = crate::send::obsidian::vaults();
+        // Without a notes folder there is no file for pictures to be found
+        // beside, and a note already in a vault has nowhere new to go.
+        let sendable = self
+            .path
+            .as_deref()
+            .is_some_and(|folder| !crate::send::obsidian::within(folder, &vaults));
+        if sendable {
+            const IDS: [&str; 8] = [
+                "send-to-obsidian-0",
+                "send-to-obsidian-1",
+                "send-to-obsidian-2",
+                "send-to-obsidian-3",
+                "send-to-obsidian-4",
+                "send-to-obsidian-5",
+                "send-to-obsidian-6",
+                "send-to-obsidian-7",
+            ];
+            if let [vault] = vaults.as_slice() {
+                items.push(Command::new(
+                    IDS[0],
+                    "command.send-to-obsidian",
+                    Intent::SendToObsidian(vault.path.clone()),
+                ));
+            } else {
+                // Several vaults: one command each, most recently used first.
+                for (id, vault) in IDS.iter().zip(&vaults) {
+                    items.push(
+                        Command::new(
+                            id,
+                            "command.send-to-obsidian-vault",
+                            Intent::SendToObsidian(vault.path.clone()),
+                        )
+                        .arg("vault", vault.name.clone()),
+                    );
+                }
+            }
+        }
         // Stepping between daily notes is offered from a daily note, towards a day
         // that has one.
         if self.adjacent_daily_note(false).is_some() {
@@ -1721,7 +1766,7 @@ impl MarkraftApp {
         (self.interaction.panel() == Panel::Actions).then(|| {
             self.filtered_actions(cx)
                 .into_iter()
-                .map(|command| self.i18n.text(command.label))
+                .map(|command| command.text(&self.i18n))
                 .collect()
         })
     }
@@ -1765,12 +1810,8 @@ impl MarkraftApp {
             .filter(|command| {
                 command.intent.is_some()
                     && !command.ex_only
-                    && (self
-                        .i18n
-                        .text(command.label)
-                        .to_lowercase()
-                        .contains(&query)
-                        || english.text(command.label).to_lowercase().contains(&query))
+                    && (command.text(&self.i18n).to_lowercase().contains(&query)
+                        || command.text(&english).to_lowercase().contains(&query))
             })
             .collect();
         items.sort_by_key(|command| command.intent.as_ref().map(Intent::action_group));
@@ -1801,7 +1842,7 @@ impl MarkraftApp {
         let vim = self.preferences.vim_mode;
         for (index, command) in items.into_iter().enumerate() {
             let ex = vim.then(|| command.ex_label()).flatten();
-            let label = self.i18n.text(command.label);
+            let label = command.text(&self.i18n);
             let Command {
                 id,
                 shortcut,

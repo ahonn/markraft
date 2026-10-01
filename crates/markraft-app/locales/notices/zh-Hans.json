@@ -7,6 +7,7 @@
   "notice.copied-markdown": "已复制为 Markdown",
   "notice.copied-rich-text": "已复制为富文本",
   "notice.exported": "已导出“%{name}”",
+  "notice.sent-to-obsidian": "已将“%{name}”发送到 Obsidian",
   "notice.open-folder-save": "请先打开文件夹以保存笔记。",
   "notice.wait-reload": "请等待当前的文件操作完成后再重新加载。",
   "notice.single-folder": "请拖入单个文件夹以打开。",

@@ -61,6 +61,8 @@
     "save-and-hide-window": "Guardar y ocultar ventana",
     "save-and-quit-markraft": "Guardar y salir de Markraft",
     "save-now": "Guardar ahora",
+    "send-to-obsidian": "Enviar a Obsidian",
+    "send-to-obsidian-vault": "Enviar a Obsidian: %{vault}",
     "show-folder-in-finder": "Mostrar carpeta en el Finder",
     "show-logs-in-finder": "Mostrar registros en el Finder",
     "strikethrough": "Tachado",

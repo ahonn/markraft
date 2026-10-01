@@ -7,6 +7,7 @@
   "notice.copied-markdown": "Markdownとしてコピーしました",
   "notice.copied-rich-text": "リッチテキストとしてコピーしました",
   "notice.exported": "“%{name}”を書き出しました",
+  "notice.sent-to-obsidian": "“%{name}”をObsidianに送りました",
   "notice.open-folder-save": "ノートを保存するにはフォルダを開いてください。",
   "notice.wait-reload": "現在のファイル操作が終わってから再読み込みしてください。",
   "notice.single-folder": "開くにはフォルダを1つだけドロップしてください。",

@@ -61,6 +61,8 @@
     "save-and-hide-window": "Sichern und Fenster ausblenden",
     "save-and-quit-markraft": "Sichern und Markraft beenden",
     "save-now": "Jetzt sichern",
+    "send-to-obsidian": "An Obsidian senden",
+    "send-to-obsidian-vault": "An Obsidian senden: %{vault}",
     "show-folder-in-finder": "Ordner im Finder zeigen",
     "show-logs-in-finder": "Protokolle im Finder zeigen",
     "strikethrough": "Durchgestrichen",
