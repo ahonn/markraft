@@ -503,6 +503,13 @@ fn a_file_changed_elsewhere_is_not_trashed_and_its_note_comes_back(cx: &mut Test
     let path = h.active_note().path.expect("a saved note");
     std::fs::write(&path, "changed elsewhere\n").unwrap();
     let note = trash_active(&mut h);
+    // The note comes back as it was read; what the file now holds arrives with
+    // the folder's next scan.
+    h.wait_until(|h| {
+        h.app
+            .update(h.cx, |app, _| app.test_note(&note.id))
+            .is_some_and(|back| crate::doc::to_markdown(&back.document) == "changed elsewhere")
+    });
 
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
