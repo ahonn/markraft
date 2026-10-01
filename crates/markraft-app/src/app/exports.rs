@@ -1,5 +1,5 @@
 //! The note on screen, taken somewhere else: a file (Markdown, HTML or PDF),
-//! paper, or the clipboard as rich text.
+//! paper, the clipboard as rich text, or an Obsidian vault.
 //!
 //! Every way out takes one road. [`MarkraftApp::deliver`] captures the
 //! committed note ([`ExportInput`]), asks for a file where the way out writes
@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::export::{Options, Profile};
+use markraft_commonmark::SourceSnapshot;
 
 /// The file a note is exported as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +31,10 @@ pub(super) struct ExportInput {
     pub(super) document: Node,
     /// The note's Markdown as it would be saved now.
     pub(super) markdown: String,
+    /// The file's bytes as read, where the note has a file.
+    pub(super) source: Option<SourceSnapshot>,
+    /// The Markdown style new syntax is spelled in.
+    pub(super) house: markraft_commonmark::HouseStyleHandle,
     pub(super) options: Options,
 }
 
@@ -72,6 +77,8 @@ impl MarkraftApp {
                 return Ok(ExportInput {
                     markdown: format!("{}\n", doc::to_markdown_in(&note.document, &house)),
                     document: note.document,
+                    source: None,
+                    house,
                     options,
                 });
             };
@@ -94,6 +101,8 @@ impl MarkraftApp {
                 },
                 document: snapshot.document,
                 markdown: snapshot.markdown,
+                source: snapshot.source,
+                house,
             })
         }
     }
@@ -292,6 +301,42 @@ impl MarkraftApp {
                     cx,
                 );
                 this.inform(Message::new("notice.copied-rich-text"), cx);
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// A copy of the note, with its pictures, as a new note in `vault`, opened
+    /// there.
+    pub(super) fn send_to_obsidian(
+        &mut self,
+        vault: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self.library.active_note().file_stem();
+        self.deliver(
+            None,
+            move |input, _| {
+                let note = crate::send::obsidian::Note {
+                    name: &name,
+                    document: &input.document,
+                    markdown: &input.markdown,
+                    source: input.source.as_ref(),
+                    house: &input.house,
+                    base: input.options.base.as_deref(),
+                    root: input.options.image_root.as_root(),
+                };
+                crate::send::obsidian::send(&vault, &note)
+            },
+            |this, path, _, cx| {
+                cx.open_url(&crate::send::obsidian::open_url(&path));
+                let name = crate::fs::file_label(&path);
+                this.inform(
+                    Message::new("notice.sent-to-obsidian").arg("name", name),
+                    cx,
+                );
             },
             window,
             cx,

@@ -31,6 +31,8 @@ pub(super) struct Command {
     /// Offered only to a `:` query, for a command that stands for vim's rather than
     /// being one of the panel's own.
     pub ex_only: bool,
+    /// A value the label names, such as the vault a note is sent to.
+    pub arg: Option<(&'static str, String)>,
 }
 
 /// How the `/` menu applies a command, once the trigger text has been deleted.
@@ -55,6 +57,7 @@ impl Command {
             checked: None,
             ex: &[],
             ex_only: false,
+            arg: None,
         }
     }
     /// A command only the editor's `/` menu offers.
@@ -73,6 +76,19 @@ impl Command {
             checked: None,
             ex: &[],
             ex_only: false,
+            arg: None,
+        }
+    }
+    /// The label names `value` where its message says `%{name}`.
+    pub(super) fn arg(mut self, name: &'static str, value: String) -> Self {
+        self.arg = Some((name, value));
+        self
+    }
+    /// The label in `i18n`'s language.
+    pub(super) fn text(&self, i18n: &crate::locale::I18n) -> String {
+        match &self.arg {
+            Some((name, value)) => i18n.text_with(self.label, &[(name, value)]),
+            None => i18n.text(self.label),
         }
     }
     pub(super) fn slash(mut self, rank: u8, effect: SlashEffect) -> Self {
@@ -170,13 +186,14 @@ impl SlashProvider {
         let mut ranked: Vec<_> = commands
             .into_iter()
             .filter_map(|command| {
+                let label = command.text(i18n);
+                let english_label = command.text(&english);
                 let (rank, effect) = command.slash?;
                 Some((
                     rank,
                     Entry {
-                        item: TypeaheadItem::new(command.id, i18n.text(command.label))
-                            .hint(command.shortcut),
-                        english_label: english.text(command.label),
+                        item: TypeaheadItem::new(command.id, label).hint(command.shortcut),
+                        english_label,
                         icon: command.intent.as_ref().map_or(Icon::Divider, intent_icon),
                         effect,
                         intent: command.intent,

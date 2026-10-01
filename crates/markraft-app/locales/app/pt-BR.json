@@ -61,6 +61,8 @@
     "save-and-hide-window": "Salvar e Ocultar Janela",
     "save-and-quit-markraft": "Salvar e Encerrar Markraft",
     "save-now": "Salvar Agora",
+    "send-to-obsidian": "Enviar para o Obsidian",
+    "send-to-obsidian-vault": "Enviar para o Obsidian: %{vault}",
     "show-folder-in-finder": "Mostrar Pasta no Finder",
     "show-logs-in-finder": "Mostrar Registros no Finder",
     "strikethrough": "Tachado",

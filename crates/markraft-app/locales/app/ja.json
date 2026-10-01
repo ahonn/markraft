@@ -61,6 +61,8 @@
     "save-and-hide-window": "保存してウインドウを隠す",
     "save-and-quit-markraft": "保存してMarkraftを終了",
     "save-now": "今すぐ保存",
+    "send-to-obsidian": "Obsidianに送る",
+    "send-to-obsidian-vault": "Obsidianに送る：%{vault}",
     "show-folder-in-finder": "フォルダをFinderに表示",
     "show-logs-in-finder": "ログをFinderに表示",
     "strikethrough": "取り消し線",

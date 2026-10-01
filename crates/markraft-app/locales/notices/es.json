@@ -7,6 +7,7 @@
   "notice.copied-markdown": "Copiado como Markdown",
   "notice.copied-rich-text": "Copiado como texto enriquecido",
   "notice.exported": "Se exportó “%{name}”",
+  "notice.sent-to-obsidian": "Se envió “%{name}” a Obsidian",
   "notice.open-folder-save": "Abre una carpeta para guardar notas.",
   "notice.wait-reload": "Espera a que termine la operación de archivo actual antes de recargar.",
   "notice.single-folder": "Suelta una sola carpeta para abrirla.",

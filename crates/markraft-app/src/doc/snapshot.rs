@@ -19,6 +19,9 @@ pub struct DocumentSnapshot {
     pub markdown: String,
     pub base_path: Option<PathBuf>,
     pub auto_number_equations: bool,
+    /// The file's bytes as read, for writing a changed copy of the document
+    /// back with everything it did not change as it was.
+    pub source: Option<SourceSnapshot>,
 }
 
 /// Capturing clones immutable state; rendering belongs on the persistence worker.
@@ -48,7 +51,7 @@ impl PendingSnapshot {
     }
 
     pub fn render(self) -> Result<DocumentSnapshot, StoreError> {
-        let markdown = match self.source {
+        let markdown = match &self.source {
             Some(source) => source
                 .render(schema(), &self.note.document)
                 .map_err(|error| StoreError::from(error.to_string()))?,
@@ -67,6 +70,7 @@ impl PendingSnapshot {
                 .path
                 .and_then(|path| path.parent().map(ToOwned::to_owned)),
             auto_number_equations: self.auto_number_equations,
+            source: self.source,
         };
         log::debug!(
             "document_snapshot note={} generation={} positions={} bytes={} file_backed={} auto_number={}",

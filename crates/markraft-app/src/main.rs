@@ -14,6 +14,7 @@ mod logging;
 mod persistence;
 mod platform;
 mod remote_images;
+mod send;
 mod storage;
 mod updater;
 mod vault;

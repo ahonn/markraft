@@ -61,6 +61,8 @@
     "save-and-hide-window": "儲存並隱藏視窗",
     "save-and-quit-markraft": "儲存並結束 Markraft",
     "save-now": "立即儲存",
+    "send-to-obsidian": "傳送到 Obsidian",
+    "send-to-obsidian-vault": "傳送到 Obsidian：%{vault}",
     "show-folder-in-finder": "在 Finder 中顯示資料夾",
     "show-logs-in-finder": "在 Finder 中顯示記錄檔",
     "strikethrough": "刪除線",
