@@ -241,6 +241,7 @@ impl MarkraftApp {
             multiple: false,
             prompt: Some(self.i18n.text(prompt).into()),
         });
+        let paths = self.file_panel(paths, window, cx);
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
                 return;
