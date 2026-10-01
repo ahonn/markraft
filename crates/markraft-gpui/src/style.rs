@@ -255,7 +255,7 @@ impl EditorStyle {
     }
 
     /// The accent a callout of `tone` is drawn in.
-    pub(crate) fn callout_tone(&self, tone: crate::callout::Tone) -> Hsla {
+    pub fn callout_tone(&self, tone: crate::callout::Tone) -> Hsla {
         self.callout_tones[tone.index()]
     }
 }

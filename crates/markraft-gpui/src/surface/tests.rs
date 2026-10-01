@@ -604,7 +604,7 @@ fn runs_styled(
     let line = &projection.lines()[0];
     let font_size = style.font_size(None, false);
     let text = display_text(&input, line, 0, font_size, px(600.), &text_system());
-    let runs = text_runs(&input, line, &text, None, false, font_size, &style);
+    let runs = text_runs(&input, line, &text, None, false, &style);
     (text.text.to_string(), runs, style.clone())
 }
 

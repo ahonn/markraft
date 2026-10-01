@@ -133,6 +133,29 @@ pub fn use_system_pasteboard(cx: &mut App) {
     cx.set_global(SystemPasteboard);
 }
 
+/// Put a whole `document` on the clipboard as a copy the host makes outside the
+/// editor, such as a note as rich text: `text` for other apps' plain flavour,
+/// `html` as the rich one, and the document itself as the metadata an editor
+/// pastes from, so a paste back into one restores the note rather than reading
+/// the presentation HTML. Without [`use_system_pasteboard`] there is no HTML.
+pub fn write_rich_text(
+    schema: &Schema,
+    codecs: &dyn Codecs,
+    document: &markraft_core::Node,
+    text: String,
+    html: &str,
+    cx: &mut App,
+) {
+    let slice = Slice::new(document.content().clone(), 0, 0);
+    cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(
+        text,
+        metadata(schema, codecs, &slice),
+    ));
+    if cx.has_global::<SystemPasteboard>() {
+        platform::write_html(html);
+    }
+}
+
 pub(crate) fn write(schema: &Schema, codecs: &dyn Codecs, slice: &Slice, cx: &mut App) {
     let metadata = metadata(schema, codecs, slice);
     cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(
@@ -288,6 +311,28 @@ mod tests {
         ] {
             assert!(math_paste_at(source, range).is_none(), "{source}");
         }
+    }
+
+    #[gpui::test]
+    fn a_rich_text_copy_pastes_back_as_the_document(cx: &mut gpui::TestAppContext) {
+        let schema = commonmark_schema();
+        let codecs = CommonMarkCodecs::new(schema.clone(), Default::default());
+        let document = markraft_commonmark::from_markdown(&schema, "Area $x^2$ **ok**").unwrap();
+        cx.update(|cx| {
+            write_rich_text(
+                &schema,
+                &codecs,
+                &document,
+                "Area x^2 ok".into(),
+                "<p>Area <img src=\"data:image/png;base64,AAAA\"> ok</p>",
+                cx,
+            );
+            let item = cx.read_from_clipboard().expect("an item");
+            assert_eq!(item.text().as_deref(), Some("Area x^2 ok"));
+            let pasted =
+                read_fragment(&schema, &codecs, &item, PasteMode::Formatted, cx).expect("a slice");
+            assert_eq!(markup(&codecs, &pasted), "Area $x^2$ **ok**");
+        });
     }
 
     #[test]

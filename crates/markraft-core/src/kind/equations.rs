@@ -69,6 +69,9 @@ impl std::fmt::Display for EquationDiagnostic {
 pub struct Equation {
     /// Formula boundaries, including delimiters, in projected characters.
     pub source: Range<usize>,
+    /// Absolute document position where the formula's TeX begins, just past its
+    /// opening delimiter, when the projection maps it back to the tree.
+    pub position: Option<usize>,
     /// TeX body with numbering metadata removed and references resolved.
     pub render_source: String,
     /// TeX for the separately laid-out tag, including its desired parentheses.
@@ -81,12 +84,24 @@ pub struct Equation {
 
 /// A deterministic index keyed by projected line and formula source start.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct EquationIndex(BTreeMap<(usize, usize), Equation>);
+pub struct EquationIndex {
+    by_source: BTreeMap<(usize, usize), Equation>,
+    by_position: BTreeMap<usize, (usize, usize)>,
+}
 
 impl EquationIndex {
     /// Look up one formula by its projected location.
     pub fn get(&self, line_index: usize, source_start: usize) -> Option<&Equation> {
-        self.0.get(&(line_index, source_start))
+        self.by_source.get(&(line_index, source_start))
+    }
+
+    /// Look up one formula by the document position where its TeX begins
+    /// ([`Equation::position`]), for consumers that walk the tree rather than
+    /// the projection.
+    pub fn at_position(&self, position: usize) -> Option<&Equation> {
+        self.by_position
+            .get(&position)
+            .and_then(|key| self.by_source.get(key))
     }
 
     /// Resolve labels in a separate pass so forward references and offscreen
@@ -203,10 +218,14 @@ impl EquationIndex {
             } else {
                 None
             };
-            result.0.insert(
+            if let Some(position) = item.position {
+                result.by_position.insert(position, item.key);
+            }
+            result.by_source.insert(
                 item.key,
                 Equation {
                     source: item.source.clone(),
+                    position: item.position,
                     render_source,
                     tag: item.tag.as_ref().map(Tag::render),
                     target,

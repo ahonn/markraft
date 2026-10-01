@@ -37,7 +37,8 @@ mod surface;
 mod syntax;
 mod typeahead;
 mod wiki;
-pub use clipboard::use_system_pasteboard;
+pub use callout::{Tone as CalloutTone, callout_heading, callout_tone};
+pub use clipboard::{use_system_pasteboard, write_rich_text};
 pub use emoji::{EmojiInsertion, EmojiShortcodes, emoji_menu};
 pub use extension::{
     ActionHandler, CaretShape, EXTENSION_ORIGIN_PREFIX, EditorCx, Extension, ExtensionHandle,

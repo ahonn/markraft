@@ -790,3 +790,145 @@ fn a_style_markdown_cannot_say_is_given_up_and_its_text_kept() {
         assert_eq!(markdown(html), expected, "{html}");
     }
 }
+
+// -- rules a consumer supplies ------------------------------------------------
+
+/// A writer whose math runs come out as `[tex@position]`.
+fn atom_writer() -> markraft_commonmark::HtmlSerializer {
+    serializer().with_atom_rule(
+        markraft_commonmark::schema::MATH,
+        std::sync::Arc::new(|state, mark, tex, position| {
+            let display = mark
+                .attrs
+                .get("display")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            state.write(if display { "[D " } else { "[" });
+            state.text(tex);
+            match position {
+                Some(position) => state.write(&format!("@{position}]")),
+                None => state.write("@-]"),
+            }
+        }),
+    )
+}
+
+#[test]
+fn an_atom_rule_writes_each_formula_once_without_its_delimiters() {
+    let codec = Codec::new();
+    let doc = codec.parse("a $x^2$ **b $<y>$** c\n\n$$\nE=mc^2\n$$\n\n$a$$b$");
+    assert_eq!(
+        atom_writer().serialize(&doc),
+        "<p>a [x^2@4] <strong>b [&lt;y&gt;@14]</strong> c</p>\n\
+         <p>[D \nE=mc^2\n@26]</p>\n\
+         <p>[a@39][b@42]</p>"
+    );
+}
+
+#[test]
+fn atom_positions_are_the_ones_equation_numbering_keys_on() {
+    use markraft_core::kind::{DocTypes, equations::EquationIndex};
+    use markraft_core::projection::Projection;
+    let codec = Codec::new();
+    let doc = codec.parse("Energy\n\n$$\nE=mc^2 \\label{e}\n$$\n\nsee $\\eqref{e}$ and $x$");
+    let types = DocTypes::from_schema_names(
+        &codec.schema,
+        &markraft_commonmark::commonmark_doc_type_names(),
+    );
+    let equations = EquationIndex::build(&Projection::of(&doc, &codec.schema), &types, true);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let writer = serializer().with_atom_rule(
+        markraft_commonmark::schema::MATH,
+        std::sync::Arc::new(move |_, _, tex, position| {
+            record.lock().unwrap().push((
+                tex.to_owned(),
+                position.expect("a position in the document"),
+            ));
+        }),
+    );
+    writer.serialize(&doc);
+    let seen = seen.lock().unwrap();
+    let found: Vec<_> = seen
+        .iter()
+        .map(|(tex, position)| {
+            let equation = equations
+                .at_position(*position)
+                .unwrap_or_else(|| panic!("no equation at {position} for {tex:?}"));
+            (equation.render_source.as_str(), equation.tag.as_deref())
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [("\nE=mc^2  \n", Some("(1)")), ("{(1)}", None), ("x", None)]
+    );
+}
+
+#[test]
+fn a_replaced_node_rule_knows_where_its_node_starts() {
+    let codec = Codec::new();
+    let doc = codec.parse("one\n\n## two\n\nthree");
+    let writer = serializer().with_node_rule(
+        markraft_commonmark::schema::HEADING,
+        std::sync::Arc::new(|state, node, _| {
+            let at = state.position().expect("a node of the document");
+            state.write(&format!("<h9 data-at=\"{at}\">"));
+            state.render_inline(node);
+            state.write("</h9>");
+        }),
+    );
+    assert_eq!(
+        writer.serialize(&doc),
+        "<p>one</p>\n<h9 data-at=\"5\">two</h9>\n<p>three</p>"
+    );
+}
+
+#[test]
+fn a_detached_tree_gives_its_formulas_no_position() {
+    let codec = Codec::new();
+    let doc = codec.parse("> $a$\n\n$b$");
+    let writer = atom_writer().with_node_rule(
+        markraft_commonmark::schema::BLOCKQUOTE,
+        std::sync::Arc::new(|state, node, _| {
+            for child in node.children() {
+                state.render_detached(child, Some(node));
+            }
+        }),
+    );
+    assert_eq!(writer.serialize(&doc), "<p>[a@-]</p>\n<p>[b@9]</p>");
+}
+
+#[test]
+fn every_formula_position_is_the_one_its_equation_has() {
+    use markraft_core::kind::{DocTypes, equations::EquationIndex};
+    use markraft_core::projection::Projection;
+    let codec = Codec::new();
+    let doc = codec.parse(
+        "| x | y |\n|---|---|\n| $a$ | ab $b$ |\n| $c$ | $d$ |\n\n\
+         - [ ] task $e$\n  - nested $f$\n\n> quote $g$\n\n1. item $h$\n\n$i$ end",
+    );
+    let types = DocTypes::from_schema_names(
+        &codec.schema,
+        &markraft_commonmark::commonmark_doc_type_names(),
+    );
+    let equations = EquationIndex::build(&Projection::of(&doc, &codec.schema), &types, true);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = seen.clone();
+    serializer()
+        .with_atom_rule(
+            markraft_commonmark::schema::MATH,
+            std::sync::Arc::new(move |_, _, tex, position| {
+                record.lock().unwrap().push((tex.to_owned(), position));
+            }),
+        )
+        .serialize(&doc);
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 9);
+    for (tex, position) in seen.iter() {
+        let position = position.unwrap_or_else(|| panic!("{tex} has no position"));
+        let equation = equations
+            .at_position(position)
+            .unwrap_or_else(|| panic!("no equation at {position} for {tex}"));
+        assert_eq!(&equation.render_source, tex, "at {position}");
+    }
+}

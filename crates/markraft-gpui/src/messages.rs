@@ -189,23 +189,20 @@ impl EditorMessages {
         }
     }
 
-    pub(crate) fn callout_title(&self, kind: &str) -> String {
-        let key = format!("editor.callout-{}", kind.to_lowercase());
+    /// The interface language's name for a callout type, given in lower case,
+    /// where it has one that differs from English.
+    pub(crate) fn callout_translation(&self, kind: &str) -> Option<String> {
+        let key = format!("editor.callout-{kind}");
         let message = EditorMessage::ALL
             .iter()
-            .find(|message| message.key() == key);
-        if let Some(message) = message {
-            let translated = self.text(*message);
-            if translated != message.english() {
-                return translated;
-            }
-        }
-        // Preserve the author's capitalization and unknown custom callout types.
-        let mut chars = kind.chars();
-        chars
-            .next()
-            .map(|first| first.to_uppercase().chain(chars).collect())
-            .unwrap_or_default()
+            .find(|message| message.key() == key)?;
+        let translated = self.text(*message);
+        (translated != message.english()).then_some(translated)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn callout_title(&self, kind: &str) -> String {
+        crate::callout::callout_heading(kind, "", |kind| self.callout_translation(kind))
     }
 }
 

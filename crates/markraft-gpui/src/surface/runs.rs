@@ -15,7 +15,6 @@ pub(super) fn text_runs(
     text: &DisplayText,
     heading: Option<u8>,
     code_block: bool,
-    font_size: Pixels,
     style: &EditorStyle,
 ) -> Runs {
     let types = input.types;
@@ -182,14 +181,14 @@ pub(super) fn text_runs(
     }
     if code_block {
         let language = types.code_language(line).unwrap_or("");
-        let highlighted = crate::syntax::highlight(&text.text, language, style.background.l < 0.5);
+        let highlighted = markraft_syntax::highlight(&text.text, language);
         let total: usize = highlighted
             .iter()
-            .map(|row| row.iter().map(|(len, _)| len).sum::<usize>())
+            .map(|row| row.iter().map(|span| span.len).sum::<usize>())
             .sum::<usize>()
             + highlighted.len().saturating_sub(1);
         if total == text.text.len() {
-            runs = highlight_runs(&highlighted, font_size);
+            runs = highlight_runs(&highlighted, style.background.l < 0.5);
         }
     }
     // A raw block the kind reads more in — a run of link definitions — is drawn
@@ -288,10 +287,7 @@ pub(super) fn source_highlight_runs(
     runs.into_iter().map(|(len, part)| run(len, part)).collect()
 }
 
-pub(super) fn highlight_runs(
-    highlighted: &crate::syntax::HighlightedLines,
-    _font_size: Pixels,
-) -> Vec<TextRun> {
+pub(super) fn highlight_runs(highlighted: &markraft_syntax::Lines, dark: bool) -> Vec<TextRun> {
     let mut runs = Vec::new();
     for (index, row) in highlighted.iter().enumerate() {
         if index > 0 {
@@ -304,21 +300,15 @@ pub(super) fn highlight_runs(
                 strikethrough: None,
             });
         }
-        for (len, syntax) in row {
+        for span in row {
             let mut face = font(CODE_FONT);
-            // Themes embolden keywords; at note size colour alone reads calmer.
-            if syntax
-                .font_style
-                .contains(syntect::highlighting::FontStyle::ITALIC)
-            {
+            if span.tone.italic() {
                 face.style = FontStyle::Italic;
             }
-            let color = syntax.foreground;
             runs.push(TextRun {
-                len: *len,
+                len: span.len,
                 font: face,
-                color: rgb(((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32)
-                    .into(),
+                color: rgb(span.tone.rgb(dark)).into(),
                 background_color: None,
                 underline: None,
                 strikethrough: None,
