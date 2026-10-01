@@ -32,6 +32,40 @@ pub(super) async fn receive<T>(
 }
 
 impl MarkraftApp {
+    /// Hold `panel`, a system file panel just opened, until it answers, with the
+    /// note stepped down from floating meanwhile. macOS opens these panels at
+    /// the normal window level, so a note kept above other windows would cover
+    /// the panel it asked for. The answer comes back unchanged.
+    pub(super) fn file_panel<T: 'static>(
+        &mut self,
+        panel: futures_channel::oneshot::Receiver<T>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> futures_channel::oneshot::Receiver<T> {
+        if !self.preferences.always_on_top {
+            return panel;
+        }
+        if let Some(platform) = &self.platform {
+            let _ = platform.set_always_on_top(window, false);
+        }
+        let (answer, answered) = futures_channel::oneshot::channel();
+        cx.spawn_in(window, async move |this, cx| {
+            let reply = panel.await;
+            let _ = cx.update(|window, cx| {
+                this.update(cx, |this, _| {
+                    if let Some(platform) = &this.platform {
+                        let _ = platform.set_always_on_top(window, this.preferences.always_on_top);
+                    }
+                })
+            });
+            if let Ok(reply) = reply {
+                let _ = answer.send(reply);
+            }
+        })
+        .detach();
+        answered
+    }
+
     pub(super) fn is_reloading(&self) -> bool {
         self.reloading.load(std::sync::atomic::Ordering::Relaxed)
     }

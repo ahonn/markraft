@@ -121,7 +121,8 @@ impl MarkraftApp {
         let input = self.export_input(cx);
         let prompt = save_as.map(|name| {
             let directory = self.path.clone().unwrap_or_default();
-            cx.prompt_for_new_path(&directory, Some(&name))
+            let panel = cx.prompt_for_new_path(&directory, Some(&name));
+            self.file_panel(panel, window, cx)
         });
         // The save panel asks before replacing a file, but an export never
         // replaces a note: that would lose it.

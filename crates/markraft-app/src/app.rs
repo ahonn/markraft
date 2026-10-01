@@ -1620,6 +1620,7 @@ impl MarkraftApp {
             multiple: false,
             prompt: Some(self.i18n.text("dialog.use-folder").into()),
         });
+        let prompt = self.file_panel(prompt, window, cx);
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(mut paths))) = prompt.await
                 && let Some(directory) = paths.pop()
@@ -1711,6 +1712,7 @@ impl MarkraftApp {
         );
         let directory = self.path.clone().unwrap_or_default();
         let prompt = cx.prompt_for_new_path(&directory, Some(&filename));
+        let prompt = self.file_panel(prompt, window, cx);
         let executor = cx.background_executor().clone();
         self.run_io(
             async move {
@@ -1850,6 +1852,7 @@ impl MarkraftApp {
             multiple: true,
             prompt: Some(self.i18n.text("dialog.open-markdown").into()),
         });
+        let prompt = self.file_panel(prompt, window, cx);
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = prompt.await {
                 let _ = cx.update(|window, cx| {
@@ -2032,6 +2035,7 @@ impl MarkraftApp {
             multiple: false,
             prompt: Some(self.i18n.text("dialog.new-folder").into()),
         });
+        let prompt = self.file_panel(prompt, window, cx);
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = prompt.await
                 && let Some(path) = paths.first()
@@ -2074,6 +2078,7 @@ impl MarkraftApp {
             multiple: false,
             prompt: Some(self.i18n.text("dialog.image-folder").into()),
         });
+        let prompt = self.file_panel(prompt, window, cx);
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = prompt.await
                 && let Some(path) = paths.first()
