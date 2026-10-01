@@ -69,6 +69,7 @@ pub fn prepare(
     let public = prepared.join("public");
     fs::create_dir(&public)?;
     let base = format!("http://127.0.0.1:{port}");
+    let notes = "<!doctype html><html><body><h1>Local Sparkle Update Test</h1><p>Isolated test release 0.1.1. Notes should survive installation and relaunch.</p></body></html>\n";
     for (version, feed_name) in [("0.1.0", "no-update"), ("0.1.1", "valid")] {
         let version_dir = prepared.join(version);
         fs::create_dir(&version_dir)?;
@@ -81,6 +82,7 @@ pub fn prepare(
         let name = format!("Markraft-Update-Test-{version}.zip");
         let archive = archives.join(&name);
         crate::macos::zip(&app, &archive)?;
+        fs::write(archive.with_extension("html"), notes)?;
         let feed = crate::release::generate_appcast(
             root,
             &archives,
@@ -88,9 +90,8 @@ pub fn prepare(
             &format!("{base}/"),
             &format!("{base}/release-notes.html"),
         )?;
+        crate::release::verify_feed(&feed, &archive, &public_key)?;
         let xml = fs::read_to_string(feed)?;
-        let signature = signature_value(&xml)?.1;
-        crate::crypto::verify_archive(&archive, &public_key, signature)?;
         fs::write(public.join(format!("{feed_name}.xml")), &xml)?;
         if feed_name == "valid" {
             fs::write(
@@ -100,10 +101,7 @@ pub fn prepare(
         }
         fs::rename(archive, public.join(name))?;
     }
-    fs::write(
-        public.join("release-notes.html"),
-        "<!doctype html><html><body><h1>Local Sparkle Update Test</h1><p>Isolated test release 0.1.1. Notes should survive installation and relaunch.</p></body></html>\n",
-    )?;
+    fs::write(public.join("release-notes.html"), notes)?;
     fs::write(prepared.join("scenario.txt"), format!("{scenario}\n"))?;
     fs::write(
         prepared.join("config.json"),

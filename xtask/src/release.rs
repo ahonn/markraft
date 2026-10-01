@@ -23,6 +23,7 @@ pub fn generate_appcast(
                 download_prefix,
                 "--full-release-notes-url",
                 full_notes_url,
+                "--embed-release-notes",
                 "--maximum-deltas",
                 "0",
                 "--maximum-versions",
@@ -62,7 +63,37 @@ pub fn verify_feed(feed: &Path, archive: &Path, public_key: &str) -> Result<()> 
         length == fs::metadata(archive)?.len(),
         "Appcast archive length does not match"
     );
-    crypto::verify_archive(archive, public_key, signature)
+    crypto::verify_archive(archive, public_key, signature)?;
+    let item = enclosure
+        .parent()
+        .filter(|node| node.has_tag_name("item"))
+        .context("Appcast enclosure must belong to an update item")?;
+    ensure!(
+        item.children().any(|node| {
+            node.has_tag_name("description")
+                && node.text().is_some_and(|text| !text.trim().is_empty())
+        }),
+        "Appcast update is missing embedded release notes"
+    );
+    Ok(())
+}
+
+fn release_notes(root: &Path, version: &str) -> Result<String> {
+    // Use the same version section as the GitHub release, before expensive packaging.
+    let markdown = output(
+        Command::new("bash")
+            .arg(root.join("scripts/changelog-section.sh"))
+            .arg(version),
+    )
+    .with_context(|| format!("Read CHANGELOG.md release notes for {version}"))?;
+    ensure!(
+        !markdown.trim().is_empty(),
+        "CHANGELOG.md release notes for {version} are empty"
+    );
+    Ok(comrak::markdown_to_html(
+        &markdown,
+        &comrak::Options::default(),
+    ))
 }
 
 fn required_env(name: &str) -> Result<String> {
@@ -136,6 +167,7 @@ pub fn release(root: &Path, tag: &str, prebuilt: bool) -> Result<()> {
         tag == format!("v{version}"),
         "Release tag must equal v{version}"
     );
+    let notes = release_notes(root, version)?;
     let app = macos::bundle(
         root,
         macos::BundleOptions {
@@ -162,6 +194,8 @@ pub fn release(root: &Path, tag: &str, prebuilt: bool) -> Result<()> {
     let filename = format!("Markraft-{version}-universal.zip");
     let archive = staging.join(&filename);
     macos::zip(&app, &archive)?;
+    // Sparkle discovers release notes by the archive's basename and embeds the HTML.
+    fs::write(archive.with_extension("html"), notes)?;
     let feed = generate_appcast(
         root,
         &staging,
@@ -208,6 +242,41 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     #[test]
+    fn renders_only_the_requested_changelog_section() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::create_dir(dir.path().join("scripts"))?;
+        fs::write(
+            dir.path().join("scripts/changelog-section.sh"),
+            include_str!("../../scripts/changelog-section.sh"),
+        )?;
+        fs::write(
+            dir.path().join("CHANGELOG.md"),
+            "## 0.1.50 (2026-10-02)\n\n- Future update.\n\n## 0.1.5 (2026-10-01)\n\n### Fixes\n\n- Show **更新日志** with `A & B` and [details](https://markraft.app).\n\n## 0.1.4 (2026-09-28)\n\n- Older update.\n",
+        )?;
+        let html = release_notes(dir.path(), "0.1.5")?;
+        assert!(html.contains("<h3>Fixes</h3>"));
+        assert!(html.contains("<strong>更新日志</strong>"));
+        assert!(html.contains("<code>A &amp; B</code>"));
+        assert!(html.contains("<a href=\"https://markraft.app\">details</a>"));
+        assert!(!html.contains("Future update"));
+        assert!(!html.contains("Older update"));
+        assert!(!html.contains("0.1.5"));
+
+        assert!(release_notes(dir.path(), "0.1.6").is_err());
+        fs::write(
+            dir.path().join("CHANGELOG.md"),
+            "## 0.1.5 (2026-10-01)\n\n \n## 0.1.4 (2026-09-28)\n\n- Older update.\n",
+        )?;
+        assert!(
+            release_notes(dir.path(), "0.1.5")
+                .unwrap_err()
+                .to_string()
+                .contains("are empty")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn validates_feed_signature_and_length_before_release() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let archive = dir.path().join("app.zip");
@@ -220,7 +289,7 @@ mod tests {
             fs::write(
                 &feed,
                 format!(
-                    r#"<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><item><enclosure length="{length}" sparkle:edSignature="{signature}"/></item></channel></rss>"#
+                    r#"<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><item><description><![CDATA[<p>Release notes.</p>]]></description><enclosure length="{length}" sparkle:edSignature="{signature}"/></item></channel></rss>"#
                 ),
             )?;
             assert_eq!(verify_feed(&feed, &archive, &public).is_ok(), valid);
@@ -261,6 +330,95 @@ mod tests {
                 .to_string();
             assert!(error.contains(reason), "{reason:?} not in {error:?}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_release_notes_missing_from_the_update_item() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let archive = dir.path().join("app.zip");
+        fs::write(&archive, b"archive")?;
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let public = STANDARD.encode(key.verifying_key().as_bytes());
+        let signature = STANDARD.encode(key.sign(b"archive").to_bytes());
+        let feed = dir.path().join("appcast.xml");
+        for notes in [
+            "",
+            "<description/>",
+            "<description> \n </description>",
+            "<sparkle:fullReleaseNotesLink>https://markraft.app</sparkle:fullReleaseNotesLink>",
+            "<sparkle:releaseNotesLink>https://markraft.app/notes.html</sparkle:releaseNotesLink>",
+        ] {
+            fs::write(
+                &feed,
+                format!(
+                    r#"<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><description>Channel description.</description><item><description>Another update.</description></item><item>{notes}<enclosure length="7" sparkle:edSignature="{signature}"/></item></channel></rss>"#
+                ),
+            )?;
+            assert!(
+                verify_feed(&feed, &archive, &public)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("missing embedded release notes")
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires the Sparkle tools installed by scripts/download-sparkle.sh"]
+    fn sparkle_embeds_release_notes_in_generated_feed() -> Result<()> {
+        let root = crate::root();
+        let dir = tempfile::tempdir()?;
+        let key_file = dir.path().join("private-key");
+        let public_key = crypto::generate_key(&key_file)?;
+        let app = dir.path().join("ReleaseTest.app");
+        fs::create_dir_all(app.join("Contents/MacOS"))?;
+        fs::copy("/bin/echo", app.join("Contents/MacOS/ReleaseTest"))?;
+        let mut info = plist::Dictionary::new();
+        for (name, value) in [
+            ("CFBundleIdentifier", "app.markraft.release-test"),
+            ("CFBundleName", "ReleaseTest"),
+            ("CFBundleExecutable", "ReleaseTest"),
+            ("CFBundlePackageType", "APPL"),
+            ("CFBundleVersion", "0.1.5"),
+            ("CFBundleShortVersionString", "0.1.5"),
+            ("LSMinimumSystemVersion", "13.0"),
+            ("SUPublicEDKey", &public_key),
+        ] {
+            info.insert(name.into(), value.into());
+        }
+        plist::Value::Dictionary(info).to_file_xml(app.join("Contents/Info.plist"))?;
+        run(Command::new("codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(&app))?;
+        let archives = dir.path().join("archives");
+        let archive = archives.join("ReleaseTest-0.1.5.zip");
+        macos::zip(&app, &archive)?;
+        let notes = "<!doctype html><html><body><h3>Fixes</h3><p>Show 更新日志 &amp; details.</p></body></html>";
+        fs::write(archive.with_extension("html"), notes)?;
+        let feed = generate_appcast(
+            &root,
+            &archives,
+            &key_file,
+            "https://example.com/download/",
+            "https://example.com/releases/0.1.5",
+        )?;
+        verify_feed(&feed, &archive, &public_key)?;
+        let xml = fs::read_to_string(feed)?;
+        let document = roxmltree::Document::parse(&xml)?;
+        let description = document
+            .descendants()
+            .find(|node| node.has_tag_name("description"))
+            .context("Missing embedded notes")?;
+        assert_eq!(description.text(), Some(notes));
+        assert!(!document.descendants().any(|node| {
+            node.has_tag_name((
+                "http://www.andymatuschak.org/xml-namespaces/sparkle",
+                "releaseNotesLink",
+            ))
+        }));
         Ok(())
     }
 }

@@ -38,3 +38,5 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Verify Sparkle release notes generation
+        run: cargo test -p xtask --locked sparkle_embeds_release_notes_in_generated_feed -- --ignored

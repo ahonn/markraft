@@ -9112,6 +9112,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "clap",
+ "comrak",
  "ed25519-dalek",
  "plist",
  "roxmltree 0.21.1",
