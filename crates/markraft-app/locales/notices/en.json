@@ -5,6 +5,8 @@
   "notice.trash-failed": "Couldn't move to Trash.",
   "notice.trashed": "Moved to Trash",
   "notice.copied-markdown": "Copied as Markdown",
+  "notice.copied-rich-text": "Copied as rich text",
+  "notice.exported": "Exported “%{name}”",
   "notice.open-folder-save": "Open a folder to save notes.",
   "notice.wait-reload": "Wait for the current file operation before reloading.",
   "notice.single-folder": "Drop a single folder to open it.",

@@ -5,6 +5,8 @@
   "notice.trash-failed": "No se pudo trasladar a la papelera.",
   "notice.trashed": "Trasladada a la papelera",
   "notice.copied-markdown": "Copiado como Markdown",
+  "notice.copied-rich-text": "Copiado como texto enriquecido",
+  "notice.exported": "Se exportó “%{name}”",
   "notice.open-folder-save": "Abre una carpeta para guardar notas.",
   "notice.wait-reload": "Espera a que termine la operación de archivo actual antes de recargar.",
   "notice.single-folder": "Suelta una sola carpeta para abrirla.",

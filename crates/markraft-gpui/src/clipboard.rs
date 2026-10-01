@@ -237,11 +237,14 @@ mod platform {
 
     pub(super) fn write_html(html: &str) {
         let pasteboard = NSPasteboard::generalPasteboard();
+        // AppKit's HTML importer otherwise guesses a legacy encoding for the
+        // UTF-8 bytes on the pasteboard, corrupting non-ASCII text in other apps.
+        let html = format!("<meta charset=\"utf-8\">{html}");
         // Add the HTML representation to GPUI's existing text + metadata item.
         // A nil owner is valid because the data is supplied synchronously below.
         unsafe {
             pasteboard.addTypes_owner(&NSArray::from_slice(&[NSPasteboardTypeHTML]), None);
-            pasteboard.setString_forType(&NSString::from_str(html), NSPasteboardTypeHTML);
+            pasteboard.setString_forType(&NSString::from_str(&html), NSPasteboardTypeHTML);
         }
     }
 }

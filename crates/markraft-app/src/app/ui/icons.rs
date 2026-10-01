@@ -54,6 +54,7 @@ define_icons! {
     Unlink => "eraser",
     Copy => "doc.on.clipboard",
     Export => "square.and.arrow.up",
+    Print => "printer",
     Document => "doc.text",
     Settings => "gearshape",
     // The Settings pages for the editor and for the syntax it writes: typing, and the

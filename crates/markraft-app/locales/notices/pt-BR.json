@@ -5,6 +5,8 @@
   "notice.trash-failed": "Não foi possível mover para o Lixo.",
   "notice.trashed": "Movida para o Lixo",
   "notice.copied-markdown": "Copiado como Markdown",
+  "notice.copied-rich-text": "Copiado como texto formatado",
+  "notice.exported": "“%{name}” exportado",
   "notice.open-folder-save": "Abra uma pasta para salvar notas.",
   "notice.wait-reload": "Aguarde a operação de arquivo atual antes de recarregar.",
   "notice.single-folder": "Solte uma única pasta para abri-la.",

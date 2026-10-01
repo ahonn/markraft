@@ -5,6 +5,8 @@
   "notice.trash-failed": "無法移到垃圾桶。",
   "notice.trashed": "已移到垃圾桶",
   "notice.copied-markdown": "已拷貝為 Markdown",
+  "notice.copied-rich-text": "已拷貝為富文字",
+  "notice.exported": "已輸出「%{name}」",
   "notice.open-folder-save": "請先打開資料夾以儲存筆記。",
   "notice.wait-reload": "請等待目前的檔案作業完成後再重新載入。",
   "notice.single-folder": "請拖入單一資料夾以打開。",

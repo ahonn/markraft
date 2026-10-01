@@ -475,6 +475,21 @@ impl Note {
             .collect()
     }
 
+    /// The note's file name without its extension, which copies of the note
+    /// are named after. A note without a file goes by its title.
+    pub fn file_stem(&self) -> String {
+        match self.path.as_deref().and_then(Path::file_stem) {
+            Some(stem) => stem.to_string_lossy().into_owned(),
+            None => self.title().replace(['/', ':'], "-"),
+        }
+    }
+
+    /// The note's file name with `extension` in place of its own, for a copy of
+    /// it in another format.
+    pub fn file_name(&self, extension: &str) -> String {
+        format!("{}.{extension}", self.file_stem())
+    }
+
     /// User-visible fallback titles are localized without changing file names. A
     /// note with nothing to title it but a file, such as a daily note made from no
     /// template, goes by the file's name, as the title bar names it.
@@ -1076,6 +1091,17 @@ mod tests {
         assert_eq!(library.note(&html).unwrap().title(), "Real title");
         let markup = library.new_note(doc::from_markdown("<hr/>"));
         assert_eq!(library.note(&markup).unwrap().title(), "Untitled");
+    }
+
+    #[test]
+    fn a_copy_is_named_after_the_file_and_otherwise_the_title() {
+        let mut library = Library::default();
+        let id = library.new_note(doc::from_markdown("# Trip: day 1/2\n"));
+        let note = library.note(&id).unwrap();
+        assert_eq!(note.file_name("pdf"), "Trip- day 1-2.pdf");
+        let note = library.notes.iter_mut().find(|note| note.id == id).unwrap();
+        note.path = Some(PathBuf::from("/notes/2026 plans.v2.md"));
+        assert_eq!(note.file_name("html"), "2026 plans.v2.html");
     }
 
     #[test]

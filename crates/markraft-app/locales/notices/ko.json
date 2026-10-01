@@ -5,6 +5,8 @@
   "notice.trash-failed": "휴지통으로 이동할 수 없습니다.",
   "notice.trashed": "휴지통으로 이동됨",
   "notice.copied-markdown": "Markdown으로 복사됨",
+  "notice.copied-rich-text": "서식 있는 텍스트로 복사됨",
+  "notice.exported": "‘%{name}’ 내보냄",
   "notice.open-folder-save": "노트를 저장하려면 폴더를 여세요.",
   "notice.wait-reload": "현재 파일 작업이 끝난 후 다시 불러오세요.",
   "notice.single-folder": "열려면 폴더 하나만 드롭하세요.",

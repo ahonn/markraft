@@ -2,6 +2,7 @@ use crate::locale::Message;
 mod assets;
 mod carry;
 mod daily_notes;
+mod exports;
 mod feedback;
 mod find;
 mod interaction;
@@ -64,6 +65,9 @@ actions!(
         Settings,
         Link,
         Export,
+        ExportHtml,
+        ExportPdf,
+        Print,
         OpenMarkdown,
         Find,
         FindNext,
@@ -1699,7 +1703,7 @@ impl MarkraftApp {
         let snapshot = self.library.active_note().clone();
         let original = snapshot.clone();
         let activation = self.io.opening;
-        let filename = format!("{}.md", snapshot.title().replace(['/', ':'], "-"));
+        let filename = snapshot.file_name("md");
         let rendering = persistence.snapshot_async(
             snapshot,
             self.library.generation,
@@ -1839,9 +1843,6 @@ impl MarkraftApp {
         .detach();
     }
 
-    fn export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.write_copy(false, window, cx);
-    }
     fn open_markdown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -2609,6 +2610,10 @@ fn set_app_menus(i18n: &crate::locale::I18n, cx: &App) {
             MenuItem::action(i18n.text("command.save-now"), Save),
             MenuItem::action(i18n.text("command.open-markdown"), OpenMarkdown),
             MenuItem::action(i18n.text("command.export-markdown"), Export),
+            MenuItem::action(i18n.text("command.export-html"), ExportHtml),
+            MenuItem::action(i18n.text("command.export-pdf"), ExportPdf),
+            MenuItem::separator(),
+            MenuItem::action(i18n.text("command.print"), Print),
         ]),
         Menu::new(i18n.text("menu.edit")).items([
             MenuItem::action(i18n.text("command.undo"), markraft_gpui::Undo),

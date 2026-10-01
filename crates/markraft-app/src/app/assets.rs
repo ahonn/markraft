@@ -29,14 +29,7 @@ pub(super) fn from_clipboard(item: gpui::ClipboardItem) -> Vec<Asset> {
 }
 
 pub(super) fn is_image(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "tiff" | "tif" | "ico"
-            )
-        })
+    markraft_media::ImageType::of_path(path).is_some()
 }
 
 fn subdirectory(base: &Path, relative: &Path) -> Result<PathBuf, Message> {
@@ -79,29 +72,8 @@ fn destination(
 
 /// Produce a URL path, escaping spaces, delimiters and non-ASCII bytes once.
 fn relative_url(parent: &Path, path: &Path) -> Result<String, Message> {
-    let from: Vec<_> = parent.components().collect();
-    let to: Vec<_> = path.components().collect();
-    let shared = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
-    let mut relative = PathBuf::new();
-    for _ in shared..from.len() {
-        relative.push("..");
-    }
-    for component in &to[shared..] {
-        relative.push(component.as_os_str());
-    }
-    let text = relative
-        .to_str()
-        .ok_or(Message::new("asset.invalid-name"))?;
-    let mut encoded = String::new();
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
-            encoded.push(char::from(byte));
-        } else {
-            use std::fmt::Write;
-            write!(&mut encoded, "%{byte:02X}").unwrap();
-        }
-    }
-    Ok(encoded)
+    path.to_str().ok_or(Message::new("asset.invalid-name"))?;
+    Ok(markraft_media::relative_url(parent, path))
 }
 
 /// The Markdown to insert, and where each image ended up relative to the note. A

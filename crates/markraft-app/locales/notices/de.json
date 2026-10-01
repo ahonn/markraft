@@ -5,6 +5,8 @@
   "notice.trash-failed": "Konnte nicht in den Papierkorb gelegt werden.",
   "notice.trashed": "In den Papierkorb gelegt",
   "notice.copied-markdown": "Als Markdown kopiert",
+  "notice.copied-rich-text": "Als formatierter Text kopiert",
+  "notice.exported": "„%{name}“ exportiert",
   "notice.open-folder-save": "Öffne einen Ordner, um Notizen zu sichern.",
   "notice.wait-reload": "Warte mit dem Neuladen, bis der aktuelle Dateivorgang beendet ist.",
   "notice.single-folder": "Ziehe einen einzelnen Ordner hierher, um ihn zu öffnen.",

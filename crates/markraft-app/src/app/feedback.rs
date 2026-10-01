@@ -32,7 +32,7 @@ const WITH_ACTION: Duration = Duration::from_secs(8);
 /// Long enough to be seen without following the typing that provoked it.
 const FILE_STATUS_FLASH: Duration = Duration::from_millis(900);
 
-/// A clickable follow-up on a notice — reveal a path in Finder.
+/// A clickable follow-up on a notice.
 #[derive(Clone)]
 pub(super) struct NoticeAction {
     pub(super) label: Message,
