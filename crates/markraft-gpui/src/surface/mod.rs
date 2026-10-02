@@ -421,7 +421,7 @@ impl Element for EditorSurface {
                 &view.types,
                 &rows,
                 &|index| (place.borrow_mut())(index),
-                window.scale_factor(),
+                crate::accessibility::Space::new(bounds.top(), window.scale_factor()),
             );
         }
         let revealed = self.editor.update(cx, |editor, cx| {
