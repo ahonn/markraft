@@ -56,6 +56,9 @@ actions!(
         Quit,
         CheckForUpdates,
         Hide,
+        /// ⌘W: runs `:q`'s Hide Window command (`Intent::Hide`), closing any panel
+        /// first; unlike Escape's `Hide`, it skips the dismiss cascade.
+        HideWindow,
         Show,
         NewNote,
         Browse,
@@ -2556,6 +2559,9 @@ pub fn bind_app_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-c", CopyMarkdown, Some("MarkraftApp")),
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("escape", Hide, Some("MarkraftApp")),
+        // ⌘W runs Hide Window, skipping Escape's dismiss cascade,
+        // so vim users have a key besides `:q`.
+        KeyBinding::new("cmd-w", HideWindow, Some("MarkraftApp")),
         KeyBinding::new("cmd-n", NewNote, Some("MarkraftApp")),
         KeyBinding::new("cmd-p", Browse, Some("MarkraftApp")),
         KeyBinding::new("cmd-k", Actions, Some("MarkraftApp")),
