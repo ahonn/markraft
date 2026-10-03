@@ -421,7 +421,7 @@ impl Element for EditorSurface {
                 &view.types,
                 &rows,
                 &|index| (place.borrow_mut())(index),
-                window.scale_factor(),
+                crate::accessibility::Space::new(bounds.top(), window.scale_factor()),
             );
         }
         let revealed = self.editor.update(cx, |editor, cx| {
@@ -507,6 +507,7 @@ impl Element for EditorSurface {
             .filter(|decoration| decoration.spec().attrs.get(crate::find::ROLE).is_some())
             .filter_map(|decoration| decoration.range())
             .collect();
+        let text_diagnostics = editor.text_diagnostics.clone();
         let marked = markraft_core::composition::composition_range(state)
             .map(|range| (range.from, range.to));
         let focused = editor.focus.is_focused(window);
@@ -783,6 +784,26 @@ impl Element for EditorSurface {
                 }
                 if let Some(marker) = &row.marker {
                     paint_marker(row, marker, &style, window, cx);
+                }
+                if !inert && row.code_pos.is_none() {
+                    for diagnostic in &text_diagnostics {
+                        if diagnostic.end <= row.from || diagnostic.start >= row.to() {
+                            continue;
+                        }
+                        let from = row.pos_to_offset(diagnostic.start.max(row.from));
+                        let to = row.pos_to_offset(diagnostic.end.min(row.to()));
+                        for rect in row.rectangles(from..to.min(row.char_len), false) {
+                            window.paint_underline(
+                                point(rect.left(), rect.bottom() - px(2.)),
+                                rect.size.width,
+                                &UnderlineStyle {
+                                    thickness: px(1.),
+                                    color: Some(rgb(0xd93025).into()),
+                                    wavy: true,
+                                },
+                            );
+                        }
+                    }
                 }
                 if row.index == 0
                     && !inert

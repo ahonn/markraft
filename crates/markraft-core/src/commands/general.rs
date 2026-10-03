@@ -35,6 +35,13 @@ pub fn delete_selection() -> Command {
         if state.selection().is_empty(doc) {
             return None;
         }
+        if matches!(state.selection(), Selection::Custom(_)) {
+            return super::text::custom_replacement_spec(
+                state,
+                Slice::empty(),
+                event::DELETE_SELECTION,
+            );
+        }
         let range = state.selection().replacement_range(doc);
         let (set, new_doc) = resolve_changes(
             state,

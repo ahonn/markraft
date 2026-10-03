@@ -46,6 +46,18 @@ pub use types::{CalloutAttrs, DocTypes};
 pub type Formatting =
     Arc<dyn Fn(&EditorState) -> Result<Option<TransactionSpec>, String> + Send + Sync>;
 
+/// How a system-provided plain-text replacement obtains its styles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReadingReplacementPolicy {
+    /// Proofreading retains the styles of unchanged reading characters.
+    #[default]
+    PreserveUnchanged,
+    /// A plain-text Services result inherits the selection's initial character
+    /// styles throughout, including unchanged words; the resulting insertion
+    /// point follows the returned text.
+    InheritSelectionStart,
+}
+
 /// How a document kind spells itself for a view: the behaviour behind the
 /// roles [`DocTypes`] names.
 ///
@@ -83,6 +95,28 @@ pub trait DocumentKind: Send + Sync {
     fn set_link(&self, ty: MarkTypeId, url: Option<&str>) -> Option<Formatting> {
         let _ = (ty, url);
         None
+    }
+    /// Replace rendered reading text while preserving this kind's source and
+    /// styles. `range` uses document positions; `text` contains no markup.
+    /// A supported unchanged replacement returns an empty transaction, allowing
+    /// hosts to query capability through the same validation as execution.
+    /// `Ok(None)` declines this structure and permits the host's existing
+    /// precise literal replacement. An error refuses the edit and must not
+    /// fall back to deleting concealed source indiscriminately.
+    fn replace_reading(&self, range: Range<usize>, text: &str) -> Option<Formatting> {
+        let _ = (range, text);
+        None
+    }
+    /// Replace reading text with an explicit style policy. Kinds implementing
+    /// only the original hook remain compatible.
+    fn replace_reading_with_policy(
+        &self,
+        range: Range<usize>,
+        text: &str,
+        policy: ReadingReplacementPolicy,
+    ) -> Option<Formatting> {
+        let _ = policy;
+        self.replace_reading(range, text)
     }
     /// `split`, a command that splits a textblock at the caret, as this kind
     /// wants it run: one that spells styles in the text closes and reopens

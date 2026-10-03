@@ -14,6 +14,8 @@ emojis = "0.9"
 scraper = { version = "0.24", default-features = false }
 finl_unicode = { version = "1.4.0", default-features = false, features = ["categories"] }
 unicode-width = { version = "0.2", default-features = false }
+unicode-segmentation = "1.12"
+similar = { version = "3.2", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

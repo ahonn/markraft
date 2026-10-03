@@ -69,6 +69,11 @@ pub trait SelectionKind: std::fmt::Debug + Send + Sync {
             .unwrap_or_else(|_| Slice::empty())
     }
 
+    /// Clipboard content with access to enclosing semantic scopes.
+    fn content_with_schema(&self, doc: &Node, _schema: &Schema) -> Slice {
+        self.content(doc)
+    }
+
     /// Add a change to `spec` replacing this selection with `slice`.
     fn replace(
         &self,
@@ -78,6 +83,18 @@ pub trait SelectionKind: std::fmt::Debug + Send + Sync {
     ) -> crate::state::TransactionSpec {
         let range = self.replacement_range(doc);
         spec.changes([crate::change::Change::replace(range.from, range.to, slice)])
+    }
+
+    /// Replace with access to the receiving schema. Existing kinds retain
+    /// their replacement contract unless they need schema-aware fitting.
+    fn replace_with_schema(
+        &self,
+        spec: crate::state::TransactionSpec,
+        doc: &Node,
+        _schema: &Schema,
+        slice: Slice,
+    ) -> crate::state::TransactionSpec {
+        self.replace(spec, doc, slice)
     }
 
     /// Validate the selection against `doc`.

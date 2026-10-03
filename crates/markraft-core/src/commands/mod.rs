@@ -84,7 +84,7 @@ pub use table::{
 };
 pub use text::{
     delete_range, delete_range_changes, insert_hard_break, insert_node, insert_text,
-    replace_selection, replace_selection_changes,
+    replace_selection, replace_selection_changes, replace_selection_with_event,
 };
 
 use std::sync::Arc;
