@@ -108,6 +108,7 @@ fn shortcut_label(intent: &Intent) -> &'static str {
         Intent::New => "⌘N",
         Intent::Browse => "⌘P",
         Intent::Save => "⌘S",
+        Intent::Hide => "⌘W",
         Intent::Copy => "⇧⌘C",
         Intent::PastePlain => "⇧⌘V",
         Intent::PasteMarkdown => "⌥⇧⌘V",
@@ -2095,6 +2096,7 @@ impl Render for MarkraftApp {
             .on_action(cx.listener(|this, _: &CopyMarkdown, _, cx| this.copy_markdown(cx)))
             .on_action(cx.listener(|this, _: &Quit, window, cx| this.quit(window, cx)))
             .on_action(cx.listener(|this, _: &Hide, w, cx| this.dismiss(w, cx)))
+            .on_action(cx.listener(|this, _: &HideWindow, w, cx| this.intent(Intent::Hide, w, cx)))
             .on_action(cx.listener(|this, _: &NewNote, w, cx| this.intent(Intent::New, w, cx)))
             .on_action(cx.listener(|this, _: &Browse, w, cx| this.intent(Intent::Browse, w, cx)))
             .on_action(cx.listener(|this, _: &Actions, w, cx| this.intent(Intent::Actions, w, cx)))
@@ -2664,5 +2666,11 @@ mod shortcut_tests {
         assert_eq!(shortcut_label(&Intent::Block(doc::Block::Task)), "⇧⌘9");
         assert_eq!(shortcut_label(&Intent::Link), "⌘L");
         assert_eq!(shortcut_label(&Intent::Rename), "");
+        assert_eq!(shortcut_label(&Intent::Hide), "⌘W");
+        // `:wq` saves and hides, but no single key does both.
+        assert_eq!(
+            shortcut_label(&Intent::Then(vec![Intent::Save, Intent::Hide])),
+            ""
+        );
     }
 }

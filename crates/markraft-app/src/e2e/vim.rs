@@ -1,7 +1,8 @@
 //! Vim through the bindings a person presses and the editor the app hosts.
 
-use super::harness::open_with;
-use gpui::TestAppContext;
+use super::harness::{Harness, open_with};
+use crate::app::HideWindow;
+use gpui::{Action, KeyContext, Keystroke, TestAppContext};
 
 // Vim's normal mode edits the note, and what it does is saved.
 #[gpui::test]
@@ -215,4 +216,61 @@ fn every_vim_binding_is_what_its_keys_run_in_each_mode(cx: &mut TestAppContext) 
         "one (two) \"three\"",
         "the sweep edits nothing"
     );
+}
+
+// Escape walks back out through whatever is open, and in vim it never hides the
+// window, so ⌘W is the key that hides it outright, in every mode. The settings
+// window binds ⌘W to closing itself, and that must still win while it is open.
+#[gpui::test]
+fn cmd_w_hides_the_window_in_every_mode_but_closes_settings_first(cx: &mut TestAppContext) {
+    /// What ⌘W runs under `stack`, or `None` while it waits for a longer binding.
+    fn cmd_w_runs(h: &mut Harness, stack: &[KeyContext]) -> Option<Box<dyn Action>> {
+        let keymap = h.cx.update(|_, cx| cx.key_bindings());
+        let keystrokes = [Keystroke::parse("cmd-w").expect("a keystroke")];
+        let (found, pending) = keymap.borrow().bindings_for_input(&keystrokes, stack);
+        let first = found.first().filter(|_| !pending)?;
+        Some(first.action().boxed_clone())
+    }
+    /// The focused editor's context stack, and the vim mode it reports.
+    fn settled_stack(h: &mut Harness) -> (Vec<KeyContext>, Option<String>) {
+        h.cx.update(|window, _| window.refresh());
+        h.cx.run_until_parked();
+        let stack = h.cx.update(|window, _| window.context_stack());
+        let mode = stack
+            .iter()
+            .rev()
+            .find_map(|context| context.get("vim_mode").map(|value| value.to_string()));
+        (stack, mode)
+    }
+    let hides_window = |runs: &Option<Box<dyn Action>>| {
+        runs.as_ref()
+            .is_some_and(|action| action.partial_eq(&HideWindow))
+    };
+
+    let mut h = open_with(cx, &[("w.md", "abc\n")], |p| p.vim_mode = true);
+    h.keys("cmd-up");
+    for (enter, mode) in [("", "normal"), ("i", "insert")] {
+        if !enter.is_empty() {
+            h.keys(enter);
+        }
+        let (stack, vim_mode) = settled_stack(&mut h);
+        assert_eq!(vim_mode.as_deref(), Some(mode), "after {enter:?}");
+        let runs = cmd_w_runs(&mut h, &stack);
+        assert!(hides_window(&runs), "vim {mode}: {runs:?}");
+    }
+    // Settings is a window of its own, so the note's context never reaches it; its
+    // root context sits under the same keymap, and there ⌘W must close it.
+    let settings = [KeyContext::parse("MarkraftSettings").expect("a context")];
+    let runs = cmd_w_runs(&mut h, &settings);
+    assert_eq!(
+        runs.as_ref().map(|action| action.name()),
+        Some("markraft_settings::CloseSettings")
+    );
+    drop(h);
+
+    let mut h = open_with(cx, &[("w.md", "abc\n")], |p| p.vim_mode = false);
+    let (stack, vim_mode) = settled_stack(&mut h);
+    assert_eq!(vim_mode, None);
+    let runs = cmd_w_runs(&mut h, &stack);
+    assert!(hides_window(&runs), "without vim: {runs:?}");
 }
