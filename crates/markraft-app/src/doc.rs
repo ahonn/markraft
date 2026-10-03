@@ -68,10 +68,19 @@ fn formatter(house: &HouseStyleHandle) -> Formatter {
 /// The input rules and corrections a CommonMark editor wants. The input rules — `# `,
 /// `- `, `> ` and the rest turning a line into a block — run while `shortcuts` holds,
 /// and brackets and quotes pair while `pairs` does.
+#[cfg(test)]
 pub fn extensions(shortcuts: Arc<AtomicBool>, pairs: Arc<AtomicBool>) -> Extension {
+    extensions_with_quotes(shortcuts, pairs, Arc::new(AtomicBool::new(true)))
+}
+
+pub fn extensions_with_quotes(
+    shortcuts: Arc<AtomicBool>,
+    pairs: Arc<AtomicBool>,
+    quotes: Arc<AtomicBool>,
+) -> Extension {
     Extension::all([
         markraft_commonmark::commonmark_extensions_with_shortcuts(schema(), shortcuts),
-        markraft_commonmark::commonmark_auto_pairs(pairs),
+        markraft_commonmark::commonmark_auto_pairs_with_quotes(pairs, quotes),
     ])
 }
 
@@ -168,6 +177,26 @@ impl DocumentKind for MarkdownKind {
             None => formatter.unlink(),
         };
         Some(worded(command, self.refusal.clone()))
+    }
+
+    fn replace_reading(&self, range: std::ops::Range<usize>, text: &str) -> Option<Formatting> {
+        Some(worded(
+            self.formatter().replace_reading(range, text),
+            self.refusal.clone(),
+        ))
+    }
+
+    fn replace_reading_with_policy(
+        &self,
+        range: std::ops::Range<usize>,
+        text: &str,
+        policy: markraft_core::kind::ReadingReplacementPolicy,
+    ) -> Option<Formatting> {
+        Some(worded(
+            self.formatter()
+                .replace_reading_with_policy(range, text, policy),
+            self.refusal.clone(),
+        ))
     }
 
     /// Every style open at the caret is closed before the cut and opened again
@@ -664,9 +693,8 @@ pub enum Inline {
     Italic,
     Code,
     Strikethrough,
-    /// Present when HTML paste carries underline, which Markdown spells as
-    /// `<u>…</u>`; no control of the interface offers it.
-    #[allow(dead_code)]
+    Highlight,
+    /// Markdown spells underline as `<u>…</u>`.
     Underline,
 }
 
@@ -677,6 +705,7 @@ impl Inline {
             Inline::Italic => md::EM,
             Inline::Code => md::CODE,
             Inline::Strikethrough => md::STRIKETHROUGH,
+            Inline::Highlight => md::HIGHLIGHT,
             Inline::Underline => md::UNDERLINE,
         })
     }

@@ -406,6 +406,30 @@ pub fn markup_safe(
     range: Range<usize>,
     keep_emptied: bool,
 ) -> Vec<Range<usize>> {
+    markup_safe_with(projection, syntax, range, |_, _| keep_emptied)
+}
+
+/// Source ranges for replacing visible text while retaining the insertion
+/// point's enclosing styles. Empty inner styles go away; only paired wrappers
+/// containing the leading content position survive to enclose the new text.
+/// Single-run substitutions such as entities are always replaced in full.
+pub fn markup_replacement(
+    projection: &Projection,
+    syntax: Option<MarkTypeId>,
+    range: Range<usize>,
+) -> Vec<Range<usize>> {
+    let insertion = range.start;
+    markup_safe_with(projection, syntax, range, |runs, content| {
+        runs.len() > 1 && content.contains(&insertion)
+    })
+}
+
+fn markup_safe_with(
+    projection: &Projection,
+    syntax: Option<MarkTypeId>,
+    range: Range<usize>,
+    keep_emptied: impl Fn(&[Range<usize>], &Range<usize>) -> bool,
+) -> Vec<Range<usize>> {
     let mut take = vec![range.clone()];
     let mut keep = Vec::new();
     let lines = projection
@@ -426,7 +450,7 @@ pub fn markup_safe(
             };
             let emptied =
                 !content.is_empty() && range.start <= content.start && content.end <= range.end;
-            if emptied && !keep_emptied {
+            if emptied && !keep_emptied(&runs, &content) {
                 take.push(first.start..last.end);
             } else {
                 keep.extend(runs);

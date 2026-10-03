@@ -220,6 +220,22 @@ pub fn update_composition(
     text: &str,
     caret: usize,
 ) -> Result<TransactionSpec, StateError> {
+    update_composition_with(state, text, caret, &crate::commands::insert_text(text))
+}
+
+/// Update composition using the host's insertion contract, for example a
+/// source-backed kind that keeps concealed delimiters balanced. The
+/// command must insert `text` and leave its caret immediately after that text.
+///
+/// # Errors
+///
+/// Fails when insertion cannot be expressed or produces an invalid document.
+pub fn update_composition_with(
+    state: &EditorState,
+    text: &str,
+    caret: usize,
+    insert: &crate::commands::Command,
+) -> Result<TransactionSpec, StateError> {
     let doc = state.doc();
     let (from, to) = match composition_range(state) {
         Some(range) => (range.from, range.to),
@@ -230,17 +246,34 @@ pub fn update_composition(
     };
     let length = text.chars().count();
     let (changes, next_doc, end) = if text.is_empty() {
-        let changes = ChangeSet::create(
-            state.schema(),
-            doc,
-            [Change::delete(from, to).with_fit(Fit::Auto)],
-        )?;
-        let next_doc = changes.apply(doc)?;
-        let mapped = changes
-            .map_pos(to, 1, TrackMode::Simple)
-            .unwrap_or(next_doc.content_size());
-        let end = Selection::near(state.schema(), &next_doc, mapped, -1).head(&next_doc);
-        (changes, next_doc, end)
+        if composition_range(state).is_none() && matches!(state.selection(), Selection::Custom(_)) {
+            let spec = state.selection().replace_with_schema(
+                TransactionSpec::new(),
+                doc,
+                state.schema(),
+                crate::Slice::empty(),
+            );
+            let (changes, next_doc, selected) = spec.resolve_edit(state)?;
+            let mapped = changes
+                .map_pos(to, 1, TrackMode::Simple)
+                .unwrap_or(next_doc.content_size());
+            let end = selected
+                .unwrap_or_else(|| Selection::near(state.schema(), &next_doc, mapped, -1))
+                .head(&next_doc);
+            (changes, next_doc, end)
+        } else {
+            let changes = ChangeSet::create(
+                state.schema(),
+                doc,
+                [Change::delete(from, to).with_fit(Fit::Auto)],
+            )?;
+            let next_doc = changes.apply(doc)?;
+            let mapped = changes
+                .map_pos(to, 1, TrackMode::Simple)
+                .unwrap_or(next_doc.content_size());
+            let end = Selection::near(state.schema(), &next_doc, mapped, -1).head(&next_doc);
+            (changes, next_doc, end)
+        }
     } else {
         // Share typing's fitted caret and inline-scope handling. Only its
         // document change is used; the composition remains one transaction.
@@ -254,7 +287,7 @@ pub fn update_composition(
         } else {
             state.clone()
         };
-        let spec = crate::commands::insert_text(text)(&selected).ok_or_else(|| {
+        let spec = insert(&selected).ok_or_else(|| {
             StateError::Node(NodeError::InvalidText(
                 "the schema cannot insert the composition candidate".into(),
             ))

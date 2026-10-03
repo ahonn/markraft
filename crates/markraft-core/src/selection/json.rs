@@ -9,7 +9,8 @@
 //! A custom kind serialises under its own
 //! [`SelectionKind::tag`](super::SelectionKind::tag). Reading one
 //! back needs the extension that defines it, so [`Selection::from_json`] only
-//! understands the built-in kinds and reports anything else as unknown.
+//! understands the built-in kinds (including `reading-text`) and reports
+//! anything else as unknown.
 
 use serde_json::{Value, json};
 
@@ -39,9 +40,9 @@ impl Selection {
 
     /// Read a built-in selection from its JSON representation.
     ///
-    /// The built-in kinds hold only positions, so the schema goes unused; it
-    /// is taken for symmetry with [`Selection::to_json`].
-    pub fn from_json(_schema: &Schema, value: &Value) -> Result<Selection, NodeError> {
+    /// Reading selections resolve their syntax mark by schema name; other
+    /// built-in kinds hold only document positions.
+    pub fn from_json(schema: &Schema, value: &Value) -> Result<Selection, NodeError> {
         let object = value
             .as_object()
             .ok_or_else(|| NodeError::Json("a selection must be an object".into()))?;
@@ -57,6 +58,20 @@ impl Selection {
                 .ok_or_else(|| NodeError::Json(format!("a selection needs `{name}`")))
         };
         match kind {
+            "reading-text" => {
+                let syntax = object
+                    .get("syntax")
+                    .and_then(Value::as_str)
+                    .and_then(|name| schema.mark_id(name))
+                    .ok_or_else(|| {
+                        NodeError::Json("reading-text needs a known syntax mark".into())
+                    })?;
+                Ok(Selection::reading(
+                    number("anchor")?,
+                    number("head")?,
+                    syntax,
+                ))
+            }
             "text" => {
                 let anchor = number("anchor")?;
                 let head = object

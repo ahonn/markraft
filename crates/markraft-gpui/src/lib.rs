@@ -13,6 +13,7 @@ mod callout;
 mod caret;
 mod clipboard;
 mod completion;
+mod context;
 mod emoji;
 #[cfg(test)]
 mod equation_integration;
@@ -32,13 +33,19 @@ mod messages;
 mod shaping;
 mod shown;
 mod single_line;
+mod smart_clipboard;
 mod style;
 mod surface;
 mod syntax;
 mod typeahead;
 mod wiki;
+mod word_boundary;
 pub use callout::{Tone as CalloutTone, callout_heading, callout_tone};
-pub use clipboard::{use_system_pasteboard, write_rich_text};
+pub use clipboard::{CopyFormat, use_system_pasteboard, write_rich_text};
+pub use context::{
+    ContextAction, ContextRequest, ContextTarget, ContextText, ContextTextMap, EditCapabilities,
+    TextTransformation,
+};
 pub use emoji::{EmojiInsertion, EmojiShortcodes, emoji_menu};
 pub use extension::{
     ActionHandler, CaretShape, EXTENSION_ORIGIN_PREFIX, EditorCx, Extension, ExtensionHandle,
@@ -282,10 +289,15 @@ fn list_key_bindings() -> [KeyBinding; 3] {
 
 #[derive(Clone, Debug)]
 pub enum EditorEvent {
+    /// A pointer requested editing commands after the selection settled.
+    ContextMenuRequested(ContextRequest),
     /// The host owns writing pasted files and images to its document location.
     FilesPasted(ClipboardItem),
     Changed {
         revision: u64,
+        /// Committed typing, including an input-method candidate, rather than
+        /// a paste, history action, host replacement, or document reload.
+        text_input: bool,
     },
     /// A link was clicked without ⌘; the caret is now inside it.
     LinkClicked,
@@ -581,15 +593,29 @@ pub(crate) enum VerticalMove {
     Stay,
 }
 
+/// The first press owns the word target for an OS multi-click sequence, even
+/// when placing its caret reveals source and changes the following frame.
+struct PointerWordGesture {
+    document: Node,
+    epoch: u64,
+    modifiers: gpui::Modifiers,
+    word: Option<Selection>,
+}
+
 pub struct EditorView {
     document_guard: Option<DocumentGuard>,
     transaction_guard: Option<TransactionGuard>,
     edit_error: Option<EditRejection>,
     file_paste: bool,
+    smart_insert_delete: bool,
     state: EditorState,
     analysis: markraft_core::kind::analysis::DocumentAnalysis,
     /// The find query and its hits. See [`find`].
     find: markraft_core::StateField<find::Find>,
+    /// Host-provided spelling/grammar ranges for the current document only.
+    text_diagnostics: Vec<std::ops::Range<usize>>,
+    /// Present only while a right-click selection and its extensions settle.
+    context_target_bookmark: Option<context::ContextTargetBookmark>,
     pub(crate) types: DocTypes,
     /// The host's document kind; see [`Setup::kind`].
     kind: Arc<dyn DocumentKind>,
@@ -630,6 +656,9 @@ pub struct EditorView {
     /// The caret's own view state: break side, kept column, pending reveal.
     pub(crate) caret: caret::CaretView,
     selecting: bool,
+    pointer_word_gesture: Option<PointerWordGesture>,
+    context_epoch: u64,
+    context_edit: bool,
     published_revision: u64,
     undo_group_depth: usize,
     pub(crate) accessible_text: Rc<RefCell<accessibility::AccessibleText>>,
@@ -719,7 +748,10 @@ impl EditorView {
             transaction_guard: None,
             edit_error: None,
             file_paste: false,
+            smart_insert_delete: false,
             find,
+            text_diagnostics: Vec::new(),
+            context_target_bookmark: None,
             types,
             codecs: kind.codecs(),
             spelling: kind.spelling(),
@@ -742,7 +774,10 @@ impl EditorView {
             unmeasured: std::cell::Cell::new(false),
             caret: caret::CaretView::default(),
             selecting: false,
+            pointer_word_gesture: None,
             published_revision: 0,
+            context_epoch: 0,
+            context_edit: false,
             undo_group_depth: 0,
             accessible_text: Rc::default(),
             focus_subscriptions: None,
@@ -835,6 +870,16 @@ impl EditorView {
 
     pub fn take_edit_error(&mut self) -> Option<EditRejection> {
         self.edit_error.take()
+    }
+
+    pub fn with_smart_insert_delete(mut self, enabled: bool) -> Self {
+        self.smart_insert_delete = enabled;
+        self
+    }
+
+    /// Enable the platform's word-aware clipboard spacing behavior.
+    pub fn set_smart_insert_delete(&mut self, enabled: bool) {
+        self.smart_insert_delete = enabled;
     }
 
     pub fn with_file_paste(mut self, enabled: bool) -> Self {
@@ -1358,12 +1403,14 @@ impl EditorView {
         );
         self.find = find;
         self.state = state;
+        self.text_diagnostics.clear();
+        self.context_epoch = self.context_epoch.wrapping_add(1);
         self.sync_document_analysis();
         self.extension_selection = self.state.selection().clone();
         self.undo_group_depth = 0;
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.reset_caret_blink(cx);
-        self.publish(cx);
+        self.publish(false, cx);
         self.run_extensions(
             extension::Update {
                 committed: true,
@@ -1407,6 +1454,24 @@ impl EditorView {
                 return None;
             }
         };
+        self.context_target_bookmark = self
+            .context_target_bookmark
+            .take()
+            .and_then(|bookmark| bookmark.map(&transactions));
+        if transactions.iter().any(|transaction| {
+            let before = transaction.start_state();
+            let after = transaction.state();
+            transaction.doc_changed()
+                || before.selection() != after.selection()
+                || before.stored_marks() != after.stored_marks()
+                || markraft_core::composition::composition_range(before)
+                    != markraft_core::composition::composition_range(after)
+        }) {
+            self.context_epoch = self.context_epoch.wrapping_add(1);
+        }
+        if transactions.iter().any(Transaction::doc_changed) {
+            self.text_diagnostics.clear();
+        }
         self.sync_document_analysis();
         Some(transactions)
     }
@@ -1421,7 +1486,12 @@ impl EditorView {
         discarding: bool,
         specs: Vec<TransactionSpec>,
     ) -> Option<bool> {
-        self.edit_with_isolation(cx, discarding, specs, None)
+        self.edit_with_isolation(
+            cx,
+            discarding,
+            specs,
+            self.context_edit.then_some(self.undo_group_depth),
+        )
     }
 
     fn edit_with_isolation(
@@ -1436,7 +1506,21 @@ impl EditorView {
         let changed = transactions.iter().any(Transaction::doc_changed);
         self.caret.moved_by_edit();
         if changed || composing != self.is_composing() {
-            self.publish(cx);
+            let text_input = !discarding
+                && !self.context_edit
+                && !self.is_composing()
+                && (transactions
+                    .iter()
+                    .find(|transaction| transaction.user_event_name().is_some())
+                    .is_some_and(|transaction| {
+                        transaction.is_user_event(markraft_core::protocol::event::INPUT_TYPE)
+                    })
+                    || (composing
+                        && !changed
+                        && transactions
+                            .iter()
+                            .all(|transaction| transaction.user_event_name().is_none())));
+            self.publish(text_input, cx);
         }
         self.reset_caret_blink(cx);
         cx.notify();
@@ -1708,45 +1792,35 @@ impl EditorView {
         })
     }
 
-    /// Run one of the catalogue's table commands.
-    ///
-    /// `false` where the schema declares no table types, and where the command
-    /// does not apply — which, for all but [`TableOp::Insert`], means
-    /// the caret is not in a table.
-    fn table_command(
-        &mut self,
-        build: impl FnOnce(markraft_core::commands::TableTypes) -> Command,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.single_line {
-            return false;
-        }
-        let Some(types) = self.types.table_types() else {
-            return false;
-        };
-        self.run_command(&build(types), cx)
-    }
-
     /// One edit of the table the caret is in, or a new table where there is
     /// none: what every table control resolves to. `false` where it does not
     /// apply — outside a table for every shape but [`TableOp::Insert`], and
     /// in a single-line editor always.
     pub fn table(&mut self, op: TableOp, cx: &mut Context<Self>) -> bool {
+        if let Some(command) = self.table_operation(op) {
+            self.run_command(&command, cx)
+        } else {
+            false
+        }
+    }
+
+    fn table_operation(&self, op: TableOp) -> Option<Command> {
         use markraft_core::commands as c;
-        self.table_command(
-            move |types| match op {
-                TableOp::Insert { rows, columns } => c::insert_table(types, rows, columns),
-                TableOp::AddRowBefore => c::add_row_before(types),
-                TableOp::AddRowAfter => c::add_row_after(types),
-                TableOp::AddColumnBefore => c::add_column_before(types),
-                TableOp::AddColumnAfter => c::add_column_after(types),
-                TableOp::DeleteRow => c::delete_row(types),
-                TableOp::DeleteColumn => c::delete_column(types),
-                TableOp::DeleteTable => c::delete_table(types),
-                TableOp::SetAlignment(alignment) => c::set_column_alignment(types, alignment),
-            },
-            cx,
-        )
+        if self.single_line {
+            return None;
+        }
+        let types = self.types.table_types()?;
+        Some(match op {
+            TableOp::Insert { rows, columns } => c::insert_table(types, rows, columns),
+            TableOp::AddRowBefore => c::add_row_before(types),
+            TableOp::AddRowAfter => c::add_row_after(types),
+            TableOp::AddColumnBefore => c::add_column_before(types),
+            TableOp::AddColumnAfter => c::add_column_after(types),
+            TableOp::DeleteRow => c::delete_row(types),
+            TableOp::DeleteColumn => c::delete_column(types),
+            TableOp::DeleteTable => c::delete_table(types),
+            TableOp::SetAlignment(alignment) => c::set_column_alignment(types, alignment),
+        })
     }
 
     /// Window bounds of the first line of the selection, or of the link touching the
@@ -1785,10 +1859,11 @@ impl EditorView {
         )
     }
 
-    fn publish(&mut self, cx: &mut Context<Self>) {
+    fn publish(&mut self, text_input: bool, cx: &mut Context<Self>) {
         self.published_revision += 1;
         cx.emit(EditorEvent::Changed {
             revision: self.published_revision,
+            text_input,
         });
         cx.notify();
     }
@@ -2228,14 +2303,27 @@ impl EditorView {
             return;
         }
         let schema = self.state.schema().clone();
+        let smart = self.smart_copy_eligible();
         match self.codecs.clone().filter(|_| !self.single_line) {
-            Some(codecs) => clipboard::write(&schema, codecs.as_ref(), &slice, cx),
+            Some(codecs) => clipboard::write(&schema, codecs.as_ref(), &slice, smart, cx),
             // Without codecs there is only one flavour to write, and a
             // single-line editor holds nothing but text anyway.
             None => {
                 let text = conceal::slice_text(&schema, self.types.syntax, &slice);
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(
+                    text,
+                    (if smart { clipboard::SMART_PREFIX } else { "" }).to_string(),
+                ));
             }
+        }
+    }
+
+    fn cut(&mut self, cx: &mut Context<Self>) {
+        self.copy(cx);
+        if let Some(spec) = self.smart_delete_spec() {
+            self.edit(cx, false, vec![spec]);
+        } else {
+            self.run_command(&markraft_core::commands::delete_selection(), cx);
         }
     }
 
@@ -2317,7 +2405,13 @@ impl EditorView {
             }
             let slice =
                 markraft_core::Slice::from_fragment(markraft_core::Fragment::from_nodes(nodes));
-            markraft_core::commands::replace_selection(slice)(&self.state)
+            if matches!(mode, clipboard::PasteMode::Plain) {
+                markraft_core::commands::replace_selection_with_event(slice, event::INPUT_TYPE)(
+                    &self.state,
+                )
+            } else {
+                markraft_core::commands::replace_selection(slice)(&self.state)
+            }
         } else if let Some(codecs) = self
             .codecs
             .clone()
@@ -2325,7 +2419,10 @@ impl EditorView {
             .filter(|_| !self.single_line && !verbatim)
         {
             // The kind reads plain text as the characters it is.
-            markraft_core::commands::replace_selection(codecs.from_text(text))(&self.state)
+            markraft_core::commands::replace_selection_with_event(
+                codecs.from_text(text),
+                event::INPUT_TYPE,
+            )(&self.state)
         } else if literal {
             let text = single_line::text(text, self.single_line);
             chains::insert_plain(&self.types, &text)(&self.state)
@@ -2359,11 +2456,20 @@ impl EditorView {
             None
         };
         if let Some(spec) = spec {
-            self.edit(cx, false, vec![spec.user_event(event::INPUT_PASTE)]);
+            // Replacement uses its own typing or rich-paste intent; classify the
+            // composed action after that contract has been applied.
+            let specs =
+                self.smart_paste_specs(spec.replace_user_event(event::INPUT_PASTE), &item, cx);
+            self.edit(cx, false, specs);
         }
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let previous_word_gesture = self.pointer_word_gesture.take();
+        if event.modifiers.control {
+            self.context_mouse_down(event, window, cx);
+            return;
+        }
         window.focus(&self.focus, cx);
         self.selecting = true;
         self.caret.forget_column();
@@ -2435,6 +2541,24 @@ impl EditorView {
             );
             return;
         }
+        // Resolve the clicked word against the frame the pointer actually saw.
+        // Moving the caret can reveal source delimiters and change that layout.
+        self.lay_out_at(event.position);
+        let pointer_word = if event.click_count == 2 {
+            previous_word_gesture
+                .filter(|gesture| {
+                    gesture.document.ptr_eq(self.state.doc())
+                        && gesture.epoch == self.context_epoch
+                        && gesture.modifiers == event.modifiers
+                })
+                .map(|gesture| gesture.word)
+                .unwrap_or_else(|| self.pointer_word_at(event.position))
+        } else if event.click_count == 1 {
+            self.pointer_word_at(event.position)
+        } else {
+            None
+        };
+        let pointer_document = self.state.doc().clone();
         self.select_point(event.position, event.modifiers.shift, cx);
         if event.click_count == 1 && !event.modifiers.shift {
             self.caret_into_source(event.position, cx);
@@ -2466,18 +2590,43 @@ impl EditorView {
             {
                 self.select_range(line.from(), line.to(), cx);
             }
-        } else if event.click_count == 2 {
-            let from = self
-                .analysis
-                .projection()
-                .prev_word_boundary(head)
-                .unwrap_or(head);
-            let to = self
-                .analysis
-                .projection()
-                .next_word_boundary(from)
-                .unwrap_or(head);
-            self.select_range(from, to, cx);
+        } else if event.click_count == 2 && pointer_document.ptr_eq(self.state.doc()) {
+            if let Some(selection) = &pointer_word {
+                self.edit(
+                    cx,
+                    false,
+                    vec![
+                        TransactionSpec::new()
+                            .selection(selection.clone())
+                            .user_event(event::SELECT_POINTER),
+                    ],
+                );
+            } else {
+                // Keep the existing whitespace and outside-text behavior;
+                // actual characters use pointer-word rather than caret semantics.
+                let from = self
+                    .analysis
+                    .projection()
+                    .prev_word_boundary(head)
+                    .unwrap_or(head);
+                let to = self
+                    .analysis
+                    .projection()
+                    .next_word_boundary(from)
+                    .unwrap_or(head);
+                self.select_range(from, to, cx);
+            }
+        }
+        if event.click_count == 1 && pointer_document.ptr_eq(self.state.doc()) {
+            // Store after this press settles its own caret/source selection.
+            // Later edits, selection changes, marks, or composition invalidate
+            // the target through the same epoch used by contextual snapshots.
+            self.pointer_word_gesture = Some(PointerWordGesture {
+                document: pointer_document,
+                epoch: self.context_epoch,
+                modifiers: event.modifiers,
+                word: pointer_word,
+            });
         }
         self.reset_caret_blink(cx);
         cx.notify();
@@ -2541,6 +2690,7 @@ impl Render for EditorView {
                 }),
                 cx.on_blur(&self.focus, window, |this, window, cx| {
                     this.selecting = false;
+                    this.pointer_word_gesture = None;
                     this.sync_caret_focus(window, cx);
                     // The input method owns commit/unmark ordering. A host that
                     // dismisses an editor can explicitly cancel composition.
@@ -2571,6 +2721,7 @@ impl Render for EditorView {
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::context_mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !*hovered {
@@ -2705,8 +2856,21 @@ impl EditorView {
                 }));
             };
         }
-        run!(Backspace, chains::backspace);
-        run!(Delete, chains::delete_forward);
+        root = root
+            .on_action(cx.listener(|this, _: &Backspace, _, cx| {
+                if let Some(spec) = this.smart_delete_spec() {
+                    this.edit(cx, false, vec![spec]);
+                } else if !this.run_command(&chains::backspace(&this.types), cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Delete, _, cx| {
+                if let Some(spec) = this.smart_delete_spec() {
+                    this.edit(cx, false, vec![spec]);
+                } else if !this.run_command(&chains::delete_forward(&this.types), cx) {
+                    cx.propagate();
+                }
+            }));
         run!(ParagraphStart, |_: &DocTypes| chains::textblock_edge(false));
         run!(ParagraphEnd, |_: &DocTypes| chains::textblock_edge(true));
         run!(DeleteToParagraphEnd, chains::delete_to_textblock_end);
@@ -2946,9 +3110,7 @@ impl EditorView {
             }))
             .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
             .on_action(cx.listener(|this, _: &Cut, _, cx| {
-                this.copy(cx);
-                let command = markraft_core::commands::delete_selection();
-                this.run_command(&command, cx);
+                this.cut(cx);
             }))
             .on_action(
                 cx.listener(|this, _: &Paste, _, cx| {
@@ -2987,6 +3149,12 @@ fn list(types: &DocTypes, ty: Option<NodeTypeId>, item: Option<NodeTypeId>) -> C
         _ => markraft_core::commands::command(|_| None),
     }
 }
+
+#[cfg(test)]
+mod pointer_word_tests;
+
+#[cfg(test)]
+mod reading_selection_tests;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

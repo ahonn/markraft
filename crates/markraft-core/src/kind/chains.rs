@@ -1237,7 +1237,7 @@ pub fn insert_plain(types: &DocTypes, text: &str) -> Command {
             })
             .collect();
         let slice = crate::Slice::new(crate::Fragment::from_nodes(nodes?), 1, 1);
-        crate::commands::replace_selection(slice)(state)
+        crate::commands::replace_selection_with_event(slice, event::INPUT_TYPE)(state)
     })
 }
 

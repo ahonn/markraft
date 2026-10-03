@@ -50,10 +50,13 @@ libc = "0.2"
 global-hotkey = "0.7"
 tray-icon = { version = "0.21", default-features = false }
 objc2 = "0.6"
+block2 = "0.6"
+objc2-natural-language = { version = "0.3.2", default-features = false, features = ["NLTagger", "NLTagScheme", "NLTokenizer"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
-    "NSBitmapImageRep", "NSButton", "NSColor", "NSControl", "NSFontDescriptor",
+    "NSApplication", "NSAttributedString", "NSPasteboard", "NSBitmapImageRep", "NSButton", "NSColor", "NSControl", "NSFontDescriptor",
     "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSResponder",
     "NSStatusBarButton", "NSStatusItem", "NSView", "NSPrintInfo", "NSPrintOperation", "NSWindow",
+    "NSBezierPath", "NSWritingToolsCoordinator", "NSWritingToolsCoordinatorContext", "NSWritingToolsCoordinatorAnimationParameters", "block2",
     "objc2-core-foundation",
 ] }
 # Printing lays notes out with WebKit, which paginates HTML.

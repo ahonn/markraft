@@ -73,5 +73,7 @@
   "notice.folder-daily": "请先打开文件夹再使用日记。",
   "notice.choose-markdown-inside": "请选择笔记文件夹内的 Markdown 文件。",
   "dialog.daily-folder": "日记文件夹",
-  "dialog.daily-template": "日记模板"
+  "dialog.daily-template": "日记模板",
+  "notice.spelling-complete": "拼写检查完成。",
+  "notice.text-service-rejected": "此结果无法安全替换当前选区，请改为从系统工具复制结果。"
 }

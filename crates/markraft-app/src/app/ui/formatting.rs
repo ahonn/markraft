@@ -240,6 +240,7 @@ impl MarkraftApp {
             Intent::FormatMenu(menu) => Some(menu),
             _ => None,
         };
+        let enabled = self.editing_enabled(&intent, cx);
         let expanded = menu.is_some() && self.interaction.format_menu() == menu;
         let active = toggled == Some(true);
         // A control that takes a row, a column or the whole table away is written in
@@ -258,6 +259,7 @@ impl MarkraftApp {
             .id(id)
             .role(Role::Button)
             .aria_label(label.clone())
+            .when(!enabled, |s| s.opacity(0.45))
             .when_some(menu, |s, _| s.aria_expanded(expanded))
             // A control that opens a menu reports whether the menu is open; it is
             // not a toggle, whatever fill the format in force gives it.
@@ -305,6 +307,7 @@ impl MarkraftApp {
             Intent::FormatMenu(menu) => Some(menu),
             _ => None,
         };
+        let enabled = self.editing_enabled(&intent, cx);
         let expanded = menu.is_some() && self.interaction.format_menu() == menu;
         let selected = toggled == Some(true) && menu.is_none();
         self.format_button_base(id, label, kind, intent, toggled, cx)
@@ -321,7 +324,13 @@ impl MarkraftApp {
             } else {
                 0.
             }))
-            .opacity(if expanded { 0.8 } else { 1. })
+            .opacity(if !enabled {
+                0.45
+            } else if expanded {
+                0.8
+            } else {
+                1.
+            })
             .hover(|s| s.bg(self.chrome_fill(if selected { 0.10 } else { 0.05 })))
             .active(|s| {
                 s.bg(self.chrome_fill(if selected { 0.10 } else { 0.05 }))

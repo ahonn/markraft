@@ -15,6 +15,37 @@ use std::{
 use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
 
+/// Native prose services are shared across notes; code remains literal.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextCheckingPreferences {
+    pub spelling: bool,
+    pub grammar: bool,
+    pub correction: bool,
+    pub quotes: bool,
+    pub dashes: bool,
+    pub replacements: bool,
+    pub links: bool,
+    pub data_detectors: bool,
+    pub smart_insert_delete: bool,
+}
+
+impl Default for TextCheckingPreferences {
+    fn default() -> Self {
+        Self {
+            spelling: true,
+            grammar: false,
+            correction: false,
+            quotes: false,
+            dashes: false,
+            replacements: true,
+            links: true,
+            data_detectors: true,
+            smart_insert_delete: true,
+        }
+    }
+}
+
 /// Folder name under `Documents` used when Settings has no notes folder yet.
 pub const DEFAULT_NOTES_FOLDER_NAME: &str = "Markraft";
 
@@ -73,6 +104,7 @@ const LIBRARY_VERSION: u32 = 2;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
+    pub text_checking: TextCheckingPreferences,
     /// Requested display language; old settings continue to follow the system.
     pub language: LanguagePreference,
     pub dark_mode: Option<bool>,
@@ -327,6 +359,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             language: LanguagePreference::default(),
+            text_checking: TextCheckingPreferences::default(),
             dark_mode: None,
             auto_height: true,
             hotkey: "Alt+N".into(),
@@ -367,6 +400,7 @@ impl Default for Preferences {
 /// set, so they have no word here.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pref {
+    TextChecking(TextCheckingPreferences),
     Language(LanguagePreference),
     Theme(Option<bool>),
     AutoHeight(bool),
@@ -408,6 +442,7 @@ impl Pref {
     /// Write this setting into `preferences`.
     pub fn apply(self, preferences: &mut Preferences) {
         match self {
+            Pref::TextChecking(settings) => preferences.text_checking = settings,
             Pref::Language(language) => preferences.language = language,
             Pref::Theme(mode) => preferences.dark_mode = mode,
             Pref::AutoHeight(on) => preferences.auto_height = on,
@@ -1197,6 +1232,17 @@ mod tests {
     /// shows up as a difference.
     fn every_preference_changed() -> Preferences {
         let preferences = Preferences {
+            text_checking: TextCheckingPreferences {
+                spelling: false,
+                grammar: true,
+                correction: true,
+                quotes: true,
+                dashes: true,
+                replacements: false,
+                links: false,
+                data_detectors: false,
+                smart_insert_delete: false,
+            },
             language: LanguagePreference::Locale("future-Language".into()),
             dark_mode: Some(true),
             auto_height: false,
@@ -1262,6 +1308,7 @@ mod tests {
     fn every_pref_sets_its_own_field() {
         let changed = every_preference_changed();
         let words = vec![
+            Pref::TextChecking(changed.text_checking),
             Pref::Language(changed.language.clone()),
             Pref::Theme(changed.dark_mode),
             Pref::AutoHeight(changed.auto_height),

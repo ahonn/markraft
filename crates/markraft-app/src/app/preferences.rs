@@ -109,6 +109,22 @@ impl MarkraftApp {
             self.shortcuts
                 .store(now.markdown_shortcuts, std::sync::atomic::Ordering::Relaxed);
         }
+        if before.text_checking.smart_insert_delete != now.text_checking.smart_insert_delete {
+            for editor in self.editors() {
+                editor.update(cx, |editor, _| {
+                    editor.set_smart_insert_delete(now.text_checking.smart_insert_delete)
+                });
+            }
+        }
+        if before.text_checking != now.text_checking {
+            self.schedule_text_checking(false, false, cx);
+        }
+        if before.text_checking.quotes != now.text_checking.quotes {
+            self.quote_pairs.store(
+                !now.text_checking.quotes,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         if before.auto_pair != now.auto_pair {
             self.pairs
                 .store(now.auto_pair, std::sync::atomic::Ordering::Relaxed);

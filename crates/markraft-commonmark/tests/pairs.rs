@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use markraft_commonmark::{
-    commonmark_auto_pairs, commonmark_extensions, commonmark_schema, from_markdown,
+    commonmark_auto_pairs_with_quotes, commonmark_extensions, commonmark_schema, from_markdown,
     from_markdown_fragment, to_markdown,
 };
 use markraft_core::commands::{
@@ -19,13 +19,22 @@ use markraft_core::{EditorState, EditorStateConfig, Extension, Selection, Transa
 /// An editor over `markdown` with the caret where `|` is, auto-pairing
 /// switched by the returned flag.
 fn editor(markdown: &str) -> (EditorState, Arc<AtomicBool>) {
+    let (state, enabled, _) = editor_with_quotes(markdown, true);
+    (state, enabled)
+}
+
+fn editor_with_quotes(
+    markdown: &str,
+    quotes: bool,
+) -> (EditorState, Arc<AtomicBool>, Arc<AtomicBool>) {
     let (source, caret) = split_caret(markdown);
     let schema = commonmark_schema();
     let doc = from_markdown(&schema, &source).expect("the source parses");
     let enabled = Arc::new(AtomicBool::new(true));
+    let quotes_enabled = Arc::new(AtomicBool::new(quotes));
     let extensions = Extension::all([
         commonmark_extensions(&schema),
-        commonmark_auto_pairs(enabled.clone()),
+        commonmark_auto_pairs_with_quotes(enabled.clone(), quotes_enabled.clone()),
         history(HistoryConfig::default()),
         markraft_core::composition::composition(),
     ]);
@@ -53,7 +62,7 @@ fn editor(markdown: &str) -> (EditorState, Arc<AtomicBool>) {
             )
         }
     };
-    (state, enabled)
+    (state, enabled, quotes_enabled)
 }
 
 /// `markdown` without its caret mark `|` or selection marks `‹…›`, and where
@@ -368,4 +377,51 @@ fn a_footnote_and_a_task_type_through() {
     let (state, _) = editor("- ");
     let state = typed(&state, "[ ] task");
     assert_eq!(to_markdown(state.schema(), state.doc()), "- [ ] task");
+}
+
+#[test]
+fn smart_quote_mode_has_no_automatic_straight_closer_to_leave_behind() {
+    fn replace_character(state: &EditorState, position: usize, text: &str) -> EditorState {
+        let slice = markraft_core::Slice::from_fragment(markraft_core::Fragment::from_node(
+            state.schema().text(text),
+        ));
+        apply(
+            state,
+            vec![
+                TransactionSpec::new()
+                    .changes([markraft_core::Change::replace(
+                        position,
+                        position + 1,
+                        slice,
+                    )])
+                    .user_event(markraft_core::protocol::event::INPUT_REPLACE),
+            ],
+        )
+    }
+    let (state, _, quotes) = editor_with_quotes("", false);
+    let state = typed(&state, "\"");
+    assert_eq!(shown(&state), "\"|");
+    let state = replace_character(&state, 1, "“");
+    let state = typed(&state, "hello\"");
+    let state = replace_character(&state, 7, "”");
+    assert_eq!(shown(&state), "“hello”|");
+    // Turning smart quotes off restores the original pairing immediately.
+    quotes.store(true, Ordering::Relaxed);
+    assert_eq!(shown(&typed(&state, " \"")), "“hello” \"|\"");
+}
+
+#[test]
+fn suppressing_quote_pairs_keeps_brackets_code_and_existing_closers_working() {
+    let (state, _, _) = editor_with_quotes("", false);
+    assert_eq!(shown(&typed(&state, "(hi)")), "(hi)|");
+    let (state, _, _) = editor_with_quotes("‹hi›", false);
+    assert_eq!(shown(&typed(&state, "\"")), "\"|");
+    let (state, _, quotes) = editor_with_quotes("", true);
+    let state = typed(&state, "\"hello");
+    quotes.store(false, Ordering::Relaxed);
+    assert_eq!(shown(&typed(&state, "\"")), "\"hello\"|");
+    for enabled in [false, true] {
+        let (state, _, _) = editor_with_quotes("`code |`", enabled);
+        assert_eq!(shown(&typed(&state, "\"")), "`code \"|`");
+    }
 }

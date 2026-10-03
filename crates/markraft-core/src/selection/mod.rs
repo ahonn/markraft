@@ -25,8 +25,10 @@
 mod custom;
 mod json;
 mod near;
+mod reading;
 
 pub use custom::SelectionKind;
+pub use reading::ReadingSelection;
 
 use crate::change::ChangeDesc;
 use crate::error::NodeError;
@@ -140,6 +142,18 @@ impl Selection {
         Selection::Text { anchor, head }
     }
 
+    /// Select visible content across concealed spelling. Explicit source
+    /// selections remain ordinary text selections; this kind owns balanced
+    /// replacement without widening the visual range.
+    pub fn reading(anchor: usize, head: usize, syntax: crate::MarkTypeId) -> Selection {
+        ReadingSelection::selection(anchor, head, syntax)
+    }
+
+    /// Whether the selected range came from visible text across source spelling.
+    pub fn is_reading(&self) -> bool {
+        matches!(self, Selection::Custom(kind) if kind.as_any().is::<ReadingSelection>())
+    }
+
     /// A node selection on the node starting at `pos`.
     pub fn node(pos: usize) -> Selection {
         Selection::Node { pos }
@@ -226,7 +240,8 @@ impl Selection {
     /// Selected clipboard content, retaining enclosing inline semantic scopes.
     pub fn content_with_schema(&self, doc: &Node, schema: &Schema) -> Slice {
         match self {
-            Selection::Node { .. } | Selection::Custom(_) => self.content(doc),
+            Selection::Custom(kind) => kind.content_with_schema(doc, schema),
+            Selection::Node { .. } => self.content(doc),
             _ => doc
                 .slice_with_schema(schema, self.from(doc), self.to(doc))
                 .unwrap_or_else(|_| Slice::empty()),
@@ -280,7 +295,10 @@ impl Selection {
                 }
             }
             Selection::All => Selection::All,
-            Selection::Custom(kind) => kind.map(doc, changes),
+            Selection::Custom(kind) => match kind.as_any().downcast_ref::<ReadingSelection>() {
+                Some(reading) => reading.map_with_schema(schema, doc, changes),
+                None => kind.map(doc, changes),
+            },
         }
     }
 

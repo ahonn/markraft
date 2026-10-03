@@ -85,6 +85,8 @@ use crate::textblock::{Item, Items, block_kind, document_context, style_mark, sy
 use markraft_core::ends::KeptEnds;
 use markraft_core::protocol::event;
 
+mod reading_replacement;
+
 /// Why a formatting command left the document alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandRefusal {
@@ -149,6 +151,37 @@ pub struct Formatter {
 }
 
 impl Formatter {
+    /// Replace a source selection's reading text, keeping unchanged characters'
+    /// styles. New text inherits the edited location's style.
+    pub fn replace_reading(&self, range: Range<usize>, text: impl Into<String>) -> FormatCommand {
+        self.replace_reading_with_policy(
+            range,
+            text,
+            markraft_core::kind::ReadingReplacementPolicy::PreserveUnchanged,
+        )
+    }
+
+    /// Replace reading text using the style contract of its originating
+    /// system operation. Plain-text Services uniformly inherit the selection's
+    /// start; proofreading preserves unchanged characters' styles.
+    pub fn replace_reading_with_policy(
+        &self,
+        range: Range<usize>,
+        text: impl Into<String>,
+        policy: markraft_core::kind::ReadingReplacementPolicy,
+    ) -> FormatCommand {
+        let text = text.into();
+        let house = self.house.clone();
+        Arc::new(move |state| {
+            if !reading_replacement::owns_structure(state, range.clone()) {
+                return Ok(None);
+            }
+            reading_replacement::replace(state, range.clone(), &text, policy, house.get())
+                .map(Some)
+                .ok_or_else(unreadable)
+        })
+    }
+
     /// The commands, spelling in `house`'s style.
     pub fn new(house: HouseStyleHandle) -> Formatter {
         Formatter { house }
