@@ -662,12 +662,8 @@ impl MenuBuilder<'_> {
                     .context_text_range(&paragraph, check.range)
                     .filter(|detected| editor.context_is_prose(detected))?;
                 let range = detected.text_range();
-                (range.start < selection.end && range.end > selection.start).then_some(
-                    Row::DetectedData {
-                        result,
-                        position: request.position,
-                    },
-                )
+                (range.start < selection.end && range.end > selection.start)
+                    .then_some(Row::DetectedData { result })
             })
     }
 
@@ -861,24 +857,8 @@ impl MarkraftApp {
         if self.platform.is_none() {
             return;
         }
-        self.attach_text_services(id, window, cx);
-        let writing_tools = self
-            .context_menus
-            .native
-            .as_ref()
-            .and_then(|session| session._requestor.as_ref())
-            .and_then(TextServiceSession::writing_tools_items);
-        let prepared = match PreparedMenu::new(&rows, window, writing_tools) {
-            Ok(menu) => menu,
-            Err(error) => {
-                self.context_menus.dismiss_popup();
-                self.feedback.set_error(error);
-                cx.notify();
-                return;
-            }
-        };
         // AppKit tracking can suspend GPUI presentation. Let the pointer's new
-        // selection paint before handing event delivery to the native popup.
+        // selection paint before reading its anchor and tracking the popup.
         let (painted, ready) = futures_channel::oneshot::channel();
         window.on_next_frame(move |_, _| {
             let _ = painted.send(());
@@ -887,12 +867,41 @@ impl MarkraftApp {
             if ready.await.is_err() {
                 return;
             }
-            let valid = this
-                .update(cx, |app, cx| app.context_menu_current(id, cx))
-                .unwrap_or(false);
-            if !valid {
+            let prepared = cx
+                .update(|window, cx| {
+                    this.update(cx, |app, cx| {
+                        if !app.context_menu_current(id, cx) {
+                            return None;
+                        }
+                        app.attach_text_services(id, window, cx);
+                        let writing_tools = app
+                            .context_menus
+                            .native
+                            .as_ref()
+                            .and_then(|session| session._requestor.as_ref())
+                            .and_then(TextServiceSession::writing_tools_items);
+                        match PreparedMenu::new(
+                            &rows,
+                            window,
+                            app.text_service_bounds(position, cx),
+                            writing_tools,
+                        ) {
+                            Ok(menu) => Some(menu),
+                            Err(error) => {
+                                app.context_menus.dismiss_popup();
+                                app.feedback.set_error(error);
+                                cx.notify();
+                                None
+                            }
+                        }
+                    })
+                })
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
+            let Some(prepared) = prepared else {
                 return;
-            }
+            };
             // No App, Window or entity borrow crosses AppKit's nested event loop.
             let selected = prepared.show(position);
             let _ = cx.update(|window, cx| {
@@ -904,6 +913,17 @@ impl MarkraftApp {
         .detach();
     }
 
+    fn text_service_bounds(&self, position: Point<Pixels>, cx: &App) -> Bounds<Pixels> {
+        let editor = self.editor().read(cx);
+        editor.anchor_bounds().unwrap_or_else(|| {
+            let style = editor.style();
+            Bounds::new(
+                position,
+                size(px(1.), style.body_size * style.line_height_ratio),
+            )
+        })
+    }
+
     fn attach_text_services(&mut self, id: u64, window: &Window, cx: &mut Context<Self>) {
         let session = self.context_menus.pending.as_ref().expect("a pending menu");
         let Some(text) = self.editor().read(cx).context_text(&session.request) else {
@@ -911,8 +931,7 @@ impl MarkraftApp {
         };
         let editable = text.replaceable && self.library.active_note().read_only.is_none();
         let prose = self.editor().read(cx).context_is_prose(&session.request);
-        let editor_style = self.editor().read(cx).style();
-        let line_height = editor_style.body_size * editor_style.line_height_ratio;
+        let anchor = self.text_service_bounds(session.request.position, cx);
         let Ok((requestor, returned)) = TextServiceSession::attach(
             window,
             TextServiceSnapshot {
@@ -920,8 +939,7 @@ impl MarkraftApp {
                 editable,
                 prose,
             },
-            session.request.position,
-            line_height,
+            anchor,
         ) else {
             return;
         };
@@ -1047,7 +1065,7 @@ impl MarkraftApp {
             text_services::stop_speaking();
             return;
         }
-        let anchor = match TextAnchor::new(window, position) {
+        let anchor = match TextAnchor::new(window, self.text_service_bounds(position, cx)) {
             Ok(anchor) => anchor,
             Err(error) => {
                 self.feedback.set_error(error);
@@ -1138,7 +1156,7 @@ impl MarkraftApp {
                 .is_some_and(|text| text.replaceable);
         let shown = crate::platform::translation::Translation::show(
             window,
-            session.request.position,
+            self.text_service_bounds(session.request.position, cx),
             text,
             editable,
         );

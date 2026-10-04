@@ -1,14 +1,14 @@
 //! Read-only system text integrations. Native presentations run outside GPUI borrows.
 
-use super::{NSPoint, NSRect, native_view, native_window, text_checking::DetectedData};
+use super::{native_view, native_window, text_checking::DetectedData};
 use crate::locale::Message;
-use gpui::{Pixels, Point, Window};
+use gpui::{Bounds, Pixels, Window};
 use objc2::{
     MainThreadMarker, class, msg_send,
     rc::{Allocated, Retained},
     runtime::AnyObject,
 };
-use objc2_foundation::{NSArray, NSAttributedString, NSString, NSURL};
+use objc2_foundation::{NSArray, NSAttributedString, NSPoint, NSRect, NSString, NSURL};
 use std::{cell::RefCell, ptr};
 
 #[link(name = "AVFoundation", kind = "framework")]
@@ -23,22 +23,22 @@ thread_local! {
 pub(crate) struct TextAnchor {
     view: Retained<AnyObject>,
     window: Retained<AnyObject>,
-    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
 }
 
 impl TextAnchor {
-    pub(crate) fn new(window: &Window, position: Point<Pixels>) -> Result<Self, Message> {
+    pub(crate) fn new(window: &Window, bounds: Bounds<Pixels>) -> Result<Self, Message> {
         main_thread()?;
         let view = unsafe { Retained::retain(native_view(window)?) }.ok_or_else(failure)?;
         let window = unsafe { Retained::retain(native_window(window)?) }.ok_or_else(failure)?;
         Ok(Self {
             view,
             window,
-            position,
+            bounds,
         })
     }
 
-    fn point(&self) -> Result<NSPoint, Message> {
+    fn rect(&self) -> Result<NSRect, Message> {
         main_thread()?;
         let attached: *mut AnyObject = unsafe { msg_send![&*self.view, window] };
         let visible: bool = unsafe { msg_send![&*self.window, isVisible] };
@@ -47,11 +47,15 @@ impl TextAnchor {
         }
         let bounds: NSRect = unsafe { msg_send![&*self.view, bounds] };
         let flipped: bool = unsafe { msg_send![&*self.view, isFlipped] };
-        Ok(view_point(self.position, bounds, flipped))
+        Ok(super::text_geometry::view_rect(
+            self.bounds,
+            bounds,
+            flipped,
+        ))
     }
 
     pub(crate) fn show_definition(&self, text: &str) -> Result<(), Message> {
-        let point = self.point()?;
+        let point = anchor_point(self.rect()?);
         if text.trim().is_empty() {
             return Ok(());
         }
@@ -66,7 +70,7 @@ impl TextAnchor {
 
     /// Let AppKit provide the installed system's date, address, phone, and flight actions.
     pub(crate) fn data_menu(&self, action: &DetectedData) -> Result<Retained<AnyObject>, Message> {
-        let point = self.point()?;
+        let point = anchor_point(self.rect()?);
         // Only use the original detector result and its exact checked string.
         // Synthetic results lack Reveal metadata and can crash inside AppKit.
         // Rechecking would also shift relative dates.
@@ -79,7 +83,7 @@ impl TextAnchor {
     }
 
     pub(crate) fn share(&self, text: &str) -> Result<(), Message> {
-        let point = self.point()?;
+        let rect = self.rect()?;
         if text.trim().is_empty() {
             return Ok(());
         }
@@ -97,10 +101,6 @@ impl TextAnchor {
                 let _: () = msg_send![&*previous, close];
             }
         }
-        let rect = NSRect {
-            origin: point,
-            size: NSPoint { x: 1.0, y: 1.0 },
-        };
         unsafe {
             let _: () = msg_send![&*picker, showRelativeToRect: rect, ofView: &*self.view, preferredEdge: 1usize];
         }
@@ -108,13 +108,12 @@ impl TextAnchor {
     }
 }
 
-fn view_point(position: Point<Pixels>, bounds: NSRect, flipped: bool) -> NSPoint {
-    let x = f32::from(position.x) as f64;
-    let y = f32::from(position.y) as f64;
-    NSPoint {
-        x: bounds.origin.x + x,
-        y: bounds.origin.y + if flipped { y } else { bounds.size.y - y },
-    }
+// Point-only AppKit APIs use the center of the same selection rectangle.
+fn anchor_point(rect: NSRect) -> NSPoint {
+    NSPoint::new(
+        rect.origin.x + rect.size.width / 2.,
+        rect.origin.y + rect.size.height / 2.,
+    )
 }
 
 pub(crate) fn start_speaking(text: &str) -> Result<(), Message> {
@@ -240,18 +239,11 @@ fn failure() -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{point, px};
+    use objc2_foundation::NSSize;
 
     #[test]
-    fn text_anchor_respects_view_origin_and_orientation() {
-        let bounds = NSRect {
-            origin: NSPoint { x: 10.0, y: 20.0 },
-            size: NSPoint { x: 300.0, y: 200.0 },
-        };
-        let position = point(px(30.0), px(40.0));
-        let flipped = view_point(position, bounds, true);
-        assert_eq!((flipped.x, flipped.y), (40.0, 60.0));
-        let ordinary = view_point(position, bounds, false);
-        assert_eq!((ordinary.x, ordinary.y), (40.0, 180.0));
+    fn point_presentations_anchor_at_selection_center() {
+        let rect = NSRect::new(NSPoint::new(40., 60.), NSSize::new(80., 20.));
+        assert_eq!(anchor_point(rect), NSPoint::new(80., 70.));
     }
 }

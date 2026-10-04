@@ -185,6 +185,50 @@ fn copy_uses_the_selection_and_cancel_keeps_the_document_and_clipboard(cx: &mut 
 }
 
 #[gpui::test]
+fn cancelling_checking_retires_services_retained_after_menu_escape(cx: &mut TestAppContext) {
+    let mut h = open_with(cx, &[("note.md", "hello world\n")], |_| {});
+    h.select(1, 6);
+    let id = open_menu(&mut h, ContextTarget::Text);
+    // Supply the application session without instantiating AppKit in a headless
+    // test. The native responder restoration is covered by device validation.
+    h.app.update(h.cx, |app, _| {
+        let pending = app.context_menus.pending.as_ref().unwrap();
+        app.context_menus.native = Some(super::NativeSession {
+            id,
+            note: pending.note.clone(),
+            editor: pending.editor.clone(),
+            request: pending.request.clone(),
+            _requestor: None,
+            _translation: None,
+        });
+    });
+    finish(&mut h, id, None);
+    h.app.update(h.cx, |app, _| {
+        // AppKit reports no menu action when a Service handles the selection.
+        // Escape alone must preserve that asynchronous session.
+        assert_eq!(app.context_menus.native.as_ref().unwrap().id, id);
+        app.cancel_checking_panel();
+        // Returned native results require this session to still be active.
+        assert!(app.context_menus.native.is_none());
+        assert!(app.context_menus.pending.is_none());
+    });
+    assert_eq!(h.markdown(), "hello world");
+}
+
+#[gpui::test]
+fn cancelling_checking_rejects_a_queued_menu_action(cx: &mut TestAppContext) {
+    let mut h = open_with(cx, &[("note.md", "hello world\n")], |_| {});
+    h.select(1, 6);
+    let id = open_menu(&mut h, ContextTarget::Text);
+    let cut = command(&mut h, EditCommand::Cut);
+    h.cx.write_to_clipboard(ClipboardItem::new_string("keep".into()));
+    h.app.update(h.cx, |app, _| app.cancel_checking_panel());
+    finish(&mut h, id, Some(cut));
+    assert_eq!(h.markdown(), "hello world");
+    assert_eq!(clipboard(&mut h), "keep");
+}
+
+#[gpui::test]
 fn paste_is_undoable_and_persists_through_the_existing_edit_pipeline(cx: &mut TestAppContext) {
     let mut h = open_with(cx, &[("note.md", "one two three\n")], |_| {});
     h.select(5, 8);

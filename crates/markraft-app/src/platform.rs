@@ -8,6 +8,7 @@ pub(crate) mod locale;
 pub(crate) mod print;
 pub(crate) mod symbols;
 pub(crate) mod text_checking;
+pub(crate) mod text_geometry;
 pub(crate) mod text_requestor;
 pub(crate) mod text_services;
 pub(crate) mod translation;

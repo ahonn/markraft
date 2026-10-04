@@ -420,17 +420,32 @@ Writing Tools can request coordinator context and then return text through the S
 pasteboard bridge. The session records that request so both return paths preserve
 unchanged source styles. Ordinary Services still inherit the selection's starting style.
 
+Writing Tools anchors its pasteboard popover through `NSViewContentSelectionInfo`.
+The app supplies the selection's first visual line as `selectionAnchorRect` in
+native view coordinates. Its session stores that rectangle on the GPUI view,
+so AppKit can query it without reentering a GPUI update. An existing view
+implementation takes precedence. Closing the session releases its stored anchor.
+Translation and sharing use the same selection rectangle. Lookup and detected-data
+presentations use its center because their AppKit APIs accept a point. Native text
+presentations share one coordinate conversion for flipped and unflipped views.
+The transparent translation anchor passes pointer events through to the editor.
+The context menu itself stays at the pointer; control menus keep their own anchors.
+
+Checking panels retain their action responder across context menus. A text-service
+session can sit above that responder and retain it as its restoration target.
+Closing the checking session first retires the pending menu and text-service session,
+then releases the panel responder. This order preserves the original responder
+chain and rejects any queued result from the retired sessions.
+
 Translation uses the public SwiftUI presentation API, weak-linked behind macOS 14.4
 availability. The small Swift bridge is compiled by `xcrun swiftc`. It requires an
 Xcode SDK providing the Translation framework. Lookup, sharing, speech, and Open With
 use public AppKit or AVFoundation APIs. Detected-data menus retain the original
 system result and its checked string, including native detector metadata.
 
-The translation host currently inherits GPUI's AccessKit content-view accessibility
-tree, which does not expose native hosting subviews. Translation generation has
-been checked on macOS; automated replacement-button interaction remains unverified
-because the same coordinate-click issue also occurs in TextEdit's native popover.
-The Rust callback and guarded replacement paths have separate test coverage.
+Native popover accessibility varies by macOS version. Translation generation,
+replacement-button interaction and undo have been verified on macOS 27.
+The Rust callback and guarded replacement paths have separate headless test coverage.
 
 Each note owns its spelling document tag, so ignored words remain document-local.
 Prose checks run in bounded Unicode chunks after a debounce and yield between chunks;
