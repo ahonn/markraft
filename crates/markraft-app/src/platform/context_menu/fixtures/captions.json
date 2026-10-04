@@ -1,0 +1,222 @@
+[
+  [
+    "Paragraph style QA\nSecond paragraph.",
+    "Paragraph style QA Second…"
+  ],
+  [
+    "one two three four five six seven eight nine ten",
+    "one two three four five six…"
+  ],
+  [
+    "The quick brown fox jumps over the lazy dog",
+    "The quick brown fox jumps over…"
+  ],
+  [
+    "   hello\t\nworld   ",
+    "hello\t world"
+  ],
+  [
+    "one\n\ntwo",
+    "one  two"
+  ],
+  [
+    "  a  b  ",
+    "a  b"
+  ],
+  [
+    "a\t\tb",
+    "a\t\tb"
+  ],
+  [
+    "a\r\nb",
+    "a  b"
+  ],
+  [
+    "a\u000bb",
+    "a b"
+  ],
+  [
+    "a\fb",
+    "a b"
+  ],
+  [
+    "ab",
+    "a b"
+  ],
+  [
+    "a b",
+    "a b"
+  ],
+  [
+    "a b",
+    "a b"
+  ],
+  [
+    "a b",
+    "a b"
+  ],
+  [
+    "a b",
+    "a b"
+  ],
+  [
+    "a b",
+    "a b"
+  ],
+  [
+    "a b",
+    "a b"
+  ],
+  [
+    "a​b",
+    "a​b"
+  ],
+  [
+    "abc-def-ghi-jkl-mno-pqr-stu-vwx-yz",
+    "abc-def-ghi-jkl-mno-pqr-stu-…"
+  ],
+  [
+    "abc\/def\/ghi\/jkl\/mno\/pqr\/stu\/vwx\/yz",
+    "abc\/def\/ghi\/jkl\/mno\/pqr\/stu\/…"
+  ],
+  [
+    "abc,def,ghi,jkl,mno,pqr,stu,vwx,yz",
+    "abc,def,ghi,jkl,mno,pqr,stu,…"
+  ],
+  [
+    "abc—def—ghi—jkl—mno—pqr—stu—vwx—yz",
+    "abc—def—ghi—jkl—mno—pqr—stu—…"
+  ],
+  [
+    "这是一个用于比较原生右键菜单标题截断规则的中文字符串及更多文字",
+    "这是一个用于比较原生右键菜单标题截断规则的中文字符串及更多…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…"
+  ],
+  [
+    "éééééééééééééééééééé",
+    "ééééééééééééééé…"
+  ],
+  [
+    "👨‍👩‍👧‍👦👨‍👩‍👧‍👦👨‍👩‍👧‍👦👨‍👩‍👧‍👦👨‍👩‍👧‍👦",
+    "👨‍👩‍👧‍👦👨‍👩‍👧‍👦…"
+  ],
+  [
+    "12345678901234567890123456789😀X",
+    "12345678901234567890123456789…"
+  ],
+  [
+    "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀X",
+    "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀…"
+  ],
+  [
+    "a                                        b",
+    "a…"
+  ],
+  [
+    "é́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́ more",
+    "é́́́́́́́́́́́́́́́́́́́́́́́́́́́́…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaa don't stop",
+    "aaaaaaaaaaaaaaaaaaaaaaa don't…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaa don't stop",
+    "aaaaaaaaaaaaaaaaaaaaaaaa don't…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaa don't stop",
+    "aaaaaaaaaaaaaaaaaaaaaaaaa do…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaa don't stop",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaa do…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaa don't stop",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaa do…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaa don't stop",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaa…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaa don't stop",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaa…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa don't stop",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…"
+  ],
+  [
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这是一个测试句子",
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这是一个测试…"
+  ],
+  [
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这是一个测试句子",
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这是一个测试…"
+  ],
+  [
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这是一个测试句子",
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这是一个…"
+  ],
+  [
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这是一个测试句子",
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这是一个…"
+  ],
+  [
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这是一个测试句子",
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这是一…"
+  ],
+  [
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这是一个测试句子",
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这是…"
+  ],
+  [
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这是一个测试句子",
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这…"
+  ],
+  [
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲这是一个测试句子",
+    "甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaa xyz abcdef",
+    "aaaaaaaaaaaaaaaaaaaaaaa xyz…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaa xyz abcdef",
+    "aaaaaaaaaaaaaaaaaaaaaaaa xyz…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaa xyz abcdef",
+    "aaaaaaaaaaaaaaaaaaaaaaaaa xyz…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaa xyz abcdef",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaa xyz…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaa xyz abcdef",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaa…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaa xyz abcdef",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaa…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaa xyz abcdef",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaa…"
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa xyz abcdef",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…"
+  ]
+]

@@ -73,5 +73,7 @@
   "notice.folder-daily": "Ouvrez un dossier pour utiliser les notes quotidiennes.",
   "notice.choose-markdown-inside": "Choisissez un fichier Markdown situé dans le dossier de notes.",
   "dialog.daily-folder": "Dossier des notes quotidiennes",
-  "dialog.daily-template": "Modèle de note quotidienne"
+  "dialog.daily-template": "Modèle de note quotidienne",
+  "notice.spelling-complete": "Vérification orthographique terminée.",
+  "notice.text-service-rejected": "Le résultat n’a pas pu remplacer cette sélection en toute sécurité. Copiez plutôt le résultat depuis l’outil système."
 }

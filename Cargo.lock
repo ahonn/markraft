@@ -4140,6 +4140,7 @@ name = "markraft-app"
 version = "0.1.6"
 dependencies = [
  "base64 0.22.1",
+ "block2 0.6.2",
  "chrono",
  "futures-channel",
  "futures-util",
@@ -4160,6 +4161,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "objc2-natural-language",
  "objc2-web-kit",
  "png 0.17.16",
  "raw-window-handle",
@@ -4187,6 +4189,8 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "similar",
+ "unicode-segmentation",
  "unicode-width",
 ]
 
@@ -4214,6 +4218,7 @@ dependencies = [
  "markraft-math",
  "markraft-media",
  "markraft-syntax",
+ "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "serde_json",
@@ -5017,6 +5022,17 @@ checksum = "a0125f776a10d00af4152d74616409f0d4a2053a6f57fa5b7d6aa2854ac04794"
 dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-natural-language"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43f3395c4eda23486f1ca42da8256021a99cf94ebe3cf189bfafeb7e197f8a6d"
+dependencies = [
+ "bitflags 2.13.2",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
 ]
@@ -6851,6 +6867,15 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "similar"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
+dependencies = [
+ "bstr",
+]
 
 [[package]]
 name = "simplecss"

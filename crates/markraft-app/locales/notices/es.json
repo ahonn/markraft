@@ -73,5 +73,7 @@
   "notice.folder-daily": "Abre una carpeta para usar las notas diarias.",
   "notice.choose-markdown-inside": "Elige un archivo Markdown dentro de la carpeta de notas.",
   "dialog.daily-folder": "Carpeta de notas diarias",
-  "dialog.daily-template": "Plantilla de nota diaria"
+  "dialog.daily-template": "Plantilla de nota diaria",
+  "notice.spelling-complete": "Revisión ortográfica completada.",
+  "notice.text-service-rejected": "El resultado no pudo reemplazar esta selección de forma segura. Copia el resultado desde la herramienta del sistema."
 }

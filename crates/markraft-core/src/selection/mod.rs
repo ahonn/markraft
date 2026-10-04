@@ -26,7 +26,7 @@ mod custom;
 mod json;
 mod near;
 
-pub use custom::SelectionKind;
+pub use custom::{ReplacementStyle, SelectionKind};
 
 use crate::change::ChangeDesc;
 use crate::error::NodeError;
@@ -226,7 +226,8 @@ impl Selection {
     /// Selected clipboard content, retaining enclosing inline semantic scopes.
     pub fn content_with_schema(&self, doc: &Node, schema: &Schema) -> Slice {
         match self {
-            Selection::Node { .. } | Selection::Custom(_) => self.content(doc),
+            Selection::Custom(kind) => kind.content_with_schema(doc, schema),
+            Selection::Node { .. } => self.content(doc),
             _ => doc
                 .slice_with_schema(schema, self.from(doc), self.to(doc))
                 .unwrap_or_else(|_| Slice::empty()),
@@ -280,7 +281,7 @@ impl Selection {
                 }
             }
             Selection::All => Selection::All,
-            Selection::Custom(kind) => kind.map(doc, changes),
+            Selection::Custom(kind) => kind.map_with_schema(schema, doc, changes),
         }
     }
 

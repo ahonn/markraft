@@ -166,7 +166,7 @@ pub use kind::{
     CommandRefusal, CommonMarkCodecs, CommonMarkSpelling, FormatCommand, Formatted, Formatter,
     Inexpressible, commonmark_doc_type_names,
 };
-pub use pairs::commonmark_auto_pairs;
+pub use pairs::{commonmark_auto_pairs, commonmark_auto_pairs_with_quotes};
 pub use parse::{MarkdownParser, ParseError, commonmark_options};
 pub use preset::{
     commonmark_mark_rules, commonmark_node_rules, commonmark_serializer, inline_link_mark_rule,

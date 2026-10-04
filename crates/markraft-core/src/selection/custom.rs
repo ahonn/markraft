@@ -12,6 +12,17 @@ use crate::slice::Slice;
 
 use super::{Selection, SelectionRange};
 
+/// Where the content replacing a selection gets its styles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReplacementStyle {
+    /// The content carries its own styles: a rich paste, a deletion.
+    #[default]
+    Own,
+    /// The content continues the styles of the text it replaces: typing, or
+    /// plain text put where the selection was.
+    Receiving,
+}
+
 /// A selection kind provided by an extension.
 ///
 /// Implementors are values: `clone_box` and `eq_kind` give
@@ -48,6 +59,13 @@ pub trait SelectionKind: std::fmt::Debug + Send + Sync {
     /// back to a built-in selection when its own invariants no longer hold.
     fn map(&self, doc: &Node, changes: &ChangeDesc) -> Selection;
 
+    /// Map with the schema of the resulting document, for a kind whose
+    /// invariants depend on what its positions sit in. [`Selection::map`]
+    /// calls this; the default is [`Self::map`].
+    fn map_with_schema(&self, _schema: &Schema, doc: &Node, changes: &ChangeDesc) -> Selection {
+        self.map(doc, changes)
+    }
+
     /// Serialise the selection. The `tag` is added by the caller.
     fn to_json(&self, schema: &Schema) -> Value;
 
@@ -69,6 +87,11 @@ pub trait SelectionKind: std::fmt::Debug + Send + Sync {
             .unwrap_or_else(|_| Slice::empty())
     }
 
+    /// Clipboard content with access to enclosing semantic scopes.
+    fn content_with_schema(&self, doc: &Node, _schema: &Schema) -> Slice {
+        self.content(doc)
+    }
+
     /// Add a change to `spec` replacing this selection with `slice`.
     fn replace(
         &self,
@@ -78,6 +101,20 @@ pub trait SelectionKind: std::fmt::Debug + Send + Sync {
     ) -> crate::state::TransactionSpec {
         let range = self.replacement_range(doc);
         spec.changes([crate::change::Change::replace(range.from, range.to, slice)])
+    }
+
+    /// Replace with access to the receiving schema and the caller's
+    /// [`ReplacementStyle`]. Existing kinds retain their replacement contract
+    /// unless they need schema-aware fitting.
+    fn replace_with_schema(
+        &self,
+        spec: crate::state::TransactionSpec,
+        doc: &Node,
+        _schema: &Schema,
+        slice: Slice,
+        _style: ReplacementStyle,
+    ) -> crate::state::TransactionSpec {
+        self.replace(spec, doc, slice)
     }
 
     /// Validate the selection against `doc`.

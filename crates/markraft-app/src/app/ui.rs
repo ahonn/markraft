@@ -1,5 +1,7 @@
 use crate::locale::Message;
 mod code;
+pub(super) mod context_menu;
+mod editing;
 mod focus;
 mod formatting;
 mod icons;
@@ -8,6 +10,7 @@ mod rename;
 pub(in crate::app) mod settings;
 pub(in crate::app) mod slash;
 pub(super) mod table;
+mod text_checking;
 mod tokens;
 mod vim;
 pub(in crate::app) mod wiki;
@@ -18,6 +21,7 @@ use focus::Surface;
 use icons::{Icon, icon, sized_icon};
 use slash::{Command, SlashEffect};
 use table::TableEdit;
+pub(in crate::app) use text_checking::CheckTrigger;
 pub(in crate::app) use tokens::playback;
 use tokens::{POPOVER_RADIUS, ROW_HEIGHT, ROW_RADIUS, keycaps, popover_shadow};
 
@@ -46,7 +50,8 @@ enum Intent {
     Pin,
     PinNote(String),
     TrashNote(String),
-    Copy,
+    CopyMarkdown,
+    Edit(editing::EditCommand),
     CopyRichText,
     PastePlain,
     PasteMarkdown,
@@ -109,7 +114,7 @@ fn shortcut_label(intent: &Intent) -> &'static str {
         Intent::Browse => "⌘P",
         Intent::Save => "⌘S",
         Intent::Hide => "⌘W",
-        Intent::Copy => "⇧⌘C",
+        Intent::CopyMarkdown => "⇧⌘C",
         Intent::PastePlain => "⇧⌘V",
         Intent::PasteMarkdown => "⌥⇧⌘V",
         Intent::Export => "⇧⌘E",
@@ -163,7 +168,8 @@ impl Intent {
             | Self::DailyNext
             | Self::Browse
             | Self::Pin => ActionGroup::Notes,
-            Self::Copy
+            Self::Edit(_)
+            | Self::CopyMarkdown
             | Self::CopyRichText
             | Self::PastePlain
             | Self::PasteMarkdown
@@ -295,7 +301,7 @@ fn intent_icon(intent: &Intent) -> Icon {
         Intent::Browse => Icon::Notes,
         Intent::Pin => Icon::Pin,
         Intent::Delete | Intent::TrashNote(_) => Icon::Trash,
-        Intent::Copy | Intent::CopyRichText | Intent::CopyLink => Icon::Copy,
+        Intent::CopyMarkdown | Intent::CopyRichText | Intent::CopyLink => Icon::Copy,
         Intent::Export | Intent::ExportHtml | Intent::ExportPdf => Icon::Export,
         Intent::Print => Icon::Print,
         Intent::SendToObsidian(_) => Icon::Send,
@@ -351,7 +357,11 @@ impl MarkraftApp {
         if self.is_reloading() {
             return;
         }
+        if !self.editing_enabled(&intent, cx) {
+            return;
+        }
         match intent {
+            Intent::Edit(command) => self.edit_selection(command, window, cx),
             Intent::New => self.new_note(window, cx),
             Intent::DailyToday => {
                 self.open_daily_note(daily_notes::today(), window, cx);
@@ -471,7 +481,7 @@ impl MarkraftApp {
             Intent::TrashNote(id) => self.confirm_trash(id, true, window, cx),
             Intent::Select(id) => self.select_note(&id, window, cx),
             Intent::CodeLanguage(language) => self.apply_code_language(language, window, cx),
-            Intent::Copy => {
+            Intent::CopyMarkdown => {
                 self.copy_markdown(cx);
                 self.intent(Intent::Back, window, cx);
             }
@@ -1408,7 +1418,11 @@ impl MarkraftApp {
             Command::new("daily-today", "command.daily-today", Intent::DailyToday)
                 .ex(&[("today", 5)]),
             Command::new("save-now", "command.save-now", Intent::Save).ex(&[("write", 1)]),
-            Command::new("copy-markdown", "command.copy-as-markdown", Intent::Copy),
+            Command::new(
+                "copy-markdown",
+                "command.copy-as-markdown",
+                Intent::CopyMarkdown,
+            ),
             Command::new(
                 "copy-rich-text",
                 "command.copy-as-rich-text",
@@ -1852,6 +1866,7 @@ impl MarkraftApp {
                 ..
             } = command;
             let Some(intent) = intent else { continue };
+            let enabled = self.editing_enabled(&intent, cx);
             let group = intent.action_group();
             let separator = previous_group.is_some_and(|previous| previous != group);
             previous_group = Some(group);
@@ -1868,6 +1883,7 @@ impl MarkraftApp {
                     })
                     .child(
                         self.row(id, label, shortcut, ex, intent, cx)
+                            .when(!enabled, |s| s.opacity(0.45))
                             .h(ACTION_ROW_HEIGHT)
                             .text_size(px(14.))
                             .role(Role::Button)

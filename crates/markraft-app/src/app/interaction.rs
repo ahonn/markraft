@@ -213,6 +213,8 @@ impl MarkraftApp {
     }
 
     pub(super) fn set_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
+        self.context_menus.dismiss();
+        self.cancel_checking_panel();
         self.leave_input(cx);
         self.interaction.switch_panel(panel);
     }

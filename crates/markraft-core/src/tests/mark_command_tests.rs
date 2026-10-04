@@ -506,3 +506,109 @@ fn removing_a_whole_inherited_link_does_not_leave_empty_links() {
         r#"doc(paragraph(inline_span("ab")))"#
     );
 }
+
+mod custom_selection_replacement {
+    use super::*;
+    use crate::{Change, ChangeDesc, Node, Schema, SelectionKind};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    /// The visual range and replacement policy deliberately differ, proving
+    /// commands dispatch to the kind rather than flattening it to two offsets.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct InnerSelection;
+
+    impl SelectionKind for InnerSelection {
+        fn tag(&self) -> &str {
+            "inner-test"
+        }
+        fn clone_box(&self) -> Box<dyn SelectionKind> {
+            Box::new(*self)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn eq_kind(&self, other: &dyn SelectionKind) -> bool {
+            other.as_any().is::<Self>()
+        }
+        fn anchor(&self, _: &Node) -> usize {
+            1
+        }
+        fn head(&self, _: &Node) -> usize {
+            4
+        }
+        fn map(&self, _: &Node, changes: &ChangeDesc) -> Selection {
+            let range = changes.map_range(1, 4);
+            Selection::text(range.from, range.to)
+        }
+        fn to_json(&self, _: &Schema) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        // Override the original hook to also verify backward compatibility with
+        // kinds that do not implement the newer schema-aware hook.
+        fn replace(&self, spec: TransactionSpec, _: &Node, slice: Slice) -> TransactionSpec {
+            spec.changes([Change::replace(2, 3, slice).with_fit(crate::Fit::Auto)])
+                .selection(Selection::cursor(2))
+        }
+    }
+
+    #[test]
+    fn custom_selection_commands_honor_replacement_and_caret_without_running_filters() {
+        let schema = shared_schema();
+        let filters = Arc::new(AtomicUsize::new(0));
+        let observed = filters.clone();
+        let filter: crate::TransactionFilterFn = Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            None
+        });
+        let start = state(
+            doc(&schema, [n(&schema, "paragraph", [t(&schema, "abc")])]),
+            crate::transaction_filter().of(filter),
+        );
+        let selected = start
+            .update([TransactionSpec::new().selection(Selection::custom(Box::new(InnerSelection)))])
+            .unwrap()
+            .state()
+            .clone();
+        for (command, expected) in [
+            (insert_text("X"), "aXc"),
+            (insert_node(t(&schema, "X")), "aXc"),
+            (
+                replace_selection(Slice::from_fragment(Fragment::from_node(t(&schema, "X")))),
+                "aXc",
+            ),
+            (delete_selection(), "ac"),
+            (replace_selection(Slice::empty()), "ac"),
+        ] {
+            filters.store(0, Ordering::SeqCst);
+            let spec = command(&selected).expect("custom replacement applies");
+            assert_eq!(
+                filters.load(Ordering::SeqCst),
+                0,
+                "command construction must be pure"
+            );
+            let result = selected.update([spec]).unwrap();
+            assert_eq!(filters.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                result.new_doc().text_between(
+                    &schema,
+                    0,
+                    result.new_doc().content_size(),
+                    None,
+                    None
+                ),
+                expected
+            );
+            assert_eq!(result.new_selection(), Selection::cursor(2));
+        }
+        let hard_break = schema.node_id("hard_break").unwrap();
+        let broken = run(&selected, &insert_hard_break(hard_break));
+        assert_eq!(
+            schema.describe(broken.doc()),
+            "doc(paragraph(\"a\", hard_break, \"c\"))"
+        );
+        assert_eq!(broken.selection(), &Selection::cursor(2));
+    }
+}

@@ -1,4 +1,5 @@
 //! Editor session lifetimes and workspace replacement.
+use super::ui::CheckTrigger;
 use super::*;
 use crate::locale::Message;
 use markraft_commonmark::SourceTrack;
@@ -185,6 +186,7 @@ impl MarkraftApp {
                 self.focus_editor(window, cx);
             }
             self.sync_find(cx);
+            self.schedule_text_checking(CheckTrigger::Changed, cx);
             return;
         }
         let restore_focus = self.close_popover(cx) || restore_focus;
@@ -255,7 +257,11 @@ impl MarkraftApp {
                 Setup::new(doc::schema().clone())
                     .types(doc::types().clone())
                     .kind(std::sync::Arc::new(kind))
-                    .extensions(doc::extensions(self.shortcuts.clone(), self.pairs.clone()))
+                    .extensions(doc::extensions_with_quotes(
+                        self.shortcuts.clone(),
+                        self.pairs.clone(),
+                        self.quote_pairs.clone(),
+                    ))
                     .doc(document),
                 cx,
             )
@@ -264,6 +270,7 @@ impl MarkraftApp {
             .with_image_base(image_base)
             .with_image_root(image_root.clone().map_err(|error| error.render(&self.i18n)))
             .with_file_paste(true)
+            .with_smart_insert_delete(self.preferences.text_checking.smart_insert_delete)
             .with_transaction_guard(move |transactions| {
                 let locale = guard_locale.read().expect("the app locale lock");
                 if reloading.load(std::sync::atomic::Ordering::Relaxed) {
@@ -334,6 +341,12 @@ impl MarkraftApp {
             &editor,
             window,
             move |this, editor, event: &EditorEvent, window, cx| {
+                if let EditorEvent::ContextMenuRequested(request) = event {
+                    if this.library.active_id == note_id {
+                        this.request_context_menu(editor, request.clone(), window, cx);
+                    }
+                    return;
+                }
                 if let EditorEvent::FilesPasted(item) = event {
                     if this.library.active_id == note_id {
                         this.insert_assets(assets::from_clipboard(item.clone()), window, cx);
@@ -388,6 +401,20 @@ impl MarkraftApp {
                 {
                     this.close_popover(cx);
                 }
+                if this.library.active_id == note_id {
+                    let trigger = if matches!(
+                        event,
+                        EditorEvent::Changed {
+                            text_input: true,
+                            ..
+                        }
+                    ) {
+                        CheckTrigger::Typed
+                    } else {
+                        CheckTrigger::Changed
+                    };
+                    this.schedule_text_checking(trigger, cx);
+                }
                 let document = editor.read(cx).committed_document().clone();
                 this.reconcile_vim_find(window, cx);
                 let title = this.library.note(&note_id).map(|note| note.title());
@@ -405,6 +432,8 @@ impl MarkraftApp {
             if this.library.active_id != state_note_id {
                 return;
             }
+            this.invalidate_text_service(cx);
+            this.sync_checking_panel(cx);
             if this.toolbar.formats_changed(|| {
                 let editor = editor.read(cx);
                 (
@@ -434,6 +463,7 @@ impl MarkraftApp {
             self.focus_editor(window, cx);
         }
         self.sync_find(cx);
+        self.schedule_text_checking(CheckTrigger::Changed, cx);
     }
     /// Apply an application edit through the editor's source guard and history.
     /// Composition is left untouched; callers can report that note as skipped.

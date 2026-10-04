@@ -58,6 +58,21 @@ mod tests {
     }
 
     #[test]
+    fn inline_breaks_separate_words_and_keep_search_offsets() {
+        let (text, projection) = shown("one\n**two**");
+        assert_eq!(text.text(), "one\ntwo");
+        assert!(text.matches("onetwo").is_empty());
+        assert_eq!(
+            text.matches("two"),
+            vec![line_offset(&projection, 6)..line_offset(&projection, 9)]
+        );
+        assert_eq!(
+            text.matches("\n"),
+            vec![line_offset(&projection, 3)..line_offset(&projection, 4)]
+        );
+    }
+
+    #[test]
     fn a_wiki_link_is_found_by_its_label_and_selects_the_atom() {
         let (text, projection) = shown("see [[Notes]] now");
         assert_eq!(text.text(), "see Notes now");
