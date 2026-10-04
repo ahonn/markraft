@@ -105,6 +105,11 @@ fn only_a_selection_made_by_a_word_gesture_counts_as_a_word(cx: &mut TestAppCont
         assert!(!view.selected_by_word());
         view.select_range(5, 8, cx);
         assert!(!view.selected_by_word());
+        // A replaced document ends it too, whatever is selected afterwards.
+        view.select_context(6, Some(6), false, &ContextTarget::Text, cx);
+        assert!(view.selected_by_word());
+        view.replace_doc(view.state.doc().clone(), cx);
+        assert!(view.word_selection.is_none());
     });
 }
 
