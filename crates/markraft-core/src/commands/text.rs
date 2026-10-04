@@ -7,7 +7,7 @@ use crate::mark::MarkSet;
 use crate::node::Node;
 use crate::pos::ResolvedPos;
 use crate::schema::{NodeTypeId, Schema};
-use crate::selection::Selection;
+use crate::selection::{ReplacementStyle, Selection};
 use crate::slice::{Slice, Token};
 use crate::state::{EditorState, TransactionSpec};
 
@@ -38,6 +38,17 @@ pub(crate) fn insert_text_spec(state: &EditorState, text: &str) -> Option<Transa
     let resolved = doc.resolve(from).ok()?;
     let marks = marks_for_insertion(state, &resolved);
     let inherited = resolved.inherited_marks(schema);
+    if matches!(state.selection(), Selection::Custom(_)) {
+        let local_marks = resolved.local_marks(schema);
+        let local = marks.filter(|mark| !inherited.contains(mark) || local_marks.contains(mark));
+        let slice = Slice::from_fragment(Fragment::from_node(schema.text_marked(text, local)));
+        let mut spec =
+            custom_replacement_spec(state, slice, ReplacementStyle::Receiving, event::INPUT_TYPE)?;
+        if state.stored_marks().is_some() {
+            spec = spec.stored_marks(Some(marks));
+        }
+        return Some(spec);
+    }
     let leave_scope = state.stored_marks().is_some()
         && inherited.iter().any(|mark| !marks.contains(mark))
         && from == to;
@@ -158,6 +169,9 @@ fn insert_node_spec(state: &EditorState, node: Node, event: &str) -> Option<Tran
     let schema = state.schema();
     let range = state.selection().replacement_range(doc);
     let slice = Slice::from_fragment(Fragment::from_node(node));
+    if matches!(state.selection(), Selection::Custom(_)) {
+        return custom_replacement_spec(state, slice, ReplacementStyle::Own, event);
+    }
     let (set, new_doc) = resolve_changes(
         state,
         vec![Change::replace(range.from, range.to, slice).with_fit(Fit::Auto)],
@@ -276,7 +290,18 @@ fn covered_depths(schema: &Schema, from: &ResolvedPos, to: &ResolvedPos) -> Vec<
 /// caret sits in while the closed nodes in between stay whole. A fully closed
 /// slice of block content splits the textblock around it instead.
 pub fn replace_selection(slice: Slice) -> Command {
+    replace_selection_as(slice, ReplacementStyle::Own, event::INPUT_PASTE)
+}
+
+/// Replace through the same selection contract, saying where the content gets
+/// its styles and what the edit is. Typing and literal-text insertion take the
+/// receiving style, so a visible selection keeps it; a rich paste brings its own.
+pub fn replace_selection_as(slice: Slice, style: ReplacementStyle, event: &str) -> Command {
+    let event = event.to_owned();
     command(move |state| {
+        if matches!(state.selection(), Selection::Custom(_)) {
+            return custom_replacement_spec(state, slice.clone(), style, &event);
+        }
         let doc = state.doc();
         let schema = state.schema();
         let range = state.selection().replacement_range(doc);
@@ -289,10 +314,48 @@ pub fn replace_selection(slice: Slice) -> Command {
             TransactionSpec::new()
                 .change_set(set)
                 .selection(Selection::near(schema, &new_doc, end, -1))
-                .user_event(event::INPUT_PASTE)
+                .user_event(&event)
                 .scroll_into_view(),
         )
     })
+}
+
+/// Resolve a custom selection's replacement contract without running extension
+/// filters during command construction. The hook owns its changes and may own
+/// the resulting caret; ordinary command metadata is applied at this boundary.
+pub(super) fn custom_replacement_spec(
+    state: &EditorState,
+    slice: Slice,
+    style: ReplacementStyle,
+    event: &str,
+) -> Option<TransactionSpec> {
+    let Selection::Custom(kind) = state.selection() else {
+        return None;
+    };
+    let range = kind.replacement_range(state.doc());
+    let spec = kind.replace_with_schema(
+        TransactionSpec::new().user_event(event),
+        state.doc(),
+        state.schema(),
+        slice,
+        style,
+    );
+    let (changes, doc, explicit_selection) = spec.resolve_edit(state).ok()?;
+    if changes.is_empty() {
+        return None;
+    }
+    let selection = explicit_selection.unwrap_or_else(|| {
+        let end = changes
+            .map_pos(range.to, 1, TrackMode::Simple)
+            .unwrap_or(doc.content_size());
+        Selection::near(state.schema(), &doc, end, -1)
+    });
+    selection.check(&doc, state.schema()).ok()?;
+    Some(
+        spec.change_set(changes)
+            .selection(selection)
+            .scroll_into_view(),
+    )
 }
 
 /// The changes [`replace_selection`] performs.

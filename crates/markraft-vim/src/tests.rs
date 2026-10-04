@@ -1526,6 +1526,25 @@ fn a_table_that_is_the_whole_document_leaves_the_smallest_one_the_schema_allows(
 }
 
 #[test]
+fn a_word_selected_across_concealed_spelling_survives_normal_mode() {
+    let mut keys = Keys::new("Mark**raft** two").at(0, 0);
+    let (from, to) = (keys.pos(0, 0), keys.pos(0, 12));
+    let syntax = keys.host.types().syntax.expect("a syntax mark");
+    keys.host.select(
+        markraft_core::kind::ReadingSelection::selection(from, to, syntax),
+        false,
+    );
+    keys.settle();
+    let selection = keys.host.state().selection();
+    assert!(markraft_core::kind::ReadingSelection::is(selection));
+    let doc = keys.host.state().doc();
+    assert_eq!((selection.from(doc), selection.to(doc)), (from, to));
+    // The next motion collapses it, as it does a dragged selection.
+    keys.keys("l");
+    assert!(keys.host.state().selection().is_cursor());
+}
+
+#[test]
 fn a_paste_that_is_not_a_row_lands_beside_the_table_rather_than_in_it() {
     let mut keys = Keys::new(TABLE).at(0, 0);
     keys.keys("yy");

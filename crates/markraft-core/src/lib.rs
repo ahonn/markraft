@@ -203,7 +203,7 @@ pub use schema::{
 };
 pub use slice::{Slice, Token, min_prefix_delta, node_tokens, tokens_cut, tokens_size};
 
-pub use selection::{Selection, SelectionKind, SelectionRange};
+pub use selection::{ReplacementStyle, Selection, SelectionKind, SelectionRange};
 pub use state::protocol;
 pub use state::{
     Annotation, AnnotationType, ChangeFilterFn, ChangeFilterResult, Compartment, Configuration,

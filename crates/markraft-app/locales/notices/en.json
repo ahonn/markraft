@@ -73,5 +73,7 @@
   "notice.folder-daily": "Open a folder to use daily notes.",
   "notice.choose-markdown-inside": "Choose a Markdown file inside the notes folder.",
   "dialog.daily-folder": "Daily Notes Folder",
-  "dialog.daily-template": "Daily Note Template"
+  "dialog.daily-template": "Daily Note Template",
+  "notice.spelling-complete": "Spelling check complete.",
+  "notice.text-service-rejected": "The result could not replace this selection safely. Copy the result from the system tool instead."
 }

@@ -26,8 +26,9 @@ markraft-commonmark.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSPasteboard"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSString", "NSArray"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSPasteboard", "NSTextView", "NSText", "NSView", "NSResponder", "NSAttributedString"] }
+objc2 = "0.6.3"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSCharacterSet", "NSString", "NSArray", "NSAttributedString"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }

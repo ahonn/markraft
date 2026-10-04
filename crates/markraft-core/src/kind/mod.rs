@@ -25,6 +25,7 @@ pub mod equations;
 pub mod footnotes;
 pub mod math;
 pub mod reading;
+mod reading_selection;
 pub mod types;
 
 use std::ops::Range;
@@ -38,6 +39,7 @@ use crate::schema::MarkTypeId;
 use crate::slice::Slice;
 use crate::state::{EditorState, TransactionSpec};
 
+pub use reading_selection::ReadingSelection;
 pub use types::{CalloutAttrs, DocTypes};
 
 /// A document kind's formatting edit over a state: `Ok(None)` where it does not
@@ -45,6 +47,18 @@ pub use types::{CalloutAttrs, DocTypes};
 /// sentence the host wants shown, which a view reports as a refused edit.
 pub type Formatting =
     Arc<dyn Fn(&EditorState) -> Result<Option<TransactionSpec>, String> + Send + Sync>;
+
+/// How plain text that replaces reading text obtains its styles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReadingReplacementPolicy {
+    /// A correction: characters the replacement leaves unchanged keep their
+    /// styles, and new ones take the style of where they land.
+    #[default]
+    PreserveUnchanged,
+    /// A rewrite: the whole replacement takes the styles of the selection's
+    /// first character, unchanged words included, and the caret follows it.
+    InheritSelectionStart,
+}
 
 /// How a document kind spells itself for a view: the behaviour behind the
 /// roles [`DocTypes`] names.
@@ -82,6 +96,23 @@ pub trait DocumentKind: Send + Sync {
     /// for the same reason. `ty` is the mark type [`DocTypes::link`] names.
     fn set_link(&self, ty: MarkTypeId, url: Option<&str>) -> Option<Formatting> {
         let _ = (ty, url);
+        None
+    }
+    /// Replace rendered reading text while preserving this kind's source and
+    /// styles. `range` uses document positions; `text` contains no markup.
+    /// A supported unchanged replacement returns an empty transaction, allowing
+    /// hosts to query capability through the same validation as execution.
+    /// `Ok(None)` declines this structure and permits the host's existing
+    /// precise literal replacement. An error refuses the edit and must not
+    /// fall back to deleting concealed source indiscriminately.
+    /// `policy` says where the replacement's styles come from.
+    fn replace_reading(
+        &self,
+        range: Range<usize>,
+        text: &str,
+        policy: ReadingReplacementPolicy,
+    ) -> Option<Formatting> {
+        let _ = (range, text, policy);
         None
     }
     /// `split`, a command that splits a textblock at the caret, as this kind

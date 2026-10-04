@@ -73,5 +73,7 @@
   "notice.folder-daily": "Abra uma pasta para usar notas diárias.",
   "notice.choose-markdown-inside": "Escolha um arquivo Markdown dentro da pasta de notas.",
   "dialog.daily-folder": "Pasta de Notas Diárias",
-  "dialog.daily-template": "Modelo de Nota Diária"
+  "dialog.daily-template": "Modelo de Nota Diária",
+  "notice.spelling-complete": "Verificação ortográfica concluída.",
+  "notice.text-service-rejected": "O resultado não pôde substituir esta seleção com segurança. Copie o resultado da ferramenta do sistema."
 }

@@ -73,5 +73,7 @@
   "notice.folder-daily": "デイリーノートを使うにはフォルダを開いてください。",
   "notice.choose-markdown-inside": "ノートフォルダ内のMarkdownファイルを選択してください。",
   "dialog.daily-folder": "デイリーノートのフォルダ",
-  "dialog.daily-template": "デイリーノートのテンプレート"
+  "dialog.daily-template": "デイリーノートのテンプレート",
+  "notice.spelling-complete": "スペルチェックが完了しました。",
+  "notice.text-service-rejected": "結果でこの選択範囲を安全に置き換えられませんでした。システムツールから結果をコピーしてください。"
 }

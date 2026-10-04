@@ -766,11 +766,12 @@ pub(crate) fn settle(state: &mut State, cx: &mut impl Host, replaced: bool) -> O
         };
     } else if state.mode == Mode::Normal {
         // A ranged *text* selection in Normal mode was made with the mouse; leave it
-        // alone so that ⌘C still copies it. The next motion collapses it.
+        // alone so that ⌘C still copies it. The next motion collapses it. A word
+        // picked across concealed spelling is the same gesture in another kind.
         let ranged = matches!(
             cx.state().selection(),
             Selection::Text { anchor, head, .. } if anchor != head
-        );
+        ) || markraft_core::kind::ReadingSelection::is(cx.state().selection());
         if !ranged {
             let head = host::head(cx);
             let clamped = clamp(&projection, head);

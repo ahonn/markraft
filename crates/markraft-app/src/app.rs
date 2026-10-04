@@ -123,6 +123,7 @@ pub struct MarkraftApp {
     instance: Instance,
     sessions: Sessions,
     interaction: Interaction,
+    context_menus: ui::context_menu::ContextMenus,
     input: Option<InputSession>,
     /// Where Tab has walked the chrome, and the handle its controls share.
     ring: FocusRing,
@@ -185,6 +186,7 @@ pub struct MarkraftApp {
     shortcuts: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Whether brackets and quotes pair as they are typed, shared the same way.
     pairs: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    quote_pairs: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Whether someone is at the window, which is what the chrome follows.
     presence: Presence,
     /// The window's own size, and the one resize the app asked for.
@@ -311,6 +313,7 @@ impl MarkraftApp {
         let emoji = markraft_gpui::EmojiInsertion::new(preferences.emoji_characters);
         let shortcuts = std::sync::Arc::new(preferences.markdown_shortcuts.into());
         let pairs = std::sync::Arc::new(preferences.auto_pair.into());
+        let quote_pairs = std::sync::Arc::new((!preferences.text_checking.quotes).into());
         let house = markraft_commonmark::HouseStyleHandle::default();
         apply_markdown_style(&house, &preferences);
         let find_editor = cx.new(|cx| {
@@ -344,6 +347,7 @@ impl MarkraftApp {
             instance,
             sessions: Sessions::default(),
             interaction: Interaction::default(),
+            context_menus: Default::default(),
             input: None,
             ring: FocusRing::new(cx.focus_handle()),
             picker: Picker::default(),
@@ -365,6 +369,7 @@ impl MarkraftApp {
             emoji,
             shortcuts,
             pairs,
+            quote_pairs,
             toolbar: Toolbar::default(),
             find_open: false,
             find_vim: None,
@@ -913,6 +918,8 @@ impl MarkraftApp {
         cx.notify();
     }
     pub fn hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.context_menus.dismiss();
+        self.cancel_checking_panel();
         self.close_popover(cx);
         self.cancel_input(cx);
         self.editor()
@@ -1096,6 +1103,8 @@ impl MarkraftApp {
         self.notes_changed(cx);
     }
     fn select_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.context_menus.dismiss();
+        self.cancel_checking_panel();
         self.close_popover(cx);
         self.cancel_input(cx);
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
@@ -2119,6 +2128,29 @@ impl MarkraftApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.insert_assets_with_context(assets, None, window, cx);
+    }
+
+    /// A context-menu import keeps its original editor and selection throughout
+    /// saving and copying. A stale request must never replace newly selected text.
+    fn insert_context_assets(
+        &mut self,
+        assets: Vec<assets::Asset>,
+        request: markraft_gpui::ContextRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editor = self.editor();
+        self.insert_assets_with_context(assets, Some((editor, request)), window, cx);
+    }
+
+    fn insert_assets_with_context(
+        &mut self,
+        assets: Vec<assets::Asset>,
+        context: Option<(Entity<EditorView>, markraft_gpui::ContextRequest)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if assets.is_empty() {
             return;
         }
@@ -2126,10 +2158,15 @@ impl MarkraftApp {
             self.feedback.queue(Message::new("notice.resolve-readonly"));
             return;
         }
+        if context.as_ref().is_some_and(|(editor, request)| {
+            *editor != self.editor() || !editor.read(cx).context_is_current(request)
+        }) {
+            return;
+        }
         let id = self.library.active_id.clone();
         self.flush_then(window, cx, move |this, window, cx| {
             if this.library.active_id == id {
-                this.insert_saved_assets(assets, window, cx);
+                this.insert_saved_assets(assets, context, window, cx);
             }
         });
     }
@@ -2137,6 +2174,7 @@ impl MarkraftApp {
     fn insert_saved_assets(
         &mut self,
         assets: Vec<assets::Asset>,
+        context: Option<(Entity<EditorView>, markraft_gpui::ContextRequest)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2164,10 +2202,15 @@ impl MarkraftApp {
             .unwrap_or(std::path::Path::new("."))
             .join("image-imports");
         cx.spawn_in(window, async move |this, cx| {
-            // The copy belongs to the note it was started in; where the caret is by
-            // the time it finishes is the user's business, not a reason to drop it.
+            // Ordinary imports follow the current caret in the originating note.
+            // A menu request additionally retains its exact editor and selection.
             if !this
-                .update(cx, |this, _| this.library.active_id == id)
+                .update(cx, |this, cx| {
+                    this.library.active_id == id
+                        && context.as_ref().is_none_or(|(editor, request)| {
+                            *editor == this.editor() && editor.read(cx).context_is_current(request)
+                        })
+                })
                 .unwrap_or(false)
             {
                 return;
@@ -2199,7 +2242,12 @@ impl MarkraftApp {
                     )
                 };
                 let note = this.library.active_note();
-                if this.library.active_id != id || note.read_only.is_some() {
+                if this.library.active_id != id
+                    || note.read_only.is_some()
+                    || context
+                        .as_ref()
+                        .is_some_and(|(editor, _)| *editor != this.editor())
+                {
                     let (text, path) = kept("the note changed");
                     this.feedback.enqueue(text, path);
                     return;
@@ -2215,10 +2263,18 @@ impl MarkraftApp {
                         return;
                     }
                 };
-                // Typing during the copy only moves the caret; the images go where
-                // it is now.
+                // Validate the menu snapshot immediately before replacement, after
+                // every asynchronous boundary. Ordinary imports still follow the
+                // current caret. Both remain isolated from a Vim Insert undo group.
                 let applied = this.editor().update(cx, |editor, cx| {
-                    editor.run_command(&markraft_core::commands::replace_selection(slice), cx)
+                    if context
+                        .as_ref()
+                        .is_some_and(|(_, request)| !editor.context_is_current(request))
+                    {
+                        return false;
+                    }
+                    let command = markraft_core::commands::replace_selection(slice);
+                    command(editor.state()).is_some_and(|spec| editor.dispatch_isolated([spec], cx))
                 });
                 if !applied {
                     let (text, path) = kept("the note would not take them");

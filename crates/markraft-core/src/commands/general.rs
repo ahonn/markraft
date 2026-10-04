@@ -10,7 +10,7 @@ use crate::fit::Fit;
 use crate::node::Node;
 use crate::pos::ResolvedPos;
 use crate::schema::{NodeTypeId, Schema};
-use crate::selection::Selection;
+use crate::selection::{ReplacementStyle, Selection};
 use crate::slice::{Slice, Token};
 use crate::state::{EditorState, TransactionSpec};
 
@@ -34,6 +34,14 @@ pub fn delete_selection() -> Command {
         let doc = state.doc();
         if state.selection().is_empty(doc) {
             return None;
+        }
+        if matches!(state.selection(), Selection::Custom(_)) {
+            return super::text::custom_replacement_spec(
+                state,
+                Slice::empty(),
+                ReplacementStyle::Own,
+                event::DELETE_SELECTION,
+            );
         }
         let range = state.selection().replacement_range(doc);
         let (set, new_doc) = resolve_changes(

@@ -109,6 +109,74 @@ pub(crate) enum PasteMode {
     Markdown,
 }
 
+/// The representation requested explicitly by an editor's Copy As menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyFormat {
+    PlainText,
+    Markdown,
+    HtmlCode,
+    RichText,
+}
+
+/// Prepare every representation before touching the clipboard. In particular,
+/// HTML source is only text; a rich copy also carries semantic HTML and an
+/// exact fragment for a paste back into the editor.
+pub(crate) struct PreparedCopy {
+    text: String,
+    metadata: Option<String>,
+    html: Option<String>,
+}
+
+pub(crate) fn prepare_copy(
+    schema: &Schema,
+    codecs: Option<&dyn Codecs>,
+    types: &DocTypes,
+    slice: &Slice,
+    format: CopyFormat,
+) -> Option<PreparedCopy> {
+    if slice.is_empty() {
+        return None;
+    }
+    let mut result = PreparedCopy {
+        text: String::new(),
+        metadata: None,
+        html: None,
+    };
+    result.text = match format {
+        CopyFormat::PlainText => codecs.map_or_else(
+            || markraft_core::kind::conceal::slice_text(schema, types.syntax, slice),
+            |codecs| codecs.to_text(slice),
+        ),
+        CopyFormat::Markdown => {
+            let codecs = codecs?;
+            codecs.to_markup(&codecs.copied(slice))?
+        }
+        CopyFormat::HtmlCode => {
+            let codecs = codecs?;
+            codecs.to_html(&codecs.copied(slice))?
+        }
+        CopyFormat::RichText => {
+            let codecs = codecs?;
+            result.html = Some(codecs.to_html(&codecs.copied(slice))?);
+            result.metadata = Some(metadata(schema, codecs, slice));
+            codecs.to_text(slice)
+        }
+    };
+    Some(result)
+}
+
+pub(crate) fn write_prepared(copy: PreparedCopy, cx: &mut App) {
+    cx.write_to_clipboard(match copy.metadata {
+        Some(metadata) => ClipboardItem::new_string_with_metadata(copy.text, metadata),
+        None => ClipboardItem::new_string(copy.text),
+    });
+    if cx.has_global::<SystemPasteboard>()
+        && let Some(html) = copy.html
+    {
+        platform::write_html(&html);
+    }
+}
+
 const METADATA_PREFIX: &str = "markraft-fragment-v1:";
 
 /// The string flavour of `slice`: the kind's markup, or its plain text when the
@@ -156,12 +224,33 @@ pub fn write_rich_text(
     }
 }
 
-pub(crate) fn write(schema: &Schema, codecs: &dyn Codecs, slice: &Slice, cx: &mut App) {
-    let metadata = metadata(schema, codecs, slice);
+pub(crate) const SMART_PREFIX: &str = "markraft:smart-paste:";
+
+pub(crate) fn smart_item(item: &ClipboardItem, cx: &App) -> bool {
+    item.metadata()
+        .is_some_and(|metadata| metadata.starts_with(SMART_PREFIX))
+        || (cx.has_global::<SystemPasteboard>() && platform::is_smart(item.text().as_deref()))
+}
+
+pub(crate) fn write(
+    schema: &Schema,
+    codecs: &dyn Codecs,
+    slice: &Slice,
+    smart: bool,
+    cx: &mut App,
+) {
+    let metadata = format!(
+        "{}{}",
+        if smart { SMART_PREFIX } else { "" },
+        metadata(schema, codecs, slice)
+    );
     cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(
         markup(codecs, slice),
         metadata,
     ));
+    if smart && cx.has_global::<SystemPasteboard>() {
+        platform::write_smart();
+    }
     // The rich flavour goes on the same item, after it has been written.
     if cx.has_global::<SystemPasteboard>()
         && let Some(html) = codecs.to_html(slice)
@@ -177,6 +266,7 @@ fn metadata(schema: &Schema, codecs: &dyn Codecs, slice: &Slice) -> String {
 
 /// The slice a metadata flavour holds.
 fn from_metadata(schema: &Schema, metadata: &str) -> Option<Slice> {
+    let metadata = metadata.strip_prefix(SMART_PREFIX).unwrap_or(metadata);
     let json = metadata.strip_prefix(METADATA_PREFIX)?;
     let value = serde_json::from_str(json).ok()?;
     Slice::from_json(schema, &value).ok()
@@ -235,6 +325,32 @@ mod platform {
             .map(|value| value.to_string())
     }
 
+    // AppKit's interoperable marker is also emitted by WebKit. It has no payload.
+    const SMART_TYPE: &str = "NeXT smart paste pasteboard type";
+
+    pub(super) fn write_smart() {
+        let pasteboard = NSPasteboard::generalPasteboard();
+        let kind = NSString::from_str(SMART_TYPE);
+        unsafe {
+            pasteboard.addTypes_owner(&NSArray::from_slice(&[kind.as_ref()]), None);
+        }
+        pasteboard.setString_forType(&NSString::from_str(""), &kind);
+    }
+
+    pub(super) fn is_smart(text: Option<&str>) -> bool {
+        let pasteboard = NSPasteboard::generalPasteboard();
+        pasteboard
+            .stringForType(unsafe { NSPasteboardTypeString })
+            .map(|value| value.to_string())
+            .as_deref()
+            == text
+            && pasteboard
+                .availableTypeFromArray(&NSArray::from_slice(&[
+                    NSString::from_str(SMART_TYPE).as_ref()
+                ]))
+                .is_some()
+    }
+
     pub(super) fn write_html(html: &str) {
         let pasteboard = NSPasteboard::generalPasteboard();
         // AppKit's HTML importer otherwise guesses a legacy encoding for the
@@ -256,6 +372,10 @@ mod platform {
     }
 
     pub(super) fn write_html(_: &str) {}
+    pub(super) fn write_smart() {}
+    pub(super) fn is_smart(_: Option<&str>) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -263,6 +383,31 @@ mod platform {
 mod tests {
     use super::*;
     use markraft_commonmark::{CommonMarkCodecs, commonmark_schema};
+
+    #[test]
+    fn explicit_html_source_and_rich_text_have_distinct_clipboard_flavours() {
+        let schema = commonmark_schema();
+        let codecs = CommonMarkCodecs::new(schema.clone(), Default::default());
+        let types =
+            DocTypes::from_schema_names(&schema, &markraft_commonmark::commonmark_doc_type_names());
+        let slice = codecs.from_markup("**你好** &amp; `λ`").unwrap();
+        let source =
+            prepare_copy(&schema, Some(&codecs), &types, &slice, CopyFormat::HtmlCode).unwrap();
+        let rich =
+            prepare_copy(&schema, Some(&codecs), &types, &slice, CopyFormat::RichText).unwrap();
+        assert_eq!(
+            source.text,
+            "<p><strong>你好</strong> &amp; <code>λ</code></p>"
+        );
+        assert!(source.html.is_none());
+        assert!(source.metadata.is_none());
+        assert_eq!(rich.text, "你好 & λ");
+        assert_eq!(rich.html.as_deref(), Some(source.text.as_str()));
+        assert_eq!(
+            from_metadata(&schema, rich.metadata.as_deref().unwrap()),
+            Some(codecs.copied(&slice)),
+        );
+    }
 
     fn math_paste_at(source: &str, range: std::ops::Range<usize>) -> Option<String> {
         let state = crate::typeahead::tests::state_of(source);
@@ -456,5 +601,22 @@ mod tests {
         assert_eq!(html, "<p><strong>bold</strong> and <code>code</code></p>");
         // And it is what the paste path reads when there is no metadata.
         assert_eq!(codecs.from_html(&html).as_ref(), Some(&slice));
+    }
+
+    #[gpui::test]
+    fn smart_marker_preserves_rich_clipboard_roundtrip(cx: &mut gpui::TestAppContext) {
+        let schema = commonmark_schema();
+        let codecs = CommonMarkCodecs::new(schema.clone(), Default::default());
+        let document = markraft_commonmark::from_markdown(&schema, "**word**").unwrap();
+        let slice = Slice::new(document.content().clone(), 0, 0);
+        cx.update(|cx| {
+            write(&schema, &codecs, &slice, true, cx);
+            let item = cx.read_from_clipboard().unwrap();
+            assert!(smart_item(&item, cx));
+            let pasted = read_fragment(&schema, &codecs, &item, PasteMode::Formatted, cx).unwrap();
+            assert_eq!(markup(&codecs, &pasted), "**word**");
+            write(&schema, &codecs, &slice, false, cx);
+            assert!(!smart_item(&cx.read_from_clipboard().unwrap(), cx));
+        });
     }
 }
