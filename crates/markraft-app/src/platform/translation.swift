@@ -19,10 +19,11 @@ private struct TranslationContent: View {
     @ObservedObject var model: TranslationModel
     let text: String
     let editable: Bool
+    let anchorSize: NSSize
 
     var body: some View {
         Color.clear
-            .frame(width: 1, height: 1)
+            .frame(width: anchorSize.width, height: anchorSize.height)
             .translationPresentation(
                 isPresented: $model.presented,
                 text: text,
@@ -40,6 +41,14 @@ private struct TranslationContent: View {
 
 @available(macOS 14.4, *)
 @MainActor
+private final class TranslationAnchorView: NSHostingView<TranslationContent> {
+    // The transparent anchor can cover selected text. Let pointer events reach
+    // the editor; the translation popover handles input in its own window.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+@available(macOS 14.4, *)
+@MainActor
 private final class TranslationSession {
     private let model = TranslationModel()
     private var host: NSView?
@@ -47,16 +56,19 @@ private final class TranslationSession {
     private let context: UnsafeMutableRawPointer?
     private var finished = false
 
-    init(view: NSView, parent: NativePresentationRoot, point: NSPoint, text: String, editable: Bool,
+    init(view: NSView, parent: NativePresentationRoot, anchor: NSRect, text: String, editable: Bool,
          context: UnsafeMutableRawPointer?, completion: @escaping Completion) {
         self.context = context
         self.completion = completion
-        let content = TranslationContent(model: model, text: text, editable: editable)
-        let host = NSHostingView(rootView: content)
+        let frame = parent.convert(anchor, from: view)
+        let content = TranslationContent(
+            model: model, text: text, editable: editable, anchorSize: frame.size
+        )
+        let host = TranslationAnchorView(rootView: content)
         // The hosting view supplies only the selection anchor. The system owns
         // the translation popover and its layout in a separate native window.
         host.sizingOptions = []
-        host.frame = NSRect(origin: parent.convert(point, from: view), size: NSSize(width: 1, height: 1))
+        host.frame = frame
         self.host = host
         parent.addSubview(host)
         model.completed = { [weak self] text in self?.finish(text) }
@@ -97,6 +109,7 @@ func translationAvailable() -> Bool {
 @MainActor
 func translationBegin(
     _ viewPointer: UnsafeMutableRawPointer?, _ x: Double, _ y: Double,
+    _ width: Double, _ height: Double,
     _ text: UnsafePointer<CChar>?, _ editable: Bool,
     _ context: UnsafeMutableRawPointer?,
     _ callback: @escaping @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void
@@ -105,7 +118,8 @@ func translationBegin(
     let view = Unmanaged<NSView>.fromOpaque(viewPointer).takeUnretainedValue()
     guard let parent = NativePresentationRoot.containing(view) else { return nil }
     let session = TranslationSession(
-        view: view, parent: parent, point: NSPoint(x: x, y: y), text: String(cString: text),
+        view: view, parent: parent, anchor: NSRect(x: x, y: y, width: width, height: height),
+        text: String(cString: text),
         editable: editable, context: context, completion: callback
     )
     return Unmanaged.passRetained(session).toOpaque()

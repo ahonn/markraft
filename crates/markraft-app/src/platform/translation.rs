@@ -1,10 +1,11 @@
 //! Public SwiftUI translation popover, anchored in the native editor view.
 
-use super::{NSRect, native_view};
+use super::{native_view, text_geometry};
 use crate::locale::Message;
 use futures_channel::oneshot;
-use gpui::{Pixels, Point, Window};
+use gpui::{Bounds, Pixels, Window};
 use objc2::{MainThreadMarker, msg_send};
+use objc2_foundation::NSRect;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::marker::PhantomData;
@@ -17,6 +18,8 @@ unsafe extern "C" {
         view: *mut c_void,
         x: f64,
         y: f64,
+        width: f64,
+        height: f64,
         text: *const c_char,
         editable: bool,
         context: *mut c_void,
@@ -43,7 +46,7 @@ pub(crate) fn available() -> bool {
 impl Translation {
     pub(crate) fn show(
         window: &Window,
-        position: Point<Pixels>,
+        bounds: Bounds<Pixels>,
         text: &str,
         editable: bool,
     ) -> Result<(Self, oneshot::Receiver<Option<String>>), Message> {
@@ -52,24 +55,19 @@ impl Translation {
             return Err(Message::new("error.native-window-control"));
         }
         let view = native_view(window)?;
-        let bounds: NSRect = unsafe { msg_send![view, bounds] };
+        let native_bounds: NSRect = unsafe { msg_send![view, bounds] };
         let flipped: bool = unsafe { msg_send![view, isFlipped] };
-        let x = bounds.origin.x + f64::from(f32::from(position.x));
-        let offset_y = f64::from(f32::from(position.y));
-        let y = bounds.origin.y
-            + if flipped {
-                offset_y
-            } else {
-                bounds.size.y - offset_y
-            };
+        let anchor = text_geometry::view_rect(bounds, native_bounds, flipped);
         let text = CString::new(text).map_err(|_| Message::new("error.native-window-control"))?;
         let (sender, receiver) = oneshot::channel();
         let mut completion = Box::new(RefCell::new(Some(sender)));
         let native = unsafe {
             markraft_translation_begin(
                 view.cast(),
-                x,
-                y,
+                anchor.origin.x,
+                anchor.origin.y,
+                anchor.size.width,
+                anchor.size.height,
                 text.as_ptr(),
                 editable,
                 (&mut *completion as *mut Completion).cast(),

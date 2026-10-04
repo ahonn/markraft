@@ -10,7 +10,7 @@ use objc2_app_kit::{
     NSWritingToolsCoordinatorTextAnimation, NSWritingToolsCoordinatorTextReplacementReason,
     NSWritingToolsResultOptions,
 };
-use objc2_foundation::{NSAttributedString, NSPoint, NSRange, NSRect, NSSize, NSValue};
+use objc2_foundation::{NSAttributedString, NSRange, NSRect, NSValue};
 use std::{cell::Cell, ptr::NonNull};
 
 /// Changes stay local until the limited Writing Tools operation finishes. A
@@ -61,7 +61,7 @@ struct State {
     requestor: Retained<TextRequestor>,
     context: RefCell<Option<Retained<NSWritingToolsCoordinatorContext>>>,
     buffer: RefCell<Buffer>,
-    caret: NSRect,
+    anchor: NSRect,
     active: Cell<bool>,
 }
 
@@ -81,7 +81,7 @@ impl State {
 
     fn paths(&self, context: &NSWritingToolsCoordinatorContext) -> Retained<NSArray<NSBezierPath>> {
         if self.owns_context(context) {
-            NSArray::from_retained_slice(&[NSBezierPath::bezierPathWithRect(self.caret)])
+            NSArray::from_retained_slice(&[NSBezierPath::bezierPathWithRect(self.anchor)])
         } else {
             NSArray::new()
         }
@@ -256,8 +256,7 @@ impl Snapshot {
     pub(super) fn new(
         view: &NSResponder,
         requestor: &TextRequestor,
-        position: gpui::Point<gpui::Pixels>,
-        line_height: gpui::Pixels,
+        anchor: gpui::Bounds<gpui::Pixels>,
     ) -> Option<Self> {
         let mtm = MainThreadMarker::new()?;
         objc2::runtime::AnyClass::get(c"NSWritingToolsCoordinator")?;
@@ -266,24 +265,14 @@ impl Snapshot {
         }
         let view =
             unsafe { Retained::retain((view as *const NSResponder).cast_mut().cast::<NSView>())? };
-        let bounds = view.bounds();
-        let x = bounds.origin.x + f64::from(f32::from(position.x));
-        let offset = f64::from(f32::from(position.y));
-        let y = bounds.origin.y
-            + if view.isFlipped() {
-                offset
-            } else {
-                bounds.size.height - offset
-            };
+        let anchor =
+            crate::platform::text_geometry::view_rect(anchor, view.bounds(), view.isFlipped());
         let delegate = Delegate::alloc(mtm).set_ivars(State {
             view: view.clone(),
             requestor: unsafe { Retained::retain((requestor as *const TextRequestor).cast_mut())? },
             context: RefCell::new(None),
             buffer: RefCell::new(Buffer::new(requestor.ivars().borrow().text.clone())),
-            caret: NSRect::new(
-                NSPoint::new(x, y),
-                NSSize::new(1.0, f64::from(f32::from(line_height)).max(1.0)),
-            ),
+            anchor,
             active: Cell::new(true),
         });
         let delegate: Retained<Delegate> = unsafe { msg_send![super(delegate), init] };

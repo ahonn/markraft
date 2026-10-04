@@ -251,7 +251,8 @@ impl CheckingResponder {
     }
 }
 
-/// Own the panel's action target until the editor context changes or another menu opens.
+/// Own the panel's action target while a checking panel follows this editor.
+/// Drop any text-service session layered above this responder before dropping it.
 pub(crate) struct CheckingPanelSession {
     view: Retained<NSResponder>,
     previous: Option<Retained<NSResponder>>,

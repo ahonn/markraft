@@ -12,11 +12,12 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSPasteboard, NSPasteboardType, NSResponder, NSServicesMenuRequestor,
+    NSApplication, NSPasteboard, NSPasteboardType, NSResponder, NSServicesMenuRequestor, NSView,
 };
 use objc2_foundation::{NSArray, NSString};
 use std::cell::RefCell;
 
+mod selection_anchor;
 mod writing_tools;
 
 const STRING_TYPE: &str = "public.utf8-plain-text";
@@ -174,19 +175,20 @@ pub(crate) struct TextServiceSession {
     previous: Option<Retained<NSResponder>>,
     requestor: Retained<TextRequestor>,
     writing_tools: Option<writing_tools::Snapshot>,
+    anchor: Option<selection_anchor::SelectionAnchor>,
 }
 
 impl TextServiceSession {
     pub(crate) fn attach(
         window: &gpui::Window,
         snapshot: TextServiceSnapshot,
-        position: gpui::Point<gpui::Pixels>,
-        line_height: gpui::Pixels,
+        bounds: gpui::Bounds<gpui::Pixels>,
     ) -> Result<(Self, oneshot::Receiver<TextReplacement>), Message> {
         let mtm =
             MainThreadMarker::new().ok_or_else(|| Message::new("error.native-window-control"))?;
-        let view = unsafe { Retained::retain(native_view(window)?.cast::<NSResponder>()) }
+        let native = unsafe { Retained::retain(native_view(window)?.cast::<NSView>()) }
             .ok_or_else(|| Message::new("error.native-window-control"))?;
+        let view: Retained<NSResponder> = native.clone().into_super();
         let types = NSArray::from_retained_slice(&[
             NSString::from_str(STRING_TYPE),
             NSString::from_str("NSStringPboardType"),
@@ -213,8 +215,9 @@ impl TextServiceSession {
             .ivars()
             .borrow()
             .supports_writing_tools(snapshot.prose);
+        let anchor = selection_anchor::SelectionAnchor::new(&native, bounds);
         let writing_tools = native_writing
-            .then(|| writing_tools::Snapshot::new(&view, &requestor, position, line_height))
+            .then(|| writing_tools::Snapshot::new(&view, &requestor, bounds))
             .flatten();
         Ok((
             Self {
@@ -222,6 +225,7 @@ impl TextServiceSession {
                 previous,
                 requestor,
                 writing_tools,
+                anchor,
             },
             receiver,
         ))
@@ -229,6 +233,7 @@ impl TextServiceSession {
 
     pub(crate) fn cancel(&mut self) {
         self.writing_tools.take();
+        self.anchor.take();
         {
             let mut selection = self.requestor.ivars().borrow_mut();
             selection.active = false;

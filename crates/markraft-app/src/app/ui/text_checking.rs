@@ -264,6 +264,9 @@ impl MarkraftApp {
     }
 
     pub(in crate::app) fn cancel_checking_panel(&mut self) {
+        // A cancelled popup can leave a text requestor above the panel's
+        // responder. Unwind it first, while its saved predecessor is still live.
+        self.context_menus.dismiss();
         if let Some(target) = self.context_menus.checking.panel.take() {
             target.checker.hide_panel(CheckingPanel::Spelling);
             target.checker.hide_panel(CheckingPanel::Substitutions);

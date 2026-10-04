@@ -8,7 +8,7 @@ pub(crate) use caption::selection_label;
 
 use super::{NSPoint, NSRect, native_view, native_window};
 use crate::locale::Message;
-use gpui::{Pixels, Point, Window};
+use gpui::{Bounds, Pixels, Point, Window};
 use objc2::{MainThreadMarker, class, msg_send, rc::Retained, runtime::AnyObject, sel};
 use objc2_app_kit::NSImage;
 use objc2_foundation::{NSArray, NSString};
@@ -56,7 +56,6 @@ pub(crate) enum Row {
     },
     DetectedData {
         result: super::text_checking::DetectedData,
-        position: Point<Pixels>,
     },
 }
 
@@ -91,6 +90,7 @@ impl PreparedMenu {
     pub(crate) fn new(
         rows: &[Row],
         window: &Window,
+        anchor: Bounds<Pixels>,
         writing_tools: Option<&[Retained<objc2_app_kit::NSMenuItem>]>,
     ) -> Result<Self, Message> {
         MainThreadMarker::new().ok_or_else(|| failure("menu prepared off the main thread"))?;
@@ -114,6 +114,7 @@ impl PreparedMenu {
             menu.ns_menu().cast(),
             rows,
             window,
+            anchor,
             &mut system_menus,
             writing_tools.unwrap_or_default(),
         )?;
@@ -225,6 +226,7 @@ fn decorate(
     menu: *mut AnyObject,
     rows: &[Row],
     window: &Window,
+    anchor: Bounds<Pixels>,
     system_menus: &mut Vec<Retained<AnyObject>>,
     writing_tools: &[Retained<objc2_app_kit::NSMenuItem>],
 ) -> Result<(), Message> {
@@ -246,9 +248,9 @@ fn decorate(
             }
             continue;
         }
-        if let Row::DetectedData { result, position } = row {
+        if let Row::DetectedData { result } = row {
             let source =
-                super::text_services::TextAnchor::new(window, *position)?.data_menu(result)?;
+                super::text_services::TextAnchor::new(window, anchor)?.data_menu(result)?;
             unsafe {
                 let items: Retained<NSArray<AnyObject>> = msg_send![&*source, itemArray];
                 for item in items.iter() {
@@ -279,7 +281,14 @@ fn decorate(
         }
         if let Row::Submenu { children, .. } = row {
             let submenu: *mut AnyObject = unsafe { msg_send![item, submenu] };
-            decorate(submenu, children, window, system_menus, writing_tools)?;
+            decorate(
+                submenu,
+                children,
+                window,
+                anchor,
+                system_menus,
+                writing_tools,
+            )?;
         }
         if let Row::Item {
             label, appearance, ..
