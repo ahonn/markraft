@@ -1409,6 +1409,7 @@ impl EditorView {
         self.find = find;
         self.state = state;
         self.text_diagnostics.clear();
+        self.word_selection = None;
         self.context_epoch = self.context_epoch.wrapping_add(1);
         self.sync_document_analysis();
         self.extension_selection = self.state.selection().clone();
