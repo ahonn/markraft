@@ -38,6 +38,51 @@ fn range(view: &EditorView) -> Range<usize> {
     view.state.selection().from(view.state.doc())..view.state.selection().to(view.state.doc())
 }
 
+#[gpui::test]
+fn lookup_presentation_uses_reading_text_and_utf16_ranges(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| EditorView::new(setup("a **bold** 😀 word"), cx));
+    cx.run_until_parked();
+    let request = view.update(cx, |view, cx| {
+        view.select_range(1, view.state.doc().content_size() - 1, cx);
+        view.context_snapshot(Point::default(), ContextTarget::Text)
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, cx| {
+        let presentation = view.context_text_presentation(&request, cx).unwrap();
+        assert_eq!(presentation.text, "a bold 😀 word");
+        assert_eq!(presentation.runs.first().unwrap().range.start, 0);
+        assert_eq!(presentation.runs.last().unwrap().range.end, 14);
+        assert!(
+            presentation
+                .runs
+                .windows(2)
+                .all(|pair| pair[0].range.end == pair[1].range.start)
+        );
+        let bounds = view.anchor_bounds().unwrap();
+        assert_eq!(presentation.baseline.x, bounds.left());
+        assert!(presentation.baseline.y > bounds.top());
+        assert!(presentation.baseline.y < bounds.bottom());
+    });
+    view.update(cx, |view, cx| {
+        view.select(1, false, cx);
+        assert!(view.context_text_presentation(&request, cx).is_none());
+    });
+}
+
+#[gpui::test]
+fn lookup_presentation_keeps_nonliteral_labels_lookupable(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| EditorView::new(setup("[[Dictionary]] tail"), cx));
+    cx.run_until_parked();
+    view.read_with(cx, |view, cx| {
+        let request = view.context_source_range_snapshot(1..2).unwrap();
+        let mapped = view.context_text_mapping(&request).unwrap();
+        assert!(mapped.source.iter().all(Option::is_none));
+        let presentation = view.context_text_presentation(&request, cx).unwrap();
+        assert_eq!(presentation.text, "Dictionary");
+        assert_eq!(presentation.runs.last().unwrap().range.end, 10);
+    });
+}
+
 fn click_character(
     view: &Entity<EditorView>,
     cx: &mut VisualTestContext,

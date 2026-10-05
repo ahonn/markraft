@@ -4,6 +4,13 @@
 
 use super::*;
 
+/// The actual painted face and baseline at one source character.
+pub(crate) struct TextPresentation {
+    pub(crate) baseline: Point<Pixels>,
+    pub(crate) font: Option<Font>,
+    pub(crate) font_size: Pixels,
+}
+
 /// Inline code, superscript or subscript on one visual row. Text runs share one font
 /// size, so the main line only reserves the space and the text is painted again,
 /// smaller, centred in that slot. Around code, what is left of the slot on either side
@@ -18,6 +25,8 @@ pub(super) struct InlineCode {
     pub(super) left: Pixels,
     pub(super) slot: Pixels,
     pub(super) line: Rc<ShapedLine>,
+    /// Requested faces by UTF-8 byte length, before Core Text glyph fallback.
+    pub(super) font_runs: Vec<(usize, Font)>,
     /// A script: no pill behind it, and painted `lift` above the row — below
     /// it for a subscript, whose lift is negative.
     pub(super) raised: bool,
@@ -256,6 +265,8 @@ pub(crate) struct TableCell {
 #[derive(Clone)]
 pub(crate) struct LayoutRow {
     pub(super) line: Rc<WrappedLine>,
+    /// Requested faces by UTF-8 byte length, before Core Text glyph fallback.
+    pub(super) font_runs: Vec<(usize, Font)>,
     pub(super) paint_rows: Vec<ShapedLine>,
     /// `char` offset of the row's start within the projection line.
     pub(super) char_start: usize,
@@ -811,6 +822,78 @@ impl LayoutLine {
             position.x = x;
         }
         self.origin + point(position.x, self.visual_text_top(visual))
+    }
+
+    /// Describe the glyph under a source offset for native text presentations.
+    /// The baseline follows GPUI's paint metrics, including smaller inline text.
+    pub(crate) fn text_presentation_at(
+        &self,
+        offset: usize,
+        text_system: &gpui::TextSystem,
+    ) -> Option<TextPresentation> {
+        if self.rows.is_empty() || offset >= self.char_len {
+            return None;
+        }
+        let (index, byte) = self.locate(offset);
+        let row = &self.rows[index];
+        let visual = self.visual_for_offset(offset, false);
+        let code = row
+            .inline_code
+            .iter()
+            .find(|code| code.range.contains(&byte));
+        let (layout, local_byte, left, top): (&gpui::LineLayout, _, _, _) = if let Some(code) = code
+        {
+            (
+                &code.line,
+                byte - code.range.start,
+                code.text_left(),
+                self.visual_text_top(visual) - code.lift,
+            )
+        } else {
+            // GPUI's position query gives a wrap-boundary byte to the previous
+            // row's caret. Native text starts on the following row instead.
+            let local_visual = visual - row.visual_start;
+            let left = if local_visual == 0 {
+                Pixels::ZERO
+            } else {
+                let boundary = row.line.wrap_boundaries().get(local_visual - 1)?;
+                -row.line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix]
+                    .position
+                    .x
+            };
+            (
+                &*row.line.unwrapped_layout,
+                byte,
+                left,
+                self.visual_text_top(visual),
+            )
+        };
+        // Ligatures and combining characters can share a glyph. Use the glyph
+        // starting at or before the character, not the next font run.
+        let (glyph, font_id) = layout
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(move |glyph| (glyph, run.font_id)))
+            .filter(|(glyph, _)| glyph.index <= local_byte)
+            .max_by_key(|(glyph, _)| glyph.index)?;
+        let baseline =
+            top + (self.line_height - layout.ascent - layout.descent) / 2. + layout.ascent;
+        let font = text_system.get_font_for_id(font_id).or_else(|| {
+            // Platform fallback fonts are not always in GPUI's reverse cache.
+            // Preserve the requested face's traits and let AppKit fallback too.
+            let runs = code.map_or(&row.font_runs, |code| &code.font_runs);
+            let mut end = 0;
+            runs.iter().find_map(|(len, font)| {
+                end += *len;
+                (local_byte < end).then(|| font.clone())
+            })
+        });
+        Some(TextPresentation {
+            baseline: self.origin
+                + point(left + glyph.position.x + self.row_shift(visual), baseline),
+            font,
+            font_size: layout.font_size,
+        })
     }
 
     /// Where a position strictly inside inline code is drawn. Its edges keep the

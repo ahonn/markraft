@@ -3,12 +3,16 @@
 use super::{native_view, native_window, text_checking::DetectedData};
 use crate::locale::Message;
 use gpui::{Bounds, Pixels, Window};
+use markraft_gpui::{ContextFontRun, ContextTextPresentation};
 use objc2::{
     MainThreadMarker, class, msg_send,
     rc::{Allocated, Retained},
     runtime::AnyObject,
 };
-use objc2_foundation::{NSArray, NSAttributedString, NSPoint, NSRect, NSString, NSURL};
+use objc2_app_kit::NSFontAttributeName;
+use objc2_foundation::{
+    NSArray, NSMutableAttributedString, NSPoint, NSRange, NSRect, NSString, NSURL,
+};
 use std::{cell::RefCell, ptr};
 
 #[link(name = "AVFoundation", kind = "framework")]
@@ -54,14 +58,30 @@ impl TextAnchor {
         ))
     }
 
-    pub(crate) fn show_definition(&self, text: &str) -> Result<(), Message> {
-        let point = anchor_point(self.rect()?);
-        if text.trim().is_empty() {
+    pub(crate) fn show_definition(
+        &self,
+        presentation: &ContextTextPresentation,
+    ) -> Result<(), Message> {
+        self.rect()?;
+        if presentation.text.trim().is_empty() {
             return Ok(());
         }
-        let text = NSAttributedString::from_nsstring(&NSString::from_str(text));
-        // NSView explicitly supports this API for custom text views, without NSTextView.
+        let text =
+            NSMutableAttributedString::from_nsstring(&NSString::from_str(&presentation.text));
         unsafe {
+            for run in &presentation.runs {
+                let font = lookup_font(run);
+                text.addAttribute_value_range(
+                    NSFontAttributeName,
+                    &font,
+                    NSRange::new(run.range.start, run.range.len()),
+                );
+            }
+            let bounds: NSRect = msg_send![&*self.view, bounds];
+            let flipped: bool = msg_send![&*self.view, isFlipped];
+            let point = super::text_geometry::view_point(presentation.baseline, bounds, flipped);
+            // AppKit redraws a highlighted copy at the first character's baseline,
+            // not the selection center. Matching its font avoids a second-sized word.
             let _: () =
                 msg_send![&*self.view, showDefinitionForAttributedString: &*text, atPoint: point];
         }
@@ -108,7 +128,28 @@ impl TextAnchor {
     }
 }
 
-// Point-only AppKit APIs use the center of the same selection rectangle.
+fn lookup_font(run: &ContextFontRun) -> Retained<AnyObject> {
+    let family = gpui::font_name_with_fallbacks(&run.font.family, ".AppleSystemUIFont");
+    let size = f64::from(f32::from(run.font_size));
+    unsafe {
+        let manager: *mut AnyObject = msg_send![class!(NSFontManager), sharedFontManager];
+        let traits = if run.font.style == gpui::FontStyle::Italic {
+            1usize
+        } else {
+            0
+        };
+        let weight = if run.font.weight >= gpui::FontWeight::BOLD {
+            9isize
+        } else {
+            5
+        };
+        let font: Option<Retained<AnyObject>> = msg_send![manager,
+            fontWithFamily: &*NSString::from_str(family), traits: traits, weight: weight, size: size];
+        font.unwrap_or_else(|| msg_send![class!(NSFont), systemFontOfSize: size])
+    }
+}
+
+// Data detector menus use the center of the selection rectangle.
 fn anchor_point(rect: NSRect) -> NSPoint {
     NSPoint::new(
         rect.origin.x + rect.size.width / 2.,
@@ -242,7 +283,7 @@ mod tests {
     use objc2_foundation::NSSize;
 
     #[test]
-    fn point_presentations_anchor_at_selection_center() {
+    fn data_detector_menus_anchor_at_selection_center() {
         let rect = NSRect::new(NSPoint::new(40., 60.), NSSize::new(80., 20.));
         assert_eq!(anchor_point(rect), NSPoint::new(80., 70.));
     }

@@ -1,7 +1,9 @@
 //! Pointer context and capability queries shared by the host's editing menus.
 
 use crate::{EditorEvent, EditorView, clipboard, links, wiki};
-use gpui::{App, ClipboardEntry, ClipboardItem, Context, MouseDownEvent, Pixels, Point, Window};
+use gpui::{
+    App, ClipboardEntry, ClipboardItem, Context, Font, MouseDownEvent, Pixels, Point, Window,
+};
 use markraft_core::{Node, Selection, TransactionSpec, projection::Projection, protocol::event};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
@@ -14,9 +16,25 @@ pub struct ContextText {
     pub transformable: bool,
 }
 
+/// Painted text metrics for a native service that redraws the selected text.
+pub struct ContextTextPresentation {
+    pub text: String,
+    /// First character's baseline origin in window-local, top-down points.
+    pub baseline: Point<Pixels>,
+    pub runs: Vec<ContextFontRun>,
+}
+
+pub struct ContextFontRun {
+    /// UTF-16 range within the reading text, not the Markdown source.
+    pub range: Range<usize>,
+    pub font: Font,
+    pub font_size: Pixels,
+}
+
 mod block_actions;
 mod copy_formats;
 mod pointer;
+mod presentation;
 mod reading_text;
 mod smart_edit;
 mod transformations;

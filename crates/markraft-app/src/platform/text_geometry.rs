@@ -1,7 +1,17 @@
 //! Shared selection geometry for native text presentations.
 
-use gpui::{Bounds, Pixels};
+use gpui::{Bounds, Pixels, Point};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+/// Convert an exact text baseline without adding rectangle or caret dimensions.
+pub(crate) fn view_point(point: Point<Pixels>, native: NSRect, flipped: bool) -> NSPoint {
+    let x = f64::from(f32::from(point.x));
+    let y = f64::from(f32::from(point.y));
+    NSPoint::new(
+        native.origin.x + x,
+        native.origin.y + if flipped { y } else { native.size.height - y },
+    )
+}
 
 /// Convert GPUI window-local, top-down points into the native view's bounds.
 /// A caret needs a nonempty width to avoid AppKit's whole-view fallback.
@@ -28,6 +38,14 @@ pub(crate) fn view_rect(bounds: Bounds<Pixels>, native: NSRect, flipped: bool) -
 mod tests {
     use super::*;
     use gpui::{point, px, size};
+
+    #[test]
+    fn text_baseline_preserves_the_character_origin() {
+        let baseline = point(px(30.), px(54.));
+        let native = NSRect::new(NSPoint::new(10., 15.), NSSize::new(500., 300.));
+        assert_eq!(view_point(baseline, native, true), NSPoint::new(40., 69.));
+        assert_eq!(view_point(baseline, native, false), NSPoint::new(40., 261.));
+    }
 
     #[test]
     fn selection_rect_preserves_dimensions_in_both_coordinate_systems() {
