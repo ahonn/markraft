@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;
+
 type FormatItem = (String, &'static str, Intent, bool);
 
 /// How many capsules stand beside the mode badge before the rest fold into a count.
@@ -373,6 +377,7 @@ impl MarkraftApp {
                 s.child(
                     div()
                         .id("word-count")
+                        .debug_selector(|| "word-count".into())
                         .role(Role::Button)
                         .aria_label(self.i18n.text("surfaces.format.toggle-count"))
                         .h(px(24.))
@@ -385,6 +390,9 @@ impl MarkraftApp {
                         .cursor_pointer()
                         .hover(|s| s.bg(self.hover_color()))
                         .active(|s| s.bg(self.pressed_color()))
+                        // The footer floats over the editor. Keep this press from
+                        // moving its caret or starting a double-click selection.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.intent(Intent::ToggleCount, window, cx)
                         }))

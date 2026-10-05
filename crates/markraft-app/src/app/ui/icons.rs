@@ -49,6 +49,7 @@ define_icons! {
     UpDown => "chevron.up.chevron.down",
     Check => "checkmark",
     Pin => "pin",
+    Pinned => "pin.fill",
     Trash => "trash",
     // Taking a link off its text, which stays: erased, not thrown away.
     Unlink => "eraser",
