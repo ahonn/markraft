@@ -141,6 +141,23 @@ pub fn notes_folder_matches(settings: Option<&Path>, folder: &Path) -> bool {
 
 const LIBRARY_VERSION: u32 = 2;
 
+/// Settings coordinates are local to the display identified by its stable UUID.
+/// The last height avoids moving a short page upward before it is measured again.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SettingsWindowPlacement {
+    pub origin: [f32; 2],
+    pub height: f32,
+    pub display_uuid: Option<String>,
+}
+
+impl SettingsWindowPlacement {
+    pub fn is_valid(&self) -> bool {
+        self.origin.iter().all(|value| value.is_finite())
+            && self.height.is_finite()
+            && self.height > 0.
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
@@ -151,6 +168,7 @@ pub struct Preferences {
     pub auto_height: bool,
     pub hotkey: String,
     pub window_bounds: Option<[f32; 4]>,
+    pub settings_window: Option<SettingsWindowPlacement>,
     /// Modal editing in the note editors. Settings files written before it existed
     /// deserialize to `false`.
     pub vim_mode: bool,
@@ -391,6 +409,13 @@ impl Preferences {
         }) {
             return Err(Message::new("error.invalid-bounds").into());
         }
+        if self
+            .settings_window
+            .as_ref()
+            .is_some_and(|saved| !saved.is_valid())
+        {
+            return Err(Message::new("error.invalid-bounds").into());
+        }
         Ok(())
     }
 }
@@ -404,6 +429,7 @@ impl Default for Preferences {
             auto_height: true,
             hotkey: "Alt+N".into(),
             window_bounds: None,
+            settings_window: None,
             vim_mode: false,
             remote_images: true,
             animate_images: true,
@@ -1288,6 +1314,11 @@ mod tests {
             auto_height: false,
             hotkey: "Ctrl+Shift+M".into(),
             window_bounds: Some([1., 2., 3., 4.]),
+            settings_window: Some(SettingsWindowPlacement {
+                origin: [120., 80.],
+                height: 420.,
+                display_uuid: Some("settings-display".into()),
+            }),
             vim_mode: true,
             remote_images: false,
             animate_images: false,
@@ -1324,7 +1355,29 @@ mod tests {
         let preferences: Preferences =
             serde_json::from_str(r#"{"markdown_shortcuts":true}"#).unwrap();
         assert!(!preferences.auto_number_equations);
+        assert!(preferences.settings_window.is_none());
         assert_eq!(preferences.language, LanguagePreference::System);
+    }
+
+    #[test]
+    fn invalid_settings_window_geometry_refuses_a_save() {
+        for (origin, height) in [
+            ([f32::NAN, 20.], 300.),
+            ([20., f32::INFINITY], 300.),
+            ([20., 30.], f32::INFINITY),
+            ([20., 30.], 0.),
+            ([20., 30.], -1.),
+        ] {
+            let preferences = Preferences {
+                settings_window: Some(SettingsWindowPlacement {
+                    origin,
+                    height,
+                    display_uuid: None,
+                }),
+                ..Preferences::default()
+            };
+            assert!(preferences.validate().is_err());
+        }
     }
 
     #[test]
@@ -1386,6 +1439,7 @@ mod tests {
         }
         // The window remembers its own bounds; no setting speaks for them.
         applied.window_bounds = changed.window_bounds;
+        applied.settings_window = changed.settings_window.clone();
         assert_eq!(applied, changed);
     }
 
