@@ -1050,7 +1050,7 @@ impl MarkraftApp {
         &mut self,
         service: TextService,
         text: String,
-        position: Point<Pixels>,
+        request: &ContextRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1065,7 +1065,14 @@ impl MarkraftApp {
             text_services::stop_speaking();
             return;
         }
-        let anchor = match TextAnchor::new(window, self.text_service_bounds(position, cx)) {
+        let presentation = matches!(service, TextService::Lookup)
+            .then(|| {
+                self.editor()
+                    .read(cx)
+                    .context_text_presentation(request, cx)
+            })
+            .flatten();
+        let anchor = match TextAnchor::new(window, self.text_service_bounds(request.position, cx)) {
             Ok(anchor) => anchor,
             Err(error) => {
                 self.feedback.set_error(error);
@@ -1075,7 +1082,10 @@ impl MarkraftApp {
         };
         cx.spawn(async move |this, cx| {
             let result = match service {
-                TextService::Lookup => anchor.show_definition(&text),
+                TextService::Lookup => presentation.as_ref().map_or_else(
+                    || Err(Message::new("error.native-window-control")),
+                    |presentation| anchor.show_definition(presentation),
+                ),
                 TextService::Share => anchor.share(&text),
                 TextService::Speak => text_services::start_speaking(&text),
                 _ => Ok(()),
@@ -1304,7 +1314,7 @@ impl MarkraftApp {
                 self.focus_editor(window, cx);
             }
             MenuAction::Text(service, text) => {
-                self.present_text_service(service, text, session.request.position, window, cx)
+                self.present_text_service(service, text, &session.request, window, cx)
             }
             MenuAction::OpenWith(url, application) => {
                 if let Err(error) = text_services::open_with(&url, &application) {

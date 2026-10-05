@@ -43,8 +43,8 @@ mod word_boundary;
 pub use callout::{Tone as CalloutTone, callout_heading, callout_tone};
 pub use clipboard::{CopyFormat, use_system_pasteboard, write_rich_text};
 pub use context::{
-    ContextAction, ContextRequest, ContextTarget, ContextText, ContextTextMap, EditCapabilities,
-    TextTransformation,
+    ContextAction, ContextFontRun, ContextRequest, ContextTarget, ContextText, ContextTextMap,
+    ContextTextPresentation, EditCapabilities, TextTransformation,
 };
 pub use emoji::{EmojiInsertion, EmojiShortcodes, emoji_menu};
 pub use extension::{
