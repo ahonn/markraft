@@ -91,6 +91,8 @@ Bug reports and feature requests are welcome as issues. Pull requests are open t
 **Report an Issue…** in <kbd>⌘K</kbd> opens an issue with your Mac and Markraft versions filled in. Logs and crash reports are written to `~/Library/Logs/Markraft` and stay on your Mac; attach the report if there is one.
 
 To build from source, install Rust and Xcode 16 or newer with its command-line tools.
+Packaging requires Xcode 26 or newer to compile the Icon Composer app icon.
+If you have multiple Xcode versions, set `DEVELOPER_DIR` to the selected version's `Contents/Developer` directory.
 The macOS translation bridge is compiled with the bundled Swift compiler:
 
 ```sh
