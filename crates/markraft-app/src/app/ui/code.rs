@@ -89,6 +89,8 @@ impl MarkraftApp {
         let editor = self.editor().read(cx);
         let active = editor.code_language(pos)?.trim().to_lowercase();
         let anchor = editor.code_language_bounds(pos)?;
+        let query_style = self.query().read(cx).style();
+        let query_height = query_style.body_size * query_style.line_height_ratio;
         let languages = self.matching_code_languages(cx);
         let empty = languages.is_empty();
         let viewport = window.bounds().size;
@@ -201,10 +203,11 @@ impl MarkraftApp {
                         .h(px(40.))
                         .flex_shrink_0()
                         .px_3()
-                        .pt(px(5.))
+                        .flex()
+                        .items_center()
                         .border_b_1()
                         .border_color(self.border_color())
-                        .child(self.query_field(cx)),
+                        .child(self.query_field(cx).h(query_height)),
                 )
                 .child(list),
         )
