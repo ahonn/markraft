@@ -33,6 +33,8 @@ mod chrome;
 #[cfg(test)]
 mod equation_tests;
 mod inline_object;
+#[cfg(test)]
+mod interaction_tests;
 mod layout_line;
 mod lines;
 mod paint;
@@ -265,6 +267,11 @@ impl FrameLayout {
 pub(crate) struct EditorSurface {
     pub editor: Entity<EditorView>,
 }
+
+pub(crate) struct SurfacePrepaint {
+    rows: Vec<LayoutLine>,
+    task_hitboxes: Vec<Hitbox>,
+}
 impl IntoElement for EditorSurface {
     type Element = Self;
     fn into_element(self) -> Self {
@@ -273,7 +280,7 @@ impl IntoElement for EditorSurface {
 }
 impl Element for EditorSurface {
     type RequestLayoutState = ();
-    type PrepaintState = Vec<LayoutLine>;
+    type PrepaintState = SurfacePrepaint;
     fn id(&self) -> Option<ElementId> {
         None
     }
@@ -319,7 +326,7 @@ impl Element for EditorSurface {
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
-    ) -> Vec<LayoutLine> {
+    ) -> SurfacePrepaint {
         let view = self.editor.read(cx);
         // The element spans the view; the text is laid out in the column
         // inside it, and every row is placed there. Hit testing, the caret,
@@ -475,7 +482,18 @@ impl Element for EditorSurface {
         if revealed {
             window.request_animation_frame();
         }
-        rows
+        // Cursor regions share the checkbox geometry used by click handling.
+        // Normal hitboxes preserve the editor's mouse handlers and obey clipping
+        // and occlusion by controls drawn above the editor.
+        let task_hitboxes = rows
+            .iter()
+            .filter_map(|row| row.task_marker())
+            .map(|(_, bounds)| window.insert_hitbox(bounds, HitboxBehavior::Normal))
+            .collect();
+        SurfacePrepaint {
+            rows,
+            task_hitboxes,
+        }
     }
     fn paint(
         &mut self,
@@ -483,10 +501,14 @@ impl Element for EditorSurface {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        rows: &mut Vec<LayoutLine>,
+        prepaint: &mut SurfacePrepaint,
         window: &mut Window,
         cx: &mut App,
     ) {
+        for hitbox in &prepaint.task_hitboxes {
+            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+        }
+        let rows = &mut prepaint.rows;
         let editor = self.editor.read(cx);
         if window.is_a11y_active() {
             editor

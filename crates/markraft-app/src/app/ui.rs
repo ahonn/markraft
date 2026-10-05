@@ -1168,7 +1168,7 @@ impl MarkraftApp {
                             } else {
                                 "command.pin-note"
                             }),
-                            Icon::Pin,
+                            if note.pinned { Icon::Pinned } else { Icon::Pin },
                             Intent::PinNote(id.clone()),
                             cx,
                         )
@@ -1202,7 +1202,7 @@ impl MarkraftApp {
                         // Decorative: the row's own text already says "Pinned". Neither
                         // this wrapper nor the glyph carries an id or a role, so nothing
                         // of it reaches the accessibility tree.
-                        .child(icon(Icon::Pin, self.muted())),
+                        .child(icon(Icon::Pinned, self.muted())),
                 );
             }
             let row_id = SharedString::from(id.clone());
