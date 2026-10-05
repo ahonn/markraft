@@ -418,6 +418,211 @@ fn text_system() -> WindowTextSystem {
     WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))))
 }
 
+fn presentation_line(
+    text: &str,
+    face: gpui::Font,
+    font_size: Pixels,
+    width: Pixels,
+) -> (LayoutLine, WindowTextSystem) {
+    let system = text_system();
+    let runs = [TextRun {
+        len: text.len(),
+        font: face,
+        color: gpui::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }];
+    let wrapped = system
+        .shape_text(text.to_owned().into(), font_size, &runs, Some(width), None)
+        .unwrap();
+    let mut line = rows_of("plain").remove(0);
+    line.char_len = text.chars().count();
+    line.line_height = px(40.);
+    line.origin = point(px(80.), px(120.));
+    let mut char_start = 0;
+    let mut visual_start = 0;
+    for wrapped in wrapped {
+        let row = LayoutRow {
+            font_runs: vec![(wrapped.text.len(), runs[0].font.clone())],
+            line: std::rc::Rc::new(wrapped),
+            char_start,
+            visual_start,
+            inline_code: Vec::new(),
+            paint_rows: Vec::new(),
+        };
+        char_start += row.char_len() + 1;
+        visual_start += row.visual_rows();
+        line.rows.push(row);
+    }
+    (line, system)
+}
+
+fn assert_presentation_pixels(actual: Pixels, expected: Pixels) {
+    assert!(
+        f32::from(actual - expected).abs() < 0.001,
+        "expected {expected:?}, got {actual:?}",
+    );
+}
+
+#[test]
+fn text_presentation_uses_painted_baseline_and_configured_bold_face() {
+    let mut face = font("Custom Serif");
+    face.weight = gpui::FontWeight::BOLD;
+    let (line, system) = presentation_line("heading", face.clone(), px(28.), px(500.));
+    let shown = line.text_presentation_at(0, &system).unwrap();
+    let shaped = &line.rows[0].line;
+    let expected = line.origin.y
+        + (line.line_height - shaped.ascent() - shaped.descent()) / 2.
+        + shaped.ascent();
+    assert_presentation_pixels(shown.baseline.x, line.origin.x);
+    assert_presentation_pixels(shown.baseline.y, expected);
+    assert_ne!(shown.baseline.y, line.origin.y + line.line_height / 2.);
+    assert_ne!(shown.baseline.y, line.origin.y + line.line_height);
+    // NoopTextSystem shapes with unmapped FontId(0), exercising the retained
+    // requested face rather than GPUI's reverse font cache.
+    assert_eq!(shown.font, Some(face));
+    assert_eq!(shown.font_size, px(28.));
+    assert!(line.text_presentation_at(line.char_len, &system).is_none());
+}
+
+#[test]
+fn text_presentation_follows_wraps_alignment_and_hard_newlines() {
+    let (mut line, system) = presentation_line(
+        "first second third fourth\nlast",
+        font("Custom Serif"),
+        px(18.),
+        px(100.),
+    );
+    let row = &line.rows[0];
+    assert!(row.visual_rows() > 1);
+    let byte = row.wrap_starts()[1];
+    let offset = row.text()[..byte].chars().count();
+    line.row_shifts = vec![px(7.); line.visual_rows()];
+    let shown = line.text_presentation_at(offset, &system).unwrap();
+    assert_presentation_pixels(shown.baseline.x, line.origin.x + px(7.));
+    let first = line.text_presentation_at(0, &system).unwrap();
+    assert_presentation_pixels(shown.baseline.y - first.baseline.y, line.line_height);
+    let last = line
+        .text_presentation_at(line.rows[1].char_start, &system)
+        .unwrap();
+    assert_presentation_pixels(last.baseline.x, line.origin.x + px(7.));
+    assert_presentation_pixels(
+        last.baseline.y - first.baseline.y,
+        line.line_height * line.rows[1].visual_start as f32,
+    );
+}
+
+#[test]
+fn text_presentation_uses_inline_repaint_size_and_lift() {
+    let face = font("Custom Mono");
+    let (mut line, system) = presentation_line("word", face.clone(), px(20.), px(500.));
+    let small = system.shape_line(
+        "word".into(),
+        px(14.),
+        &[TextRun {
+            len: 4,
+            font: face.clone(),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    );
+    let expected =
+        line.origin.y + (line.line_height - small.ascent - small.descent) / 2. + small.ascent
+            - px(6.);
+    line.rows[0].inline_code.push(super::InlineCode {
+        range: 0..4,
+        visual_row: 0,
+        left: px(10.),
+        slot: small.width,
+        line: std::rc::Rc::new(small),
+        font_runs: vec![(4, face.clone())],
+        raised: true,
+        lift: px(6.),
+    });
+    let shown = line.text_presentation_at(0, &system).unwrap();
+    assert_presentation_pixels(shown.baseline.x, line.origin.x + px(10.));
+    assert_presentation_pixels(shown.baseline.y, expected);
+    assert_eq!(shown.font_size, px(14.));
+    assert_eq!(shown.font, Some(face));
+}
+
+#[test]
+fn text_presentation_follows_text_band_below_tall_inline_objects() {
+    let (mut line, system) = presentation_line("word", font("Custom Serif"), px(20.), px(500.));
+    let ordinary = line.text_presentation_at(0, &system).unwrap();
+    line.visuals.push(super::VisualRow {
+        top: px(0.),
+        height: px(90.),
+        baseline: px(70.),
+        text_top: px(30.),
+    });
+    let shown = line.text_presentation_at(0, &system).unwrap();
+    assert_presentation_pixels(shown.baseline.y, ordinary.baseline.y + px(30.));
+}
+
+#[test]
+fn text_presentation_keeps_configured_face_for_an_unmapped_fallback_font() {
+    let (line, system) = presentation_line("word", font("Custom Serif"), px(20.), px(500.));
+    let known = line.text_presentation_at(0, &system).unwrap();
+    let without_font_mapping = TextSystem::new(Arc::new(NoopTextSystem::new()));
+    let fallback = line.text_presentation_at(0, &without_font_mapping).unwrap();
+    assert_eq!(fallback.font, Some(font("Custom Serif")));
+    assert_eq!(fallback.baseline, known.baseline);
+    assert_eq!(fallback.font_size, known.font_size);
+}
+
+#[test]
+fn text_presentation_retains_shaped_faces_across_multibyte_style_runs() {
+    let source = "**世界** plain *italic*";
+    let rows = shaped(source);
+    let system = text_system();
+    let first = rows[0].text_presentation_at(2, &system).unwrap();
+    let second = rows[0].text_presentation_at(3, &system).unwrap();
+    let plain = rows[0].text_presentation_at(7, &system).unwrap();
+    let italic_offset = source[..source.find("italic").unwrap()].chars().count();
+    let italic = rows[0]
+        .text_presentation_at(italic_offset, &system)
+        .unwrap();
+    assert_eq!(first.font.as_ref().unwrap().weight, gpui::FontWeight::BOLD);
+    assert_eq!(first.font, second.font);
+    assert_eq!(plain.font.unwrap().weight, gpui::FontWeight::NORMAL);
+    assert_eq!(italic.font.unwrap().style, gpui::FontStyle::Italic);
+}
+
+#[test]
+fn text_presentation_uses_logical_glyph_indices_in_visual_order() {
+    let (mut line, system) = presentation_line("ab", font("Custom Serif"), px(20.), px(500.));
+    let wrapped = std::rc::Rc::get_mut(&mut line.rows[0].line)
+        .expect("the fixture owns its wrapped line exclusively");
+    let original = &wrapped.unwrapped_layout;
+    let mut runs = original.runs.clone();
+    let second_x = runs[0].glyphs[1].position.x;
+    // A right-to-left shaped run presents its later logical character first.
+    runs[0].glyphs.reverse();
+    runs[0].glyphs[0].position.x = px(0.);
+    runs[0].glyphs[1].position.x = second_x;
+    **wrapped = Arc::new(gpui::WrappedLineLayout {
+        unwrapped_layout: Arc::new(gpui::LineLayout {
+            font_size: original.font_size,
+            width: original.width,
+            ascent: original.ascent,
+            descent: original.descent,
+            runs,
+            len: original.len,
+        }),
+        wrap_boundaries: wrapped.wrap_boundaries.clone(),
+        wrap_width: wrapped.wrap_width,
+    });
+    let first = line.text_presentation_at(0, &system).unwrap();
+    let second = line.text_presentation_at(1, &system).unwrap();
+    assert_presentation_pixels(first.baseline.x, line.origin.x + second_x);
+    assert_presentation_pixels(second.baseline.x, line.origin.x);
+}
+
 /// Every line of `source`, laid out at a note's width.
 fn shaped(source: &str) -> Vec<LayoutLine> {
     shaped_with(source, callout_types())

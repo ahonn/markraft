@@ -456,7 +456,7 @@ impl<'a> EditorCx<'a> {
         let Some(app) = self.app.as_deref_mut() else {
             return false;
         };
-        clipboard::write(&schema, codecs.as_ref(), slice, app);
+        clipboard::write(&schema, codecs.as_ref(), slice, false, app);
         true
     }
     /// The slice on the system clipboard, read as ⌘V reads it: this editor's own
@@ -661,7 +661,7 @@ impl EditorView {
             // extension also moved the selection.
             self.caret.forget_column();
             self.reset_caret_blink(cx);
-            self.publish(cx);
+            self.publish(false, cx);
         }
         for event in events {
             cx.emit(event);

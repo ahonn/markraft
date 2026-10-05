@@ -73,5 +73,7 @@
   "notice.folder-daily": "Öffne einen Ordner, um Tagesnotizen zu verwenden.",
   "notice.choose-markdown-inside": "Wähle eine Markdown-Datei innerhalb des Notizenordners.",
   "dialog.daily-folder": "Ordner für Tagesnotizen",
-  "dialog.daily-template": "Vorlage für Tagesnotizen"
+  "dialog.daily-template": "Vorlage für Tagesnotizen",
+  "notice.spelling-complete": "Rechtschreibprüfung abgeschlossen.",
+  "notice.text-service-rejected": "Das Ergebnis konnte diese Auswahl nicht sicher ersetzen. Kopiere das Ergebnis stattdessen aus dem Systemwerkzeug."
 }

@@ -165,17 +165,7 @@ impl MarkraftApp {
         };
         let anchor = table.bounds;
         let viewport = window.bounds().size;
-        // In the row the grid keeps clear above itself, unless that would leave the pill
-        // in the band the title and the action capsule float in, where it would sit on
-        // top of them; then it goes below.
-        // The row is a little shorter than the pill, which reaches into the gap every
-        // block keeps below itself rather than into the block.
-        let above = anchor.top() - HEIGHT - (TABLE_TOOLBAR_ROOM - HEIGHT).abs();
-        let top = if above < TOOLBAR_HEIGHT + GAP {
-            anchor.bottom() + GAP
-        } else {
-            above
-        };
+        let top = toolbar_top(anchor, viewport.height);
         // Right-aligned to the grid, or left-aligned to it when the pill is the wider of
         // the two, and shifted rather than clipped at either edge of the window.
         let left = if WIDTH < anchor.size.width {
@@ -219,5 +209,42 @@ impl MarkraftApp {
             ));
         }
         Some(pill)
+    }
+}
+
+/// Prefer the space above the table, then below it. A table taller than the
+/// viewport leaves neither space, so keep the controls inside the editor area.
+fn toolbar_top(anchor: Bounds<Pixels>, viewport_height: Pixels) -> Pixels {
+    let min_top = TOOLBAR_HEIGHT + GAP;
+    let max_top = (viewport_height - FOOTER_HEIGHT - GAP - HEIGHT).max(min_top);
+    let above = anchor.top() - HEIGHT - (TABLE_TOOLBAR_ROOM - HEIGHT).abs();
+    let preferred = if above < min_top {
+        anchor.bottom() + GAP
+    } else {
+        above
+    };
+    preferred.clamp(min_top, max_top)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FOOTER_HEIGHT, GAP, HEIGHT, TOOLBAR_HEIGHT, toolbar_top};
+    use gpui::{Bounds, point, px, size};
+
+    #[test]
+    fn tall_table_toolbar_stays_above_footer() {
+        let height = px(700.);
+        let table = Bounds::new(point(px(75.), px(0.)), size(px(300.), height));
+        let top = toolbar_top(table, height);
+        assert!(top >= TOOLBAR_HEIGHT + GAP);
+        assert_eq!(top + HEIGHT + GAP, height - FOOTER_HEIGHT);
+    }
+
+    #[test]
+    fn table_toolbar_prefers_available_space_outside_grid() {
+        let table = Bounds::new(point(px(75.), px(200.)), size(px(300.), px(100.)));
+        assert!(toolbar_top(table, px(700.)) + HEIGHT <= table.top());
+        let table = Bounds::new(point(px(75.), TOOLBAR_HEIGHT), size(px(300.), px(100.)));
+        assert_eq!(toolbar_top(table, px(700.)), table.bottom() + GAP);
     }
 }

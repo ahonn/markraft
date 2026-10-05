@@ -73,5 +73,7 @@
   "notice.folder-daily": "請先開啟資料夾再使用日記。",
   "notice.choose-markdown-inside": "請選擇筆記資料夾內的 Markdown 檔案。",
   "dialog.daily-folder": "日記資料夾",
-  "dialog.daily-template": "日記範本"
+  "dialog.daily-template": "日記範本",
+  "notice.spelling-complete": "拼字檢查完成。",
+  "notice.text-service-rejected": "此結果無法安全取代目前選取範圍，請改從系統工具複製結果。"
 }

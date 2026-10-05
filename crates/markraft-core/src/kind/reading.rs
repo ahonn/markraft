@@ -39,10 +39,16 @@ pub fn line_pieces(
         .zip(pieces)
         .filter_map(|(run, piece)| {
             let (text, own) = if let RunContent::Atom(node) = &run.content {
-                (
-                    shown_atom_label(types, node).unwrap_or("").to_owned(),
-                    false,
-                )
+                if Some(node.type_id()) == types.hard_break {
+                    // The projection owns this one-character newline. It is
+                    // a text boundary, not an unlabeled embedded object.
+                    (piece.text.to_owned(), piece.own)
+                } else {
+                    (
+                        shown_atom_label(types, node).unwrap_or("").to_owned(),
+                        false,
+                    )
+                }
             } else {
                 (piece.text.to_owned(), piece.own)
             };

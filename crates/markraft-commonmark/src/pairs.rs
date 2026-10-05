@@ -67,6 +67,7 @@ use markraft_core::{
 
 use crate::derive::{DeriveContext, Style, derive};
 use crate::textblock::{Items, block_kind};
+use markraft_core::kind::ReadingSelection;
 use markraft_core::protocol::event;
 
 /// Every pair, opener first.
@@ -116,11 +117,22 @@ static FIELD: LazyLock<StateField<Vec<Tracked>>> =
 /// off and on without rebuilding its states. Turned off, typing is plain
 /// typing, and the closers already written are left alone.
 pub fn commonmark_auto_pairs(enabled: Arc<AtomicBool>) -> Extension {
+    commonmark_auto_pairs_with_quotes(enabled, Arc::new(AtomicBool::new(true)))
+}
+
+/// Auto-pairing with an independent flag for straight double quotes. A host
+/// performing native smart-quote replacement disables quote pairing so it does
+/// not leave a second closer behind when the opener becomes a curly quote.
+/// Brackets and existing tracked closers retain their ordinary behavior.
+pub fn commonmark_auto_pairs_with_quotes(
+    enabled: Arc<AtomicBool>,
+    quotes_enabled: Arc<AtomicBool>,
+) -> Extension {
     let filter: TransactionFilterFn = Arc::new(move |tr: &Transaction| {
         if !enabled.load(Ordering::Relaxed) {
             return None;
         }
-        auto_pair(tr)
+        auto_pair(tr, quotes_enabled.load(Ordering::Relaxed))
     });
     Extension::all([transaction_filter().of(filter), FIELD.extension()])
 }
@@ -174,7 +186,7 @@ fn update(value: &Vec<Tracked>, tr: &Transaction) -> Vec<Tracked> {
 
 // -- the filter ----------------------------------------------------------------
 
-fn auto_pair(tr: &Transaction) -> Option<Vec<TransactionSpec>> {
+fn auto_pair(tr: &Transaction, quotes_enabled: bool) -> Option<Vec<TransactionSpec>> {
     let state = tr.start_state();
     if !tr.doc_changed()
         || !tr.recorded_in_history()
@@ -186,7 +198,7 @@ fn auto_pair(tr: &Transaction) -> Option<Vec<TransactionSpec>> {
     if tr.is_user_event(event::INPUT_TYPE)
         && let Some(typed) = Typed::read(tr)
     {
-        return typed.respond(tr);
+        return typed.respond(tr, quotes_enabled);
     }
     take_closers(tr)
 }
@@ -205,9 +217,11 @@ impl Typed {
     fn read(tr: &Transaction) -> Option<Typed> {
         let state = tr.start_state();
         let doc = state.doc();
-        let Selection::Text { .. } = state.selection() else {
+        if !matches!(state.selection(), Selection::Text { .. })
+            && !ReadingSelection::is(state.selection())
+        {
             return None;
-        };
+        }
         let range = state.selection().replacement_range(doc);
         let changes = tr.changes().iter_changes();
         let [
@@ -242,7 +256,7 @@ impl Typed {
         })
     }
 
-    fn respond(&self, tr: &Transaction) -> Option<Vec<TransactionSpec>> {
+    fn respond(&self, tr: &Transaction, quotes_enabled: bool) -> Option<Vec<TransactionSpec>> {
         let state = tr.start_state();
         let schema = state.schema();
         let block = Block::at(schema, state.doc(), self.from)?;
@@ -250,9 +264,15 @@ impl Typed {
             return None;
         }
         if self.from == self.to {
-            return self.step_over(tr, &block).or_else(|| self.pair(tr, &block));
+            return self.step_over(tr, &block).or_else(|| {
+                (quotes_enabled || self.character != '"')
+                    .then(|| self.pair(tr, &block))
+                    .flatten()
+            });
         }
-        self.wrap(tr, &block)
+        (quotes_enabled || self.character != '"')
+            .then(|| self.wrap(tr, &block))
+            .flatten()
     }
 
     /// Typing a tracked closer right before it moves the caret past it.
@@ -343,13 +363,20 @@ impl Typed {
         };
         let (anchor, head) = (state.selection().anchor(doc), state.selection().head(doc));
         let inner = |pos: usize| pos + 1;
+        // The wrapped text keeps the kind of selection it had.
+        let selection = match state.schema().mark_id(crate::schema::SYNTAX) {
+            Some(syntax) if ReadingSelection::is(state.selection()) => {
+                ReadingSelection::selection(inner(anchor), inner(head), syntax)
+            }
+            _ => Selection::text(inner(anchor), inner(head)),
+        };
         Some(vec![
             TransactionSpec::new()
                 .changes([
                     Change::insert(self.from, text(self.character)),
                     Change::insert(self.to, text(closer)),
                 ])
-                .selection(Selection::text(inner(anchor), inner(head)))
+                .selection(selection)
                 .user_event(event::INPUT_TYPE)
                 .scroll_into_view(),
         ])

@@ -292,13 +292,11 @@ pub(super) fn shape_line(
                     .collect();
                 keep_line_breaking_rules(&mut wrapped, wrap_width, &glue);
             }
+            let local_runs =
+                text_layout::slice_runs(&runs.runs, byte_start..byte_start + wrapped.text.len());
             let paint_rows = if text.objects.is_empty() {
                 Vec::new()
             } else {
-                let local_runs = text_layout::slice_runs(
-                    &runs.runs,
-                    byte_start..byte_start + wrapped.text.len(),
-                );
                 text_layout::paint_rows(&wrapped, font_size, &local_runs, text_system)
             };
             byte_start += wrapped.text.len() + 1;
@@ -307,6 +305,10 @@ pub(super) fn shape_line(
                 visual_start,
                 inline_code: Vec::new(),
                 paint_rows,
+                font_runs: local_runs
+                    .into_iter()
+                    .map(|run| (run.len, run.font))
+                    .collect(),
                 line: Rc::new(wrapped),
             };
             char_start += row.char_len() + 1;
@@ -692,10 +694,11 @@ pub(super) fn shape_inline_code(
             let row_text = layout.rows[index].text().to_owned();
             let absolute = row_byte_start(layout, index);
             let absolute = absolute + part.start..absolute + part.end;
+            let local_runs = piece_runs(range.start, runs, absolute);
             let line = text_system.shape_line(
                 row_text[part.clone()].to_owned().into(),
                 font_size * scale,
-                &piece_runs(range.start, runs, absolute),
+                &local_runs,
                 None,
             );
             // The slot comes from the whole line's rectangles, so its row
@@ -707,6 +710,10 @@ pub(super) fn shape_inline_code(
                 left: slot.origin.x - layout.origin.x,
                 slot: slot.size.width,
                 line: Rc::new(line),
+                font_runs: local_runs
+                    .into_iter()
+                    .map(|run| (run.len, run.font))
+                    .collect(),
                 raised: *raised,
                 lift,
             });

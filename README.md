@@ -34,6 +34,7 @@ Press <kbd>⌥N</kbd> in any app to write, and again to put it away. Notes are p
 - **Math.** LaTeX formulas, `$…$` inline and `$$…$$` as blocks, rendered offline through [RaTeX](https://github.com/erweixin/RaTeX), with optional equation numbers and references.
 - **Plain files.** Each note is a `.md` file. A save rewrites only the lines you edited and leaves the rest of the file unchanged.
 - **Keyboard.** <kbd>⌘K</kbd> lists every action with its shortcut, <kbd>/</kbd> inserts a block, and vim mode can be turned on in Settings.
+- **Context menu.** Right-click or Control-click to edit the selection, paste plain text or Markdown, and work with links, code blocks and tables using a native macOS menu.
 - **Native.** Written in Rust and drawn with [GPUI](https://www.gpui.rs), without a web view.
 
 <p align="center">
@@ -89,7 +90,8 @@ Bug reports and feature requests are welcome as issues. Pull requests are open t
 
 **Report an Issue…** in <kbd>⌘K</kbd> opens an issue with your Mac and Markraft versions filled in. Logs and crash reports are written to `~/Library/Logs/Markraft` and stay on your Mac; attach the report if there is one.
 
-To build from source:
+To build from source, install Rust and Xcode 16 or newer with its command-line tools.
+The macOS translation bridge is compiled with the bundled Swift compiler:
 
 ```sh
 bash scripts/download-sparkle.sh   # fetch the Sparkle framework into target/sparkle

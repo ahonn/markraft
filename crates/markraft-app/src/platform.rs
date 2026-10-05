@@ -2,9 +2,16 @@
 //!
 //! Create and use this object on AppKit's main thread. GPUI owns the native
 //! window; native pointers below are borrowed only for the duration of a call.
+pub(crate) mod checking_panel;
+pub(crate) mod context_menu;
 pub(crate) mod locale;
 pub(crate) mod print;
 pub(crate) mod symbols;
+pub(crate) mod text_checking;
+pub(crate) mod text_geometry;
+pub(crate) mod text_requestor;
+pub(crate) mod text_services;
+pub(crate) mod translation;
 
 use crate::locale::Message;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
@@ -21,7 +28,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{ffi::CStr, path::Path, ptr, str::FromStr};
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
-    menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
+    menu::{Menu, MenuId, MenuItem, PredefinedMenuItem},
 };
 
 // Minimal AppKit geometry for struct-returning messages; objc2 checks the encoding.
@@ -488,7 +495,7 @@ impl Platform {
                 events.push(which.event());
             }
         }
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
+        for event in context_menu::take_application_events() {
             if let Some((_, action)) = self.menu_actions.iter().find(|(id, _)| *id == event.id) {
                 events.push(*action);
             }

@@ -57,8 +57,13 @@ pub fn commit_specs(
             let replacement = state.selection().replacement_range(doc);
             (replacement.from, replacement.to)
         });
+    let selection = if replacement_is_current_selection(state, from, to) {
+        state.selection().clone()
+    } else {
+        Selection::text(from, to)
+    };
     let select = TransactionSpec::new()
-        .selection(Selection::text(from, to))
+        .selection(selection)
         .stored_marks(state.stored_marks().cloned());
     // The insertion is computed against the selection it replaces, which is
     // what the first spec establishes; the two travel as one transaction.
@@ -77,6 +82,30 @@ pub fn commit_specs(
     }
     specs.push(finish);
     specs
+}
+
+fn replacement_is_current_selection(state: &EditorState, from: usize, to: usize) -> bool {
+    let selected = state.selection().replacement_range(state.doc());
+    !markraft_core::composition::is_composing(state) && selected.from == from && selected.to == to
+}
+
+fn selected_utf16_range(state: &EditorState) -> Option<UTF16Selection> {
+    let projection = markraft_core::projection::projection_of(state);
+    let selection = state.selection();
+    if matches!(selection, Selection::All) {
+        // Select All includes the document's structural edges, which have no
+        // inline position. Native clients still need a valid selected range.
+        return Some(UTF16Selection {
+            range: 0..projection.utf16_len(),
+            reversed: false,
+        });
+    }
+    let (anchor, head) = (selection.anchor(state.doc()), selection.head(state.doc()));
+    let (start, end) = projection.pos_range_to_utf16_range(anchor, head)?;
+    Some(UTF16Selection {
+        range: start..end,
+        reversed: anchor > head,
+    })
 }
 
 impl EditorView {
@@ -172,13 +201,7 @@ impl EntityInputHandler for EditorView {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        let doc = self.state().doc();
-        let selection = self.state().selection();
-        let (anchor, head) = (selection.anchor(doc), selection.head(doc));
-        Some(UTF16Selection {
-            range: self.utf16_of(anchor.min(head), anchor.max(head))?,
-            reversed: anchor > head,
-        })
+        selected_utf16_range(self.state())
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
@@ -239,6 +262,7 @@ impl EntityInputHandler for EditorView {
         let mut specs = Vec::new();
         if let Some(range) = range.as_ref()
             && let Some((from, to)) = self.positions_of(range)
+            && !replacement_is_current_selection(self.state(), from, to)
         {
             specs.push(markraft_core::composition::start_composition(
                 CompositionRange::new(from, to),
@@ -271,7 +295,12 @@ impl EntityInputHandler for EditorView {
             .as_ref()
             .map(|tr| tr.state())
             .unwrap_or_else(|| self.state());
-        let Ok(spec) = markraft_core::composition::update_composition(base, &text, caret) else {
+        let Ok(spec) = markraft_core::composition::update_composition_with(
+            base,
+            &text,
+            caret,
+            &chains::insert_plain(&self.types, &text),
+        ) else {
             return;
         };
         let spec = if specs.is_empty() {
@@ -410,6 +439,21 @@ mod tests {
         projection_of(state)
             .pos_to_line_offset(head)
             .expect("the caret sits in a line")
+    }
+
+    #[test]
+    fn select_all_reports_a_valid_platform_text_range() {
+        for text in ["", "Caret style QA", "中文😀\n\nsecond paragraph"] {
+            let state = state_of(text);
+            let state = apply(
+                &state,
+                vec![TransactionSpec::new().selection(markraft_core::Selection::All)],
+            );
+            let selection = super::selected_utf16_range(&state)
+                .expect("Select All is a valid native text selection");
+            assert_eq!(selection.range, 0..text_of(&state).encode_utf16().count());
+            assert!(!selection.reversed);
+        }
     }
 
     #[test]

@@ -377,6 +377,91 @@ Its library generation records where it came from; it does not authorise an
 edit to a later note. Only Markdown export exists today. HTML or PDF export
 should derive from a snapshot, never from live screen caches.
 
+### Editor context menus
+
+The editor resolves a secondary click independently of primary-click actions.
+It settles the pointer selection and composition, then emits a
+`ContextMenuRequested` snapshot containing the document, selection and clicked
+object. The app combines the editor's capabilities with note permissions to build
+the menu. Editing controls share the same applicability queries.
+
+Clicking within an existing selection preserves it. Otherwise a link selects its
+entire label, ordinary text selects the clicked word, and blank space places the
+caret. Object-specific commands precede generic editing and formatting commands.
+
+The platform presents an AppKit menu after the selection has painted, outside
+GPUI entity and window updates. Its event router preserves tray events while
+native menu tracking runs. A result is local to one popup: the app validates its
+note, editor and snapshot again before executing it. Changing the document,
+selection or active note invalidates that result.
+
+**Invariant:** a context menu does not create another editing pipeline. Commands
+use the existing clipboard, transactions and source guard, with an isolated undo
+boundary for menu edits. Asynchronous attachment imports also have their own
+undo boundary. Native text services use reading-text snapshots: hidden Markdown
+syntax and link destinations are not exposed as selected prose. Case transformations
+map literal characters back to source spans while retaining formatting. Arbitrary
+rewrites require contiguous literal spans (or unformatted top-level paragraphs);
+composite selections advertise read-only services rather than discard hidden syntax.
+Returned text passes the same source guard, permission check and isolated history.
+
+A word picked across concealed spelling is a `ReadingSelection`, a custom selection
+kind defined in the core's `kind` layer: the selection layer knows only the
+`SelectionKind` contract and depends on neither commands nor projection. A command
+that replaces a custom selection passes a `ReplacementStyle`, which says whether
+the content brings its own styles or continues those of the text it replaces.
+`Selection::from_json` reads the built-in kinds; `ReadingSelection::from_json`
+reads this one.
+
+An owned `NSServicesMenuRequestor` temporarily joins the native responder chain.
+`NSMenu.popUpContextMenu` inserts system Services and available Writing Tools.
+Writeback stays alive after menu tracking and expires when the editor context changes.
+Writing Tools can request coordinator context and then return text through the Services
+pasteboard bridge. The session records that request so both return paths preserve
+unchanged source styles. Ordinary Services still inherit the selection's starting style.
+
+Writing Tools anchors its pasteboard popover through `NSViewContentSelectionInfo`.
+The app supplies the selection's first visual line as `selectionAnchorRect` in
+native view coordinates. Its session stores that rectangle on the GPUI view,
+so AppKit can query it without reentering a GPUI update. An existing view
+implementation takes precedence. Closing the session releases its stored anchor.
+Translation and sharing use the same selection rectangle. Lookup and detected-data
+presentations use its center because their AppKit APIs accept a point. Native text
+presentations share one coordinate conversion for flipped and unflipped views.
+The transparent translation anchor passes pointer events through to the editor.
+The context menu itself stays at the pointer; control menus keep their own anchors.
+
+Checking panels retain their action responder across context menus. A text-service
+session can sit above that responder and retain it as its restoration target.
+Closing the checking session first retires the pending menu and text-service session,
+then releases the panel responder. This order preserves the original responder
+chain and rejects any queued result from the retired sessions.
+
+Translation uses the public SwiftUI presentation API, weak-linked behind macOS 14.4
+availability. The small Swift bridge is compiled by `xcrun swiftc`. It requires an
+Xcode SDK providing the Translation framework. Lookup, sharing, speech, and Open With
+use public AppKit or AVFoundation APIs. Detected-data menus retain the original
+system result and its checked string, including native detector metadata.
+
+Native popover accessibility varies by macOS version. Translation generation,
+replacement-button interaction and undo have been verified on macOS 27.
+The Rust callback and guarded replacement paths have separate headless test coverage.
+
+Each note owns its spelling document tag, so ignored words remain document-local.
+Prose checks run in bounded Unicode chunks after a debounce and yield between chunks;
+code, formulas and URL contents are excluded. Cocoa UTF-16 ranges are checked and
+converted to document scalar positions. A check returns spelling ranges only;
+guesses are fetched for the one word a menu asks about. Diagnostics survive selection
+changes. An edit moves the diagnostics beside it and removes those it touches, and
+the next check restores the ones that still apply. Smart substitutions run only at a
+fresh typing/IME commit boundary, never after paste, undo or service writeback. At that
+boundary a detected link is applied only when the text spells its own scheme; the
+explicit Add Links command applies every detected link. Smart deletion and smart copy
+apply to a selection made by a word gesture (double-click or contextual click), not
+to a range extended by hand that ends on word boundaries. Enabling smart quotes disables
+new straight-quote auto-pairs while preserving other delimiters. Settings persist
+through the existing preferences pipeline.
+
 ### Screen resources
 
 Images, math rasters and syntax highlighting are view-owned caches with

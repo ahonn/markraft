@@ -150,6 +150,15 @@ impl TransactionSpec {
         self.annotate(protocol::user_event().of(event.to_string()))
     }
 
+    /// Replace this spec's event classification without changing the ordinary
+    /// first-annotation-wins contract of [`Self::annotate`]. A host classifies
+    /// a command's spec under the broader action it ran the command for.
+    pub fn replace_user_event(mut self, event: &str) -> Self {
+        self.annotations
+            .retain(|annotation| !annotation.is(protocol::user_event()));
+        self.user_event(event)
+    }
+
     /// Shorthand for annotating with
     /// [`add_to_history`](super::protocol::add_to_history).
     pub fn add_to_history(self, add: bool) -> Self {
@@ -192,6 +201,21 @@ impl TransactionSpec {
 }
 
 impl Selection {
+    /// Replace through the selection kind's schema-aware edit contract.
+    pub fn replace_with_schema(
+        &self,
+        spec: TransactionSpec,
+        doc: &Node,
+        schema: &crate::Schema,
+        slice: Slice,
+        style: crate::ReplacementStyle,
+    ) -> TransactionSpec {
+        match self {
+            Selection::Custom(kind) => kind.replace_with_schema(spec, doc, schema, slice, style),
+            _ => self.replace(spec, doc, slice),
+        }
+    }
+
     /// Add a change to `spec` replacing this selection with `slice`.
     pub fn replace(&self, spec: TransactionSpec, doc: &Node, slice: Slice) -> TransactionSpec {
         match self {
@@ -201,6 +225,20 @@ impl Selection {
                 spec.changes([Change::replace(range.from, range.to, slice)])
             }
         }
+    }
+}
+
+impl TransactionSpec {
+    /// Resolve an edit for a command's validation without executing filters,
+    /// appenders or history twice. The original spec keeps all its metadata.
+    pub(crate) fn resolve_edit(
+        &self,
+        state: &EditorState,
+    ) -> Result<(ChangeSet, Node, Option<Selection>), StateError> {
+        let resolved = resolve_inner(state, self, state.doc())?;
+        let doc = resolved.changes.apply(state.doc())?;
+        doc.check_from(state.doc(), state.schema())?;
+        Ok((resolved.changes, doc, resolved.selection))
     }
 }
 
