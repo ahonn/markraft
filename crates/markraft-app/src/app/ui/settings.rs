@@ -16,6 +16,7 @@
 //! Markraft has no Dock icon to come back through.
 
 mod controls;
+mod placement;
 mod select;
 mod shortcut;
 
@@ -24,13 +25,15 @@ use crate::locale::{I18n, LanguagePreference, available_languages};
 use crate::platform::Shortcut;
 use crate::storage::{
     BulletMarker, CodeFence, EditorFont, EmphasisMarker, HardBreakStyle, ImageNaming, LineHeight,
-    LineWidth, NoteNaming, OrderedDelimiter, Pref, Preferences, Summon, TabKey,
+    LineWidth, NoteNaming, OrderedDelimiter, Pref, Preferences, SettingsWindowPlacement, Summon,
+    TabKey,
 };
 use controls::{
     ChordFace, Palette, button, checkbox, chord_face, error, group_gap, line, metrics::*, row,
     segmented, stepper,
 };
 use gpui_base::{Tab, Tabs};
+use placement::{SettingsDisplay, initial_bounds, select_display};
 use select::{MenuItem, MenuRow};
 use shortcut::Recorded;
 use std::{cell::Cell, rc::Rc, sync::Arc};
@@ -103,6 +106,7 @@ enum Change {
     Pref(Pref),
     /// The window came forward: re-read what macOS keeps outside the app.
     Refresh,
+    WindowPlacement(SettingsWindowPlacement),
     LaunchAtLogin(bool),
     /// A recorder opening or closing: the running shortcuts are let go of meanwhile.
     Recording(bool),
@@ -200,9 +204,7 @@ impl MarkraftApp {
             self.refresh_launch_at_login();
         }
         let near = window.bounds();
-        let display = window
-            .display(cx)
-            .map(|display| (display.id(), display.bounds().size));
+        let display = window.display(cx).map(|display| display.id());
         cx.defer(move |cx| present(link, near, display, cx));
     }
 
@@ -267,6 +269,13 @@ impl MarkraftApp {
             Change::Pref(Pref::SettingsPage(page)) => {
                 self.preferences.settings_page = page;
                 self.save.schedule(Instant::now());
+                return;
+            }
+            Change::WindowPlacement(placement) => {
+                if self.preferences.settings_window.as_ref() != Some(&placement) {
+                    self.preferences.settings_window = Some(placement);
+                    self.save.schedule(Instant::now());
+                }
                 return;
             }
             Change::Pref(pref) => self.set_preference(pref, window, cx),
@@ -446,12 +455,7 @@ struct OpenSettings(WindowHandle<SettingsView>);
 
 impl Global for OpenSettings {}
 
-fn present(
-    link: Link,
-    near: Bounds<Pixels>,
-    display: Option<(DisplayId, Size<Pixels>)>,
-    cx: &mut App,
-) {
+fn present(link: Link, near: Bounds<Pixels>, display: Option<DisplayId>, cx: &mut App) {
     let window = match cx.try_global::<OpenSettings>() {
         Some(open) => open.0,
         None => {
@@ -479,17 +483,27 @@ fn present(
 fn create(
     link: Link,
     near: Bounds<Pixels>,
-    display: Option<(DisplayId, Size<Pixels>)>,
+    display: Option<DisplayId>,
     cx: &mut App,
 ) -> Option<WindowHandle<SettingsView>> {
     let app = link.app.upgrade()?;
-    let extent = size(px(WIDTH), px(HEIGHT));
-    let origin = display
-        .map(|(_, screen)| placement(screen, near, extent))
-        .unwrap_or_default();
+    let saved = app
+        .read(cx)
+        .preferences
+        .settings_window
+        .as_ref()
+        .filter(|saved| saved.is_valid());
+    let displays: Vec<_> = cx
+        .displays()
+        .iter()
+        .map(SettingsDisplay::from_display)
+        .collect();
+    let fallback = display.or_else(|| cx.primary_display().map(|display| display.id()));
+    let display = select_display(&displays, saved, fallback);
+    let bounds = initial_bounds(display, saved, near);
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, extent))),
-        display_id: display.map(|(id, _)| id),
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        display_id: display.map(|display| display.id),
         titlebar: Some(TitlebarOptions {
             title: Some(app.read(cx).i18n.text("settings.title").into()),
             appears_transparent: true,
@@ -525,29 +539,6 @@ fn create(
             None
         }
     }
-}
-
-/// Where the window opens on the note's display: beside the note, so the note — which
-/// floats above ordinary windows — does not cover it; centred when neither side has
-/// room. Coordinates are the display's own, as GPUI takes a new window's bounds.
-fn placement(screen: Size<Pixels>, near: Bounds<Pixels>, extent: Size<Pixels>) -> Point<Pixels> {
-    let margin = px(16.);
-    // Clear of the menu bar.
-    let top = px(40.);
-    let fits = |x: Pixels| x >= margin && x + extent.width <= screen.width - margin;
-    let y = near
-        .top()
-        .min(screen.height - extent.height - margin)
-        .max(top);
-    for x in [near.right() + margin, near.left() - margin - extent.width] {
-        if fits(x) {
-            return point(x, y);
-        }
-    }
-    point(
-        ((screen.width - extent.width) / 2.).max(px(0.)),
-        ((screen.height - extent.height) / 2.).max(top),
-    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -656,6 +647,8 @@ pub(in crate::app) struct SettingsView {
     /// frame drawn once this one has settled rather than starting a second animation
     /// inside the first.
     fitting: Rc<Cell<bool>>,
+    /// A display change must refit even if the selected page did not change.
+    display: Option<SettingsDisplay>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -713,6 +706,26 @@ impl SettingsView {
                     cx.stop_propagation();
                 }
             }),
+            cx.observe_window_bounds(window, |view, window, cx| {
+                let display = window
+                    .display(cx)
+                    .as_ref()
+                    .map(SettingsDisplay::from_display);
+                if view.display != display {
+                    view.display = display.clone();
+                    view.fitted.set(0.);
+                    cx.notify();
+                }
+                let bounds = window.bounds();
+                view.link.send(
+                    Change::WindowPlacement(SettingsWindowPlacement {
+                        origin: [bounds.origin.x.into(), bounds.origin.y.into()],
+                        height: bounds.size.height.into(),
+                        display_uuid: display.and_then(|display| display.uuid),
+                    }),
+                    cx,
+                );
+            }),
             cx.observe_window_activation(window, |view, window, cx| {
                 if window.is_window_active() {
                     view.link.send(Change::Refresh, cx);
@@ -751,6 +764,10 @@ impl SettingsView {
             fitted: Rc::default(),
             selects: select::Selects::new(cx),
             fitting: Rc::default(),
+            display: window
+                .display(cx)
+                .as_ref()
+                .map(SettingsDisplay::from_display),
             _subscriptions: subscriptions,
         }
     }
@@ -2039,9 +2056,8 @@ impl Render for SettingsView {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{OpenSettings, Page, language_options, placement};
+    use super::{OpenSettings, Page, language_options};
     use crate::locale::{I18n, LanguagePreference, available_languages};
-    use gpui::{Bounds, point, px, size};
 
     #[::core::prelude::v1::test]
     fn language_choices_keep_native_names_and_do_not_duplicate_a_supported_selection() {
@@ -2077,37 +2093,6 @@ mod tests {
         }
     }
 
-    const SCREEN: gpui::Size<gpui::Pixels> = size(px(1440.), px(900.));
-    const EXTENT: gpui::Size<gpui::Pixels> = size(px(640.), px(460.));
-
-    fn note(x: f32, y: f32) -> Bounds<gpui::Pixels> {
-        Bounds::new(point(px(x), px(y)), size(px(480.), px(320.)))
-    }
-
-    #[::core::prelude::v1::test]
-    fn the_window_opens_beside_the_note_rather_than_under_it() {
-        assert_eq!(
-            placement(SCREEN, note(100., 200.), EXTENT),
-            point(px(596.), px(200.))
-        );
-        assert_eq!(
-            placement(SCREEN, note(900., 200.), EXTENT),
-            point(px(244.), px(200.))
-        );
-    }
-
-    #[::core::prelude::v1::test]
-    fn without_room_on_either_side_it_is_centred() {
-        let wide = Bounds::new(point(px(300.), px(200.)), size(px(900.), px(320.)));
-        assert_eq!(placement(SCREEN, wide, EXTENT), point(px(400.), px(220.)));
-    }
-
-    #[::core::prelude::v1::test]
-    fn it_stays_below_the_menu_bar_and_above_the_bottom_edge() {
-        assert_eq!(placement(SCREEN, note(100., 0.), EXTENT).y, px(40.));
-        assert_eq!(placement(SCREEN, note(100., 800.), EXTENT).y, px(424.));
-    }
-
     #[::core::prelude::v1::test]
     fn arrow_keys_walk_the_pages_without_wrapping() {
         assert_eq!(Page::General.step(false), Page::General);
@@ -2124,6 +2109,65 @@ mod tests {
         }
         assert_eq!(Page::remembered(""), Page::General);
         assert_eq!(Page::remembered("gone"), Page::General);
+    }
+
+    #[gpui::test]
+    fn window_bounds_are_saved_and_restored_after_close(cx: &mut gpui::TestAppContext) {
+        use crate::storage::SettingsWindowPlacement;
+        use gpui::{point, px, size};
+
+        let mut h = crate::e2e::harness::open(cx, |preferences| {
+            preferences.settings_window = Some(SettingsWindowPlacement {
+                origin: [100., 120.],
+                height: 300.,
+                display_uuid: None,
+            });
+        });
+        let app = h.app.clone();
+        let open = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| app.update(cx, |app, cx| app.open_settings(window, cx)));
+            cx.run_until_parked();
+            cx.update(|_, cx| cx.global::<OpenSettings>().0)
+        };
+        let settings = open(h.cx);
+        settings
+            .update(&mut *h.cx, |_, window, _| {
+                assert_eq!(window.bounds().origin, point(px(100.), px(120.)));
+                assert_eq!(window.bounds().size.height, px(300.));
+            })
+            .unwrap();
+
+        // The bounds observer must replace stale preferences with the live window.
+        h.app
+            .update(h.cx, |app, _| app.preferences.settings_window = None);
+        h.cx.simulate_window_resize(settings.into(), size(px(super::WIDTH), px(360.)));
+        h.cx.run_until_parked();
+        let saved = h
+            .saved_preferences(|p| p.settings_window.as_ref().is_some_and(|s| s.height == 360.))
+            .unwrap()
+            .settings_window
+            .unwrap();
+        assert_eq!(saved.origin, [100., 120.]);
+        assert!(saved.display_uuid.is_some());
+
+        settings
+            .update(&mut *h.cx, |view, window, cx| {
+                view.close(&super::CloseSettings, window, cx)
+            })
+            .unwrap();
+        h.cx.run_until_parked();
+        let reopened = open(h.cx);
+        reopened
+            .update(&mut *h.cx, |_, window, _| {
+                assert_eq!(window.bounds().origin, point(px(100.), px(120.)));
+                assert_eq!(window.bounds().size.height, px(360.));
+            })
+            .unwrap();
+        assert_eq!(
+            open(h.cx),
+            reopened,
+            "opening Settings again reuses its window"
+        );
     }
 
     /// Every page draws, with each control it can hold: a pop-up button the page

@@ -615,9 +615,9 @@ impl NativeWindow {
         })
     }
 
-    /// Give the window a content height of `height`, keeping its top edge where it
-    /// is, the way a settings window grows and shrinks from its title bar as its
-    /// pages change. An animation runs to its end inside this call.
+    /// Give the window a content height of `height`, keeping its top edge where
+    /// space allows and keeping it inside the screen's visible area. An animation
+    /// runs to its end inside this call.
     pub fn fit_height(&self, height: f32, animate: bool) {
         unsafe {
             // Should a step of the animation come before GPUI has drawn at its size,
@@ -629,18 +629,9 @@ impl NativeWindow {
             let frame: NSRect = msg_send![self.window, frame];
             let content: NSRect = msg_send![self.window, contentRectForFrameRect: frame];
             let chrome = frame.size.y - content.size.y;
-            let next_height = f64::from(height) + chrome;
-            let next = NSRect {
-                origin: NSPoint {
-                    x: frame.origin.x,
-                    // AppKit's origin is the bottom-left corner: moving it keeps the top.
-                    y: frame.origin.y + frame.size.y - next_height,
-                },
-                size: NSPoint {
-                    x: frame.size.x,
-                    y: next_height,
-                },
-            };
+            let screen: *mut AnyObject = msg_send![self.window, screen];
+            let visible = (!screen.is_null()).then(|| msg_send![screen, visibleFrame]);
+            let next = fitted_window_frame(frame, f64::from(height) + chrome, visible);
             let _: () = msg_send![
                 self.window,
                 setFrame: next,
@@ -649,6 +640,33 @@ impl NativeWindow {
             ];
         }
     }
+}
+
+/// AppKit frames share global coordinates with a bottom-left origin. Keep the
+/// window's width; a side Dock can require a horizontal move but not a resize.
+fn fitted_window_frame(frame: NSRect, height: f64, visible: Option<NSRect>) -> NSRect {
+    let mut next = NSRect {
+        origin: NSPoint {
+            x: frame.origin.x,
+            y: frame.origin.y + frame.size.y - height,
+        },
+        size: NSPoint {
+            x: frame.size.x,
+            y: height,
+        },
+    };
+    if let Some(visible) = visible {
+        next.size.y = height.min(visible.size.y);
+        next.origin.x = frame
+            .origin
+            .x
+            .min(visible.origin.x + visible.size.x - next.size.x)
+            .max(visible.origin.x);
+        next.origin.y = (frame.origin.y + frame.size.y - next.size.y)
+            .min(visible.origin.y + visible.size.y - next.size.y)
+            .max(visible.origin.y);
+    }
+    next
 }
 
 /// Move `native` to the display under the pointer, where it sits as far from that
@@ -814,6 +832,69 @@ fn diagnostics(event: &str) {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
+        NSRect {
+            origin: NSPoint { x, y },
+            size: NSPoint {
+                x: width,
+                y: height,
+            },
+        }
+    }
+
+    fn frame_values(frame: NSRect) -> [f64; 4] {
+        [frame.origin.x, frame.origin.y, frame.size.x, frame.size.y]
+    }
+
+    #[test]
+    fn fit_height_keeps_the_top_edge_when_the_page_fits() {
+        let visible = rect(0., 40., 1440., 836.);
+        let frame = rect(120., 400., 520., 420.);
+        for height in [300., 720.] {
+            let next = fitted_window_frame(frame, height, Some(visible));
+            assert_eq!(frame_values(next), [120., 820. - height, 520., height]);
+        }
+    }
+
+    #[test]
+    fn fit_height_moves_a_growing_window_above_the_bottom_dock() {
+        let next = fitted_window_frame(
+            rect(120., 60., 520., 420.),
+            720.,
+            Some(rect(0., 40., 1440., 836.)),
+        );
+        assert_eq!(frame_values(next), [120., 40., 520., 720.]);
+    }
+
+    #[test]
+    fn fit_height_limits_tall_pages_to_the_visible_screen() {
+        let next = fitted_window_frame(
+            rect(-1300., 1200., 520., 420.),
+            720.,
+            Some(rect(-1440., 1000., 1440., 600.)),
+        );
+        assert_eq!(frame_values(next), [-1300., 1000., 520., 600.]);
+    }
+
+    #[test]
+    fn fit_height_avoids_side_docks_without_changing_the_width() {
+        for (visible, x, expected_x) in [
+            (rect(80., 0., 1360., 876.), 20., 80.),
+            (rect(0., 0., 1360., 876.), 900., 840.),
+            // A narrower display still keeps the title bar's left edge reachable.
+            (rect(80., 0., 400., 876.), 900., 80.),
+        ] {
+            let next = fitted_window_frame(rect(x, 400., 520., 420.), 600., Some(visible));
+            assert_eq!(frame_values(next), [expected_x, 220., 520., 600.]);
+        }
+    }
+
+    #[test]
+    fn fit_height_keeps_the_top_edge_when_the_screen_is_unavailable() {
+        let next = fitted_window_frame(rect(120., 60., 520., 420.), 720., None);
+        assert_eq!(frame_values(next), [120., -240., 520., 720.]);
+    }
 
     #[test]
     fn debug_info_names_the_version_and_the_system() {
