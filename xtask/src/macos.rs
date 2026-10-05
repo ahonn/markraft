@@ -53,25 +53,54 @@ fn build_options(command: &mut Command, options: &BundleOptions, target: Option<
     }
 }
 
-fn icon(root: &Path) -> Result<()> {
-    let directory = root.join("target/Markraft.iconset");
-    fs::create_dir_all(&directory)?;
-    for size in [16, 32, 128, 256, 512] {
-        for scale in [1, 2] {
-            let pixels = (size * scale).to_string();
-            let suffix = if scale == 2 { "@2x" } else { "" };
-            run(Command::new("sips")
-                .args(["--resampleHeightWidth", &pixels, &pixels])
-                .arg(root.join("assets/icon/Markraft.png"))
-                .arg("--out")
-                .arg(directory.join(format!("icon_{size}x{size}{suffix}.png"))))?;
-        }
-    }
-    run(Command::new("iconutil")
-        .args(["-c", "icns"])
-        .arg(directory)
-        .arg("-o")
-        .arg(root.join("target/Markraft.icns")))
+fn icon(root: &Path) -> Result<tempfile::TempDir> {
+    let target = root.join("target");
+    fs::create_dir_all(&target)?;
+    let directory = tempfile::tempdir_in(&target)?;
+    // Compile both the native icon stack and the padded legacy representations.
+    // Padding a standalone PNG makes newer macOS versions add a gray backplate.
+    run(Command::new("xcrun")
+        .arg("actool")
+        .arg(root.join("assets/icon/Markraft.icon"))
+        .arg("--compile")
+        .arg(directory.path())
+        .args([
+            "--output-format",
+            "human-readable-text",
+            "--platform",
+            "macosx",
+            "--minimum-deployment-target",
+            "13.0",
+            "--app-icon",
+            "Markraft",
+            "--standalone-icon-behavior",
+            "all",
+            "--output-partial-info-plist",
+        ])
+        .arg(directory.path().join("icon-info.plist")))
+    .context("Compile the app icon with Xcode 26 or newer (select it with DEVELOPER_DIR)")?;
+    fs::copy(
+        directory.path().join("Markraft.icns"),
+        target.join("Markraft.icns"),
+    )?;
+    Ok(directory)
+}
+
+fn install_icon(app: &Path, directory: &Path) -> Result<()> {
+    fs::copy(
+        directory.join("Assets.car"),
+        app.join("Contents/Resources/Assets.car"),
+    )?;
+    let icon_info = Value::from_file(directory.join("icon-info.plist"))?
+        .into_dictionary()
+        .context("Compiled icon metadata must be a dictionary")?;
+    let path = app.join("Contents/Info.plist");
+    let mut info = Value::from_file(&path)?
+        .into_dictionary()
+        .context("App Info.plist must be a dictionary")?;
+    info.extend(icon_info);
+    Value::Dictionary(info).to_file_xml(path)?;
+    Ok(())
 }
 
 fn download_sparkle(root: &Path) -> Result<()> {
@@ -121,7 +150,7 @@ pub fn bundle(root: &Path, options: BundleOptions) -> Result<PathBuf> {
         "Install cargo-bundle: cargo install cargo-bundle --version 0.11.0 --locked"
     );
     download_sparkle(root)?;
-    icon(root)?;
+    let compiled_icon = icon(root)?;
 
     let profile = if options.release { "release" } else { "debug" };
     let targets: Vec<Option<&str>> = if options.universal {
@@ -173,6 +202,7 @@ pub fn bundle(root: &Path, options: BundleOptions) -> Result<PathBuf> {
     };
     let public_key = env::var("SPARKLE_PUBLIC_KEY").unwrap_or_default();
     configure(&app, &public_key, options.mock_updates)?;
+    install_icon(&app, compiled_icon.path())?;
     let identity = env::var("MARKRAFT_SIGN_IDENTITY").unwrap_or_else(|_| "-".into());
     sign(&app, &identity)?;
     run(Command::new("plutil")
@@ -382,6 +412,47 @@ pub fn zip(app: &Path, archive: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use base64::{Engine, engine::general_purpose::STANDARD};
+
+    #[test]
+    fn compiled_icon_resources_and_metadata_are_installed_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("Markraft.app");
+        let compiled = temp.path().join("compiled");
+        fs::create_dir_all(app.join("Contents/Resources")).unwrap();
+        fs::create_dir(&compiled).unwrap();
+        fs::write(compiled.join("Assets.car"), b"compiled icon stack").unwrap();
+        let mut icon_info = Dictionary::new();
+        icon_info.insert("CFBundleIconFile".into(), "Markraft".into());
+        icon_info.insert("CFBundleIconName".into(), "Markraft".into());
+        Value::Dictionary(icon_info)
+            .to_file_xml(compiled.join("icon-info.plist"))
+            .unwrap();
+        let mut info = metadata("0.2.1");
+        info.insert("CFBundleIdentifier".into(), "app.markraft.mac".into());
+        info.insert("CFBundleIconFile".into(), "old.icns".into());
+        Value::Dictionary(info)
+            .to_file_xml(app.join("Contents/Info.plist"))
+            .unwrap();
+
+        install_icon(&app, &compiled).unwrap();
+
+        assert_eq!(
+            fs::read(app.join("Contents/Resources/Assets.car")).unwrap(),
+            b"compiled icon stack"
+        );
+        let info = Value::from_file(app.join("Contents/Info.plist")).unwrap();
+        let info = info.as_dictionary().unwrap();
+        assert_eq!(info["CFBundleIconFile"].as_string(), Some("Markraft"));
+        assert_eq!(info["CFBundleIconName"].as_string(), Some("Markraft"));
+        assert_eq!(
+            info["CFBundleIdentifier"].as_string(),
+            Some("app.markraft.mac")
+        );
+        assert_eq!(
+            info["CFBundleShortVersionString"].as_string(),
+            Some("0.2.1")
+        );
+    }
 
     fn public_key() -> String {
         STANDARD.encode(
