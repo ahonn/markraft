@@ -1,3 +1,15 @@
+## 0.1.7 (2026-10-05)
+
+### Features
+
+- Hide the note window with ⌘W, including in Vim mode.
+- Add a native context menu for editing, spelling checks, dictionary lookup, and supported macOS text services.
+
+### Fixes
+
+- Vertically center the text and caret in the code block language search field.
+- Reduce repeated accessibility processing when editing and scrolling long notes.
+
 ## 0.1.6 (2026-10-01)
 
 ### Features
