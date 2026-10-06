@@ -238,34 +238,62 @@ fn bundle_store(root: &Path, options: &BundleOptions) -> Result<PathBuf> {
         if !options.prebuilt {
             build(root, options, *target)?;
         }
-        let executable = binary(root, profile, *target);
+    }
+    let binaries: Vec<_> = targets
+        .iter()
+        .map(|target| binary(root, profile, *target))
+        .collect();
+    let app = root.join(format!("target/mac-app-store/{profile}/{APP_NAME}"));
+    if app.exists() {
+        fs::remove_dir_all(&app).context("Remove the previous store app bundle")?;
+    }
+    assemble_store(root, &binaries, &app)?;
+    let identity = env::var("MARKRAFT_MAS_SIGN_IDENTITY").unwrap_or_else(|_| "-".into());
+    run(&mut store_sign_command(
+        &app,
+        &identity,
+        &root.join("crates/markraft-app/entitlements/mac-app-store.plist"),
+    )?)?;
+    run(Command::new("codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(&app))?;
+    run(Command::new("plutil")
+        .arg("-lint")
+        .arg(app.join("Contents/Info.plist")))?;
+    Ok(app)
+}
+
+/// Stage an unsigned store product. Xcode consumes its parts before processing
+/// the final Info.plist and signing; local bundling signs the complete product.
+pub(crate) fn assemble_store(root: &Path, binaries: &[PathBuf], app: &Path) -> Result<()> {
+    ensure!(
+        !binaries.is_empty(),
+        "At least one store binary is required"
+    );
+    for executable in binaries {
         ensure!(
             executable.is_file(),
             "Missing store binary {}",
             executable.display()
         );
-        let linked = output(Command::new("otool").arg("-L").arg(&executable))?;
+        let linked = output(Command::new("otool").arg("-L").arg(executable))?;
         ensure!(
             !linked.contains("Sparkle.framework"),
             "Store binary still links Sparkle; rebuild with --no-default-features --features mac-app-store"
         );
     }
     let compiled_icon = icon(root)?;
-    let app = root.join(format!("target/mac-app-store/{profile}/{APP_NAME}"));
-    if app.exists() {
-        fs::remove_dir_all(&app).context("Remove the previous store app bundle")?;
-    }
     fs::create_dir_all(app.join("Contents/MacOS"))?;
     fs::create_dir_all(app.join("Contents/Resources"))?;
     let executable = app.join("Contents/MacOS/markraft-app");
-    if options.universal {
+    if binaries.len() > 1 {
         run(Command::new("lipo")
             .arg("-create")
-            .args(targets.iter().map(|target| binary(root, profile, *target)))
+            .args(binaries)
             .arg("-output")
             .arg(&executable))?;
     } else {
-        fs::copy(binary(root, profile, None), &executable)?;
+        fs::copy(&binaries[0], &executable)?;
     }
     fs::copy(
         root.join("target/Markraft.icns"),
@@ -298,25 +326,16 @@ fn bundle_store(root: &Path, options: &BundleOptions) -> Result<PathBuf> {
     info.insert("NSHighResolutionCapable".into(), true.into());
     configure_store_metadata(&mut info)?;
     Value::Dictionary(info).to_file_xml(app.join("Contents/Info.plist"))?;
-    install_icon(&app, compiled_icon.path())?;
-    let identity = env::var("MARKRAFT_MAS_SIGN_IDENTITY").unwrap_or_else(|_| "-".into());
-    run(&mut store_sign_command(
-        &app,
-        &identity,
-        &root.join("crates/markraft-app/entitlements/mac-app-store.plist"),
-    )?)?;
-    run(Command::new("codesign")
-        .args(["--verify", "--deep", "--strict"])
-        .arg(&app))?;
-    run(Command::new("plutil")
-        .arg("-lint")
-        .arg(app.join("Contents/Info.plist")))?;
-    Ok(app)
+    install_icon(app, compiled_icon.path())?;
+    Ok(())
 }
 
 fn configure_store_metadata(info: &mut Dictionary) -> Result<()> {
     configure_metadata(info, "", false)?;
     info.retain(|key, _| !key.starts_with("SU"));
+    // Matches the existing internal TestFlight declaration: standard HTTPS, no
+    // proprietary encryption. Reassess before adding encryption or markets.
+    info.insert("ITSAppUsesNonExemptEncryption".into(), false.into());
     Ok(())
 }
 
@@ -601,6 +620,22 @@ mod tests {
             Some("app.markraft.mac")
         );
         assert!(info.contains_key("CFBundleDocumentTypes"));
+    }
+
+    #[test]
+    fn store_metadata_declares_exempt_encryption_without_changing_direct_distribution() {
+        let mut info = metadata("0.2.1");
+        configure_metadata(&mut info, &public_key(), false).unwrap();
+        assert!(!info.contains_key("ITSAppUsesNonExemptEncryption"));
+
+        configure_store_metadata(&mut info).unwrap();
+        let mut xml = Vec::new();
+        Value::Dictionary(info).to_writer_xml(&mut xml).unwrap();
+        let serialized = Value::from_reader(std::io::Cursor::new(xml)).unwrap();
+        assert_eq!(
+            serialized.as_dictionary().unwrap()["ITSAppUsesNonExemptEncryption"].as_boolean(),
+            Some(false)
+        );
     }
 
     #[test]

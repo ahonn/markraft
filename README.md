@@ -107,6 +107,9 @@ Run the dependency script before the first Cargo command and after changing bran
 It stores generated source in the ignored `.build/dependencies` directory.
 See [the patch guide](patches/README.md) for provenance and update instructions.
 
+For sandboxed macOS archives, use the `Markraft-Store` Xcode scheme.
+See [the archive guide](docs/xcode-archive.md) for local validation and signing requirements.
+
 See [the architecture notes](docs/architecture.md) for how the workspace is divided, and [the localization guide](docs/localization.md) for adding a language. To contribute a translation, attach the message files to an issue.
 
 ## Acknowledgments

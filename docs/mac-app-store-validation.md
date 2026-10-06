@@ -2,7 +2,9 @@
 
 The application has a separate Mac App Store channel with App Sandbox enabled.
 The default channel retains Sparkle updates.
-These changes do not constitute App Store approval or a release qualification.
+Xcode Cloud published `0.1.7 (2)` to internal TestFlight on 2026-10-06.
+Installation and the smoke tests below passed on an Apple Silicon Mac.
+These checks do not constitute App Store approval or qualification for every supported device.
 
 ## Behavior
 
@@ -80,6 +82,87 @@ The command rejects a binary that still links Sparkle.
 Use `--release` for optimized output.
 A successful debug bundle does not qualify an optimized or universal release.
 
+## TestFlight verification on 2026-10-06
+
+Xcode Cloud build 2 published `0.1.7 (2)` from commit `c14ba9f`.
+Apple processing reached `VALID`, and internal testing reached `IN_BETA_TESTING`.
+The Cloud checks passed 2,035 Rust tests and 19 Python tests.
+Four existing Rust tests were ignored.
+The archive passed checks for both architectures, signing, sandbox entitlements, and matching debug symbols.
+
+The Apple TestFlight app installed this build on an Apple Silicon Mac running macOS 27.0.
+The installed bundle uses `app.markraft.mac` and contains an App Store receipt.
+Strict signature verification passed, the sandbox entitlements were present, and Sparkle was absent.
+The TestFlight app installed at `/Applications/Markraft 2.app` beside the existing DMG app.
+
+| Device check | Result |
+| --- | --- |
+| Markdown and Chinese rendering | Headings, lists, emphasis, inline code, and Chinese text rendered. |
+| Folder authorization | The system folder panel granted access to a generated notes directory. |
+| Autosave | New notes and pasted English and Chinese text saved the expected bytes. |
+| Undo and redo | Undo removed a pasted marker from disk, and redo restored it. |
+| Search and file watching | Search opened a second note. An external file addition appeared without restarting. |
+| HTML export | The exported HTML contained the expected note content. |
+| Images | A local image and an HTTPS image rendered. |
+| Process restart | The app restored the note and wrote a new note without another folder prompt. |
+| Folder command | The command palette opened the folder picker. Cancellation preserved the current folder. |
+| Independent file | A parent-directory grant permitted atomic saves outside the notes directory. |
+
+No application crash was observed during these checks.
+The main test sequence used generated fixtures and did not edit existing notes.
+One preliminary test note was created in the app's initial directory.
+The detailed local report and installed-build metadata are in `target/testflight-validation/`.
+These generated artifacts are not committed.
+
+Automated Chinese typing dropped characters in both Markraft and TextEdit.
+This result does not isolate an application defect.
+Chinese clipboard paste, rendering, and saved bytes passed.
+Actual IME composition and candidate selection still need manual verification.
+This pass does not cover Intel hardware, other macOS versions, PDF export, printing, image clipboard paste, or Finder's Open With command.
+
+## Merge preparation verification on 2026-10-06
+
+The final local checks covered both distribution channels and the release hooks.
+
+| Check | Result |
+| --- | --- |
+| Default workspace Clippy and tests | Passed. Tests: 2,036 passed, 4 existing ignored. |
+| Store workspace Clippy and tests | Passed. Tests: 2,036 passed, 4 existing ignored. |
+| Python hook and archive tests | 28 passed. |
+| Sparkle release-feed integration test | 1 passed, explicitly run with `--ignored`. |
+| Formatting and `git diff --check` | Passed. |
+| Direct-distribution debug bundle | Signature and plist checks passed. |
+| Store optimized universal archive | Build 43 passed signature, sandbox, architecture, debug-symbol, and encryption-declaration checks. |
+
+The direct-distribution bundle used the real public `SPARKLE_PUBLIC_KEY`.
+Sparkle checked the release feed and reported that `0.1.7` was the newest version.
+The app launched with a generated notes directory.
+Titlebar dragging changed the saved window origin from `(1679, 1022)` to `(1200, 830)`.
+A normal quit and restart restored the note and saved window bounds.
+
+Reopening the running app through Finder displayed the note.
+Settings and the translucent window rendered correctly.
+Double-clicking the titlebar did not produce an observed size change, so zoom remains unverified.
+Spaces behavior was not tested.
+These checks used a debug bundle and do not qualify an optimized universal release.
+
+A separate local Xcode archive used the optimized `app-store` profile and ad-hoc signing.
+It contains both architectures and the boolean `ITSAppUsesNonExemptEncryption=false` declaration.
+This archive was not uploaded, and build number 43 was not reserved in App Store Connect.
+
+The first launch against the existing `~/Documents/Markraft` directory blocked during startup.
+A process sample showed `Store::open` waiting in `read_dir` and `__open_nocancel`.
+The generated directory opened normally.
+The cause was not isolated, and these observations do not establish that this change introduced the blocked operation.
+This change does not claim to fix it.
+
+After testing, the original DMG settings were restored byte for byte.
+The debug app was closed, and the TestFlight app was restored.
+The original app bundle and existing notes were not changed.
+
+An API read confirmed that `Store Archive` enables the `v`-prefix tag trigger with `autoCancel=false` and retains manual branch builds.
+The first real release tag and an upgrade through TestFlight still require verification.
+
 ## Rebase verification on 2026-10-06
 
 The branch was rebased onto `origin/master` at `efdcafd2c988d2c3c2390fd698e560a6b344e480`.
@@ -144,17 +227,22 @@ That tree passed these native sandbox checks with generated fixtures:
 - The store application menu and About settings omitted update controls.
 - The editor and translucent window rendered after the GPUI patch.
 
-These native checks were not repeated on the migrated branch.
+These earlier checks were not all repeated on the migrated branch.
+The TestFlight section records the subset tested again on the distributed build.
 No actual user note directory was granted to the test application.
 The initial migration repeated compilation, tests, packaging, signature verification, and the binary scan.
 
 ## Remaining release requirements
 
-- Configure App Store signing and provisioning as applicable.
-  Validate the installer package and App Store Connect upload.
-  TestFlight and App Review were not run.
+- Verify the first release tag starts Xcode Cloud automatically and reaches the internal TestFlight group.
+  Compare the DMG and TestFlight source commits and marketing versions.
+  Test an upgrade from `0.1.7 (2)` through TestFlight.
+- Complete App Review requirements before public distribution.
+  Cloud signing, upload, Apple processing, and internal TestFlight installation have passed.
 - Provide a published privacy policy, an in-app policy link, privacy answers, screenshots, and review metadata.
-- Validate an optimized universal release, supported macOS versions, and Intel hardware.
+- Run the optimized universal release on supported macOS versions and Intel hardware.
+  Universal archiving passed, but the Intel executable was not run on Intel hardware.
+- Verify actual IME composition, PDF export, image clipboard paste, and Finder file opening.
 - Check provider and iCloud files, login items, accessibility, Spaces behavior, and physical printing.
 - Design authorization for attachments outside all selected directories.
   A reference in a note does not grant access to an arbitrary external file.
