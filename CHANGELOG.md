@@ -1,3 +1,9 @@
+## 0.1.9 (2026-10-06)
+
+### Fixes
+
+- Add a setting to hide the word or character count in note windows.
+
 ## 0.1.8 (2026-10-06)
 
 ### Fixes
