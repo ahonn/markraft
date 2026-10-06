@@ -8,8 +8,11 @@ repository.workspace = true
 license.workspace = true
 
 [features]
+default = ["direct-distribution"]
+direct-distribution = ["dep:sparkle-updater"]
+mac-app-store = []
 # Local update integration tests use an isolated app identity and data directory.
-updater-mock = []
+updater-mock = ["direct-distribution"]
 
 [dependencies]
 futures-channel = "0.3"
@@ -65,7 +68,7 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
     "WKWebViewConfiguration", "objc2-app-kit", "objc2-core-foundation",
 ] }
 raw-window-handle = "0.6"
-sparkle-updater = "=0.1.0"
+sparkle-updater = { version = "=0.1.0", optional = true }
 objc2-foundation = { version = "0.3", features = ["NSBundle", "NSData", "NSError", "NSString", "NSURL"] }
 
 [package.metadata.bundle]

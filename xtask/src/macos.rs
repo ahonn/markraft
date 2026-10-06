@@ -23,6 +23,7 @@ pub struct BundleOptions {
     pub release: bool,
     pub universal: bool,
     pub mock_updates: bool,
+    pub mac_app_store: bool,
     /// Bundle binaries already built, one per target, by [`compile`] on other
     /// machines, rather than building them here.
     pub prebuilt: bool,
@@ -44,6 +45,9 @@ fn build_options(command: &mut Command, options: &BundleOptions, target: Option<
         command.arg("--release");
     } else {
         command.args(["--profile", "dev"]);
+    }
+    if options.mac_app_store {
+        command.args(["--no-default-features", "--features", "mac-app-store"]);
     }
     if options.mock_updates {
         command.args(["--features", "updater-mock"]);
@@ -126,16 +130,19 @@ fn binary(root: &Path, profile: &str, target: Option<&str>) -> PathBuf {
 
 /// Build the release binary for one of [`UNIVERSAL_TARGETS`]. A release builds each
 /// on a machine of its own and bundles them together with `--prebuilt`.
-pub fn compile(root: &Path, target: &str) -> Result<PathBuf> {
+pub fn compile(root: &Path, target: &str, mac_app_store: bool) -> Result<PathBuf> {
     ensure!(cfg!(target_os = "macos"), "Building the app requires macOS");
     ensure!(
         UNIVERSAL_TARGETS.contains(&target),
         "Expected one of {}, got {target}",
         UNIVERSAL_TARGETS.join(", ")
     );
-    download_sparkle(root)?;
+    if !mac_app_store {
+        download_sparkle(root)?;
+    }
     let options = BundleOptions {
         release: true,
+        mac_app_store,
         ..Default::default()
     };
     build(root, &options, Some(target))?;
@@ -144,6 +151,13 @@ pub fn compile(root: &Path, target: &str) -> Result<PathBuf> {
 
 pub fn bundle(root: &Path, options: BundleOptions) -> Result<PathBuf> {
     ensure!(cfg!(target_os = "macos"), "App bundling requires macOS");
+    ensure!(
+        !(options.mac_app_store && options.mock_updates),
+        "App Store bundles cannot enable mock updates"
+    );
+    if options.mac_app_store {
+        return bundle_store(root, &options);
+    }
     let version = output(cargo(root).args(["bundle", "--version"]))?;
     ensure!(
         version.trim() == "cargo-bundle v0.11.0",
@@ -209,6 +223,111 @@ pub fn bundle(root: &Path, options: BundleOptions) -> Result<PathBuf> {
         .arg("-lint")
         .arg(app.join("Contents/Info.plist")))?;
     Ok(app)
+}
+
+/// Assemble the store bundle independently of cargo-bundle's direct-distribution
+/// framework metadata. This path never downloads or copies Sparkle.
+fn bundle_store(root: &Path, options: &BundleOptions) -> Result<PathBuf> {
+    let profile = if options.release { "release" } else { "debug" };
+    let targets: Vec<Option<&str>> = if options.universal {
+        UNIVERSAL_TARGETS.iter().copied().map(Some).collect()
+    } else {
+        vec![None]
+    };
+    for target in &targets {
+        if !options.prebuilt {
+            build(root, options, *target)?;
+        }
+        let executable = binary(root, profile, *target);
+        ensure!(
+            executable.is_file(),
+            "Missing store binary {}",
+            executable.display()
+        );
+        let linked = output(Command::new("otool").arg("-L").arg(&executable))?;
+        ensure!(
+            !linked.contains("Sparkle.framework"),
+            "Store binary still links Sparkle; rebuild with --no-default-features --features mac-app-store"
+        );
+    }
+    let compiled_icon = icon(root)?;
+    let app = root.join(format!("target/mac-app-store/{profile}/{APP_NAME}"));
+    if app.exists() {
+        fs::remove_dir_all(&app).context("Remove the previous store app bundle")?;
+    }
+    fs::create_dir_all(app.join("Contents/MacOS"))?;
+    fs::create_dir_all(app.join("Contents/Resources"))?;
+    let executable = app.join("Contents/MacOS/markraft-app");
+    if options.universal {
+        run(Command::new("lipo")
+            .arg("-create")
+            .args(targets.iter().map(|target| binary(root, profile, *target)))
+            .arg("-output")
+            .arg(&executable))?;
+    } else {
+        fs::copy(binary(root, profile, None), &executable)?;
+    }
+    fs::copy(
+        root.join("target/Markraft.icns"),
+        app.join("Contents/Resources/Markraft.icns"),
+    )?;
+    let metadata: serde_json::Value = serde_json::from_str(&output(cargo(root).args([
+        "metadata",
+        "--locked",
+        "--no-deps",
+        "--format-version",
+        "1",
+    ]))?)?;
+    let version = metadata["packages"]
+        .as_array()
+        .context("Cargo packages missing")?
+        .iter()
+        .find(|package| package["name"] == "markraft-app")
+        .and_then(|package| package["version"].as_str())
+        .context("App version missing")?;
+    let mut info = Dictionary::new();
+    info.insert("CFBundleShortVersionString".into(), version.into());
+    info.insert("CFBundleExecutable".into(), "markraft-app".into());
+    info.insert("CFBundlePackageType".into(), "APPL".into());
+    info.insert("CFBundleIconFile".into(), "Markraft.icns".into());
+    info.insert(
+        "LSApplicationCategoryType".into(),
+        "public.app-category.productivity".into(),
+    );
+    info.insert("LSMinimumSystemVersion".into(), "13.0".into());
+    info.insert("NSHighResolutionCapable".into(), true.into());
+    configure_store_metadata(&mut info)?;
+    Value::Dictionary(info).to_file_xml(app.join("Contents/Info.plist"))?;
+    install_icon(&app, compiled_icon.path())?;
+    let identity = env::var("MARKRAFT_MAS_SIGN_IDENTITY").unwrap_or_else(|_| "-".into());
+    run(&mut store_sign_command(
+        &app,
+        &identity,
+        &root.join("crates/markraft-app/entitlements/mac-app-store.plist"),
+    )?)?;
+    run(Command::new("codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(&app))?;
+    run(Command::new("plutil")
+        .arg("-lint")
+        .arg(app.join("Contents/Info.plist")))?;
+    Ok(app)
+}
+
+fn configure_store_metadata(info: &mut Dictionary) -> Result<()> {
+    configure_metadata(info, "", false)?;
+    info.retain(|key, _| !key.starts_with("SU"));
+    Ok(())
+}
+
+fn store_sign_command(app: &Path, identity: &str, entitlements: &Path) -> Result<Command> {
+    ensure!(!identity.is_empty(), "Signing identity must not be empty");
+    let mut command = Command::new("codesign");
+    command
+        .args(["--force", "--sign", identity, "--entitlements"])
+        .arg(entitlements)
+        .arg(app);
+    Ok(command)
 }
 
 fn configure_metadata(info: &mut Dictionary, public_key: &str, mock: bool) -> Result<()> {
@@ -467,6 +586,90 @@ mod tests {
         info.insert("CFBundleShortVersionString".into(), version.into());
         info.insert("CFBundleVersion".into(), "timestamp".into());
         info
+    }
+
+    #[test]
+    fn store_metadata_removes_all_updater_configuration() {
+        let mut info = metadata("0.2.1");
+        configure_metadata(&mut info, &public_key(), true).unwrap();
+        configure_store_metadata(&mut info).unwrap();
+        assert!(info.keys().all(|key| !key.starts_with("SU")));
+        assert!(!info.contains_key("MarkraftMockUpdates"));
+        assert!(!info.contains_key("NSAppTransportSecurity"));
+        assert_eq!(
+            info["CFBundleIdentifier"].as_string(),
+            Some("app.markraft.mac")
+        );
+        assert!(info.contains_key("CFBundleDocumentTypes"));
+    }
+
+    #[test]
+    fn store_build_disables_default_updater_dependency() {
+        let mut command = Command::new("cargo");
+        build_options(
+            &mut command,
+            &BundleOptions {
+                mac_app_store: true,
+                ..Default::default()
+            },
+            None,
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert!(
+            args.windows(3)
+                .any(|args| args == ["--no-default-features", "--features", "mac-app-store"])
+        );
+        assert!(!args.contains(&"updater-mock"));
+        let mut direct = Command::new("cargo");
+        build_options(&mut direct, &BundleOptions::default(), None);
+        assert!(!direct.get_args().any(|arg| arg == "--no-default-features"));
+    }
+
+    #[test]
+    fn store_signing_applies_sandbox_entitlements_to_main_app() {
+        let entitlements = Path::new("sandbox.plist");
+        let app = Path::new("Markraft.app");
+        for identity in ["-", "Apple Distribution: Example"] {
+            let command = store_sign_command(app, identity, entitlements).unwrap();
+            let args: Vec<_> = command
+                .get_args()
+                .map(|arg| arg.to_str().unwrap())
+                .collect();
+            assert_eq!(
+                args,
+                [
+                    "--force",
+                    "--sign",
+                    identity,
+                    "--entitlements",
+                    "sandbox.plist",
+                    "Markraft.app"
+                ]
+            );
+        }
+        assert!(store_sign_command(app, "", entitlements).is_err());
+        let value = Value::from_reader_xml(
+            include_bytes!("../../crates/markraft-app/entitlements/mac-app-store.plist").as_slice(),
+        )
+        .unwrap();
+        let entitlements = value.as_dictionary().unwrap();
+        for key in [
+            "com.apple.security.app-sandbox",
+            "com.apple.security.files.user-selected.read-write",
+            "com.apple.security.files.bookmarks.app-scope",
+            "com.apple.security.network.client",
+            "com.apple.security.print",
+        ] {
+            assert_eq!(entitlements[key].as_boolean(), Some(true));
+        }
+        assert!(
+            entitlements
+                .keys()
+                .all(|key| !key.contains("temporary-exception"))
+        );
     }
 
     #[test]

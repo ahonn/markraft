@@ -97,6 +97,7 @@ pub(in crate::app) struct SettingsErrors {
     new_notes: Option<Message>,
     daily: Option<Message>,
     images: Option<Message>,
+    #[cfg(feature = "direct-distribution")]
     updates: Option<Message>,
 }
 
@@ -117,7 +118,9 @@ enum Change {
     ResetImageLocation,
     RevealFolder,
     NewNoteName(NoteNaming),
+    #[cfg(feature = "direct-distribution")]
     AutomaticUpdates(bool),
+    #[cfg(feature = "direct-distribution")]
     CheckForUpdates,
     ImageName(ImageNaming),
     DailyFolder,
@@ -180,6 +183,7 @@ struct Snapshot {
     images: Option<(String, bool)>,
     new_note_name: NoteNaming,
     /// None where this copy has no updater to ask: unbundled, or not configured.
+    #[cfg(feature = "direct-distribution")]
     automatic_updates: Option<bool>,
     image_name: ImageNaming,
     daily: crate::daily::DailySettings,
@@ -243,6 +247,7 @@ impl MarkraftApp {
             new_notes,
             images,
             new_note_name: workspace.new_note_name,
+            #[cfg(feature = "direct-distribution")]
             automatic_updates: self.updater.automatically_checks(),
             image_name: workspace.image_name,
             daily: workspace.daily.clone(),
@@ -330,6 +335,7 @@ impl MarkraftApp {
                 self.library.workspace.new_note_name = naming;
                 self.schedule_save(cx);
             }
+            #[cfg(feature = "direct-distribution")]
             Change::AutomaticUpdates(enabled) => {
                 if let Err(error) = self.updater.set_automatically_checks(enabled) {
                     self.settings_errors.updates = Some(error);
@@ -339,6 +345,7 @@ impl MarkraftApp {
                 self.library.workspace.image_name = naming;
                 self.schedule_save(cx);
             }
+            #[cfg(feature = "direct-distribution")]
             Change::CheckForUpdates => {
                 self.settings_errors.updates = self.updater.check().err();
             }
@@ -1884,34 +1891,39 @@ impl SettingsView {
                     .child(version),
             );
 
-        let mut updates = vec![
-            checkbox(
-                "automatic-updates",
-                s.i18n.text("settings.automatic-updates"),
-                s.automatic_updates.unwrap_or(false),
-                s.automatic_updates.is_none(),
-                p,
-                self.sender(Change::AutomaticUpdates),
-            )
-            .into_any_element(),
-        ];
-        // A copy that cannot update itself shows both controls dimmed, without saying
-        // why: only the builds from GitHub carry an update feed.
-        let available = s.automatic_updates.is_some();
-        updates.push(line(vec![
-            button(
-                "check-for-updates",
-                s.i18n.text("settings.check-updates"),
-                p,
-                self.on_click(Change::CheckForUpdates),
-            )
-            .disabled(!available)
-            .when(!available, |button| button.opacity(0.45).cursor_default())
-            .into_any_element(),
-        ]));
-        if let Some(refused) = &s.errors.updates {
-            updates.push(error(refused.render(&s.i18n), p));
-        }
+        #[cfg(feature = "direct-distribution")]
+        let updates = {
+            let mut updates = vec![
+                checkbox(
+                    "automatic-updates",
+                    s.i18n.text("settings.automatic-updates"),
+                    s.automatic_updates.unwrap_or(false),
+                    s.automatic_updates.is_none(),
+                    p,
+                    self.sender(Change::AutomaticUpdates),
+                )
+                .into_any_element(),
+            ];
+            // A copy that cannot update itself shows both controls dimmed, without saying
+            // why: only the builds from GitHub carry an update feed.
+            let available = s.automatic_updates.is_some();
+            updates.push(line(vec![
+                button(
+                    "check-for-updates",
+                    s.i18n.text("settings.check-updates"),
+                    p,
+                    self.on_click(Change::CheckForUpdates),
+                )
+                .disabled(!available)
+                .when(!available, |button| button.opacity(0.45).cursor_default())
+                .into_any_element(),
+            ]));
+            if let Some(refused) = &s.errors.updates {
+                updates.push(error(refused.render(&s.i18n), p));
+            }
+
+            updates
+        };
 
         let open = |url: &'static str| {
             move |_: &ClickEvent, _: &mut Window, cx: &mut App| cx.open_url(url)
@@ -1936,6 +1948,7 @@ impl SettingsView {
         let mut page = vec![
             identity,
             group_gap(),
+            #[cfg(feature = "direct-distribution")]
             row(Some(s.i18n.text("settings.updates")), updates, p),
             row(Some(s.i18n.text("settings.links")), vec![line(links)], p),
         ];

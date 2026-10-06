@@ -1,4 +1,6 @@
 {
+  "error.file-parent-folder": "Choose “%{folder}” or one of its parent folders to allow saving this file.",
+  "error.obsidian-vault-folder": "Choose the root of an Obsidian vault containing its .obsidian folder.",
   "_version": 1,
   "error.file-missing": "“%{name}” ya no está ahí. Puede que se haya renombrado, movido o eliminado; vuelve a elegir la carpeta de notas.",
   "error.file-permission": "Markraft no tiene permiso para usar “%{name}”. Comprueba sus permisos en el Finder o elige otra carpeta de notas.",
