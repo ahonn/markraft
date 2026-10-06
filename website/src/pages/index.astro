@@ -1,6 +1,7 @@
 ---
 import Base from '../layouts/Base.astro';
 import Loop from '../components/Loop.astro';
+import Footer from '../components/Footer.astro';
 
 const repo = 'https://github.com/ahonn/markraft';
 // The release workflow also uploads the newest disk image under this fixed name.
@@ -15,7 +16,7 @@ const description =
 const faq = [
   {
     question: 'Is Markraft free?',
-    answer: 'Yes, completely. There is no paid version and no account to create.',
+    answer: 'The download on this site is free and open source, and there is no account to create.',
   },
   {
     question: 'Can I use it with my Obsidian vault?',
@@ -228,7 +229,7 @@ const media = 'overflow-hidden rounded-[20px] bg-backdrop';
         <p class="text-[17px] leading-[1.55] text-muted">No account and no cloud. Your notes never leave your Mac unless you move them.</p>
       </div>
       <div class="flex flex-col gap-2.5">
-        <h3 class="text-[21px] font-semibold">Free for good</h3>
+        <h3 class="text-[21px] font-semibold">Open source</h3>
         <p class="text-[17px] leading-[1.55] text-muted">
           No subscription and no limit on how many notes you keep. The code is <a href={repo}>open on GitHub</a> for anyone to read.
         </p>
@@ -259,11 +260,5 @@ const media = 'overflow-hidden rounded-[20px] bg-backdrop';
     </section>
   </main>
 
-  <footer class:list={[container, 'mt-24 flex flex-col gap-3 border-t border-line pt-7 pb-10 text-[13px] text-subtle sm:flex-row sm:items-center sm:justify-between']}>
-    <span>© 2026 Yuexun Jiang</span>
-    <span class="flex gap-5">
-      <a href={repo} class="text-subtle! hover:text-ink!">GitHub</a>
-      <a href={`${repo}/releases`} class="text-subtle! hover:text-ink!">Releases</a>
-    </span>
-  </footer>
+  <Footer class={`${container} mt-24`} />
 </Base>

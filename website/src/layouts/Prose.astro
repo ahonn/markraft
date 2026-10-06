@@ -1,0 +1,92 @@
+---
+import Base from './Base.astro';
+import Footer from '../components/Footer.astro';
+
+interface Props {
+  title: string;
+  description: string;
+  heading: string;
+  /** A line under the heading, such as the date a policy took effect. */
+  note?: string;
+}
+
+const { title, description, heading, note } = Astro.props;
+const container = 'mx-auto w-[min(44rem,100%-2rem)]';
+---
+
+<Base title={title} description={description} structuredData={[]}>
+  <header class:list={[container, 'flex items-center justify-between border-b border-line py-4 sm:py-5']}>
+    <a href="/" class="flex min-h-11 items-center gap-2.5 text-ink!">
+      <img src="/icon.png" alt="" width="26" height="26" />
+      <span class="text-[17px] font-semibold">Markraft</span>
+    </a>
+    <nav class="flex items-center gap-5 text-sm sm:gap-7">
+      <a href="/support/" class="py-3 text-muted! hover:text-ink!">Support</a>
+      <a href="/privacy/" class="py-3 text-muted! hover:text-ink!">Privacy</a>
+    </nav>
+  </header>
+
+  <main class:list={[container, 'prose pt-12 sm:pt-16']}>
+    <h1>{heading}</h1>
+    {note && <p class="note">{note}</p>}
+    <slot />
+  </main>
+
+  <Footer class={`${container} mt-24`} />
+</Base>
+
+<style>
+  .prose :global(h1) {
+    font-size: clamp(2rem, 4.5vw, 2.75rem);
+    font-weight: 600;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+  }
+
+  .prose .note {
+    margin-top: 0.75rem;
+    font-size: 0.875rem;
+    color: var(--color-subtle);
+  }
+
+  .prose :global(h2) {
+    margin-top: 3rem;
+    font-size: 1.3125rem;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+
+  .prose :global(p),
+  .prose :global(ul) {
+    margin-top: 1rem;
+    font-size: 1.0625rem;
+    line-height: 1.55;
+    color: var(--color-muted);
+  }
+
+  .prose :global(ul) {
+    list-style: disc;
+    padding-left: 1.25rem;
+  }
+
+  .prose :global(li + li) {
+    margin-top: 0.5rem;
+  }
+
+  /* A link in a list is told apart by more than its colour, as in a paragraph. */
+  .prose :global(li a) {
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+  }
+
+  .prose :global(strong) {
+    font-weight: 600;
+    color: var(--color-ink);
+  }
+
+  .prose :global(code) {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+  }
+</style>

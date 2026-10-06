@@ -1,0 +1,71 @@
+---
+import Prose from '../layouts/Prose.astro';
+
+const repo = 'https://github.com/ahonn/markraft';
+---
+
+<Prose
+  title="Privacy Policy — Markraft"
+  description="Markraft collects no personal data. This page lists the network connections the app and this website make."
+  heading="Privacy Policy"
+  note="Effective October 6, 2026"
+>
+  <p>
+    Markraft is made by Techflow Studio Limited, called the developer on this page. Markraft does not collect personal data. The
+    app has no account, no analytics and no telemetry. This page lists every connection the app and this website make,
+    so you can check that for yourself.
+  </p>
+
+  <h2>Your notes</h2>
+  <p>
+    Notes are plain <code>.md</code> files in a folder you choose on your Mac. Markraft never uploads them. If you keep
+    that folder in iCloud Drive or another sync service, that service handles the files under its own privacy policy.
+  </p>
+
+  <h2>Connections the app makes</h2>
+  <ul>
+    <li>
+      <strong>Images linked from the web.</strong> When a note links to an image on the web, Markraft downloads the
+      image from the address in the link. The server at that address sees your IP address, as it would in a browser.
+      You can turn this off in Settings.
+    </li>
+    <li>
+      <strong>Update checks.</strong> The version downloaded from this website contacts{' '}
+      <code>updates.markraft.app</code> to see whether a newer version exists, and downloads the update when you install
+      it. The Mac App Store version does not do this, because the App Store delivers its updates.
+    </li>
+    <li>
+      <strong>Links you open.</strong> A link you click opens in your browser. Markraft does not load the page itself.
+    </li>
+  </ul>
+  <p>None of these connections carries the contents of your notes.</p>
+
+  <h2>Crash reports</h2>
+  <p>
+    If Markraft quits unexpectedly, it saves a report on your Mac in <code>~/Library/Logs/Markraft</code>. The report
+    stays there. It reaches the developer only if you attach it to an issue yourself.
+  </p>
+
+  <h2>Mac App Store purchases</h2>
+  <p>
+    Apple processes purchases of the Mac App Store version. The developer receives sales totals from Apple and does not
+    receive your name, email address or payment details.
+  </p>
+
+  <h2>This website</h2>
+  <p>
+    This website counts page views and download clicks with a self-hosted copy of Plausible Analytics. It sets no
+    cookies and stores no personal data. The website is served by Cloudflare, which processes your IP address to deliver the pages.
+  </p>
+
+  <h2>Changes</h2>
+  <p>
+    If this policy changes, the new version is published on this page with a new effective date. The{' '}
+    <a href={`${repo}/commits/master/website/src/pages/privacy.astro`}>history of this page</a> is public.
+  </p>
+
+  <h2>Contact</h2>
+  <p>
+    For a question about this policy, <a href={`${repo}/issues`}>open an issue on GitHub</a>.
+  </p>
+</Prose>

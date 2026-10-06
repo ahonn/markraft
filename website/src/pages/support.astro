@@ -1,0 +1,55 @@
+---
+import Prose from '../layouts/Prose.astro';
+
+const repo = 'https://github.com/ahonn/markraft';
+---
+
+<Prose
+  title="Support — Markraft"
+  description="Get help with Markraft: report a problem, ask a question, or sort out an App Store purchase."
+  heading="Support"
+>
+  <h2>Report a problem or ask a question</h2>
+  <p>
+    Markraft is developed in the open. <a href={`${repo}/issues/new?template=bug_report.yml`}>Open an issue on GitHub</a>{' '}
+    to report a bug, or <a href={`${repo}/issues`}>search the existing issues</a> to see whether it is already known.
+    Feature requests and questions are welcome there too.
+  </p>
+  <p>A good report says what you did, what you expected, and what happened instead. It also helps to include:</p>
+  <ul>
+    <li>The Markraft version, shown in Settings under About.</li>
+    <li>Your macOS version.</li>
+    <li>
+      The crash report, if Markraft quit unexpectedly. Reports are saved on your Mac in{' '}
+      <code>~/Library/Logs/Markraft</code> and are sent only when you attach one yourself.
+    </li>
+  </ul>
+
+  <h2>Common questions</h2>
+  <ul>
+    <li>
+      <strong>Changing the shortcut.</strong> The ⌥N shortcut and the optional shortcut for a new note are set in
+      Settings.
+    </li>
+    <li>
+      <strong>Moving your notes.</strong> Notes are plain <code>.md</code> files in the folder you chose. Choose a
+      different folder in Settings, or move the files with Finder.
+    </li>
+    <li>
+      <strong>Folder access.</strong> The Mac App Store version asks you to choose your notes folder once, because
+      macOS only lets it read the folders you pick.
+    </li>
+    <li>
+      <strong>Syncing.</strong> Keep the notes folder in iCloud Drive or another sync service. That service does the
+      syncing.
+    </li>
+  </ul>
+  <p>More answers are in the <a href="/#faq">questions on the home page</a>.</p>
+
+  <h2>Mac App Store purchases</h2>
+  <p>
+    Apple handles payment for the Mac App Store version. To ask for a refund, use{' '}
+    <a href="https://reportaproblem.apple.com">reportaproblem.apple.com</a>. To install Markraft again on another Mac,
+    sign in to the App Store with the same Apple Account and download it from your purchases.
+  </p>
+</Prose>

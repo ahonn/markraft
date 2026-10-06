@@ -1,0 +1,23 @@
+---
+interface Props {
+  class?: string;
+}
+
+const { class: className } = Astro.props;
+const repo = 'https://github.com/ahonn/markraft';
+---
+
+<footer
+  class:list={[
+    'flex flex-col gap-3 border-t border-line pt-7 pb-10 text-[13px] text-subtle sm:flex-row sm:items-center sm:justify-between',
+    className,
+  ]}
+>
+  <span>© 2026 Techflow Studio Limited</span>
+  <span class="flex flex-wrap gap-x-5 gap-y-2">
+    <a href="/support/" class="text-subtle! hover:text-ink!">Support</a>
+    <a href="/privacy/" class="text-subtle! hover:text-ink!">Privacy</a>
+    <a href={repo} class="text-subtle! hover:text-ink!">GitHub</a>
+    <a href={`${repo}/releases`} class="text-subtle! hover:text-ink!">Releases</a>
+  </span>
+</footer>
