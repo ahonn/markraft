@@ -174,6 +174,7 @@ pub fn release(root: &Path, tag: &str, prebuilt: bool) -> Result<()> {
             release: true,
             universal: true,
             mock_updates: false,
+            mac_app_store: false,
             prebuilt,
         },
     )?;

@@ -4,6 +4,8 @@ mod carry;
 mod daily_notes;
 mod exports;
 mod feedback;
+#[cfg(feature = "mac-app-store")]
+mod file_access;
 mod find;
 mod interaction;
 mod io;
@@ -118,6 +120,7 @@ pub struct MarkraftApp {
     /// The notes folder, once one has been chosen.
     path: Option<PathBuf>,
     settings_path: PathBuf,
+    file_access: crate::file_access::FileAccess,
     platform: Option<Platform>,
     updater: Updater,
     instance: Instance,
@@ -342,6 +345,7 @@ impl MarkraftApp {
             house,
             path,
             settings_path,
+            file_access: Default::default(),
             platform,
             updater,
             instance,
@@ -766,6 +770,7 @@ impl MarkraftApp {
                 }
                 PlatformEvent::DailyNote => self.toggle_daily_note(window, cx),
                 PlatformEvent::Settings => self.open_settings(window, cx),
+                #[cfg(feature = "direct-distribution")]
                 PlatformEvent::CheckForUpdates => self.check_for_updates(window, cx),
                 PlatformEvent::ReportIssue => self.report_issue(cx),
                 PlatformEvent::Quit => self.quit(window, cx),
@@ -824,9 +829,7 @@ impl MarkraftApp {
                     };
                     if success {
                         cx.defer(move |_| {
-                            if let Some(main_thread) = sparkle_updater::MainThreadMarker::new() {
-                                continuation.resume(main_thread);
-                            }
+                            crate::updater::resume(continuation);
                         });
                     } else {
                         this.updater.postpone(continuation);
@@ -1013,6 +1016,17 @@ impl MarkraftApp {
         if let Some(directory) = crate::crash::directory() {
             cx.reveal_path(&crate::logging::file(&directory));
         }
+    }
+
+    /// Retain startup security scopes for all asynchronous file consumers.
+    pub fn with_file_access(mut self, file_access: crate::file_access::FileAccess) -> Self {
+        self.file_access = file_access;
+        self
+    }
+
+    pub fn announce(&mut self, text: Message, cx: &mut Context<Self>) {
+        self.feedback.queue(text);
+        cx.notify();
     }
 
     /// Put what a bug report needs on the clipboard, and say so.
@@ -1651,6 +1665,10 @@ impl MarkraftApp {
         if self.is_reloading() {
             return;
         }
+        if let Err(error) = self.file_access.remember(&directory) {
+            self.inform(error, cx);
+            return;
+        }
         if self.persistence.is_some() {
             if self.path.as_ref() == Some(&directory) {
                 self.flush_then(window, cx, |_, _, _| {});
@@ -1958,6 +1976,37 @@ impl MarkraftApp {
         self.sync_documents(cx);
         if paths.len() == 1 && paths[0].is_dir() {
             self.open_folder(paths[0].clone(), window, cx);
+            return;
+        }
+        #[cfg(feature = "mac-app-store")]
+        {
+            self.authorize_open_paths(paths, window, cx);
+        }
+        #[cfg(not(feature = "mac-app-store"))]
+        self.open_authorized_paths(paths, window, cx);
+    }
+
+    fn open_authorized_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_reloading() {
+            return;
+        }
+        let paths: Vec<_> = paths
+            .into_iter()
+            .filter(|path| {
+                if let Err(error) = self.file_access.remember(path) {
+                    self.inform(error, cx);
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        if paths.is_empty() {
             return;
         }
         let Some(persistence) = &self.persistence else {
@@ -2667,6 +2716,7 @@ fn set_app_menus(i18n: &crate::locale::I18n, cx: &App) {
         Menu::new("Markraft").items([
             MenuItem::action(i18n.text("menu.show-notes"), Show),
             MenuItem::action(i18n.text("menu.settings"), Settings),
+            #[cfg(feature = "direct-distribution")]
             MenuItem::action(i18n.text("menu.updates"), CheckForUpdates),
             MenuItem::separator(),
             MenuItem::action(i18n.text("menu.quit"), Quit),

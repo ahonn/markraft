@@ -26,6 +26,9 @@ enum Task {
         universal: bool,
         #[arg(long)]
         mock_updates: bool,
+        /// Build a sandboxed App Store bundle without the Sparkle updater.
+        #[arg(long, conflicts_with_all = ["mock_updates", "dmg"])]
+        mac_app_store: bool,
         /// Also package the bundle as a disk image, signed only with a Developer ID.
         #[arg(long)]
         dmg: bool,
@@ -37,6 +40,8 @@ enum Task {
     Compile {
         #[arg(long)]
         target: String,
+        #[arg(long)]
+        mac_app_store: bool,
     },
     /// Build signed, notarized artifacts without uploading them.
     Release {
@@ -134,6 +139,7 @@ fn main() -> Result<()> {
             release,
             universal,
             mock_updates,
+            mac_app_store,
             dmg,
             prebuilt,
         } => {
@@ -143,6 +149,7 @@ fn main() -> Result<()> {
                     release,
                     universal,
                     mock_updates,
+                    mac_app_store,
                     prebuilt,
                 },
             )?;
@@ -160,8 +167,11 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Task::Compile { target } => {
-            let binary = macos::compile(&root, &target)?;
+        Task::Compile {
+            target,
+            mac_app_store,
+        } => {
+            let binary = macos::compile(&root, &target, mac_app_store)?;
             println!("Built {}.", binary.display());
             Ok(())
         }

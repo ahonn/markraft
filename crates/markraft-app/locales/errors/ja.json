@@ -1,4 +1,6 @@
 {
+  "error.file-parent-folder": "Choose “%{folder}” or one of its parent folders to allow saving this file.",
+  "error.obsidian-vault-folder": "Choose the root of an Obsidian vault containing its .obsidian folder.",
   "_version": 1,
   "error.file-missing": "“%{name}”はもうありません。名称変更、移動、または削除された可能性があります。ノートフォルダを選択し直してください。",
   "error.file-permission": "Markraftには“%{name}”を使用する権限がありません。Finderでアクセス権を確認するか、別のノートフォルダを選択してください。",

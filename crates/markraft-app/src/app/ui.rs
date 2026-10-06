@@ -59,7 +59,7 @@ enum Intent {
     ExportHtml,
     ExportPdf,
     Print,
-    SendToObsidian(PathBuf),
+    SendToObsidian(Option<PathBuf>),
     /// The pill under the title, and the two things done inside it.
     Rename,
     ApplyRename,
@@ -516,7 +516,10 @@ impl MarkraftApp {
             }
             Intent::SendToObsidian(vault) => {
                 self.intent(Intent::Back, window, cx);
-                self.send_to_obsidian(vault, window, cx);
+                match vault {
+                    Some(vault) => self.send_to_obsidian(vault, window, cx),
+                    None => self.choose_obsidian_vault(window, cx),
+                }
             }
             Intent::Rename => self.open_rename(window, cx),
             Intent::ApplyRename => self.apply_rename(window, cx),
@@ -1570,41 +1573,52 @@ impl MarkraftApp {
                 SlashEffect::Block(doc::Block::Divider),
             ),
         ];
-        let vaults = crate::send::obsidian::vaults();
-        // Without a notes folder there is no file for pictures to be found
-        // beside, and a note already in a vault has nowhere new to go.
-        let sendable = self
-            .path
-            .as_deref()
-            .is_some_and(|folder| !crate::send::obsidian::within(folder, &vaults));
-        if sendable {
-            const IDS: [&str; 8] = [
-                "send-to-obsidian-0",
-                "send-to-obsidian-1",
-                "send-to-obsidian-2",
-                "send-to-obsidian-3",
-                "send-to-obsidian-4",
-                "send-to-obsidian-5",
-                "send-to-obsidian-6",
-                "send-to-obsidian-7",
-            ];
-            if let [vault] = vaults.as_slice() {
-                items.push(Command::new(
-                    IDS[0],
-                    "command.send-to-obsidian",
-                    Intent::SendToObsidian(vault.path.clone()),
-                ));
-            } else {
-                // Several vaults: one command each, most recently used first.
-                for (id, vault) in IDS.iter().zip(&vaults) {
-                    items.push(
-                        Command::new(
-                            id,
-                            "command.send-to-obsidian-vault",
-                            Intent::SendToObsidian(vault.path.clone()),
-                        )
-                        .arg("vault", vault.name.clone()),
-                    );
+        #[cfg(feature = "mac-app-store")]
+        if self.path.is_some() {
+            items.push(Command::new(
+                "send-to-obsidian",
+                "command.send-to-obsidian",
+                Intent::SendToObsidian(None),
+            ));
+        }
+        #[cfg(not(feature = "mac-app-store"))]
+        {
+            let vaults = crate::send::obsidian::vaults();
+            // Without a notes folder there is no file for pictures to be found
+            // beside, and a note already in a vault has nowhere new to go.
+            let sendable = self
+                .path
+                .as_deref()
+                .is_some_and(|folder| !crate::send::obsidian::within(folder, &vaults));
+            if sendable {
+                const IDS: [&str; 8] = [
+                    "send-to-obsidian-0",
+                    "send-to-obsidian-1",
+                    "send-to-obsidian-2",
+                    "send-to-obsidian-3",
+                    "send-to-obsidian-4",
+                    "send-to-obsidian-5",
+                    "send-to-obsidian-6",
+                    "send-to-obsidian-7",
+                ];
+                if let [vault] = vaults.as_slice() {
+                    items.push(Command::new(
+                        IDS[0],
+                        "command.send-to-obsidian",
+                        Intent::SendToObsidian(Some(vault.path.clone())),
+                    ));
+                } else {
+                    // Several vaults: one command each, most recently used first.
+                    for (id, vault) in IDS.iter().zip(&vaults) {
+                        items.push(
+                            Command::new(
+                                id,
+                                "command.send-to-obsidian-vault",
+                                Intent::SendToObsidian(Some(vault.path.clone())),
+                            )
+                            .arg("vault", vault.name.clone()),
+                        );
+                    }
                 }
             }
         }
