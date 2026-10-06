@@ -1,0 +1,111 @@
+---
+import { MAC_SIZE } from '../lib/sizes';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Markraft · Screenshots</title>
+  </head>
+  <body>
+    <header>
+      <strong>Markraft · Screenshots</strong>
+      <span>{MAC_SIZE.label} · {MAC_SIZE.w}×{MAC_SIZE.h}</span>
+      <button id="export-all" type="button">Export All</button>
+    </header>
+    <p id="loading">Loading captures…</p>
+    <main id="preview-grid" hidden></main>
+  </body>
+</html>
+
+<script>
+  import { mount } from '../lib/screenshots';
+  void mount();
+</script>
+
+<style is:global>
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    background: #f3f4f6;
+    color: #1d1d1f;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    background: white;
+    border-bottom: 1px solid #e5e7eb;
+  }
+
+  header span {
+    flex: 1;
+    color: #6e6e73;
+  }
+
+  #loading {
+    padding: 40px;
+  }
+
+  #preview-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+    gap: 20px;
+    padding: 24px;
+  }
+
+  #preview-grid[hidden] {
+    display: none;
+  }
+
+  .card {
+    overflow: hidden;
+    background: white;
+    border-radius: 12px;
+    box-shadow:
+      0 1px 3px rgb(0 0 0 / 0.08),
+      0 1px 2px rgb(0 0 0 / 0.06);
+  }
+
+  .card-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    color: #6e6e73;
+  }
+
+  button {
+    padding: 6px 14px;
+    border: 1px solid #1f66dd;
+    border-radius: 8px;
+    background: #1f66dd;
+    color: white;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  button.export {
+    background: transparent;
+    color: #1f66dd;
+  }
+
+  button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+</style>
