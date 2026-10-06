@@ -1,3 +1,19 @@
+## 0.1.8 (2026-10-06)
+
+### Fixes
+
+- Use the native app icon on newer macOS versions and correctly sized icons on older versions.
+- Add support for sandboxed Mac App Store builds and TestFlight distribution.
+
+#### Keep the note selection unchanged when clicking the character or word counter.
+
+Show a pointer cursor over task checkboxes.
+Use a filled pin icon to distinguish pinned notes in search results.
+
+#### Remember the Settings window position across reopening and app restarts.
+
+Keep the window within the visible display area when restoring its position or changing pages.
+
 ## 0.1.7 (2026-10-05)
 
 ### Features
