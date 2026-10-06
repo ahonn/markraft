@@ -40,7 +40,6 @@ Cloud build 2 completed archive, distribution signing, upload, and internal Test
 The `Internal` group contains the intended internal testers.
 
 Installation through TestFlight and the local smoke tests passed on Apple Silicon with macOS 27.0.
-The [device results](../docs/mac-app-store-validation.md#testflight-verification-on-2026-10-06) record the scope and limits.
 
 The hooks use Apple's `CI_BUILD_NUMBER`, `CI_PRIMARY_REPOSITORY_PATH`, and archive
 environment variables. They do not require an ASC API key, a Sparkle key, or
@@ -56,7 +55,7 @@ Developer ID credentials. Xcode Cloud manages the distribution signing setup.
 
 The three entry points reject execution outside Xcode Cloud. The preparation
 hooks also reject a platform other than macOS or an invalid build number.
-Run local archive builds with the commands in [the archive guide](../docs/xcode-archive.md).
+For local archives, use the `Markraft-Store` scheme in `Markraft.xcodeproj`.
 
 The preparation hooks install rustup 1.28.2 from the official Rust distribution
 server. They verify its SHA-256 digest against the pinned digest for the host
@@ -223,6 +222,5 @@ autosave, Chinese input, images, settings, shortcuts, and opening files from Fin
 Publication and installation of this specific build are verified.
 Local smoke tests passed for folder access after restart, autosave, undo and redo, search, HTML export, images, and external-file authorization.
 Chinese rendering and clipboard paste passed. Actual IME composition remains unverified.
-The [device results](../docs/mac-app-store-validation.md#testflight-verification-on-2026-10-06) list the remaining device checks.
 
 [View Markraft in TestFlight](https://appstoreconnect.apple.com/apps/6819551024/testflight/macos).
