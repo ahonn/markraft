@@ -4135,7 +4135,7 @@ dependencies = [
 
 [[package]]
 name = "markraft-app"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
@@ -4178,7 +4178,7 @@ dependencies = [
 
 [[package]]
 name = "markraft-commonmark"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "comrak",
  "emojis",
@@ -4194,7 +4194,7 @@ dependencies = [
 
 [[package]]
 name = "markraft-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "emojis",
  "serde",
@@ -4205,7 +4205,7 @@ dependencies = [
 
 [[package]]
 name = "markraft-gpui"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "emojis",
  "gpui-pre",
@@ -4226,7 +4226,7 @@ dependencies = [
 
 [[package]]
 name = "markraft-math"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "ratex-layout",
  "ratex-parser",
@@ -4236,14 +4236,14 @@ dependencies = [
 
 [[package]]
 name = "markraft-media"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "url",
 ]
 
 [[package]]
 name = "markraft-syntax"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "syntect",
  "two-face",
@@ -4251,7 +4251,7 @@ dependencies = [
 
 [[package]]
 name = "markraft-vim"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "gpui-pre",
  "markraft-commonmark",
