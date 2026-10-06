@@ -166,6 +166,7 @@ pub struct Preferences {
     pub language: LanguagePreference,
     pub dark_mode: Option<bool>,
     pub auto_height: bool,
+    pub show_word_count: bool,
     pub hotkey: String,
     pub window_bounds: Option<[f32; 4]>,
     pub settings_window: Option<SettingsWindowPlacement>,
@@ -427,6 +428,7 @@ impl Default for Preferences {
             text_checking: TextCheckingPreferences::default(),
             dark_mode: None,
             auto_height: true,
+            show_word_count: true,
             hotkey: "Alt+N".into(),
             window_bounds: None,
             settings_window: None,
@@ -470,6 +472,7 @@ pub enum Pref {
     Language(LanguagePreference),
     Theme(Option<bool>),
     AutoHeight(bool),
+    ShowWordCount(bool),
     VimMode(bool),
     EmojiCharacters(bool),
     RemoteImages(bool),
@@ -512,6 +515,7 @@ impl Pref {
             Pref::Language(language) => preferences.language = language,
             Pref::Theme(mode) => preferences.dark_mode = mode,
             Pref::AutoHeight(on) => preferences.auto_height = on,
+            Pref::ShowWordCount(on) => preferences.show_word_count = on,
             Pref::VimMode(on) => preferences.vim_mode = on,
             Pref::EmojiCharacters(on) => preferences.emoji_characters = on,
             Pref::RemoteImages(on) => preferences.remote_images = on,
@@ -1312,6 +1316,7 @@ mod tests {
             language: LanguagePreference::Locale("future-Language".into()),
             dark_mode: Some(true),
             auto_height: false,
+            show_word_count: false,
             hotkey: "Ctrl+Shift+M".into(),
             window_bounds: Some([1., 2., 3., 4.]),
             settings_window: Some(SettingsWindowPlacement {
@@ -1356,6 +1361,7 @@ mod tests {
             serde_json::from_str(r#"{"markdown_shortcuts":true}"#).unwrap();
         assert!(!preferences.auto_number_equations);
         assert!(preferences.settings_window.is_none());
+        assert!(preferences.show_word_count);
         assert_eq!(preferences.language, LanguagePreference::System);
     }
 
@@ -1405,6 +1411,7 @@ mod tests {
             Pref::Language(changed.language.clone()),
             Pref::Theme(changed.dark_mode),
             Pref::AutoHeight(changed.auto_height),
+            Pref::ShowWordCount(changed.show_word_count),
             Pref::VimMode(changed.vim_mode),
             Pref::EmojiCharacters(changed.emoji_characters),
             Pref::RemoteImages(changed.remote_images),

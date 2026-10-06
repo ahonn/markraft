@@ -16,6 +16,7 @@
     "always-on-top": "保持在其他窗口上方",
     "hide-on-deactivate": "使用其他 App 时隐藏",
     "auto-height": "随笔记内容调整高度",
+    "show-word-count": "显示字数或字符数",
     "all-spaces": "在所有桌面上显示",
     "follow-pointer": "在指针所在的显示器上打开",
     "default": "默认",

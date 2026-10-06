@@ -16,6 +16,7 @@
     "always-on-top": "다른 윈도우 위에 유지",
     "hide-on-deactivate": "다른 앱 사용 시 가리기",
     "auto-height": "노트 내용에 맞춰 높이 조절",
+    "show-word-count": "단어 수 또는 문자 수 표시",
     "all-spaces": "모든 데스크탑에 표시",
     "follow-pointer": "포인터가 있는 디스플레이에서 열기",
     "default": "기본",

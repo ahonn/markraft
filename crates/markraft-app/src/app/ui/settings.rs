@@ -1201,6 +1201,15 @@ impl SettingsView {
                     )
                     .into_any_element(),
                     checkbox(
+                        "show-word-count",
+                        s.i18n.text("settings.show-word-count"),
+                        s.preferences.show_word_count,
+                        false,
+                        p,
+                        self.sender(|value| Change::Pref(Pref::ShowWordCount(value))),
+                    )
+                    .into_any_element(),
+                    checkbox(
                         "all-spaces",
                         s.i18n.text("settings.all-spaces"),
                         s.preferences.all_spaces,

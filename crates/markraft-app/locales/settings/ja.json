@@ -16,6 +16,7 @@
     "always-on-top": "ほかのウインドウより手前に表示",
     "hide-on-deactivate": "ほかのアプリの使用中は隠す",
     "auto-height": "ノートに合わせて高さを調整",
+    "show-word-count": "単語数または文字数を表示",
     "all-spaces": "すべてのデスクトップに表示",
     "follow-pointer": "ポインタのあるディスプレイで開く",
     "default": "デフォルト",

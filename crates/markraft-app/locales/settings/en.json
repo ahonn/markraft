@@ -16,6 +16,7 @@
     "always-on-top": "Keep above other windows",
     "hide-on-deactivate": "Hide when another app is used",
     "auto-height": "Grow with the note",
+    "show-word-count": "Show word or character count",
     "all-spaces": "Show on all desktops",
     "follow-pointer": "Open on the display with the pointer",
     "default": "Default",

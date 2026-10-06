@@ -16,6 +16,7 @@
     "always-on-top": "Garder au premier plan",
     "hide-on-deactivate": "Masquer si une autre app est active",
     "auto-height": "Adapter la hauteur à la note",
+    "show-word-count": "Afficher le nombre de mots ou de caractères",
     "all-spaces": "Afficher sur tous les bureaux",
     "follow-pointer": "Ouvrir sur l’écran du pointeur",
     "default": "Par défaut",

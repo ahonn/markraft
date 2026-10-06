@@ -373,40 +373,43 @@ impl MarkraftApp {
                     .children(self.vim_badge(compact_vim))
                     .children(self.status_capsules(&states, cx)),
             )
-            .when(!self.toolbar.shown(), |s| {
-                s.child(
-                    div()
-                        .id("word-count")
-                        .debug_selector(|| "word-count".into())
-                        .role(Role::Button)
-                        .aria_label(self.i18n.text("surfaces.format.toggle-count"))
-                        .h(px(24.))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .rounded(ROW_RADIUS)
-                        .text_size(px(12.))
-                        .text_color(self.muted())
-                        .cursor_pointer()
-                        .hover(|s| s.bg(self.hover_color()))
-                        .active(|s| s.bg(self.pressed_color()))
-                        // The footer floats over the editor. Keep this press from
-                        // moving its caret or starting a double-click selection.
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.intent(Intent::ToggleCount, window, cx)
-                        }))
-                        .child(count)
-                        .with_spring(
-                            "word-count-enter",
-                            SpringAnimation::new(super::FORMAT_SPRING)
-                                .to(true)
-                                .from(false)
-                                .playback(playback(reduce_motion)),
-                            |s, phase| s.opacity(phase.interpolate_clamped(0., 1.)),
-                        ),
-                )
-            })
+            .when(
+                self.preferences.show_word_count && !self.toolbar.shown(),
+                |s| {
+                    s.child(
+                        div()
+                            .id("word-count")
+                            .debug_selector(|| "word-count".into())
+                            .role(Role::Button)
+                            .aria_label(self.i18n.text("surfaces.format.toggle-count"))
+                            .h(px(24.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .rounded(ROW_RADIUS)
+                            .text_size(px(12.))
+                            .text_color(self.muted())
+                            .cursor_pointer()
+                            .hover(|s| s.bg(self.hover_color()))
+                            .active(|s| s.bg(self.pressed_color()))
+                            // The footer floats over the editor. Keep this press from
+                            // moving its caret or starting a double-click selection.
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.intent(Intent::ToggleCount, window, cx)
+                            }))
+                            .child(count)
+                            .with_spring(
+                                "word-count-enter",
+                                SpringAnimation::new(super::FORMAT_SPRING)
+                                    .to(true)
+                                    .from(false)
+                                    .playback(playback(reduce_motion)),
+                                |s, phase| s.opacity(phase.interpolate_clamped(0., 1.)),
+                            ),
+                    )
+                },
+            )
             .child(
                 div()
                     .absolute()
@@ -428,6 +431,7 @@ impl MarkraftApp {
                                 Intent::ToggleFormatToolbar,
                                 cx,
                             )
+                            .debug_selector(|| "format-toolbar-toggle".into())
                             .size(px(32.))
                             .rounded_full()
                             .opacity(1.)
