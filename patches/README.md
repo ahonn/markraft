@@ -22,7 +22,7 @@ This directory survives `cargo clean`.
 The script checks the generated source against its recorded hash and rebuilds stale or modified files.
 An unchanged checkout reuses the prepared source without network access.
 
-GitHub Actions runs this script before Cargo.
+GitHub Actions, local Xcode builds, and Xcode Cloud run this script before Cargo.
 A fresh checkout cannot build without preparation because Cargo requires the generated path.
 Cargo does not fall back to the unpatched registry crate when that path is missing.
 Cargo cannot apply a diff through `[patch]`, and a Rust build script runs too late to prepare dependency manifests.

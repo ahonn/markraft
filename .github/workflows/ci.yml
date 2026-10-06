@@ -37,7 +37,7 @@ jobs:
         run: rm -rf target/sparkle
       - run: bash scripts/download-sparkle.sh
       - run: cargo fmt --all -- --check
-      - name: Test dependency preparation
+      - name: Test dependency preparation, Cloud hooks, and archive validation
         run: python3 -m unittest discover -s ci_scripts/tests -v
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked

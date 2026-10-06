@@ -1,0 +1,161 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXFileReference section */
+		F10000000000000000000001 /* Markraft.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Markraft.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F10000000000000000000002 /* BuildNumber.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Markraft.xcodeproj/BuildNumber.xcconfig; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		F20000000000000000000001 = {
+			isa = PBXGroup;
+			children = (F10000000000000000000002 /* BuildNumber.xcconfig */, F20000000000000000000002 /* Products */,);
+			sourceTree = "<group>";
+		};
+		F20000000000000000000002 /* Products */ = {
+			isa = PBXGroup;
+			children = (F10000000000000000000001 /* Markraft.app */,);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		F30000000000000000000001 /* Markraft */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F60000000000000000000002;
+			buildPhases = (F50000000000000000000001 /* Build Rust store product */,);
+			buildRules = ();
+			dependencies = ();
+			name = Markraft;
+			productName = Markraft;
+			productReference = F10000000000000000000001 /* Markraft.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		F40000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					F30000000000000000000001 = {CreatedOnToolsVersion = 26.0; ProvisioningStyle = Automatic; };
+				};
+			};
+			buildConfigurationList = F60000000000000000000001;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base,);
+			mainGroup = F20000000000000000000001;
+			productRefGroup = F20000000000000000000002 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (F30000000000000000000001 /* Markraft */,);
+		};
+/* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		F50000000000000000000001 /* Build Rust store product */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = ("$(SRCROOT)/scripts/xcode-build.sh",);
+			name = "Build Rust store product";
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Assets.car",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Markraft.icns",
+				"$(DERIVED_FILE_DIR)/Markraft-Info.plist",
+				"$(DWARF_DSYM_FOLDER_PATH)/$(DWARF_DSYM_FILE_NAME)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "\"$SRCROOT/scripts/xcode-build.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		F70000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; SDKROOT = macosx; MACOSX_DEPLOYMENT_TARGET = 13.0; ONLY_ACTIVE_ARCH = YES; };
+			name = Debug;
+		};
+		F70000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; SDKROOT = macosx; MACOSX_DEPLOYMENT_TARGET = 13.0; ONLY_ACTIVE_ARCH = NO; };
+			name = Release;
+		};
+		F70000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = F10000000000000000000002 /* BuildNumber.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "crates/markraft-app/entitlements/mac-app-store.plist";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = C97A45J272;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				EXECUTABLE_NAME = "markraft-app";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "$(DERIVED_FILE_DIR)/Markraft-Info.plist";
+				INSTALL_PATH = /Applications;
+				PRODUCT_BUNDLE_IDENTIFIER = app.markraft.mac;
+				PRODUCT_NAME = Markraft;
+				SKIP_INSTALL = NO;
+				STRIP_INSTALLED_PRODUCT = NO;
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = Debug;
+		};
+		F70000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = F10000000000000000000002 /* BuildNumber.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "crates/markraft-app/entitlements/mac-app-store.plist";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = C97A45J272;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				EXECUTABLE_NAME = "markraft-app";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "$(DERIVED_FILE_DIR)/Markraft-Info.plist";
+				INSTALL_PATH = /Applications;
+				PRODUCT_BUNDLE_IDENTIFIER = app.markraft.mac;
+				PRODUCT_NAME = Markraft;
+				SKIP_INSTALL = NO;
+				STRIP_INSTALLED_PRODUCT = NO;
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		F60000000000000000000001 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (F70000000000000000000001, F70000000000000000000002,);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F60000000000000000000002 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (F70000000000000000000003, F70000000000000000000004,);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = F40000000000000000000001 /* Project object */;
+}
