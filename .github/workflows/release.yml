@@ -77,6 +77,7 @@ jobs:
           targets: ${{ matrix.target }}
       # No Rust cache: caches saved from a tag or pull request ref are never seen by
       # the next release, so every release compiles from scratch anyway.
+      - run: python3 scripts/prepare-dependencies.py
       - run: cargo xtask compile --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v7
         with:
@@ -147,7 +148,9 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$SIGNING_KEYCHAIN"
           security list-keychains -d user -s "$SIGNING_KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db"
       - name: Bundle, sign, notarize and generate appcast
-        run: cargo xtask release "$TAG" --prebuilt
+        run: |
+          python3 scripts/prepare-dependencies.py
+          cargo xtask release "$TAG" --prebuilt
       - name: Verify embedded framework without development paths
         run: env -u DYLD_FRAMEWORK_PATH 'target/universal-apple-darwin/release/bundle/osx/Markraft.app/Contents/MacOS/markraft-app' --help
       - uses: actions/upload-artifact@v7

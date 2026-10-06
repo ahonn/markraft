@@ -151,6 +151,7 @@ pub enum PlatformEvent {
     NewNote,
     DailyNote,
     Settings,
+    #[cfg(feature = "direct-distribution")]
     CheckForUpdates,
     ReportIssue,
     Quit,
@@ -178,6 +179,7 @@ impl Platform {
         let toggle = MenuItem::new(i18n.text("menu.show-hide"), true, None);
         let new_note = MenuItem::new(i18n.text("menu.new-note"), true, None);
         let settings = MenuItem::new(i18n.text("menu.settings"), true, None);
+        #[cfg(feature = "direct-distribution")]
         let updates = MenuItem::new(i18n.text("menu.updates"), true, None);
         // An accessory app has no menu bar of its own, so a menu bar's Help menu
         // comes down to this. Debug info and logs are in the command palette.
@@ -188,6 +190,7 @@ impl Platform {
             &new_note,
             &PredefinedMenuItem::separator(),
             &settings,
+            #[cfg(feature = "direct-distribution")]
             &updates,
             &report,
             &PredefinedMenuItem::separator(),
@@ -198,6 +201,7 @@ impl Platform {
             (toggle.id().clone(), PlatformEvent::Toggle),
             (new_note.id().clone(), PlatformEvent::NewNote),
             (settings.id().clone(), PlatformEvent::Settings),
+            #[cfg(feature = "direct-distribution")]
             (updates.id().clone(), PlatformEvent::CheckForUpdates),
             (report.id().clone(), PlatformEvent::ReportIssue),
             (quit.id().clone(), PlatformEvent::Quit),
@@ -219,6 +223,7 @@ impl Platform {
                 (toggle, "menu.show-hide"),
                 (new_note, "menu.new-note"),
                 (settings, "menu.settings"),
+                #[cfg(feature = "direct-distribution")]
                 (updates, "menu.updates"),
                 (report, "menu.report"),
                 (quit, "menu.quit"),

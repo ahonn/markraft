@@ -1,4 +1,6 @@
 {
+  "error.file-parent-folder": "Choose “%{folder}” or one of its parent folders to allow saving this file.",
+  "error.obsidian-vault-folder": "Choose the root of an Obsidian vault containing its .obsidian folder.",
   "_version": 1,
   "error.file-missing": "“%{name}”已不存在，可能已被重命名、移动或删除；请重新选择笔记文件夹。",
   "error.file-permission": "Markraft 无权使用“%{name}”。请在访达中检查其权限，或选择其他笔记文件夹。",

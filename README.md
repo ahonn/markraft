@@ -90,17 +90,22 @@ Bug reports and feature requests are welcome as issues. Pull requests are open t
 
 **Report an Issue…** in <kbd>⌘K</kbd> opens an issue with your Mac and Markraft versions filled in. Logs and crash reports are written to `~/Library/Logs/Markraft` and stay on your Mac; attach the report if there is one.
 
-To build from source, install Rust and Xcode 16 or newer with its command-line tools.
+To build from source, install Rust, Python 3.9 or newer, Git, and Xcode 16 or newer with its command-line tools.
 Packaging requires Xcode 26 or newer to compile the Icon Composer app icon.
 If you have multiple Xcode versions, set `DEVELOPER_DIR` to the selected version's `Contents/Developer` directory.
 The macOS translation bridge is compiled with the bundled Swift compiler:
 
 ```sh
+python3 scripts/prepare-dependencies.py # apply the pinned GPUI compatibility patch
 bash scripts/download-sparkle.sh   # fetch the Sparkle framework into target/sparkle
 cargo run -p markraft-app          # run the app
 cargo test --workspace             # run the tests
 cargo xtask bundle                 # build target/debug/bundle/osx/Markraft.app
 ```
+
+Run the dependency script before the first Cargo command and after changing branches or updating the GPUI patch.
+It stores generated source in the ignored `.build/dependencies` directory.
+See [the patch guide](patches/README.md) for provenance and update instructions.
 
 See [the architecture notes](docs/architecture.md) for how the workspace is divided, and [the localization guide](docs/localization.md) for adding a language. To contribute a translation, attach the message files to an issue.
 

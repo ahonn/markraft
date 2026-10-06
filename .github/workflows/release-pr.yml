@@ -47,6 +47,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git switch -C release
           knope prepare-release
+          python3 scripts/prepare-dependencies.py
           # Reject stale workspace versions before opening a release PR.
           cargo metadata --format-version 1 --locked > /dev/null
           version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)

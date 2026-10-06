@@ -1,0 +1,281 @@
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -74,22 +74,19 @@
+     ptr::{self, NonNull},
+     rc::Rc,
+     sync::{
+-        Arc, Once, Weak,
++        Arc, Weak,
+         atomic::{AtomicBool, Ordering},
+     },
+     time::Duration,
+ };
+ 
+ const WINDOW_STATE_IVAR: &str = "windowState";
+-
+-static RESTORES_WORKSPACE_AT_LAUNCH_DEFAULT: Once = Once::new();
+ 
+ static mut WINDOW_CLASS: *const Class = ptr::null();
+ static mut PANEL_CLASS: *const Class = ptr::null();
+ static mut VIEW_CLASS: *const Class = ptr::null();
+ static mut BLURRED_VIEW_CLASS: *const Class = ptr::null();
+ static mut WINDOW_STATE_ARCHIVER_DELEGATE_CLASS: *const Class = ptr::null();
+-static mut WINDOW_STATE_UNARCHIVER_CLASS: *const Class = ptr::null();
+ 
+ #[allow(non_upper_case_globals)]
+ const NSWindowStyleMaskNonactivatingPanel: NSWindowStyleMask =
+@@ -285,9 +282,8 @@
+             );
+ 
+             decl.add_method(
+-                sel!(_opaqueRectForWindowMoveWhenInTitlebar),
+-                opaque_rect_for_window_move_when_in_titlebar
+-                    as extern "C" fn(&Object, Sel) -> NSRect,
++                sel!(mouseDownCanMoveWindow),
++                mouse_down_can_move_window as extern "C" fn(&Object, Sel) -> BOOL,
+             );
+ 
+             decl.add_method(
+@@ -301,10 +297,6 @@
+             decl.add_method(
+                 sel!(initWithFrame:),
+                 blurred_view_init_with_frame as extern "C" fn(&Object, Sel, NSRect) -> id,
+-            );
+-            decl.add_method(
+-                sel!(updateLayer),
+-                blurred_view_update_layer as extern "C" fn(&Object, Sel),
+             );
+             decl.register()
+         };
+@@ -315,16 +307,6 @@
+                 sel!(archiver:willEncodeObject:),
+                 window_state_archiver_will_encode_object
+                     as extern "C" fn(&Object, Sel, id, id) -> id,
+-            );
+-            decl.register()
+-        };
+-        WINDOW_STATE_UNARCHIVER_CLASS = {
+-            let mut decl =
+-                ClassDecl::new("GPUIWindowStateKeyedUnarchiver", class!(NSKeyedUnarchiver))
+-                    .unwrap();
+-            decl.add_method(
+-                sel!(_windowRestorationOptions),
+-                window_state_unarchiver_restoration_options as extern "C" fn(&Object, Sel) -> id,
+             );
+             decl.register()
+         };
+@@ -353,28 +335,6 @@
+             nil
+         } else {
+             object
+-        }
+-    }
+-}
+-
+-// Override of the private `_windowRestorationOptions` on our NSKeyedUnarchiver subclass.
+-// Returning a default-initialized `NSWindowRestorationOptions` tells AppKit to restore the
+-// window to its original Space. This is the macOS 15+ path (FB15644170: the
+-// `NSWindowRestoresWorkspaceAtLaunch` user default no longer works there).
+-extern "C" fn window_state_unarchiver_restoration_options(_this: &Object, _sel: Sel) -> id {
+-    if !is_macos_version_at_least(NSOperatingSystemVersion::new(15, 0, 0)) {
+-        return nil;
+-    }
+-    // SAFETY: we look the class up by name and only send it `alloc`/`init`/`autorelease`, all of
+-    // which have the standard `-> id` signature. Returning `nil` when the class is absent is valid.
+-    unsafe {
+-        match Class::get("NSWindowRestorationOptions") {
+-            Some(class) => {
+-                let options: id = msg_send![class, alloc];
+-                let options: id = msg_send![options, init];
+-                msg_send![options, autorelease]
+-            }
+-            None => nil,
+         }
+     }
+ }
+@@ -692,10 +652,8 @@
+     external_files_dragged: bool,
+     // Whether the next left-mouse click is also the focusing click.
+     first_mouse: bool,
+-    // When true, the whole content view is reported as app-owned titlebar content via
+-    // `_opaqueRectForWindowMoveWhenInTitlebar`, so AppKit does not drag the window from
+-    // the titlebar or delay titlebar clicks (a delay first observed on macOS 27). Such
+-    // windows draw their own titlebar and move the window via `start_window_move`.
++    // App-owned titlebars suppress implicit view dragging through the public
++    // `mouseDownCanMoveWindow` hook and use `start_window_move` for explicit drags.
+     app_owns_titlebar_drag: bool,
+     fullscreen_restore_bounds: Bounds<Pixels>,
+     is_exiting_fullscreen: bool,
+@@ -1579,25 +1537,8 @@
+                 return;
+             }
+ 
+-            // On macOS < 15 the `NSWindowRestoresWorkspaceAtLaunch` user default controls whether
+-            // the window is restored to its original Space. On macOS 15+ that default is broken
+-            // (FB15644170), and the `_windowRestorationOptions` override on our unarchiver subclass
+-            // handles it instead.
+-            if !is_macos_version_at_least(NSOperatingSystemVersion::new(15, 0, 0)) {
+-                RESTORES_WORKSPACE_AT_LAUNCH_DEFAULT.call_once(|| {
+-                    let defaults: id = NSUserDefaults::standardUserDefaults();
+-                    let key = ns_string("NSWindowRestoresWorkspaceAtLaunch");
+-                    let yes_value: id = msg_send![class!(NSNumber), numberWithBool: YES];
+-                    let dict: id = msg_send![
+-                        class!(NSDictionary),
+-                        dictionaryWithObject: yes_value
+-                        forKey: key
+-                    ];
+-                    let _: () = msg_send![defaults, registerDefaults: dict];
+-                });
+-            }
+-
+-            let unarchiver: id = msg_send![WINDOW_STATE_UNARCHIVER_CLASS, alloc];
++            // Restore through public AppKit APIs. The system decides Space placement.
++            let unarchiver: id = msg_send![class!(NSKeyedUnarchiver), alloc];
+             let mut error: id = nil;
+             let unarchiver: id =
+                 msg_send![unarchiver, initForReadingFromData: data error: &mut error];
+@@ -2183,15 +2124,9 @@
+                             }
+                             "Fill" => {
+                                 if is_resizable {
+-                                    // Unlike `zoom:`, AppKit's private Fill action honors the system's
+-                                    // "Tiled windows have margins" setting.
+-                                    let responds_to_zoom_fill: BOOL =
+-                                        msg_send![window, respondsToSelector: sel!(_zoomFill:)];
+-                                    if responds_to_zoom_fill == YES {
+-                                        let _: () = msg_send![window, _zoomFill: nil];
+-                                    } else {
+-                                        window.zoom_(nil);
+-                                    }
++                                    // Public zoom preserves toggle behavior on macOS 13+.
++                                    // System tiling margins are not exposed by this API.
++                                    window.zoom_(nil);
+                                 }
+                             }
+                             _ => {
+@@ -2533,13 +2468,22 @@
+             CursorStyle::ResizeUp => msg_send![class!(NSCursor), resizeUpCursor],
+             CursorStyle::ResizeDown => msg_send![class!(NSCursor), resizeDownCursor],
+ 
+-            // Undocumented, private class methods:
+-            // https://stackoverflow.com/questions/27242353/cocoa-predefined-resize-mouse-cursor
+-            CursorStyle::ResizeUpLeftDownRight => {
+-                msg_send![class!(NSCursor), _windowResizeNorthWestSouthEastCursor]
+-            }
+-            CursorStyle::ResizeUpRightDownLeft => {
+-                msg_send![class!(NSCursor), _windowResizeNorthEastSouthWestCursor]
++            // Public diagonal frame cursors were introduced in macOS 15. On older
++            // systems use a crosshair without depending on private AppKit selectors.
++            CursorStyle::ResizeUpLeftDownRight | CursorStyle::ResizeUpRightDownLeft => {
++                if is_macos_version_at_least(NSOperatingSystemVersion::new(15, 0, 0)) {
++                    // NSCursorFrameResizePositionTopLeft / TopRight and
++                    // NSCursorFrameResizeDirectionsAll, from AppKit's NSCursor.h.
++                    let position: NSUInteger = match cursor_style {
++                        CursorStyle::ResizeUpLeftDownRight => (1 << 0) | (1 << 1),
++                        _ => (1 << 0) | (1 << 3),
++                    };
++                    let directions: NSUInteger = (1 << 0) | (1 << 1);
++                    msg_send![class!(NSCursor), frameResizeCursorFromPosition: position
++                        inDirections: directions]
++                } else {
++                    msg_send![class!(NSCursor), crosshairCursor]
++                }
+             }
+ 
+             CursorStyle::IBeamCursorForVerticalLayout => {
+@@ -3503,22 +3447,15 @@
+     YES
+ }
+ 
+-// Reports which region of the view AppKit should treat as app-owned titlebar content
+-// (rather than a system-owned window-move region). When `app_owns_titlebar_drag` is
+-// true, we claim the entire view so AppKit neither drags the window from the titlebar
+-// nor waits to disambiguate double-clicks before delivering titlebar clicks (the macOS
+-// 27 delay); such windows implement dragging themselves via [`Window::start_window_move`].
+-// Otherwise we return an empty rect so AppKit's native titlebar dragging keeps working.
+-// This is independent of `NSWindow.isMovable`, so the Window-menu tiling items stay
+-// enabled regardless.
+-extern "C" fn opaque_rect_for_window_move_when_in_titlebar(this: &Object, _: Sel) -> NSRect {
+-    let zero_rect = NSRect::new(NSPoint::new(0., 0.), NSSize::new(0., 0.));
++// Keep manual window dragging available without relying on AppKit's internal
++// titlebar hit-testing hooks. The superclass retains native behavior for other views.
++extern "C" fn mouse_down_can_move_window(this: &Object, _: Sel) -> BOOL {
+     let window_state = unsafe { get_window_state(this) };
+     let app_owns_titlebar_drag = window_state.as_ref().lock().app_owns_titlebar_drag;
+     if app_owns_titlebar_drag {
+-        unsafe { msg_send![this, bounds] }
++        NO
+     } else {
+-        zero_rect
++        unsafe { msg_send![super(this, class!(NSView)), mouseDownCanMoveWindow] }
+     }
+ }
+ 
+@@ -3743,67 +3680,6 @@
+     }
+ }
+ 
+-extern "C" fn blurred_view_update_layer(this: &Object, _: Sel) {
+-    unsafe {
+-        let _: () = msg_send![super(this, class!(NSVisualEffectView)), updateLayer];
+-        let layer: id = msg_send![this, layer];
+-        if !layer.is_null() {
+-            remove_layer_background(layer);
+-        }
+-    }
+-}
+-
+-unsafe fn remove_layer_background(layer: id) {
+-    unsafe {
+-        let _: () = msg_send![layer, setBackgroundColor:nil];
+-
+-        let class_name: id = msg_send![layer, className];
+-        if class_name.isEqualToString("CAChameleonLayer") {
+-            // Remove the desktop tinting effect.
+-            let _: () = msg_send![layer, setHidden: YES];
+-            return;
+-        }
+-
+-        let filters: id = msg_send![layer, filters];
+-        if !filters.is_null() {
+-            // Remove the increased saturation.
+-            // The effect of a `CAFilter` or `CIFilter` is determined by its name, and the
+-            // `description` reflects its name and some parameters. Currently `NSVisualEffectView`
+-            // uses a `CAFilter` named "colorSaturate". If one day they switch to `CIFilter`, the
+-            // `description` will still contain "Saturat" ("... inputSaturation = ...").
+-            let test_string: id = ns_string("Saturat");
+-            let count = NSArray::count(filters);
+-            for i in 0..count {
+-                let description: id = msg_send![filters.objectAtIndex(i), description];
+-                let hit: BOOL = msg_send![description, containsString: test_string];
+-                if hit == NO {
+-                    continue;
+-                }
+-
+-                let all_indices = NSRange {
+-                    location: 0,
+-                    length: count,
+-                };
+-                let indices: id = msg_send![class!(NSMutableIndexSet), indexSet];
+-                let _: () = msg_send![indices, addIndexesInRange: all_indices];
+-                let _: () = msg_send![indices, removeIndex:i];
+-                let filtered: id = msg_send![filters, objectsAtIndexes: indices];
+-                let _: () = msg_send![layer, setFilters: filtered];
+-                break;
+-            }
+-        }
+-
+-        let sublayers: id = msg_send![layer, sublayers];
+-        if !sublayers.is_null() {
+-            let count = NSArray::count(sublayers);
+-            for i in 0..count {
+-                let sublayer = sublayers.objectAtIndex(i);
+-                remove_layer_background(sublayer);
+-            }
+-        }
+-    }
+-}
+-
+ extern "C" fn add_titlebar_accessory_view_controller(this: &Object, _: Sel, view_controller: id) {
+     unsafe {
+         let _: () = msg_send![super(this, class!(NSWindow)), addTitlebarAccessoryViewController: view_controller];

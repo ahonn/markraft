@@ -1,4 +1,7 @@
 {
+  "dialog.allow-file-saving": "Allow saving “%{name}”?",
+  "dialog.file-folder-access": "Choose the folder containing this file so Markraft can save changes safely.\n\n%{folder}",
+  "dialog.choose-folder-access": "Choose Folder…",
   "_version": 1,
   "notice.update-paused": "Update paused: a note couldn't be saved.",
   "notice.copied-debug": "Copied debug info",

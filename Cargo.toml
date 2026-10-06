@@ -36,3 +36,7 @@ debug = 1
 
 [profile.dev.package."*"]
 debug = 0
+
+# Run python3 scripts/prepare-dependencies.py before Cargo. See patches/README.md.
+[patch.crates-io]
+gpui-pre-macos = { path = ".build/dependencies/gpui-pre-macos" }

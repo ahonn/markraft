@@ -30,13 +30,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
+      - run: python3 scripts/prepare-dependencies.py
       - uses: Swatinem/rust-cache@v2
       # rust-cache prunes non-Cargo files but can restore their empty directories.
       - name: Discard incomplete cached Sparkle installation
         run: rm -rf target/sparkle
       - run: bash scripts/download-sparkle.sh
       - run: cargo fmt --all -- --check
+      - name: Test dependency preparation
+        run: python3 -m unittest discover -s ci_scripts/tests -v
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Check the Mac App Store channel
+        run: cargo clippy -p markraft-app --all-targets --no-default-features --features mac-app-store --locked -- -D warnings
+      - name: Test the Mac App Store channel
+        run: cargo test -p markraft-app --no-default-features --features mac-app-store --locked
       - name: Verify Sparkle release notes generation
         run: cargo test -p xtask --locked sparkle_embeds_release_notes_in_generated_feed -- --ignored

@@ -308,6 +308,37 @@ impl MarkraftApp {
         );
     }
 
+    /// User-selected vaults carry the sandbox grant needed to write the copy.
+    pub(super) fn choose_obsidian_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(self.i18n.text("dialog.use-folder").into()),
+        });
+        let prompt = self.file_panel(prompt, window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(mut paths))) = prompt.await
+                && let Some(selected) = paths.pop()
+            {
+                let _ = cx.update(|window, cx| {
+                    this.update(cx, |this, cx| {
+                        let granted = this.file_access.remember(&selected).and_then(|()| {
+                            crate::send::obsidian::validate_selected_vault(&selected)
+                        });
+                        if let Err(error) = granted {
+                            this.feedback.set_error(error);
+                            cx.notify();
+                            return;
+                        }
+                        this.send_to_obsidian(selected, window, cx);
+                    })
+                });
+            }
+        })
+        .detach();
+    }
+
     /// A copy of the note, with its pictures, as a new note in `vault`, opened
     /// there.
     pub(super) fn send_to_obsidian(
@@ -341,6 +372,55 @@ impl MarkraftApp {
             },
             window,
             cx,
+        );
+    }
+}
+
+#[cfg(all(test, feature = "mac-app-store"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod store_tests {
+    use crate::e2e::harness::{Harness, open_with};
+    use gpui::TestAppContext;
+
+    fn choose_vault(h: &mut Harness) {
+        h.keys("cmd-k");
+        h.type_text("Obsidian");
+        assert_eq!(
+            h.app.update(h.cx, |app, cx| app.test_action_labels(cx)),
+            Some(vec!["Send to Obsidian".into()])
+        );
+        h.keys("enter");
+        assert!(h.cx.did_prompt_for_paths());
+    }
+
+    #[gpui::test]
+    fn store_obsidian_send_requires_an_explicit_valid_vault_selection(cx: &mut TestAppContext) {
+        let mut h = open_with(cx, &[("alpha.md", "A note for Obsidian\n")], |_| {});
+        let vault = h.root().join("Vault");
+        std::fs::create_dir(&vault).unwrap();
+
+        choose_vault(&mut h);
+        h.cx.simulate_path_prompt_response(|options| {
+            assert!(!options.files && options.directories && !options.multiple);
+            None
+        });
+        h.cx.run_until_parked();
+        assert!(!vault.join("alpha.md").exists());
+
+        choose_vault(&mut h);
+        h.cx.simulate_path_prompt_response(|_| Some(vec![vault.clone()]));
+        h.cx.run_until_parked();
+        h.wait_for_io();
+        assert!(!vault.join("alpha.md").exists());
+
+        std::fs::create_dir(vault.join(".obsidian")).unwrap();
+        choose_vault(&mut h);
+        h.cx.simulate_path_prompt_response(|_| Some(vec![vault.clone()]));
+        h.cx.run_until_parked();
+        h.wait_until(|_| vault.join("alpha.md").is_file());
+        assert_eq!(
+            std::fs::read_to_string(vault.join("alpha.md")).unwrap(),
+            "A note for Obsidian\n"
         );
     }
 }

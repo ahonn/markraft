@@ -1,4 +1,7 @@
 {
+  "dialog.allow-file-saving": "Allow saving “%{name}”?",
+  "dialog.file-folder-access": "Choose the folder containing this file so Markraft can save changes safely.\n\n%{folder}",
+  "dialog.choose-folder-access": "Choose Folder…",
   "_version": 1,
   "notice.update-paused": "アップデートを一時停止しました：保存できないノートがあります。",
   "notice.copied-debug": "デバッグ情報をコピーしました",

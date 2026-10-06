@@ -7,6 +7,7 @@ mod doc;
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod e2e;
 mod export;
+mod file_access;
 mod fs;
 mod instance;
 mod locale;
@@ -107,7 +108,9 @@ fn main() {
     // After the handover, because this read is what sets a damaged settings file
     // aside — a second launch that is only passing a request along must not move
     // the file this one is using, and its notice would have nowhere to be shown.
-    let settings = Settings::read(&settings_path).unwrap_or_default();
+    let mut settings = Settings::read(&settings_path).unwrap_or_default();
+    let (mut file_access, mut access_notices) = file_access::FileAccess::load(&settings_path);
+    access_notices.extend(file_access.restore(&mut settings));
     // After the handover too: a launch that only passes a request along must
     // not take the notice from the one that will show it.
     let crash_notice = crash_reports.as_deref().and_then(crash::take_notice);
@@ -218,7 +221,11 @@ fn main() {
                         window,
                         cx,
                     )
+                    .with_file_access(file_access)
                 });
+                for notice in access_notices {
+                    app.update(cx, |app, cx| app.announce(notice, cx));
+                }
                 if let Some((notice, damaged)) = settings_notice {
                     app.update(cx, |app, cx| app.announce_with_reveal(notice, damaged, cx));
                 }
