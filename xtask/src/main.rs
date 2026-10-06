@@ -4,6 +4,7 @@ mod macos;
 mod mock;
 mod mutants;
 mod release;
+mod xcode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -18,6 +19,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Task {
+    /// Prepare a store product inside an Xcode native application target.
+    XcodeBuild,
     /// Assemble and sign a local app bundle.
     Bundle {
         #[arg(long)]
@@ -135,6 +138,7 @@ fn main() -> Result<()> {
     let root = root();
     std::env::set_current_dir(&root)?;
     match cli.command {
+        Task::XcodeBuild => xcode::build(&root),
         Task::Bundle {
             release,
             universal,

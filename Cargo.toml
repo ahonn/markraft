@@ -37,6 +37,14 @@ debug = 1
 [profile.dev.package."*"]
 debug = 0
 
+# Xcode archives need Rust debug information for their matching dSYMs.
+# Keep direct-distribution release artifacts on the existing release profile.
+[profile.app-store]
+inherits = "release"
+debug = 1
+split-debuginfo = "unpacked"
+strip = "none"
+
 # Run python3 scripts/prepare-dependencies.py before Cargo. See patches/README.md.
 [patch.crates-io]
 gpui-pre-macos = { path = ".build/dependencies/gpui-pre-macos" }

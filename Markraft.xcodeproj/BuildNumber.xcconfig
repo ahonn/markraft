@@ -1,0 +1,4 @@
+// Local builds use 1 unless xcodebuild receives an explicit override.
+CURRENT_PROJECT_VERSION = 1
+// ci_pre_xcodebuild.sh generates this file in the disposable Cloud checkout.
+#include? "../target/xcode-cloud/BuildNumber.xcconfig"
