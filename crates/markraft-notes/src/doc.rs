@@ -10,7 +10,8 @@
 //! the editor's catalogue.
 
 mod snapshot;
-pub use snapshot::{DocumentSnapshot, PendingSnapshot};
+pub use snapshot::DocumentSnapshot;
+pub(crate) use snapshot::PendingSnapshot;
 
 use markraft_commonmark::{
     CommandRefusal, CommonMarkCodecs, CommonMarkSpelling, Formatter, HouseStyleHandle,

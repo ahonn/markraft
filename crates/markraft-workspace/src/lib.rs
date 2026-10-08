@@ -1,6 +1,7 @@
 //! Embeddable GPUI note workspace. Process services are supplied by the host.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
-pub use markraft_notes::{daily, doc, fs, locale, persistence, storage, vault};
+pub use markraft_notes::{Preferences, daily, doc, locale};
+pub(crate) use markraft_notes::{fs, persistence, storage, vault};
 pub mod app;
 mod export;
 pub mod file_access;

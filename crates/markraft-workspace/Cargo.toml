@@ -15,7 +15,7 @@ direct-distribution = []
 mac-app-store = []
 
 [dependencies]
-markraft-notes = { path = "../markraft-notes" }
+markraft-notes = { path = "../markraft-notes", features = ["unstable-internals"] }
 futures-channel = "0.3"
 futures-executor = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
@@ -45,7 +45,7 @@ png = "0.17"
 
 [dev-dependencies]
 global-hotkey = "0.7"
-markraft-notes = { path = "../markraft-notes", features = ["test-support"] }
+markraft-notes = { path = "../markraft-notes", features = ["test-support", "unstable-internals"] }
 # The app's own flows run headless against GPUI's test platform; see src/e2e.rs.
 gpui = { workspace = true, features = ["test-support"] }
 

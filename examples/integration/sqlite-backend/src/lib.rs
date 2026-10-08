@@ -3,7 +3,7 @@
 
 use markraft_notes::{
     Asset, AssetId, BackendCapabilities, BackendError, BackendMutation, BackendNote,
-    BackendSnapshot, NoteId, NotesBackend, StorageRevision, storage::WorkspaceSettings,
+    BackendSnapshot, NoteId, NotesBackend, StorageRevision, WorkspaceSettings,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{path::Path, time::Duration};

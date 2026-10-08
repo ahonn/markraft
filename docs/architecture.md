@@ -232,7 +232,8 @@ The storage identity keeps the key unique, on one device and across devices.
 
 **Invariant:** an asset ID is the SHA-256 of the asset's bytes.
 The component never deletes an asset.
-Compatibility modules remain hidden from generated API documentation for the workspace adapter.
+The store, the worker, and the settings types are public only with the `unstable-internals` feature.
+The workspace and the application enable it. A host does not.
 
 **Invariant:** a save receipt reports completed persistence work.
 An empty draft is not reported as a Markdown file on disk.

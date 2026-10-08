@@ -25,7 +25,7 @@ pub struct DocumentSnapshot {
 }
 
 /// Capturing clones immutable state; rendering belongs on the persistence worker.
-pub struct PendingSnapshot {
+pub(crate) struct PendingSnapshot {
     note: Note,
     generation: u64,
     auto_number_equations: bool,
@@ -34,7 +34,7 @@ pub struct PendingSnapshot {
 }
 
 impl PendingSnapshot {
-    pub fn new(
+    pub(crate) fn new(
         note: Note,
         generation: u64,
         auto_number_equations: bool,
@@ -50,7 +50,7 @@ impl PendingSnapshot {
         }
     }
 
-    pub fn render(self) -> Result<DocumentSnapshot, StoreError> {
+    pub(crate) fn render(self) -> Result<DocumentSnapshot, StoreError> {
         let markdown = match &self.source {
             Some(source) => source
                 .render(schema(), &self.note.document)

@@ -24,6 +24,7 @@ impl NotesSession {
         }
     }
     /// For the workspace view, which drives the model and the worker directly.
+    #[cfg(feature = "unstable-internals")]
     #[doc(hidden)]
     pub fn into_parts(self) -> (Library, Option<crate::persistence::Persistence>) {
         (self.library, self.persistence)

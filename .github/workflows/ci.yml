@@ -43,6 +43,11 @@ jobs:
       - run: cargo test --workspace --locked
       - name: Check independent integration consumers
         run: sh examples/integration/check.sh
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: Compare the embeddable crates' public interface with the latest release
+        run: sh scripts/check-public-api.sh
       - name: Check the Mac App Store channel
         run: cargo clippy -p markraft-app -p markraft-workspace --all-targets --no-default-features --features markraft-app/mac-app-store --locked -- -D warnings
       - name: Test the Mac App Store channel

@@ -30,4 +30,17 @@ for line in tree.splitlines():
     if "gpui" in package or package in {"markraft-app", "markraft-workspace"}:
         raise SystemExit(f"Unexpected GUI dependency in the notes consumer: {line}")
 print("The notes consumer has no GPUI, workspace, or application dependency.")
+
+features = subprocess.check_output(
+    [
+        "cargo", "tree", "--manifest-path", manifest,
+        "--package", "markraft-notes-consumer", "--edges", "normal,features",
+        "--prefix", "none", "--format", "{p} {f}", "--locked",
+    ],
+    text=True,
+)
+for line in features.splitlines():
+    if line.startswith("markraft-notes ") and "unstable-internals" in line:
+        raise SystemExit(f"The notes consumer reaches the store's internals: {line}")
+print("The notes consumer names only the public notes interface.")
 PY
