@@ -284,6 +284,7 @@ The refactor does not require a file-format migration.
 
 `xtask` builds, signs, and releases the macOS bundle. It also runs local mutation testing.
 `crates/markraft-workspace/src/e2e` tests workspace behavior with temporary folders and a controlled clock.
+The suites that do not depend on files run a second time over a host backend.
 `crates/markraft-notes` tests the headless API and persistence contracts.
 
 `examples/integration` has its own Cargo workspace and lockfile.
@@ -539,6 +540,8 @@ baselines, hit testing and selection geometry, whatever the object is.
   invalidation and find.
 - The workspace has end-to-end tests over a temporary folder: saves, receipts,
   external changes, rename, daily notes and faults.
+- The end-to-end suites that do not depend on files also run over an in-memory
+  host backend. A difference between the two kinds of storage fails a test.
 
 Real font rasterization, narrow windows and system input methods need a native
 run. Unicode text injected in a test does not exercise a real IME candidate

@@ -14,6 +14,9 @@ pub mod doc;
 pub mod fs;
 mod library;
 pub mod locale;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod memory;
 #[doc(hidden)]
 pub mod persistence;
 mod platform;

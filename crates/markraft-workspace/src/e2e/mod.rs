@@ -30,6 +30,7 @@ mod math;
 mod media;
 mod paste;
 mod preferences;
+mod records;
 mod sweep;
 mod switching;
 mod tables;

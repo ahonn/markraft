@@ -59,10 +59,7 @@ fn a_candidate_being_composed_never_reaches_the_file(cx: &mut TestAppContext) {
     h.pass_time(std::time::Duration::from_secs(5));
     h.save();
     assert_eq!(h.error(), None);
-    assert_eq!(
-        std::fs::read_to_string(h.notes.join("n.md")).unwrap(),
-        "ab\n"
-    );
+    assert_eq!(h.stored("n.md"), "ab\n");
     assert_eq!(marked(&mut h), Some(2..4), "the save ended the composition");
 
     commit(&mut h, "你");
@@ -161,10 +158,7 @@ fn a_cancelled_candidate_leaves_the_note_as_it_was(cx: &mut TestAppContext) {
     assert_eq!(marked(&mut h), None);
     assert_eq!(h.markdown(), "abc");
     h.save();
-    assert_eq!(
-        std::fs::read_to_string(h.notes.join("n.md")).unwrap(),
-        "abc\n"
-    );
+    assert_eq!(h.stored("n.md"), "abc\n");
 }
 
 // Leaving a note mid-composition keeps its pinyin out of both notes' files, and
@@ -182,14 +176,8 @@ fn leaving_a_note_mid_composition_leaks_nothing(cx: &mut TestAppContext) {
     h.browse_to("beta");
     assert_eq!(h.markdown(), "beta");
     h.save();
-    assert_eq!(
-        std::fs::read_to_string(h.notes.join("alpha.md")).unwrap(),
-        "alpha\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(h.notes.join("beta.md")).unwrap(),
-        "beta\n"
-    );
+    assert_eq!(h.stored("alpha.md"), "alpha\n");
+    assert_eq!(h.stored("beta.md"), "beta\n");
     h.browse_to("alpha");
     assert_eq!(h.markdown(), "alpha");
     assert_eq!(marked(&mut h), None);

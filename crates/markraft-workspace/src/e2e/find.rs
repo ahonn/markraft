@@ -291,7 +291,7 @@ fn vim_find_external_reload_ends_the_old_session_preview(cx: &mut TestAppContext
     h.type_text("one");
     h.keys("enter /");
     h.type_text("two");
-    std::fs::write(h.notes.join("n.md"), "one new one\n").expect("rewrite the note");
+    h.write_outside("n.md", "one new one\n");
     h.refresh_files();
     h.wait_until(|h| h.markdown() == "one new one");
     assert_eq!(h.markdown(), "one new one");
