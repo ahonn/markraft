@@ -124,6 +124,48 @@ struct SourceVersions {
     removed: Option<Note>,
 }
 impl Sources {
+    pub(crate) fn install(&self, note: &Note, track: Arc<SourceTrack>) {
+        let mut entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let versions = entries.entry(note.id.clone()).or_default();
+        if let Some(current) = versions.current.take()
+            && current
+                .track
+                .as_ref()
+                .is_none_or(|old| !Arc::ptr_eq(old, &track))
+        {
+            if versions.previous.is_none() {
+                versions.previous = Some(current.clone());
+            }
+            versions.history.push(current);
+        }
+        versions.removed = None;
+        versions.current = Some(SourceVersion {
+            document: note.document.clone(),
+            updated_at: note.updated_at,
+            path: note.path.clone(),
+            read_only: note.read_only.clone(),
+            track: Some(track),
+        });
+    }
+    pub(crate) fn accept_current(&self, id: &str) {
+        if let Some(versions) = self.0.lock().unwrap_or_else(|e| e.into_inner()).get_mut(id) {
+            versions.previous = None;
+            versions.history.clear();
+        }
+    }
+    pub(crate) fn clear(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+    pub(crate) fn remove(&self, note: &Note) {
+        let mut entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let versions = entries.entry(note.id.clone()).or_default();
+        if versions.previous.is_none() {
+            versions.previous = versions.current.take();
+        } else {
+            versions.current = None;
+        }
+        versions.removed = Some(note.clone());
+    }
     pub(crate) fn is_current_external(&self, change: &External) -> bool {
         let entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
         match change {
@@ -220,6 +262,18 @@ pub struct Store {
     house: markraft_commonmark::HouseStyleHandle,
 }
 impl Store {
+    pub(crate) fn storage_revisions(&self) -> Vec<(String, crate::StorageRevision)> {
+        use sha2::{Digest, Sha256};
+        self.files
+            .iter()
+            .map(|(id, saved)| {
+                (
+                    id.clone(),
+                    crate::StorageRevision(format!("{:x}", Sha256::digest(&saved.bytes))),
+                )
+            })
+            .collect()
+    }
     /// Open the notes in `directory`, keeping the folder's state under the
     /// application's settings folder. `settings` is the settings file as the
     /// caller read it — the store keeps the copy it writes `settings.json` from.
@@ -497,6 +551,8 @@ impl Store {
                 .or_else(|| identity.map(|i| i.id.clone()))
                 .unwrap_or_else(|| Uuid::new_v4().to_string()),
             document,
+            title_override: None,
+            logical_key: None,
             created_at: identity.map_or(modified, |i| i.created),
             updated_at: modified,
             deleted_at: None,
@@ -1038,6 +1094,8 @@ impl Store {
             let mut note = Note {
                 id: record.id.clone(),
                 document: source.document().clone(),
+                title_override: None,
+                logical_key: None,
                 created_at: crate::storage::timestamp(),
                 updated_at: crate::storage::timestamp(),
                 deleted_at: None,
@@ -1256,7 +1314,17 @@ impl Store {
             }
         }
         let render_started = std::time::Instant::now();
-        let rendered = render(saved, note, &self.house);
+        let rendered = if saved.is_none() {
+            match self.sources.source(note)? {
+                Some(track) => track
+                    .snapshot()
+                    .render(doc::schema(), &note.document)
+                    .map_err(|error| StoreError::from(error.to_string())),
+                None => render(saved, note, &self.house),
+            }
+        } else {
+            render(saved, note, &self.house)
+        };
         log::debug!(
             "save_render note={} elapsed_us={} success={}",
             note.id,
@@ -1699,6 +1767,12 @@ fn already_kept_beside(original: &Path, bytes: &[u8]) -> bool {
     conflicted_copies(original)
         .into_iter()
         .any(|path| fs::read(&path).is_ok_and(|existing| existing == bytes))
+}
+
+/// The name of a copy that keeps local edits when storage wins.
+pub(crate) fn conflicted_copy_name(name: &str) -> String {
+    let (year, month, day, ..) = civil(crate::storage::timestamp());
+    format!("{name} (conflicted copy {year:04}-{month:02}-{day:02})")
 }
 
 /// The sibling that keeps local edits when disk wins:

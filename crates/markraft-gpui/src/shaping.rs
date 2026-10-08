@@ -33,6 +33,7 @@ pub(crate) struct Shaping {
     wiki: Option<WikiResolver>,
     /// How the host fetches remote images; absent, none is fetched.
     remote_images: Option<crate::RemoteImageFetcher>,
+    asset_loader: Option<crate::AssetLoader>,
     /// Bumped by every change above that reaches every line. Lines laid out
     /// under an older revision are laid out again.
     revision: u64,
@@ -130,8 +131,34 @@ impl Shaping {
     }
 
     pub(crate) fn set_remote_images(&mut self, fetcher: Option<crate::RemoteImageFetcher>) {
-        self.images.set_remote_enabled(fetcher.is_some());
+        let changed = match (&self.remote_images, &fetcher) {
+            (Some(previous), Some(next)) => !std::sync::Arc::ptr_eq(previous, next),
+            (None, None) => false,
+            _ => true,
+        };
+        if changed {
+            self.images.set_remote_enabled(false);
+            self.images.set_remote_enabled(fetcher.is_some());
+        }
         self.remote_images = fetcher;
+        self.changed();
+    }
+
+    pub(crate) fn asset_loader(&self) -> Option<&crate::AssetLoader> {
+        self.asset_loader.as_ref()
+    }
+
+    pub(crate) fn set_asset_loader(&mut self, loader: Option<crate::AssetLoader>) {
+        let changed = match (&self.asset_loader, &loader) {
+            (Some(previous), Some(next)) => !std::sync::Arc::ptr_eq(previous, next),
+            (None, None) => false,
+            _ => true,
+        };
+        if changed {
+            self.images.set_assets_enabled(false);
+            self.images.set_assets_enabled(loader.is_some());
+        }
+        self.asset_loader = loader;
         self.changed();
     }
 
@@ -226,5 +253,31 @@ mod tests {
         let before = shaping.revision();
         assert!(!shaping.refresh_images(), "nothing is cached to change");
         assert_eq!(shaping.revision(), before);
+    }
+    #[test]
+    fn replacing_image_fetcher_invalidates_previously_loaded_results() {
+        use crate::images::ImageError;
+        let mut shaping = Shaping::default();
+        let first: crate::RemoteImageFetcher = std::sync::Arc::new(|_| Err("first".into()));
+        let second: crate::RemoteImageFetcher = std::sync::Arc::new(|_| Err("disabled".into()));
+        let source = "https://example.com/image.png";
+        shaping.set_remote_images(Some(first.clone()));
+        assert!(matches!(
+            shaping.images.load(source),
+            Err(ImageError::Loading)
+        ));
+        shaping.images.take_requests();
+        shaping.finish_remote_image(source, Err(ImageError::RemoteFailed));
+        shaping.set_remote_images(Some(first));
+        assert!(matches!(
+            shaping.images.load(source),
+            Err(ImageError::RemoteFailed)
+        ));
+        shaping.set_remote_images(Some(second));
+        assert!(matches!(
+            shaping.images.load(source),
+            Err(ImageError::Loading)
+        ));
+        assert_eq!(shaping.images.take_requests(), vec![source.to_owned()]);
     }
 }

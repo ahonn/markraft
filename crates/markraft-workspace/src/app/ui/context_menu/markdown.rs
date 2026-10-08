@@ -58,7 +58,7 @@ impl MarkraftApp {
     pub(super) fn markdown_action_enabled(&self, action: MarkdownAction, cx: &App) -> bool {
         let editor = self.editor().read(cx);
         if self.is_reloading()
-            || self.library.active_note().read_only.is_some()
+            || self.notes.library.active_note().read_only.is_some()
             || editor.is_composing()
         {
             return false;
@@ -70,7 +70,13 @@ impl MarkraftApp {
             .clear_formatting()(editor.state())
             .is_ok_and(|spec| spec.is_some()),
             MarkdownAction::InsertMath => math_insertion(editor.state()).is_some(),
-            MarkdownAction::InsertImage => !doc::types().in_verbatim_block_at(editor.state()),
+            MarkdownAction::InsertImage => {
+                !doc::types().in_verbatim_block_at(editor.state())
+                    && self.notes.persistence.as_ref().is_some_and(|persistence| {
+                        let capabilities = persistence.capabilities();
+                        capabilities.file_operations || capabilities.assets
+                    })
+            }
         }
     }
 
@@ -107,7 +113,7 @@ impl MarkraftApp {
                 self.focus_editor(window, cx);
             }
             MarkdownAction::InsertImage => {
-                let note = self.library.active_id.clone();
+                let note = self.notes.library.active_id.clone();
                 let editor = self.editor().downgrade();
                 let request = request.clone();
                 let prompt = cx.prompt_for_paths(PathPromptOptions {
@@ -123,7 +129,7 @@ impl MarkraftApp {
                     };
                     let _ = cx.update(|window, cx| {
                         this.update(cx, |app, cx| {
-                            if app.library.active_id != note
+                            if app.notes.library.active_id != note
                                 || app.is_reloading()
                                 || !editor.upgrade().is_some_and(|editor| {
                                     editor == app.editor()

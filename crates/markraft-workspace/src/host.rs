@@ -2,22 +2,12 @@
 use crate::storage::Preferences;
 use std::path::PathBuf;
 
-#[derive(Clone)]
+/// What every workspace needs, whatever stores its notes. The storage itself is
+/// an argument of the constructor: Markdown folders, a backend, or a session.
+#[derive(Clone, Default)]
 pub struct WorkspaceOptions {
-    pub notes_directory: PathBuf,
-    pub state_directory: PathBuf,
     pub cache_directory: Option<PathBuf>,
     pub preferences: Preferences,
-}
-impl WorkspaceOptions {
-    pub fn new(notes_directory: PathBuf, state_directory: PathBuf) -> Self {
-        Self {
-            notes_directory,
-            state_directory,
-            cache_directory: None,
-            preferences: Preferences::default(),
-        }
-    }
 }
 #[derive(Clone)]
 pub enum WorkspaceEvent {
@@ -34,6 +24,7 @@ pub enum WorkspaceEvent {
 #[derive(Debug, Clone)]
 pub struct SaveReceipt {
     pub revision: u64,
+    pub notes: Vec<markraft_notes::NoteSaveOutcome>,
     pub markdown_paths: Vec<(String, PathBuf)>,
     pub conflict_notes: Vec<String>,
 }

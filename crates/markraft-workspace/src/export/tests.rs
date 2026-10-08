@@ -6,6 +6,7 @@ fn options(base: Option<PathBuf>) -> Options {
         base,
         image_root: markraft_media::ImageRoot::None,
         remote_images: false,
+        assets: Default::default(),
         auto_number_equations: true,
         i18n: I18n::english(),
     }
@@ -271,4 +272,27 @@ fn an_embedded_picture_is_a_picture_and_an_embedded_note_its_name() {
         "{html}"
     );
     assert!(html.ends_with("\">Other note</span></p>"), "{html}");
+}
+
+#[test]
+fn database_assets_export_without_allowing_network_images() {
+    let source = "markraft-asset:one";
+    let mut options = options(None);
+    let bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec();
+    options.assets.insert(
+        source.into(),
+        markraft_notes::Asset {
+            id: markraft_notes::AssetId("one".into()),
+            media_type: "image/svg+xml".into(),
+            bytes,
+        },
+    );
+    let document = crate::doc::from_markdown(
+        "![saved](markraft-asset:one)\n\n![remote](https://example.com/image.png)",
+    );
+    for profile in [Profile::Page, Profile::Print, Profile::RichText] {
+        let rendered = render(&document, profile, &options);
+        assert!(rendered.contains("data:image/svg+xml;base64,"));
+        assert!(!rendered.contains("src=\"https://example.com"));
+    }
 }

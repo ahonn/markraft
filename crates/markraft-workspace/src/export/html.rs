@@ -55,6 +55,7 @@ pub(super) fn serializer(
             base: options.base.clone(),
             root: options.image_root.clone(),
             remote: options.remote_images,
+            assets: options.assets.clone(),
         },
         i18n: options.i18n.clone(),
     });

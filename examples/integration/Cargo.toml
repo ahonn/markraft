@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["notes-cli", "workspace-host"]
+members = ["notes-cli", "workspace-host", "sqlite-backend"]
 
 [workspace.package]
 edition = "2024"

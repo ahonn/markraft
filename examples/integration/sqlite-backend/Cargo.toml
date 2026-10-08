@@ -1,0 +1,15 @@
+[package]
+name = "markraft-sqlite-example"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+markraft-notes = { path = "../../../crates/markraft-notes" }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+markraft-notes = { path = "../../../crates/markraft-notes", features = ["conformance"] }
+tempfile = "3"

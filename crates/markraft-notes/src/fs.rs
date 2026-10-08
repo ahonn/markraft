@@ -21,6 +21,8 @@ use std::{
 /// the variant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreError {
+    /// A host-owned backend rejected or could not persist an operation.
+    Backend(crate::BackendError),
     /// The operating system refused something at `path`. `detail` is its own
     /// report, kept for the log and for the last-resort sentence.
     Io {
@@ -62,6 +64,7 @@ impl StoreError {
 impl StoreError {
     pub fn message(&self) -> Message {
         match self {
+            Self::Backend(error) => Message::from(error.to_string()),
             Self::Io { path, kind, detail } => message(path, *kind, detail),
             Self::Locked(text) | Self::Invalid(text) | Self::Worker(text) => text.clone(),
             Self::Json { detail, .. } => {

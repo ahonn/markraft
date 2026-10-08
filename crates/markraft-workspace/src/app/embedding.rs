@@ -6,15 +6,16 @@ impl MarkraftApp {
     /// Create a workspace bound to this window. The host must retain the window
     /// until `prepare_close` completes before releasing or moving the workspace.
     pub fn open(
+        folders: markraft_notes::NotesConfig,
         options: WorkspaceOptions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Self, WorkspaceError> {
         options.preferences.validate()?;
-        let settings_path = options.state_directory.join("workspace.json");
-        let notes_directory = crate::storage::ensure_notes_folder(&options.notes_directory)?;
-        let (store, library) =
-            Store::open_library(notes_directory.clone(), options.state_directory.clone())?;
+        let state_directory = folders.state_dir;
+        let settings_path = state_directory.join("workspace.json");
+        let notes_directory = crate::storage::ensure_notes_folder(&folders.notes_dir)?;
+        let (store, library) = Store::open_library(notes_directory.clone(), state_directory)?;
         let mut view = Self::new(
             Some(notes_directory),
             settings_path,
@@ -38,6 +39,71 @@ impl MarkraftApp {
         Ok(view)
     }
 
+    /// Mount host-owned storage without creating a Markdown directory.
+    pub fn with_backend(
+        backend: Box<dyn markraft_notes::NotesBackend>,
+        options: WorkspaceOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Self, WorkspaceError> {
+        options.preferences.validate()?;
+        let house = markraft_commonmark::HouseStyleHandle::default();
+        let session = markraft_notes::NotesSession::from_backend(backend, house)?;
+        Ok(Self::with_session(session, options, window, cx))
+    }
+
+    /// Mount a session prepared by the host, including sessions opened off the UI thread.
+    /// The host must validate `options.preferences` before mounting.
+    pub fn with_session(
+        session: markraft_notes::NotesSession,
+        options: WorkspaceOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let house = session.house();
+        let (library, persistence) = session.into_parts();
+        let mut view = Self::new_with_session(
+            None,
+            PathBuf::new(),
+            Notes {
+                library,
+                persistence,
+            },
+            house,
+            options.preferences,
+            None,
+            None,
+            Box::new(crate::updater::Disabled),
+            Box::new(crate::instance::NoRequests),
+            window,
+            cx,
+        );
+        view.host_settings = false;
+        view.set_remote_image_cache(options.cache_directory, cx);
+        view
+    }
+
+    /// Request reconciliation after the host commits external changes.
+    pub fn refresh_from_storage(&mut self, cx: &mut Context<Self>) {
+        self.sync_documents(cx);
+        if let Some(persistence) = &self.notes.persistence {
+            persistence.refresh();
+        }
+    }
+
+    /// Reconcile only the named notes after the host changes them in storage.
+    /// A note that storage no longer returns is treated as deleted.
+    pub fn refresh_notes_from_storage(
+        &mut self,
+        ids: Vec<markraft_notes::NoteId>,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_documents(cx);
+        if let Some(persistence) = &self.notes.persistence {
+            persistence.refresh_notes(ids);
+        }
+    }
+
     /// Supply a per-workspace image cache; no cache writes occur outside this path.
     pub fn set_remote_image_cache(&mut self, cache: Option<PathBuf>, cx: &mut Context<Self>) {
         self.remote_fetcher = Some(crate::remote_images::fetcher(cache));
@@ -48,7 +114,7 @@ impl MarkraftApp {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.closing && self.persistence.is_none()
+        self.closing && self.notes.persistence.is_none()
     }
 
     pub fn active_editor(&self) -> Entity<EditorView> {
@@ -97,18 +163,22 @@ impl MarkraftApp {
     ) -> crate::persistence::Pending<SaveReceipt> {
         self.sync_documents(cx);
         let revision = self.save.barrier();
-        let Some(persistence) = &self.persistence else {
+        let Some(persistence) = &self.notes.persistence else {
             return Box::pin(async {
                 Err(StoreError::Worker(Message::new("error.worker-unavailable")))
             });
         };
-        let pending =
-            persistence.flush_async(revision, self.library.clone(), self.preferences.clone());
+        let pending = persistence.flush_async(
+            revision,
+            self.notes.library.clone(),
+            self.preferences.clone(),
+        );
         Box::pin(async move {
             let saved = pending.await?;
             saved.result?;
             Ok(SaveReceipt {
                 revision: saved.revision,
+                notes: saved.outcomes.clone(),
                 markdown_paths: saved.paths,
                 conflict_notes: saved.conflicts,
             })
@@ -183,12 +253,15 @@ impl MarkraftApp {
     ) {
         self.sync_documents(cx);
         let revision = self.save.barrier();
-        let Some(persistence) = &self.persistence else {
+        let Some(persistence) = &self.notes.persistence else {
             done(self, Err(WorkspaceError::Closed), window, cx);
             return;
         };
-        let pending =
-            persistence.flush_async(revision, self.library.clone(), self.preferences.clone());
+        let pending = persistence.flush_async(
+            revision,
+            self.notes.library.clone(),
+            self.preferences.clone(),
+        );
         self.run_host_io(
             pending,
             window,
@@ -201,6 +274,7 @@ impl MarkraftApp {
                         .map_err(WorkspaceError::from)
                         .map(|()| SaveReceipt {
                             revision: saved.revision,
+                            notes: saved.outcomes.clone(),
                             markdown_paths: saved.paths.clone(),
                             conflict_notes: saved.conflicts.clone(),
                         });
@@ -232,7 +306,7 @@ impl MarkraftApp {
         }
         // Standalone startup can present a storage error before a worker exists.
         // That error screen has no accepted writes and must still be closable.
-        if self.persistence.is_none() {
+        if self.notes.persistence.is_none() {
             self.closing = true;
             done(Ok(()), window, cx);
             return;
@@ -255,13 +329,14 @@ impl MarkraftApp {
                 return;
             }
             let pending = this
+                .notes
                 .persistence
                 .as_ref()
                 .expect("saved worker exists")
                 .shutdown_async();
             this.run_host_io(pending, window, cx, move |this, result, window, cx| {
                 if result.is_ok() {
-                    this.persistence.take();
+                    this.notes.persistence.take();
                 } else {
                     this.closing = false;
                     this.reloading
@@ -319,7 +394,7 @@ mod tests {
                 view.flush(window, cx, move |saved, _, _| {
                     *completed.borrow_mut() = Some(saved)
                 });
-                view.replace_library(view.library.clone(), window, cx);
+                view.replace_library(view.notes.library.clone(), window, cx);
             })
         });
         h.wait_until(|_| result.borrow().is_some());

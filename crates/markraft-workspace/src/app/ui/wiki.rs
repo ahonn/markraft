@@ -181,7 +181,15 @@ impl TypeaheadProvider for WikiProvider {
     /// than as text because text spelling a wiki link is not one: the atom is what the
     /// typed `]]` would have produced, and what a save can write back.
     fn accept(&self, item: &TypeaheadItem) -> EditCommand {
-        let markdown = format!("[[{}]]", item.id);
+        let plain = format!("[[{}]]", item.id);
+        let labelled = format!("[[{}|{}]]", item.id, item.label);
+        let markdown = if item.id.starts_with("note:")
+            && markraft_commonmark::wiki::whole_wiki_link(&labelled).is_some()
+        {
+            labelled
+        } else {
+            plain
+        };
         command(move |state| {
             let slice =
                 markraft_commonmark::from_markdown_fragment(doc::schema(), &markdown).ok()?;
@@ -209,8 +217,10 @@ impl MarkraftApp {
     /// is in is left out because a link to itself is not what `[[` is for.
     pub(in crate::app) fn refresh_link_targets(&mut self) {
         let root = self.path.as_deref();
+        let records = self.record_backed();
         let live = || {
-            self.library
+            self.notes
+                .library
                 .notes
                 .iter()
                 .filter(|note| note.deleted_at.is_none())
@@ -226,9 +236,18 @@ impl MarkraftApp {
             }
         }
         let targets: Vec<LinkTarget> = live()
-            .filter(|note| note.id != self.library.active_id)
+            .filter(|note| note.id != self.notes.library.active_id)
             .filter_map(|note| {
-                let path = note.path.as_deref()?;
+                let Some(path) = note.path.as_deref() else {
+                    if !records {
+                        return None;
+                    }
+                    return Some(LinkTarget {
+                        title: note.display_title(&self.i18n),
+                        target: format!("note:{}", note.id),
+                        location: String::new(),
+                    });
+                };
                 let stem = path.file_stem()?.to_string_lossy().into_owned();
                 let relative = root
                     .and_then(|root| path.strip_prefix(root).ok())
@@ -271,6 +290,10 @@ impl MarkraftApp {
                     (),
                 );
             }
+        }
+        for note in live().filter(|note| records && note.path.is_none()) {
+            index.insert(format!("note:{}", note.id).to_lowercase(), ());
+            index.insert(note.title().to_lowercase(), ());
         }
         self.links.fill(targets, index);
     }

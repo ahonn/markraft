@@ -20,10 +20,20 @@ pub(super) struct Pictures {
     pub(super) base: Option<PathBuf>,
     pub(super) root: markraft_media::ImageRoot,
     pub(super) remote: bool,
+    pub(super) assets: std::collections::HashMap<String, markraft_notes::Asset>,
 }
 
 impl Pictures {
     pub(super) fn picture(&self, source: &str) -> Picture {
+        if let Some(asset) = self.assets.get(source) {
+            return if asset.bytes.len() as u64 <= MAX_IMAGE_BYTES {
+                ImageType::sniff(&asset.bytes)
+                    .map(|kind| Picture::Embedded(data_uri(kind.mime(), &asset.bytes)))
+                    .unwrap_or(Picture::Unavailable)
+            } else {
+                Picture::Unavailable
+            };
+        }
         match markraft_media::locate(source, self.base.as_deref(), self.root.as_root()) {
             Some(ImageLocation::Remote(url)) if self.remote => Picture::Linked(url),
             Some(ImageLocation::File(path)) => {
@@ -253,6 +263,7 @@ mod tests {
             base: Some(dir.path().to_owned()),
             root: markraft_media::ImageRoot::None,
             remote,
+            assets: Default::default(),
         };
         assert_eq!(
             pictures(false).picture("a.png"),

@@ -17,6 +17,7 @@ mac-app-store = []
 [dependencies]
 markraft-notes = { path = "../markraft-notes" }
 futures-channel = "0.3"
+futures-executor = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 gpui.workspace = true
 gpui-base = { workspace = true, optional = true }

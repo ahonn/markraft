@@ -15,11 +15,12 @@ impl MarkraftApp {
     ) -> Option<Stateful<Div>> {
         let rename = self.interaction.rename()?;
         let extension = self
+            .notes
             .library
             .active_note()
             .path
-            .as_ref()?
-            .extension()
+            .as_ref()
+            .and_then(|path| path.extension())
             .map(|extension| format!(".{}", extension.to_string_lossy()))
             .unwrap_or_default();
         let width = WIDTH.min(window.bounds().size.width - px(16.));

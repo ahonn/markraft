@@ -9,7 +9,9 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 python3 "$repository_directory/scripts/prepare-dependencies.py"
 cargo fmt --manifest-path "$example_directory/Cargo.toml" --all -- --check
 cargo build --manifest-path "$example_directory/Cargo.toml" --workspace --locked
+cargo test --manifest-path "$example_directory/Cargo.toml" --package markraft-sqlite-example --locked
 cargo run --manifest-path "$example_directory/Cargo.toml" --package markraft-notes-consumer --locked
+cargo run --manifest-path "$example_directory/Cargo.toml" --package markraft-notes-consumer --locked -- --storage sqlite
 python3 - "$example_directory/Cargo.toml" <<'PY'
 import subprocess
 import sys

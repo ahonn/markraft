@@ -74,7 +74,7 @@ impl Stop {
 
 impl MarkraftApp {
     pub(super) fn surface(&self) -> Surface {
-        if self.persistence.is_none() {
+        if self.notes.persistence.is_none() {
             return Surface::Chooser;
         }
         if self.interaction.format_menu().is_some() && self.interaction.panel() == Panel::Editor {
@@ -175,7 +175,7 @@ impl MarkraftApp {
                 stops.push(Stop::run("rename-apply", Intent::ApplyRename));
             }
             Surface::FileStatus => {
-                if self.library.active_note().path.is_some() {
+                if self.notes.library.active_note().path.is_some() {
                     stops.push(Stop::run("file-status-open", Intent::OpenExternally));
                 }
                 stops.push(Stop::run("file-status-reveal", Intent::RevealNote));

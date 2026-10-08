@@ -473,11 +473,11 @@ impl MarkraftApp {
                 window.dispatch_action(action, cx);
             }
             Intent::Delete => {
-                let id = self.library.active_id.clone();
+                let id = self.notes.library.active_id.clone();
                 self.confirm_trash(id, false, window, cx)
             }
             Intent::Pin => {
-                let id = self.library.active_id.clone();
+                let id = self.notes.library.active_id.clone();
                 self.toggle_pin(&id, cx);
                 self.intent(Intent::Back, window, cx);
             }
@@ -537,7 +537,7 @@ impl MarkraftApp {
                 }
             }
             Intent::RevealNote => {
-                if let Some(path) = &self.library.active_note().path {
+                if let Some(path) = &self.notes.library.active_note().path {
                     cx.reveal_path(path);
                 }
                 self.close_popover(cx);
@@ -553,7 +553,7 @@ impl MarkraftApp {
                 cx.notify();
             }
             Intent::OpenExternally => {
-                if let Some(path) = self.library.active_note().path.clone() {
+                if let Some(path) = self.notes.library.active_note().path.clone() {
                     cx.open_with_system(&path);
                 }
                 self.close_popover(cx);
@@ -1052,7 +1052,7 @@ impl MarkraftApp {
     /// writing…" for a file that takes no writing. The explanation and the two ways
     /// out take the gate's own shape, scaled to a note.
     fn unreadable_file(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let note = self.library.active_note();
+        let note = self.notes.library.active_note();
         let reason = note.read_only.as_ref()?.render(&self.i18n);
         if !note.document_is_empty() || self.interaction.panel() != Panel::Editor {
             return None;
@@ -1139,7 +1139,7 @@ impl MarkraftApp {
         }
         for (index, note) in notes.iter().enumerate() {
             let id = note.id.clone();
-            let current = note.id == self.library.active_id;
+            let current = note.id == self.notes.library.active_id;
             let selected = index == self.picker.row();
             let status = if current {
                 self.i18n.text("notes.current")
@@ -1158,8 +1158,19 @@ impl MarkraftApp {
                 Some(_) => self.muted(),
                 None => notes_style(self.dark).marker,
             };
-            let location = location.unwrap_or_else(|| self.i18n.text("notes.no-file"));
-            let meta = format!("{status} · {location}");
+            let stored_without_path = note.path.is_none() && self.record_backed();
+            let location = location.unwrap_or_else(|| {
+                if stored_without_path {
+                    String::new()
+                } else {
+                    self.i18n.text("notes.no-file")
+                }
+            });
+            let meta = if note.path.is_none() && self.record_backed() {
+                status.clone()
+            } else {
+                format!("{status} · {location}")
+            };
             let mut controls = div()
                 .absolute()
                 .right(px(6.))
@@ -1287,7 +1298,11 @@ impl MarkraftApp {
                                             .text_size(px(12.))
                                             .line_height(px(18.))
                                             .text_color(self.muted())
-                                            .child(format!("{status} ·")),
+                                            .child(if stored_without_path {
+                                                status.clone()
+                                            } else {
+                                                format!("{status} ·")
+                                            }),
                                     )
                                     .child(
                                         div()
@@ -1411,7 +1426,7 @@ impl MarkraftApp {
             Command::new("new-action", "command.new-note", Intent::New).ex(&[("enew", 3)]),
             Command::new(
                 "pin-note",
-                if self.library.active_note().pinned {
+                if self.notes.library.active_note().pinned {
                     "command.unpin-note"
                 } else {
                     "command.pin-note"
@@ -1658,7 +1673,7 @@ impl MarkraftApp {
             Intent::Delete,
         )]);
         // Each of these reveals a different thing, and only while there is one.
-        if self.library.active_note().path.is_some() {
+        if self.notes.library.active_note().path.is_some() {
             items.push(Command::new(
                 "reveal-note",
                 "command.reveal-note-in-finder",
@@ -1763,15 +1778,17 @@ impl MarkraftApp {
             ));
         }
         // Low-frequency, high-stakes: last so it is not hit by accident.
-        items.push(Command::new(
-            "folder-action",
-            if self.path.is_some() {
-                "command.switch-folder"
-            } else {
-                "command.open-folder"
-            },
-            Intent::ChooseFolder,
-        ));
+        if !self.record_backed() {
+            items.push(Command::new(
+                "folder-action",
+                if self.path.is_some() {
+                    "command.switch-folder"
+                } else {
+                    "command.open-folder"
+                },
+                Intent::ChooseFolder,
+            ));
+        }
         items.extend(ex_commands());
         items
     }
@@ -2027,7 +2044,7 @@ impl Render for MarkraftApp {
         // The title bar shows the file stem; the rename pill adds the extension beside
         // the field. A note with no file yet is named by its first line instead, since
         // that is what its file will be called.
-        let note = self.library.active_note();
+        let note = self.notes.library.active_note();
         let title = note
             .path
             .as_ref()
@@ -2036,7 +2053,7 @@ impl Render for MarkraftApp {
             .unwrap_or_else(|| note.display_title(&self.i18n));
         // With no folder open there is no note to name, and a stray "Untitled"
         // over the gate reads as a bug rather than as a state.
-        let unopened = self.persistence.is_none();
+        let unopened = self.notes.persistence.is_none();
         if self.platform.is_some() {
             window.set_window_title(if unopened { "Markraft" } else { &title });
         }
@@ -2277,7 +2294,7 @@ impl Render for MarkraftApp {
                         |s, phase| s.opacity(phase.interpolate_clamped(0., 1.)),
                     ),
             );
-        if self.persistence.is_none() {
+        if self.notes.persistence.is_none() {
             // The notes folder could not be opened. First launch normally creates
             // Documents/Markraft, so this screen is recovery — not a cold-start gate.
             let default_folder = crate::storage::default_notes_folder();

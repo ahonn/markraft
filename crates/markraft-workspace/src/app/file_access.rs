@@ -11,7 +11,7 @@ impl MarkraftApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.persistence.is_none() {
+        if self.notes.persistence.is_none() {
             self.inform(Message::new("notice.folder-before-files"), cx);
             return;
         }

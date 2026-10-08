@@ -762,7 +762,7 @@ impl MarkraftApp {
         };
         let editor = self.editor().read(cx);
         let writable = !self.is_reloading()
-            && self.library.active_note().read_only.is_none()
+            && self.notes.library.active_note().read_only.is_none()
             && !editor.is_composing();
         // One reading of the request serves every group that asks about it.
         let reading = editor.context_text(request);
@@ -848,7 +848,7 @@ impl MarkraftApp {
         let position = request.position;
         self.context_menus.pending = Some(Session {
             id,
-            note: self.library.active_id.clone(),
+            note: self.notes.library.active_id.clone(),
             editor: editor.downgrade(),
             request,
             actions,
@@ -929,7 +929,7 @@ impl MarkraftApp {
         let Some(text) = self.editor().read(cx).context_text(&session.request) else {
             return;
         };
-        let editable = text.replaceable && self.library.active_note().read_only.is_none();
+        let editable = text.replaceable && self.notes.library.active_note().read_only.is_none();
         let prose = self.editor().read(cx).context_is_prose(&session.request);
         let anchor = self.text_service_bounds(session.request.position, cx);
         let Ok((requestor, returned)) = TextServiceSession::attach(
@@ -1006,10 +1006,10 @@ impl MarkraftApp {
     ) -> bool {
         use markraft_core::kind::ReadingReplacementPolicy;
 
-        if note != self.library.active_id
+        if note != self.notes.library.active_id
             || self.interaction.panel() != Panel::Editor
             || self.is_reloading()
-            || self.library.active_note().read_only.is_some()
+            || self.notes.library.active_note().read_only.is_some()
         {
             return false;
         }
@@ -1037,7 +1037,7 @@ impl MarkraftApp {
 
     pub(in crate::app) fn invalidate_text_service(&mut self, cx: &App) {
         if self.context_menus.native.as_ref().is_some_and(|session| {
-            session.note != self.library.active_id
+            session.note != self.notes.library.active_id
                 || !session.editor.upgrade().is_some_and(|editor| {
                     editor == self.editor() && editor.read(cx).context_is_current(&session.request)
                 })
@@ -1103,7 +1103,7 @@ impl MarkraftApp {
     fn context_menu_current(&self, id: u64, cx: &App) -> bool {
         self.context_menus.pending.as_ref().is_some_and(|session| {
             session.id == id
-                && session.note == self.library.active_id
+                && session.note == self.notes.library.active_id
                 && self.interaction.panel() == Panel::Editor
                 && !self.is_reloading()
                 && session.editor.upgrade().is_some_and(|editor| {
@@ -1158,7 +1158,7 @@ impl MarkraftApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let editable = self.library.active_note().read_only.is_none()
+        let editable = self.notes.library.active_note().read_only.is_none()
             && self
                 .editor()
                 .read(cx)
@@ -1266,7 +1266,7 @@ impl MarkraftApp {
                 }
             }
             MenuAction::InsertParagraph { before } => {
-                if self.library.active_note().read_only.is_none() {
+                if self.notes.library.active_note().read_only.is_none() {
                     self.editor().update(cx, |editor, cx| {
                         editor.insert_context_paragraph(&session.request, before, cx);
                     });
@@ -1306,7 +1306,7 @@ impl MarkraftApp {
             MenuAction::CheckSpelling => self.schedule_text_checking(CheckTrigger::Requested, cx),
             MenuAction::CheckSetting(setting) => self.toggle_text_checking(setting, window, cx),
             MenuAction::Transform(transform) => {
-                if self.library.active_note().read_only.is_none() {
+                if self.notes.library.active_note().read_only.is_none() {
                     self.editor().update(cx, |editor, cx| {
                         editor.transform_context_text(&session.request, transform, cx);
                     });
@@ -1336,7 +1336,7 @@ impl MarkraftApp {
                 self.focus_editor(window, cx);
             }
             MenuAction::CodeLanguage(pos) => {
-                if self.library.active_note().read_only.is_none() {
+                if self.notes.library.active_note().read_only.is_none() {
                     self.open_code_language(pos, cx);
                 }
             }

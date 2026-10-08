@@ -1,6 +1,13 @@
 //! Headless Markdown notes and persistence, independent of GPUI and application windows.
 //! [`NotesLibrary`] is the integration API. The module-level APIs remain available
 //! for the Markraft workspace adapter while its existing file formats are preserved.
+pub mod backend;
+#[cfg(any(test, feature = "conformance"))]
+pub mod conformance;
+mod engine;
+mod records;
+pub use backend::*;
+pub use engine::{NewRecord, NoteSaveOutcome, NotesSession};
 pub mod daily;
 pub mod doc;
 #[doc(hidden)]

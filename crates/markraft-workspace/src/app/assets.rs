@@ -243,6 +243,41 @@ pub(super) fn insert(
     })
 }
 
+/// Validate imported bytes before the host commits them to its attachment store.
+/// File names do not determine database asset types.
+pub(super) fn prepare_backend(assets: Vec<Asset>) -> Result<Vec<markraft_notes::Asset>, Message> {
+    use std::io::Read;
+    assets
+        .into_iter()
+        .map(|asset| {
+            let bytes = match asset {
+                Asset::File(path) | Asset::Copy(path) => {
+                    if !is_image(&path) {
+                        return Err(Message::new("asset.images-only"));
+                    }
+                    let file = fs::File::open(path).map_err(|error| {
+                        Message::new("asset.operation-failed").arg("detail", error.to_string())
+                    })?;
+                    let mut bytes = Vec::new();
+                    file.take(MAX_BYTES + 1)
+                        .read_to_end(&mut bytes)
+                        .map_err(|error| {
+                            Message::new("asset.operation-failed").arg("detail", error.to_string())
+                        })?;
+                    bytes
+                }
+                Asset::Image(image) => image.bytes().to_vec(),
+            };
+            if bytes.len() as u64 > MAX_BYTES {
+                return Err(Message::new("asset.too-large"));
+            }
+            let image_type = markraft_media::ImageType::sniff(&bytes)
+                .ok_or(Message::new("asset.images-only"))?;
+            Ok(markraft_notes::Asset::new(image_type.mime(), bytes))
+        })
+        .collect()
+}
+
 /// Read the supported scalar form of the `typora-root-url` image-preview root
 /// from actual front matter. Never use body text or nested metadata as
 /// application settings.
@@ -387,6 +422,46 @@ fn root_scalar(value: &str) -> Result<String, Message> {
         return Err(unsupported());
     }
     Ok(value.to_owned())
+}
+
+/// Backend references use stable IDs, independent of the note's location.
+pub(super) fn backend_sources(document: &markraft_core::Node) -> std::collections::HashSet<String> {
+    let mut found = std::collections::HashSet::new();
+    fn visit(document: &markraft_core::Node, found: &mut std::collections::HashSet<String>) {
+        if let Some(source) = document.attrs().get("src").and_then(|value| value.as_str())
+            && source.starts_with(markraft_notes::ASSET_SCHEME)
+        {
+            found.insert(source.to_owned());
+        }
+        for child in document.children() {
+            visit(child, found);
+        }
+    }
+    visit(document, &mut found);
+    found
+}
+
+pub(super) fn relink_backend_sources(
+    document: &markraft_core::Node,
+    references: &std::collections::HashMap<String, String>,
+) -> markraft_core::Node {
+    let document = match document
+        .attrs()
+        .get("src")
+        .and_then(|value| value.as_str())
+        .and_then(|source| references.get(source))
+    {
+        Some(source) => document.with_attrs(document.attrs().with("src", source.clone())),
+        None => document.clone(),
+    };
+    if document.child_count() == 0 {
+        return document;
+    }
+    document.copy(markraft_core::Fragment::from_nodes(
+        document
+            .children()
+            .map(|child| relink_backend_sources(child, references)),
+    ))
 }
 
 #[cfg(test)]
@@ -643,5 +718,46 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("image-")
         );
+    }
+    #[test]
+    fn database_assets_validate_content_and_keep_stable_source_references() {
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("valid.svg");
+        fs::write(
+            &image,
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>",
+        )
+        .unwrap();
+        let prepared = prepare_backend(vec![Asset::Copy(image)]).unwrap();
+        assert_eq!(prepared[0].media_type, "image/svg+xml");
+        assert_eq!(
+            prepared[0].id,
+            markraft_notes::AssetId::for_content(&prepared[0].bytes)
+        );
+        // The editor recognizes exactly the references that storage produces.
+        assert_eq!(markraft_gpui::ASSET_SCHEME, markraft_notes::ASSET_SCHEME);
+        let bad = root.path().join("bad.png");
+        fs::write(&bad, b"not an image").unwrap();
+        assert!(prepare_backend(vec![Asset::File(bad)]).is_err());
+        let large = root.path().join("large.png");
+        fs::File::create(&large)
+            .unwrap()
+            .set_len(MAX_BYTES + 1)
+            .unwrap();
+        assert!(prepare_backend(vec![Asset::File(large)]).is_err());
+        let source = "# Keep text\n\n![image](markraft-asset:one)\n";
+        let document = crate::doc::from_markdown(source);
+        assert_eq!(
+            backend_sources(&document),
+            ["markraft-asset:one".to_owned()].into()
+        );
+        let rewritten = relink_backend_sources(
+            &document,
+            &[("markraft-asset:one".into(), "assets/one.svg".into())].into(),
+        );
+        let markdown = crate::doc::to_markdown(&rewritten);
+        assert!(markdown.contains("Keep text"));
+        assert!(markdown.contains("assets/one.svg"));
+        assert!(!markdown.contains("markraft-asset:"));
     }
 }

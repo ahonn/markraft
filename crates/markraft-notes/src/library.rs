@@ -1,12 +1,6 @@
 //! Public, headless library boundary. Mutable access is the single write authority;
 //! snapshots are immutable and edits compare revisions before replacing content.
-use crate::{
-    doc,
-    fs::StoreError,
-    persistence::Persistence,
-    storage::{Library, Preferences},
-    vault::Store,
-};
+use crate::{doc, fs::StoreError, persistence::Persistence, storage::Preferences, vault::Store};
 use std::{collections::HashMap, fmt, path::PathBuf};
 
 /// Explicit locations owned by this library, independent of application settings.
@@ -30,8 +24,19 @@ impl NotesConfig {
 #[serde(transparent)]
 pub struct NoteId(String);
 impl NoteId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+    /// The ID of the note that owns `key`. Every session and device derives the
+    /// same ID, so two writers that create the note independently address one
+    /// record, and its storage identity keeps the key unique.
+    pub fn for_logical_key(key: &str) -> Self {
+        const NAMESPACE: uuid::Uuid =
+            uuid::Uuid::from_u128(0x3f0c_8a52_9b7e_4d16_a1c4_6e2d_5b90_73af);
+        Self(uuid::Uuid::new_v5(&NAMESPACE, key.as_bytes()).to_string())
     }
 }
 impl fmt::Display for NoteId {
@@ -54,6 +59,7 @@ pub struct NoteSummary {
     pub created_at: u64,
     /// Unix milliseconds.
     pub updated_at: u64,
+    pub storage_revision: Option<crate::StorageRevision>,
 }
 
 /// An immutable committed document. It contains no view or input-composition state.
@@ -71,20 +77,22 @@ pub struct NoteSnapshot {
     /// After reopening, obtain a fresh snapshot; this is not a persisted file version.
     pub revision: u64,
     pub path: Option<PathBuf>,
+    pub storage_revision: Option<crate::StorageRevision>,
 }
 
-/// A barrier receipt. Success means the requested snapshot reached its Markdown
-/// files and manifest; recovery copies alone never qualify as a successful flush.
+/// A local durability barrier. Success means the backend committed the requested
+/// snapshot. It does not promise network sync or treat recovery copies as a save.
 #[derive(Clone, Debug)]
 pub struct SaveReceipt {
     /// Save barrier revision within this opened library, not across restarts.
     pub revision: u64,
     pub saved: Vec<NoteId>,
-    /// Documents with no assigned file path. On success these are empty scratch
-    /// documents; on failure this can also include content that remains unsaved.
+    /// Documents with no persisted storage identity. A missing file path does
+    /// not make a database note a draft.
     pub drafts: Vec<NoteId>,
     pub removed: Vec<NoteId>,
     pub conflicts: Vec<NoteId>,
+    pub outcomes: Vec<crate::NoteSaveOutcome>,
 }
 
 #[derive(Clone, Debug)]
@@ -137,11 +145,10 @@ impl std::error::Error for NotesError {}
 /// executor for large folders. Save, refresh and close are runtime-independent
 /// futures. Dropping is best-effort cleanup; call [`Self::close`] for durability.
 pub struct NotesLibrary {
-    library: Library,
-    persistence: Option<Persistence>,
+    session: crate::NotesSession,
     revisions: HashMap<String, u64>,
     revision: u64,
-    root: PathBuf,
+    root: Option<PathBuf>,
     last_receipt: Option<SaveReceipt>,
     closing: bool,
 }
@@ -155,30 +162,88 @@ impl NotesLibrary {
             .map(|note| (note.id.clone(), 0))
             .collect();
         Ok(Self {
-            library,
-            persistence: Some(Persistence::new(store, Default::default())),
+            session: crate::NotesSession::from_parts(
+                library,
+                Some(Persistence::new(store, Default::default())),
+            ),
             revisions,
             revision: 0,
-            root: directory,
+            root: Some(directory),
             last_receipt: None,
             closing: false,
         })
+    }
+
+    pub fn from_backend(backend: Box<dyn crate::NotesBackend>) -> Result<Self, NotesError> {
+        let session = crate::NotesSession::from_backend(backend, Default::default())?;
+        let revisions = session
+            .library
+            .notes
+            .iter()
+            .map(|note| (note.id.clone(), 0))
+            .collect();
+        Ok(Self {
+            session,
+            revisions,
+            revision: 0,
+            root: None,
+            last_receipt: None,
+            closing: false,
+        })
+    }
+
+    pub fn capabilities(&self) -> Result<crate::BackendCapabilities, NotesError> {
+        Ok(self.worker()?.capabilities())
+    }
+
+    /// Create or retrieve a note using a stable logical key. The backend commits
+    /// its exact source before this call returns; no file path is required.
+    pub async fn create_record(&mut self, record: crate::NewRecord) -> Result<NoteId, NotesError> {
+        let note = self.worker()?.create_record_async(record).await?;
+        let id = NoteId::new(note.id.clone());
+        if !self.session.library.changes.contains_key(id.as_str()) {
+            self.session.library.adopt(note);
+        }
+        self.revision += 1;
+        self.revisions.insert(id.0.clone(), self.revision);
+        Ok(id)
+    }
+
+    pub async fn rename_note(&mut self, id: &NoteId, name: &str) -> Result<(), NotesError> {
+        self.note(id)?;
+        self.flush().await?;
+        let note = self
+            .worker()?
+            .rename_note_async(id.to_string(), name.to_owned())
+            .await?;
+        self.session.library.adopt(note);
+        self.revision += 1;
+        self.revisions.insert(id.0.clone(), self.revision);
+        Ok(())
+    }
+
+    pub async fn read_asset(&self, id: crate::AssetId) -> Result<crate::Asset, NotesError> {
+        Ok(self.worker()?.read_asset_async(id).await?)
+    }
+    pub async fn write_asset(&self, asset: crate::Asset) -> Result<(), NotesError> {
+        Ok(self.worker()?.write_asset_async(asset).await?)
     }
 
     fn worker(&self) -> Result<&Persistence, NotesError> {
         if self.closing {
             return Err(NotesError::Closed);
         }
-        self.persistence.as_ref().ok_or(NotesError::Closed)
+        self.session.persistence.as_ref().ok_or(NotesError::Closed)
     }
 
-    /// Create a semantic scratch document. Use `create_file` to import exact
-    /// Markdown source including front matter and original whitespace.
+    /// Create an unsaved document with its exact Markdown baseline. Front matter
+    /// and original whitespace remain available to both file and database saves.
     pub fn create(&mut self, markdown: &str) -> Result<NoteId, NotesError> {
         self.worker()?;
-        let document = markraft_commonmark::from_markdown(doc::schema(), markdown)
-            .map_err(|error| NotesError::InvalidMarkdown(error.to_string()))?;
-        let id = self.library.new_note(document);
+        let document = parse(markdown)?;
+        let id = self.session.library.new_note(document);
+        self.worker()?
+            .register_source(self.session.library.note(&id).expect("new note"), markdown)?;
         self.revision += 1;
         self.revisions.insert(id.clone(), self.revision);
         Ok(NoteId(id))
@@ -187,6 +252,7 @@ impl NotesLibrary {
     pub fn note(&self, id: &NoteId) -> Result<NoteSnapshot, NotesError> {
         let worker = self.worker()?;
         let note = self
+            .session
             .library
             .note(&id.0)
             .ok_or_else(|| NotesError::NotFound(id.clone()))?;
@@ -209,14 +275,16 @@ impl NotesLibrary {
             updated_at: note.updated_at,
             revision: self.revisions.get(&id.0).copied().unwrap_or(0),
             path: note.path.clone(),
+            storage_revision: worker.storage_revision(&note.id),
         })
     }
 
     pub fn search(&self, query: &str) -> Result<Vec<NoteSummary>, NotesError> {
         self.worker()?;
         Ok(self
+            .session
             .library
-            .search(query, Some(&self.root))
+            .search(query, self.root.as_deref())
             .into_iter()
             .map(|note| NoteSummary {
                 id: NoteId(note.id.clone()),
@@ -226,6 +294,10 @@ impl NotesLibrary {
                 revision: self.revisions.get(&note.id).copied().unwrap_or(0),
                 created_at: note.created_at,
                 updated_at: note.updated_at,
+                storage_revision: self
+                    .worker()
+                    .ok()
+                    .and_then(|worker| worker.storage_revision(&note.id)),
             })
             .collect())
     }
@@ -250,6 +322,7 @@ impl NotesLibrary {
     ) -> Result<u64, NotesError> {
         self.worker()?;
         let note = self
+            .session
             .library
             .note(&id.0)
             .ok_or_else(|| NotesError::NotFound(id.clone()))?;
@@ -276,7 +349,7 @@ impl NotesLibrary {
                 .render(doc::schema(), &document),
         }
         .map_err(|_| NotesError::UnsupportedEdit)?;
-        if self.library.set_document(&id.0, document) {
+        if self.session.library.set_document(&id.0, document) {
             self.revision += 1;
             self.revisions.insert(id.0.clone(), self.revision);
         }
@@ -288,6 +361,7 @@ impl NotesLibrary {
     pub fn delete(&mut self, id: &NoteId, expected_revision: u64) -> Result<(), NotesError> {
         self.worker()?;
         let note = self
+            .session
             .library
             .note(&id.0)
             .ok_or_else(|| NotesError::NotFound(id.clone()))?;
@@ -301,7 +375,7 @@ impl NotesLibrary {
                 actual,
             });
         }
-        self.library.delete(&id.0);
+        self.session.library.delete(&id.0);
         self.revision += 1;
         Ok(())
     }
@@ -322,8 +396,8 @@ impl NotesLibrary {
             })
             .await?;
         let id = NoteId(created.note.id.clone());
-        if !self.library.changes.contains_key(id.as_str()) {
-            self.library.adopt(created.note);
+        if !self.session.library.changes.contains_key(id.as_str()) {
+            self.session.library.adopt(created.note);
             self.revision += 1;
             self.revisions.insert(id.0.clone(), self.revision);
         }
@@ -334,8 +408,8 @@ impl NotesLibrary {
     pub async fn open_file(&mut self, path: PathBuf) -> Result<NoteId, NotesError> {
         let note = self.worker()?.open_file_async(path).await?;
         let id = NoteId(note.id.clone());
-        if !self.library.changes.contains_key(id.as_str()) {
-            self.library.adopt(note);
+        if !self.session.library.changes.contains_key(id.as_str()) {
+            self.session.library.adopt(note);
             self.revision += 1;
             self.revisions.insert(id.0.clone(), self.revision);
         }
@@ -351,7 +425,13 @@ impl NotesLibrary {
             .worker()?
             .rename_async(id.0.clone(), name.to_owned())
             .await?;
-        if let Some(note) = self.library.notes.iter_mut().find(|note| note.id == id.0) {
+        if let Some(note) = self
+            .session
+            .library
+            .notes
+            .iter_mut()
+            .find(|note| note.id == id.0)
+        {
             note.path = Some(path.clone());
         }
         self.revision += 1;
@@ -383,16 +463,16 @@ impl NotesLibrary {
                     crate::vault::External::Updated { note, .. } => &note.id,
                     crate::vault::External::Removed(note) => &note.id,
                 };
-                if self.library.changes.contains_key(id) {
+                if self.session.library.changes.contains_key(id) {
                     continue;
                 }
                 self.revision += 1;
                 self.revisions.insert(id.clone(), self.revision);
                 match &change {
                     crate::vault::External::Updated { note, .. } => {
-                        self.library.adopt(note.clone())
+                        self.session.library.adopt(note.clone())
                     }
-                    crate::vault::External::Removed(note) => self.library.remove(&note.id),
+                    crate::vault::External::Removed(note) => self.session.library.remove(&note.id),
                 }
                 adopted.push(change);
             }
@@ -406,38 +486,49 @@ impl NotesLibrary {
         self.poll_changes()?;
         let saved = self
             .worker()?
-            .flush_async(self.revision, self.library.clone(), Preferences::default())
+            .flush_async(
+                self.revision,
+                self.session.library.clone(),
+                Preferences::default(),
+            )
             .await?;
         for (id, path) in &saved.paths {
-            if let Some(note) = self.library.notes.iter_mut().find(|note| note.id == *id) {
+            if let Some(note) = self
+                .session
+                .library
+                .notes
+                .iter_mut()
+                .find(|note| note.id == *id)
+            {
                 note.path = Some(path.clone());
             }
         }
         let receipt = SaveReceipt {
             revision: saved.revision,
-            saved: if saved.result.is_ok() {
-                saved
-                    .changes
-                    .iter()
-                    .filter(|(id, _)| {
-                        self.library
-                            .note(id)
-                            .is_some_and(|note| note.path.is_some())
-                    })
-                    .map(|(id, _)| NoteId(id.clone()))
-                    .collect()
-            } else {
-                Vec::new()
-            },
+            saved: saved
+                .changes
+                .iter()
+                .filter(|(id, _)| {
+                    self.session.library.note(id).is_some()
+                        && self.worker().is_ok_and(|worker| worker.is_persisted(id))
+                })
+                .map(|(id, _)| NoteId(id.clone()))
+                .collect(),
             drafts: self
+                .session
                 .library
                 .notes
                 .iter()
-                .filter(|note| note.path.is_none())
+                .filter(|note| {
+                    !self
+                        .worker()
+                        .is_ok_and(|worker| worker.is_persisted(&note.id))
+                })
                 .map(|note| NoteId(note.id.clone()))
                 .collect(),
-            removed: if saved.result.is_ok() {
-                self.library
+            removed: if saved.outcomes.is_empty() && saved.result.is_ok() {
+                self.session
+                    .library
                     .deletions
                     .keys()
                     .filter(|id| !saved.kept.contains(id))
@@ -445,16 +536,22 @@ impl NotesLibrary {
                     .map(NoteId)
                     .collect()
             } else {
-                Vec::new()
+                saved
+                    .outcomes
+                    .iter()
+                    .filter(|outcome| outcome.deleted && outcome.result.is_ok())
+                    .map(|outcome| outcome.id.clone())
+                    .collect()
             },
             conflicts: saved.conflicts.iter().cloned().map(NoteId).collect(),
+            outcomes: saved.outcomes.clone(),
         };
         for id in &saved.kept {
-            self.library.restore_deleted(id);
+            self.session.library.restore_deleted(id);
         }
+        self.session.library.acknowledge_saved(&saved.changes);
         match saved.result {
             Ok(()) => {
-                self.library.acknowledge_saved(&saved.changes);
                 self.last_receipt = Some(receipt.clone());
                 Ok(receipt)
             }
@@ -469,7 +566,7 @@ impl NotesLibrary {
     /// and the next flush uses the store's existing conflict-preservation rules.
     pub async fn refresh(&mut self) -> Result<(), NotesError> {
         self.worker()?;
-        if !self.library.changes.is_empty() {
+        if !self.session.library.changes.is_empty() {
             return Err(NotesError::UnsavedChanges);
         }
         self.discard_local_changes_and_reload().await
@@ -479,9 +576,10 @@ impl NotesLibrary {
     /// host has obtained the user's discard decision, or after a conflict receipt
     /// confirms the local version exists in a recovery copy.
     pub async fn discard_local_changes_and_reload(&mut self) -> Result<(), NotesError> {
-        self.library = self.worker()?.reload_async().await?;
+        self.session.library = self.worker()?.reload_async().await?;
         self.revision += 1;
         self.revisions = self
+            .session
             .library
             .notes
             .iter()
@@ -494,7 +592,7 @@ impl NotesLibrary {
     /// On success storage has stopped and another host may open the directory.
     /// Native watch callbacks are cancelled; OS watcher cleanup can finish later.
     pub async fn close(&mut self) -> Result<SaveReceipt, NotesError> {
-        if self.persistence.is_none() {
+        if self.session.persistence.is_none() {
             return self.last_receipt.clone().ok_or(NotesError::Closed);
         }
         if !self.closing {
@@ -503,12 +601,13 @@ impl NotesLibrary {
         }
         // The worker retains the shared completion, so cancellation of this
         // future does not lose shutdown progress. Repeating close resumes it.
-        self.persistence
+        self.session
+            .persistence
             .as_ref()
             .expect("open while closing")
             .shutdown_async()
             .await?;
-        self.persistence.take();
+        self.session.persistence.take();
         self.last_receipt.clone().ok_or(NotesError::Closed)
     }
 }
@@ -677,6 +776,7 @@ mod tests {
             assert_eq!(after.markdown, before.markdown);
             assert_eq!(after.document, before.document);
             notes
+                .session
                 .library
                 .update_read_only(id.as_str(), Some("Protected".into()));
             assert!(matches!(
@@ -754,3 +854,7 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "backend_tests.rs"]
+mod backend_tests;

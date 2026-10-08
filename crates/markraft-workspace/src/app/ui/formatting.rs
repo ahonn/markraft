@@ -552,10 +552,10 @@ impl MarkraftApp {
     /// as it holds. The rest are true but not urgent.
     pub(super) fn file_states(&self) -> Vec<FileState> {
         let mut states = Vec::new();
-        if self.persistence.is_none() {
+        if self.notes.persistence.is_none() {
             return states;
         }
-        let note = self.library.active_note();
+        let note = self.notes.library.active_note();
         if let Some(error) = self.feedback.error() {
             states.push(FileState {
                 id: "state-unsaved",

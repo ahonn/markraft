@@ -75,7 +75,7 @@ impl MarkraftApp {
         }
         let editor = self.editor().read(cx);
         let writable = !self.is_reloading()
-            && self.library.active_note().read_only.is_none()
+            && self.notes.library.active_note().read_only.is_none()
             && !editor.is_composing();
         let state = match intent {
             Intent::Edit(command) => {

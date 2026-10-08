@@ -471,7 +471,15 @@ type TransactionGuard = Box<dyn Fn(&[Transaction]) -> Result<(), EditRejection>>
 /// knows rather than by looking at the disk.
 pub type WikiResolver = Box<dyn Fn(&str) -> bool>;
 
-/// Fetches the bytes behind a remote image URL. It is called on a background
+/// The scheme of an image source that names a host-owned asset, not a file or a URL.
+pub const ASSET_SCHEME: &str = "markraft-asset:";
+
+/// Loads the bytes behind a host-owned [`ASSET_SCHEME`] reference. It receives the
+/// whole source, runs on a background thread, and may block. It never depends on
+/// whether remote images are fetched.
+pub type AssetLoader = Arc<dyn Fn(&str) -> Result<Vec<u8>, String> + Send + Sync>;
+
+/// Fetches the bytes behind a remote image URL. It runs on a background
 /// thread, once per image source while that source stays in the document, and may
 /// block. An error is shown as an image that could not be loaded; what went wrong
 /// is the host's to log.
@@ -913,6 +921,13 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Load host-owned asset references with `loader`, or, with `None`, show every
+    /// one as a missing image.
+    pub fn set_asset_loader(&mut self, loader: Option<AssetLoader>, cx: &mut Context<Self>) {
+        self.shaping.set_asset_loader(loader);
+        cx.notify();
+    }
+
     /// Whether an animated picture plays while the pointer rests on it. On by
     /// default; off, every one shows only its first frame.
     pub fn set_animate_images(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -986,13 +1001,22 @@ impl EditorView {
         cx.notify();
     }
 
-    /// Start a background fetch for each remote image the last layout asked for.
+    /// Start a background fetch for each remote image and host-owned asset the
+    /// last layout asked for.
     pub(crate) fn fetch_remote_images(&mut self, cx: &mut Context<Self>) {
-        let Some(fetcher) = self.shaping.remote_images().cloned() else {
-            return;
-        };
+        fn current(shaping: &shaping::Shaping, asset: bool) -> Option<&RemoteImageFetcher> {
+            if asset {
+                shaping.asset_loader()
+            } else {
+                shaping.remote_images()
+            }
+        }
         for source in self.shaping.images().take_requests() {
-            let fetcher = fetcher.clone();
+            let asset = images::is_asset(&source);
+            let Some(fetcher) = current(&self.shaping, asset).cloned() else {
+                continue;
+            };
+            let requested_by = fetcher.clone();
             cx.spawn(async move |this, cx| {
                 let fetching = source.clone();
                 let result = cx
@@ -1000,6 +1024,11 @@ impl EditorView {
                     .spawn(async move { images::fetch(&fetcher, &fetching) })
                     .await;
                 let _ = this.update(cx, |this, cx| {
+                    if !current(&this.shaping, asset)
+                        .is_some_and(|current| Arc::ptr_eq(current, &requested_by))
+                    {
+                        return;
+                    }
                     if this.shaping.finish_remote_image(&source, result) {
                         cx.notify();
                     }

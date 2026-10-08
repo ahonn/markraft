@@ -10,6 +10,8 @@ description = "Headless Markdown notes, ordered persistence, and document sessio
 [features]
 default = []
 test-support = []
+# Contract checks that a host runs against its own NotesBackend.
+conformance = []
 
 [dependencies]
 markraft-core.workspace = true
@@ -18,9 +20,10 @@ futures-channel = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 log = "0.4"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 notify = "8"
 rust-i18n = "4"
 unicode-segmentation = "1.12"
