@@ -41,6 +41,8 @@ jobs:
         run: python3 -m unittest discover -s ci_scripts/tests -v
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Check independent integration consumers
+        run: sh examples/integration/check.sh
       - name: Check the Mac App Store channel
         run: cargo clippy -p markraft-app -p markraft-workspace --all-targets --no-default-features --features markraft-app/mac-app-store --locked -- -D warnings
       - name: Test the Mac App Store channel

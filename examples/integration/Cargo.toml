@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["notes-cli", "workspace-host"]
+
+[workspace.package]
+edition = "2024"
+publish = false
+
+# Cargo reads patches from the consumer's workspace root.
+[patch.crates-io]
+gpui-pre-macos = { path = "../../.build/dependencies/gpui-pre-macos" }
+
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = 0
+strip = "none"
+
+# Keep macro dylibs loadable with the Xcode 27 linker and strip tools.
+[profile.dev.build-override]
+strip = "none"
+
+[profile.release.build-override]
+strip = "none"

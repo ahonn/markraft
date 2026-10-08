@@ -1,0 +1,10 @@
+[package]
+name = "markraft-notes-consumer"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+markraft-notes = { path = "../../../crates/markraft-notes" }
+futures = { version = "0.3", default-features = false, features = ["executor"] }
+tempfile = "3"
