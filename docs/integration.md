@@ -277,12 +277,26 @@ fn main() {
 Keep the feature disabled if the host does not provide this native capability.
 Verify the resulting executable on the oldest macOS version the host supports.
 
+## Interface compatibility
+
+The public interface of `markraft-notes` is `NotesLibrary`, `NotesBackend`, and the types that they use.
+The public interface of `markraft-workspace` is `WorkspaceView`, its options, and its events.
+The store, the storage worker, and the settings file have no compatibility promise.
+A host cannot name them without the `unstable-internals` feature of `markraft-notes`.
+Do not enable that feature in a host.
+
+`scripts/check-public-api.sh` compares both public interfaces with the latest release.
+It uses `cargo-semver-checks`, and it runs on each pull request.
+A change that breaks a host fails the check.
+To release such a change, add a change file that declares the release `major`.
+
 ## Verification boundaries
 
 The consumer check builds and links the complete workspace host.
 It runs the notes service example with Markdown and SQLite storage.
 It also tests SQLite persistence, stale writes, rollback, tombstones, history, dirty acknowledgements, and attachment identity.
 It also rejects GPUI and application dependencies in the notes consumer's dependency tree.
+It also confirms that the notes consumer does not enable `unstable-internals`.
 
 Compilation does not verify native input, focus, window behavior, or file-access grants.
 Test those behaviors in the actual host application.

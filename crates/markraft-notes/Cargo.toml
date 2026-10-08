@@ -12,6 +12,9 @@ default = []
 test-support = []
 # Contract checks that a host runs against its own NotesBackend.
 conformance = []
+# Names the store, the storage worker and the settings file for the Markraft
+# workspace and application. No compatibility promise.
+unstable-internals = []
 
 [dependencies]
 markraft-core.workspace = true

@@ -15,7 +15,7 @@ mac-app-store = ["markraft-workspace/mac-app-store"]
 updater-mock = ["direct-distribution"]
 
 [dependencies]
-markraft-notes = { path = "../markraft-notes" }
+markraft-notes = { path = "../markraft-notes", features = ["unstable-internals"] }
 markraft-workspace = { path = "../markraft-workspace", features = ["bundled-settings", "native-translation"] }
 gpui.workspace = true
 gpui_platform.workspace = true
