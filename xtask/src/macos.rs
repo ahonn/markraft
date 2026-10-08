@@ -14,7 +14,7 @@ const VOLUME_NAME: &str = "Markraft";
 // Served from an R2 bucket on our own domain rather than a GitHub release asset,
 // so hosting can move and prereleases can get a feed without rebuilding old apps.
 const FEED_URL: &str = "https://updates.markraft.app/appcast.xml";
-const LOCALE_CATALOG: &str = include_str!("../../crates/markraft-app/locale_catalog.json");
+const LOCALE_CATALOG: &str = include_str!("../../crates/markraft-notes/locale_catalog.json");
 /// The architectures a universal app joins, the first one's bundle being the base.
 pub const UNIVERSAL_TARGETS: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
 

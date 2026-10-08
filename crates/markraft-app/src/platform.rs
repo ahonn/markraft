@@ -2,16 +2,6 @@
 //!
 //! Create and use this object on AppKit's main thread. GPUI owns the native
 //! window; native pointers below are borrowed only for the duration of a call.
-pub(crate) mod checking_panel;
-pub(crate) mod context_menu;
-pub(crate) mod locale;
-pub(crate) mod print;
-pub(crate) mod symbols;
-pub(crate) mod text_checking;
-pub(crate) mod text_geometry;
-pub(crate) mod text_requestor;
-pub(crate) mod text_services;
-pub(crate) mod translation;
 
 use crate::locale::Message;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
@@ -106,57 +96,7 @@ pub fn debug_info() -> String {
     )
 }
 
-/// Seconds this Mac's clock stands ahead of UTC, including whatever daylight saving is
-/// in force. Timestamps are stored in UTC; a date shown to the user has to be the one
-/// on their calendar, so it is read through this.
-pub fn local_utc_offset() -> i64 {
-    unsafe {
-        let zone: *mut AnyObject = msg_send![class!(NSTimeZone), localTimeZone];
-        if zone.is_null() {
-            return 0;
-        }
-        let seconds: isize = msg_send![zone, secondsFromGMT];
-        seconds as i64
-    }
-}
-
-/// The global shortcuts: one shows and hides the note, one opens a new note, and one
-/// opens today's daily note.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Shortcut {
-    Toggle,
-    NewNote,
-    DailyNote,
-}
-
-impl Shortcut {
-    pub const ALL: [Shortcut; 3] = [Shortcut::Toggle, Shortcut::NewNote, Shortcut::DailyNote];
-
-    fn index(self) -> usize {
-        self as usize
-    }
-
-    fn event(self) -> PlatformEvent {
-        match self {
-            Shortcut::Toggle => PlatformEvent::Toggle,
-            Shortcut::NewNote => PlatformEvent::NewNote,
-            Shortcut::DailyNote => PlatformEvent::DailyNote,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PlatformEvent {
-    Toggle,
-    NewNote,
-    DailyNote,
-    Settings,
-    #[cfg(feature = "direct-distribution")]
-    CheckForUpdates,
-    ReportIssue,
-    Quit,
-}
-
+pub use markraft_workspace::platform::{PlatformEvent, Shortcut};
 pub struct Platform {
     _tray: TrayIcon,
     hotkeys: GlobalHotKeyManager,
@@ -260,14 +200,14 @@ impl Platform {
                 Message::new("error.shortcut-invalid").arg("shortcut", shortcut.to_owned())
             })?)
         };
-        let current = self.shortcuts[which.index()];
+        let current = self.shortcuts[which as usize];
         if current == next {
             return Ok(());
         }
         if next.is_some()
             && Shortcut::ALL
                 .iter()
-                .any(|other| *other != which && self.shortcuts[other.index()] == next)
+                .any(|other| *other != which && self.shortcuts[*other as usize] == next)
         {
             return Err(
                 Message::new("error.shortcut-duplicate").arg("shortcut", shortcut.to_owned())
@@ -288,7 +228,7 @@ impl Platform {
             log::warn!("a shortcut could not be released: {error}");
             return Err(Message::new("error.shortcut-release"));
         }
-        self.shortcuts[which.index()] = next;
+        self.shortcuts[which as usize] = next;
         Ok(())
     }
 
@@ -493,14 +433,17 @@ impl Platform {
             if event.state != HotKeyState::Pressed {
                 continue;
             }
-            if let Some(which) = Shortcut::ALL
-                .into_iter()
-                .find(|which| self.shortcuts[which.index()].is_some_and(|key| key.id() == event.id))
-            {
-                events.push(which.event());
+            if let Some(which) = Shortcut::ALL.into_iter().find(|which| {
+                self.shortcuts[*which as usize].is_some_and(|key| key.id() == event.id)
+            }) {
+                events.push(match which {
+                    Shortcut::Toggle => PlatformEvent::Toggle,
+                    Shortcut::NewNote => PlatformEvent::NewNote,
+                    Shortcut::DailyNote => PlatformEvent::DailyNote,
+                });
             }
         }
-        for event in context_menu::take_application_events() {
+        while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
             if let Some((_, action)) = self.menu_actions.iter().find(|(id, _)| *id == event.id) {
                 events.push(*action);
             }
@@ -602,80 +545,6 @@ fn menu_bar_failure(detail: impl std::fmt::Display) -> Message {
 /// drawn at its own scale against the view's top edge.
 const NS_VIEW_LAYER_CONTENTS_PLACEMENT_TOP: isize = 4;
 
-/// A window's AppKit side, taken out of GPUI so it can be changed outside GPUI's own
-/// update. AppKit tells GPUI of every size a resize passes through, and GPUI can only
-/// hear it while nothing else is updating the app: a resize made inside an update
-/// leaves GPUI drawing at the size the window had before.
-pub struct NativeWindow {
-    window: *mut AnyObject,
-    view: *mut AnyObject,
-}
-
-impl NativeWindow {
-    /// Only for use within the same turn of the run loop, while the window is open.
-    pub fn of(window: &gpui::Window) -> Option<Self> {
-        Some(Self {
-            window: native_window(window).ok()?,
-            view: native_view(window).ok()?,
-        })
-    }
-
-    /// Give the window a content height of `height`, keeping its top edge where
-    /// space allows and keeping it inside the screen's visible area. An animation
-    /// runs to its end inside this call.
-    pub fn fit_height(&self, height: f32, animate: bool) {
-        unsafe {
-            // Should a step of the animation come before GPUI has drawn at its size,
-            // the last frame is pinned under the title bar rather than stretched.
-            let _: () = msg_send![
-                self.view,
-                setLayerContentsPlacement: NS_VIEW_LAYER_CONTENTS_PLACEMENT_TOP
-            ];
-            let frame: NSRect = msg_send![self.window, frame];
-            let content: NSRect = msg_send![self.window, contentRectForFrameRect: frame];
-            let chrome = frame.size.y - content.size.y;
-            let screen: *mut AnyObject = msg_send![self.window, screen];
-            let visible = (!screen.is_null()).then(|| msg_send![screen, visibleFrame]);
-            let next = fitted_window_frame(frame, f64::from(height) + chrome, visible);
-            let _: () = msg_send![
-                self.window,
-                setFrame: next,
-                display: Bool::YES,
-                animate: Bool::new(animate)
-            ];
-        }
-    }
-}
-
-/// AppKit frames share global coordinates with a bottom-left origin. Keep the
-/// window's width; a side Dock can require a horizontal move but not a resize.
-fn fitted_window_frame(frame: NSRect, height: f64, visible: Option<NSRect>) -> NSRect {
-    let mut next = NSRect {
-        origin: NSPoint {
-            x: frame.origin.x,
-            y: frame.origin.y + frame.size.y - height,
-        },
-        size: NSPoint {
-            x: frame.size.x,
-            y: height,
-        },
-    };
-    if let Some(visible) = visible {
-        next.size.y = height.min(visible.size.y);
-        next.origin.x = frame
-            .origin
-            .x
-            .min(visible.origin.x + visible.size.x - next.size.x)
-            .max(visible.origin.x);
-        next.origin.y = (frame.origin.y + frame.size.y - next.size.y)
-            .min(visible.origin.y + visible.size.y - next.size.y)
-            .max(visible.origin.y);
-    }
-    next
-}
-
-/// Move `native` to the display under the pointer, where it sits as far from that
-/// display's top-left as it did from its own, pulled back inside if it would overhang.
 fn move_to_pointer_screen(native: *mut AnyObject) {
     unsafe {
         let pointer: NSPoint = msg_send![class!(NSEvent), mouseLocation];
@@ -833,73 +702,64 @@ fn diagnostics(event: &str) {
     }
 }
 
+impl markraft_workspace::platform::PlatformServices for Platform {
+    fn set_locale(&mut self, i18n: &crate::locale::I18n) {
+        Platform::set_locale(self, i18n)
+    }
+    fn configure_window(&mut self, window: &mut gpui::Window) -> Result<(), Message> {
+        Platform::configure_window(self, window)
+    }
+    fn set_shortcut(&mut self, which: Shortcut, shortcut: &str) -> Result<(), Message> {
+        Platform::set_shortcut(self, which, shortcut)
+    }
+    fn suspend_shortcuts(&mut self) {
+        Platform::suspend_shortcuts(self)
+    }
+    fn resume_shortcuts(&mut self) -> Result<(), Message> {
+        Platform::resume_shortcuts(self)
+    }
+    fn app_is_active(&self) -> bool {
+        Platform::app_is_active(self)
+    }
+    fn set_always_on_top(&self, window: &gpui::Window, value: bool) -> Result<(), Message> {
+        Platform::set_always_on_top(self, window, value)
+    }
+    fn set_all_spaces(&self, window: &gpui::Window, value: bool) -> Result<(), Message> {
+        Platform::set_all_spaces(self, window, value)
+    }
+    fn launch_at_login_enabled(&self) -> bool {
+        Platform::launch_at_login_enabled(self)
+    }
+    fn set_launch_at_login(&mut self, value: bool) -> Result<(), Message> {
+        Platform::set_launch_at_login(self, value)
+    }
+    fn pointer_inside(&self, window: &gpui::Window) -> bool {
+        Platform::pointer_inside(self, window)
+    }
+    fn poll_events(&self) -> Vec<PlatformEvent> {
+        Platform::poll_events(self)
+    }
+    fn show(&mut self, window: &mut gpui::Window, follow: bool) -> Result<(), Message> {
+        Platform::show(self, window, follow)
+    }
+    fn hide(&mut self, window: &mut gpui::Window) -> Result<(), Message> {
+        Platform::hide(self, window)
+    }
+    fn is_visible(&self, window: &gpui::Window) -> bool {
+        Platform::is_visible(self, window)
+    }
+    fn return_to_previous_app(&self) {
+        Platform::return_to_previous_app(self)
+    }
+    fn remember_frontmost_app(&mut self) {
+        Platform::remember_frontmost_app(self)
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-
-    fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
-        NSRect {
-            origin: NSPoint { x, y },
-            size: NSPoint {
-                x: width,
-                y: height,
-            },
-        }
-    }
-
-    fn frame_values(frame: NSRect) -> [f64; 4] {
-        [frame.origin.x, frame.origin.y, frame.size.x, frame.size.y]
-    }
-
-    #[test]
-    fn fit_height_keeps_the_top_edge_when_the_page_fits() {
-        let visible = rect(0., 40., 1440., 836.);
-        let frame = rect(120., 400., 520., 420.);
-        for height in [300., 720.] {
-            let next = fitted_window_frame(frame, height, Some(visible));
-            assert_eq!(frame_values(next), [120., 820. - height, 520., height]);
-        }
-    }
-
-    #[test]
-    fn fit_height_moves_a_growing_window_above_the_bottom_dock() {
-        let next = fitted_window_frame(
-            rect(120., 60., 520., 420.),
-            720.,
-            Some(rect(0., 40., 1440., 836.)),
-        );
-        assert_eq!(frame_values(next), [120., 40., 520., 720.]);
-    }
-
-    #[test]
-    fn fit_height_limits_tall_pages_to_the_visible_screen() {
-        let next = fitted_window_frame(
-            rect(-1300., 1200., 520., 420.),
-            720.,
-            Some(rect(-1440., 1000., 1440., 600.)),
-        );
-        assert_eq!(frame_values(next), [-1300., 1000., 520., 600.]);
-    }
-
-    #[test]
-    fn fit_height_avoids_side_docks_without_changing_the_width() {
-        for (visible, x, expected_x) in [
-            (rect(80., 0., 1360., 876.), 20., 80.),
-            (rect(0., 0., 1360., 876.), 900., 840.),
-            // A narrower display still keeps the title bar's left edge reachable.
-            (rect(80., 0., 400., 876.), 900., 80.),
-        ] {
-            let next = fitted_window_frame(rect(x, 400., 520., 420.), 600., Some(visible));
-            assert_eq!(frame_values(next), [expected_x, 220., 520., 600.]);
-        }
-    }
-
-    #[test]
-    fn fit_height_keeps_the_top_edge_when_the_screen_is_unavailable() {
-        let next = fitted_window_frame(rect(120., 60., 520., 420.), 720., None);
-        assert_eq!(frame_values(next), [120., -240., 520., 720.]);
-    }
 
     #[test]
     fn debug_info_names_the_version_and_the_system() {

@@ -1,26 +1,15 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
-mod app;
+use markraft_notes::{fs, locale, storage, vault};
+use markraft_workspace::app;
+use markraft_workspace::file_access;
 mod crash;
-mod daily;
-mod doc;
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod e2e;
-mod export;
-mod file_access;
-mod fs;
+mod host;
 mod instance;
-mod locale;
 mod logging;
-mod persistence;
 mod platform;
-mod remote_images;
-mod send;
-mod storage;
 mod updater;
-mod vault;
 
-use app::{MarkraftApp, bind_app_keys};
+use app::MarkraftApp;
 use gpui::*;
 use instance::{Instance, Launch, Request};
 use platform::Platform;
@@ -157,15 +146,10 @@ fn main() {
         cx.dispatch_action(&app::Show);
     });
     application.run(move |cx: &mut App| {
-        // Its controls' bindings live in their own key contexts, so binding it first
-        // leaves every editor and app binding free to answer where it applies.
-        gpui_base::init(cx);
-        markraft_gpui::bind_keys(cx);
-        markraft_gpui::use_system_pasteboard(cx);
-        // After the editor's own bindings, so that at the editor's context depth vim's
-        // win; its predicates stand aside for the typeahead where that matters.
-        markraft_vim::bind_keys(cx);
-        bind_app_keys(cx);
+        markraft_workspace::bind_workspace_keys(cx);
+        // The application, rather than an embedded pane, owns process-wide Quit.
+        cx.bind_keys([KeyBinding::new("cmd-q", app::Quit, None)]);
+        host::set_app_menus(&locale::I18n::for_preference(&preferences.language), cx);
         cx.set_reduce_motion(Platform::system_reduce_motion());
         let platform = Platform::new();
         let size = size(px(480.), px(320.));
@@ -208,21 +192,108 @@ fn main() {
             },
             move |window, cx| {
                 let app = cx.new(|cx| {
-                    MarkraftApp::new(
+                    let mut view = MarkraftApp::new(
                         Some(directory),
                         settings_path,
                         store,
                         library,
                         preferences,
                         error,
-                        Some(platform),
-                        updater::Updater::new(),
-                        instance,
+                        Some(
+                            platform.map(|p| Box::new(p) as markraft_workspace::platform::Platform),
+                        ),
+                        Box::new(host::Updates::new()),
+                        Box::new(instance),
                         window,
                         cx,
                     )
-                    .with_file_access(file_access)
+                    .with_file_access(file_access);
+                    let cache = env::var_os("HOME")
+                        .map(PathBuf::from)
+                        .map(|home| home.join("Library/Caches/Markraft/Remote Images"));
+                    view.set_remote_image_cache(cache, cx);
+                    view
                 });
+                let quitting = app.downgrade();
+                cx.on_app_quit(move |cx| {
+                    let pending = quitting
+                        .update(cx, |view, cx| {
+                            if view.is_closed() {
+                                None
+                            } else {
+                                Some(view.flush_on_system_quit(cx))
+                            }
+                        })
+                        .ok()
+                        .flatten();
+                    async move {
+                        if let Some(pending) = pending
+                            && let Err(error) = pending.await
+                        {
+                            log::error!("System quit could not save notes: {error}");
+                        }
+                    }
+                })
+                .detach();
+                let handle = window.window_handle();
+                let quit_pending = std::rc::Rc::new(std::cell::Cell::new(false));
+                cx.subscribe(
+                    &app,
+                    move |view, event: &markraft_workspace::WorkspaceEvent, cx| {
+                        let view = view.clone();
+                        match event {
+                            markraft_workspace::WorkspaceEvent::OpenSettings => {
+                                cx.defer(move |cx| {
+                                    let _ = handle.update(cx, |_, window, cx| {
+                                        view.update(cx, |view, cx| {
+                                            view.open_bundled_settings(window, cx)
+                                        })
+                                    });
+                                });
+                            }
+                            markraft_workspace::WorkspaceEvent::QuitRequested => {
+                                if quit_pending.replace(true) {
+                                    return;
+                                }
+                                let quit_pending = quit_pending.clone();
+                                cx.defer(move |cx| {
+                                    let _ = handle.update(cx, |_, window, cx| {
+                                        view.update(cx, |view, cx| {
+                                            host::close_when_ready(
+                                                view,
+                                                window,
+                                                cx,
+                                                Box::new(move |result, _, cx| {
+                                                    quit_pending.set(false);
+                                                    match result {
+                                                        Ok(()) => cx.quit(),
+                                                        Err(error) => log::error!(
+                                                            "Could not close notes: {error}"
+                                                        ),
+                                                    }
+                                                }),
+                                            )
+                                        })
+                                    });
+                                });
+                            }
+                            markraft_workspace::WorkspaceEvent::HideRequested => cx.hide(),
+                            markraft_workspace::WorkspaceEvent::ReportIssue => {
+                                cx.open_url(&crash::new_issue_url(&platform::debug_info()))
+                            }
+                            markraft_workspace::WorkspaceEvent::RevealLogs => {
+                                if let Some(directory) = crash::directory() {
+                                    cx.reveal_path(&logging::file(&directory));
+                                }
+                            }
+                            markraft_workspace::WorkspaceEvent::OptionsChanged(_) => {}
+                            markraft_workspace::WorkspaceEvent::LocaleChanged(i18n) => {
+                                host::set_app_menus(i18n, cx)
+                            }
+                        }
+                    },
+                )
+                .detach();
                 for notice in access_notices {
                     app.update(cx, |app, cx| app.announce(notice, cx));
                 }

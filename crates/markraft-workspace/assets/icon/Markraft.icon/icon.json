@@ -1,0 +1,30 @@
+{
+  "fill": {
+    "solid": "srgb:0.18431373,0.48627451,0.96470588,1.00000000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "glass": false,
+          "image-name": "markraft-m.svg",
+          "name": "Parallel-cut M"
+        }
+      ],
+      "lighting": "combined",
+      "name": "Markraft M",
+      "shadow": {
+        "kind": "none",
+        "opacity": 0
+      },
+      "specular": false,
+      "translucency": {
+        "enabled": false,
+        "value": 0
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}

@@ -4137,43 +4137,25 @@ dependencies = [
 name = "markraft-app"
 version = "0.1.9"
 dependencies = [
- "base64 0.22.1",
- "block2 0.6.2",
- "chrono",
- "futures-channel",
- "futures-util",
  "global-hotkey",
- "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",
  "libc",
  "log",
- "markraft-commonmark",
- "markraft-core",
  "markraft-gpui",
- "markraft-math",
- "markraft-media",
- "markraft-syntax",
- "markraft-vim",
+ "markraft-notes",
+ "markraft-workspace",
  "notify",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
- "objc2-natural-language",
- "objc2-web-kit",
- "png 0.17.16",
  "raw-window-handle",
- "resvg",
- "rust-i18n",
  "serde",
  "serde_json",
  "sparkle-updater",
  "tempfile",
  "tray-icon",
- "unicode-segmentation",
- "ureq",
  "url",
- "uuid",
 ]
 
 [[package]]
@@ -4242,6 +4224,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "markraft-notes"
+version = "0.1.9"
+dependencies = [
+ "chrono",
+ "futures",
+ "futures-channel",
+ "futures-util",
+ "libc",
+ "log",
+ "markraft-commonmark",
+ "markraft-core",
+ "notify",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "rust-i18n",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unicode-segmentation",
+ "uuid",
+]
+
+[[package]]
 name = "markraft-syntax"
 version = "0.1.9"
 dependencies = [
@@ -4257,6 +4262,46 @@ dependencies = [
  "markraft-commonmark",
  "markraft-core",
  "markraft-gpui",
+]
+
+[[package]]
+name = "markraft-workspace"
+version = "0.1.9"
+dependencies = [
+ "base64 0.22.1",
+ "block2 0.6.2",
+ "chrono",
+ "futures-channel",
+ "futures-util",
+ "global-hotkey",
+ "gpui-base",
+ "gpui-pre",
+ "libc",
+ "log",
+ "markraft-commonmark",
+ "markraft-core",
+ "markraft-gpui",
+ "markraft-math",
+ "markraft-media",
+ "markraft-notes",
+ "markraft-syntax",
+ "markraft-vim",
+ "muda",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "objc2-natural-language",
+ "objc2-web-kit",
+ "png 0.17.16",
+ "raw-window-handle",
+ "resvg",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unicode-segmentation",
+ "ureq",
+ "url",
+ "uuid",
 ]
 
 [[package]]

@@ -1,7 +1,8 @@
 //! Sparkle stays on AppKit's main thread; callbacks hand work to the app's poll loop.
 use crate::locale::Message;
+use markraft_workspace::updater::RelaunchContinuation;
 use objc2_foundation::{NSBundle, NSString};
-use sparkle_updater::{MainThreadMarker, RelaunchContinuation, SparkleUpdater, UpdaterConfig};
+use sparkle_updater::{MainThreadMarker, SparkleUpdater, UpdaterConfig};
 use std::{cell::RefCell, path::Path, rc::Rc};
 
 const UNBUNDLED: &str = "error.updates-unbundled";
@@ -71,7 +72,11 @@ impl Updater {
                 relaunch_handler: Some(Rc::new(move |_, continuation| {
                     // Never borrow GPUI from a native callback: Sparkle can call back
                     // synchronously while MarkraftApp is already being updated.
-                    pending.borrow_mut().request(continuation);
+                    pending.borrow_mut().request(Box::new(move || {
+                        if let Some(main_thread) = MainThreadMarker::new() {
+                            continuation.resume(main_thread);
+                        }
+                    }) as RelaunchContinuation);
                 })),
                 ..Default::default()
             },
@@ -84,19 +89,6 @@ impl Updater {
             }
         }
         this
-    }
-
-    /// An updater that never checks: for the headless tests, which run off the main
-    /// thread and outside any bundle.
-    #[cfg(test)]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    pub fn disabled() -> Self {
-        Self {
-            native: None,
-            unavailable: Message::new(UNBUNDLED),
-            pending: Rc::new(RefCell::new(PendingRelaunch::default())),
-            startup_error: None,
-        }
     }
 
     fn fail(&mut self, message: Message) {
@@ -204,12 +196,6 @@ impl<T> PendingRelaunch<T> {
     fn retry(&mut self) -> bool {
         self.ready = self.continuation.is_some();
         self.ready
-    }
-}
-
-pub fn resume(continuation: RelaunchContinuation) {
-    if let Some(main_thread) = MainThreadMarker::new() {
-        continuation.resume(main_thread);
     }
 }
 

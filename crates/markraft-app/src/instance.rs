@@ -2,6 +2,7 @@
 use crate::fs::StoreError;
 use crate::locale::Message;
 use std::{
+    cell::Cell,
     fs::{File, OpenOptions, TryLockError},
     io::{self, Read, Write},
     os::unix::{
@@ -194,7 +195,9 @@ impl Instance {
 /// exceed macOS's 104-byte socket pathname limit. Each operation opens its own
 /// lock handle, so concurrent callers never share ownership of the queue lock.
 struct LaunchChannel {
-    _watcher: notify::RecommendedWatcher,
+    _watcher_stop: mpsc::Sender<()>,
+    watcher_ready: Arc<AtomicBool>,
+    last_poll: Cell<Instant>,
     dirty: Arc<AtomicBool>,
     directory: tempfile::TempDir,
 }
@@ -223,32 +226,52 @@ impl LaunchChannel {
             .mode(0o600)
             .open(directory.path().join("queue.lock"))?;
         let dirty = Arc::new(AtomicBool::new(true));
+        let watcher_ready = Arc::new(AtomicBool::new(false));
+        let ready = watcher_ready.clone();
         let changed = dirty.clone();
-        let mut watcher =
-            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                // Polling the UI should only inspect memory while the queue is idle.
-                // Ignore our own removals; create/modify also cover a crashed writer.
-                if event.is_err()
-                    || event.is_ok_and(|event| {
-                        event.need_rescan()
-                            || !matches!(event.kind, notify::EventKind::Remove(_))
-                                && event.paths.iter().any(|path| {
-                                    path.extension()
-                                        .is_some_and(|extension| extension == "request")
-                                })
-                    })
-                {
-                    changed.store(true, Ordering::Release);
+        let path = directory.path().to_owned();
+        let (stop, stopped) = mpsc::channel::<()>();
+        // FSEvents registration can block on a system daemon for many seconds.
+        // Publish the private spool immediately; bounded polling covers startup
+        // and watcher failures without delaying another launch's handoff.
+        std::thread::Builder::new()
+            .name("markraft-launch-watch".into())
+            .spawn(move || {
+                let notifications = changed.clone();
+                let watcher =
+                    notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                        if event.is_err()
+                            || event.is_ok_and(|event| {
+                                event.need_rescan()
+                                    || !matches!(event.kind, notify::EventKind::Remove(_))
+                                        && event.paths.iter().any(|path| {
+                                            path.extension()
+                                                .is_some_and(|extension| extension == "request")
+                                        })
+                            })
+                        {
+                            notifications.store(true, Ordering::Release);
+                        }
+                    });
+                let result = watcher.and_then(|mut watcher| {
+                    watcher.watch(&path, notify::RecursiveMode::NonRecursive)?;
+                    Ok(watcher)
+                });
+                match result {
+                    Ok(_watcher) => {
+                        ready.store(true, Ordering::Release);
+                        changed.store(true, Ordering::Release);
+                        // Disconnecting this sender releases the native watcher
+                        // off the UI thread; it owns no instance lock or TempDir.
+                        let _ = stopped.recv();
+                    }
+                    Err(error) => log::warn!("launch channel uses polling: {error}"),
                 }
-            })
-            .map_err(io::Error::other)?;
-        watcher
-            .watch(directory.path(), notify::RecursiveMode::NonRecursive)
-            .map_err(io::Error::other)?;
-        // Establish the watcher before publishing the address. Starting dirty
-        // additionally covers changes that arrive before its first callback.
+            })?;
         Ok(Self {
-            _watcher: watcher,
+            _watcher_stop: stop,
+            watcher_ready,
+            last_poll: Cell::new(Instant::now()),
             dirty,
             directory,
         })
@@ -314,9 +337,13 @@ impl LaunchChannel {
     }
 
     fn receive(&self) -> Vec<Request> {
-        if !self.dirty.swap(false, Ordering::AcqRel) {
+        let changed = self.dirty.swap(false, Ordering::AcqRel);
+        let fallback = !self.watcher_ready.load(Ordering::Acquire)
+            && self.last_poll.get().elapsed() >= Duration::from_millis(250);
+        if !changed && !fallback {
             return Vec::new();
         }
+        self.last_poll.set(Instant::now());
         let directory = self.directory.path();
         let _lock = match Self::lock(directory) {
             Ok(lock) => lock,
