@@ -705,11 +705,9 @@ impl MarkraftApp {
             self.trashed = saved.trashed;
         }
         if !saved.conflicts.is_empty() && completion == SaveCompletion::Current {
-            // Disk won mid-save: toast and refresh so the editor adopts disk content.
-            if self.file_backed() {
-                self.feedback
-                    .queue(crate::storage::conflicts_kept(saved.conflicts.len()));
-            }
+            // Storage won mid-save: toast and refresh so the editor adopts its content.
+            self.feedback
+                .queue(crate::storage::conflicts_kept(saved.conflicts.len()));
             if let Some(persistence) = &self.notes.persistence {
                 persistence.refresh();
             }

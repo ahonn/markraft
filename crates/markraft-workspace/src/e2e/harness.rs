@@ -56,7 +56,7 @@ pub(crate) fn open_with<'a>(
     .expect("the store");
     let mut preferences = Preferences::default();
     configure(&mut preferences);
-    let directory = store.directory().to_owned();
+    let directory = store.directory().unwrap_or(&notes).to_owned();
     let (app, cx) = cx.add_window_view(|window, cx| {
         MarkraftApp::new(
             Some(directory),

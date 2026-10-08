@@ -573,6 +573,94 @@ fn reopening_a_logical_note_cannot_promote_a_dirty_edit_to_a_new_remote_revision
     });
 }
 
+#[test]
+fn a_save_that_storage_wins_keeps_the_local_edits_as_one_copy() {
+    block_on(async {
+        let backend = Memory::default();
+        let mut first = NotesLibrary::from_backend(Box::new(backend.clone())).unwrap();
+        let id = first.create("Base\n").unwrap();
+        first.flush().await.unwrap();
+        let mut second = NotesLibrary::from_backend(Box::new(backend.clone())).unwrap();
+        first
+            .edit(&id, first.note(&id).unwrap().revision, "First writer\n")
+            .unwrap();
+        first.flush().await.unwrap();
+        second
+            .edit(&id, second.note(&id).unwrap().revision, "Local pending\n")
+            .unwrap();
+        // The copy is committed by the save that finds the conflict, before any
+        // editor reads the stored version. A retry sees the same conflict.
+        assert!(second.flush().await.is_err());
+        assert!(second.flush().await.is_err());
+        {
+            let state = backend.0.lock().unwrap();
+            let copies: Vec<_> = state.records.values().filter(|n| n.id != id).collect();
+            assert_eq!(copies.len(), 1, "{copies:?}");
+            assert_eq!(copies[0].markdown, "Local pending\n");
+            assert!(
+                copies[0]
+                    .title
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("Local pending (conflicted copy ")
+            );
+            assert_eq!(state.records[id.as_str()].markdown, "First writer\n");
+        }
+        second.discard_local_changes_and_reload().await.unwrap();
+        assert_eq!(second.note(&id).unwrap().markdown, "First writer\n");
+        second.close().await.unwrap();
+        first.close().await.unwrap();
+    });
+}
+
+#[test]
+fn a_refused_deletion_puts_the_note_back_as_storage_holds_it() {
+    block_on(async {
+        let backend = Memory::default();
+        let mut notes = NotesLibrary::from_backend(Box::new(backend.clone())).unwrap();
+        let id = notes.create("Mine\n").unwrap();
+        notes.flush().await.unwrap();
+        let mut remote = backend.clone();
+        let old = remote.load().unwrap().notes.remove(0);
+        remote
+            .commit(BackendMutation::Put {
+                id: id.clone(),
+                expected: Some(old.revision),
+                markdown: "Theirs\n".into(),
+                title: None,
+                logical_key: None,
+                created_at: old.created_at,
+                updated_at: old.updated_at + 1,
+                pinned: false,
+            })
+            .unwrap();
+        // No refresh ran: the deletion reaches storage and is refused there.
+        notes
+            .delete(&id, notes.note(&id).unwrap().revision)
+            .unwrap();
+        let Err(NotesError::SaveFailed { receipt, .. }) = notes.flush().await else {
+            panic!("a refused deletion is not a completed save")
+        };
+        assert!(receipt.removed.is_empty());
+        assert!(receipt.outcomes.iter().any(|outcome| {
+            outcome.id == id
+                && outcome.deleted
+                && matches!(outcome.result, Err(BackendError::Conflict { .. }))
+        }));
+        // The note is listed again as storage holds it, and a later save does not
+        // retry the deletion.
+        settle(&notes).await;
+        assert!(notes.poll_changes().unwrap());
+        assert_eq!(notes.note(&id).unwrap().markdown, "Theirs\n");
+        notes.flush().await.unwrap();
+        assert_eq!(
+            backend.0.lock().unwrap().records[id.as_str()].markdown,
+            "Theirs\n"
+        );
+        notes.close().await.unwrap();
+    });
+}
+
 /// Wait until the worker has handled every request sent before this call.
 async fn settle(notes: &NotesLibrary) {
     let any = notes.session.library.notes[0].clone();

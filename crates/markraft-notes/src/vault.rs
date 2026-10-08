@@ -1,32 +1,31 @@
-//! In-place Markdown persistence. Application metadata never enters the workspace.
+//! The notes store: one copy of the rules for saving, for conflicts, and for changes
+//! made outside the application, over any [`NotesBackend`]. A folder of Markdown
+//! files is one backend; a host supplies the other kind.
 use crate::locale::Message;
 use crate::{
+    Asset, AssetId, BackendCapabilities, BackendError, BackendMutation, BackendNote,
+    BackendSnapshot, ChangeNotifier, NewRecord, NoteId, NoteSaveOutcome, NotesBackend,
+    StorageRevision,
+    directory::{MarkdownDirectory, ends_with_newline},
     doc,
-    fs::{
-        StoreError, atomic_write, copy_metadata, describe,
-        faults::{self, Stage},
-        inherit_folder_mode, move_to_trash, move_without_replacing, read_optional,
-        same_regular_file,
-    },
+    fs::StoreError,
     storage::{Library, Note, Notices, Preferences, Settings, WorkspaceSettings},
 };
 use markraft_commonmark::{SourceDocument, SourceTrack};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, File, OpenOptions},
-    io::{self, Write},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
-    time::UNIX_EPOCH,
 };
-use uuid::Uuid;
 
+/// One version of a note as storage holds it.
 #[derive(Clone)]
 struct Saved {
-    path: PathBuf,
-    bytes: Vec<u8>,
-    /// The file as first read, and as the editor last wrote it: kept for the
+    /// What storage calls this version. A write names the one it replaces.
+    revision: StorageRevision,
+    /// The Markdown as storage holds it.
+    text: String,
+    /// The text as first read, and as the editor last wrote it: kept for the
     /// whole session, across saves and undo, and shared with the note's
     /// editor so that what it takes on a keystroke is what a save writes.
     /// `None` for a file that is not Markdown this store can read.
@@ -37,72 +36,6 @@ struct Saved {
 pub enum External {
     Updated { previous: Option<Note>, note: Note },
     Removed(Note),
-}
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-struct Identity {
-    id: String,
-    pinned: bool,
-    created: u64,
-    /// The file left while Markraft was watching, which the window reported then.
-    /// The identity stays for a file that comes straight back, as one does when an
-    /// editor replaces it; the next launch drops it without saying so twice.
-    gone: bool,
-}
-/// The manifest layout this build writes. A folder whose manifest says more
-/// was last opened by a newer Markraft, and is refused rather than misread.
-const MANIFEST_VERSION: u32 = 1;
-#[derive(Default, Serialize, Deserialize)]
-#[serde(default)]
-struct Manifest {
-    version: u32,
-    paths: HashMap<PathBuf, Identity>,
-    workspace: WorkspaceSettings,
-    active_id: String,
-    loose: Vec<PathBuf>,
-}
-/// A leftover draft from a version that kept them. Only read now, and read
-/// forgivingly: a field this version does not know is not worth losing the text over.
-#[derive(Serialize, Deserialize, Default)]
-#[serde(default)]
-struct Recovery {
-    id: String,
-    path: Option<PathBuf>,
-    base: Vec<u8>,
-    source: Vec<u8>,
-    local: String,
-    disk: Option<Vec<u8>>,
-    conflict: bool,
-}
-/// The manifest in `bytes`, and whether it could not be read and was replaced.
-///
-/// It holds what Markraft remembers about the folder — identities, pins, the
-/// folder's settings — never a note's text, so an unreadable one is set aside
-/// beside itself and the folder opens fresh rather than not at all. One a newer
-/// Markraft wrote is refused instead: starting fresh would write over it.
-fn read_manifest(path: &Path, bytes: &[u8]) -> Result<(Manifest, bool), StoreError> {
-    let newer = || StoreError::Invalid(Message::new("error.newer-folder"));
-    match serde_json::from_slice::<Manifest>(bytes) {
-        Ok(manifest) if manifest.version > MANIFEST_VERSION => Err(newer()),
-        Ok(manifest) => Ok((manifest, false)),
-        Err(error) => {
-            let version = serde_json::from_slice::<serde_json::Value>(bytes)
-                .ok()
-                .and_then(|value| value.get("version")?.as_u64());
-            if version.is_some_and(|version| version > u64::from(MANIFEST_VERSION)) {
-                return Err(newer());
-            }
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |elapsed| elapsed.as_secs());
-            let aside = path.with_file_name(format!("manifest.unreadable-{stamp}.json"));
-            log::warn!("{} could not be read: {error}", path.display());
-            if let Err(error) = fs::rename(path, &aside) {
-                log::warn!("{} could not be set aside: {error}", path.display());
-            }
-            Ok((Manifest::default(), true))
-        }
-    }
 }
 /// Read-only editor baselines. The lock protects Arc lookups only; rendering and
 /// parsing always happen after it is released.
@@ -146,25 +79,6 @@ impl Sources {
             read_only: note.read_only.clone(),
             track: Some(track),
         });
-    }
-    pub(crate) fn accept_current(&self, id: &str) {
-        if let Some(versions) = self.0.lock().unwrap_or_else(|e| e.into_inner()).get_mut(id) {
-            versions.previous = None;
-            versions.history.clear();
-        }
-    }
-    pub(crate) fn clear(&self) {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    }
-    pub(crate) fn remove(&self, note: &Note) {
-        let mut entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let versions = entries.entry(note.id.clone()).or_default();
-        if versions.previous.is_none() {
-            versions.previous = versions.current.take();
-        } else {
-            versions.current = None;
-        }
-        versions.removed = Some(note.clone());
     }
     pub(crate) fn is_current_external(&self, change: &External) -> bool {
         let entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -233,45 +147,118 @@ fn same_external_version(left: &Note, right: &Note) -> bool {
         && left.read_only == right.read_only
 }
 
+/// Whether two versions of a note say different things. A pin is where the
+/// note sits in a list, not what it says, and never makes two versions conflict.
+fn differs(left: &Note, right: &Note) -> bool {
+    left.document != right.document
+        || left.title_override != right.title_override
+        || left.logical_key != right.logical_key
+}
+
+fn unsupported(operation: &'static str) -> StoreError {
+    StoreError::Backend(BackendError::Unsupported(operation))
+}
+fn invalid(reason: &str) -> StoreError {
+    StoreError::Backend(BackendError::Invalid(reason.into()))
+}
+
+/// Where the notes are kept. The store saves, refreshes and resolves conflicts
+/// through [`NotesBackend`] alone. What only a file has, such as a path, a move to
+/// another name and the Trash, it asks of the folder directly.
+enum Storage {
+    Directory(Box<MarkdownDirectory>),
+    Host(Box<dyn NotesBackend>),
+}
+impl Storage {
+    fn directory(&self) -> Option<&MarkdownDirectory> {
+        match self {
+            Self::Directory(directory) => Some(directory),
+            Self::Host(_) => None,
+        }
+    }
+    fn directory_mut(&mut self) -> Option<&mut MarkdownDirectory> {
+        match self {
+            Self::Directory(directory) => Some(directory),
+            Self::Host(_) => None,
+        }
+    }
+    fn capabilities(&self) -> BackendCapabilities {
+        match self {
+            Self::Directory(directory) => directory.capabilities(),
+            Self::Host(backend) => backend.capabilities(),
+        }
+    }
+    // The folder reports a failure in the reader's language and names the file.
+    // A host backend reports what its own error says.
+    fn load(&mut self) -> Result<BackendSnapshot, StoreError> {
+        match self {
+            Self::Directory(directory) => directory.snapshot(),
+            Self::Host(backend) => backend.load().map_err(StoreError::Backend),
+        }
+    }
+    fn read(&mut self, ids: &[NoteId]) -> Result<Vec<BackendNote>, StoreError> {
+        match self {
+            Self::Directory(directory) => directory.read_notes(ids),
+            Self::Host(backend) => backend.read(ids).map_err(StoreError::Backend),
+        }
+    }
+    fn commit(&mut self, mutation: BackendMutation) -> Result<StorageRevision, StoreError> {
+        match self {
+            Self::Directory(directory) => directory.commit_note(mutation),
+            Self::Host(backend) => backend.commit(mutation).map_err(StoreError::Backend),
+        }
+    }
+    fn save_workspace(
+        &mut self,
+        active_id: &NoteId,
+        workspace: &WorkspaceSettings,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Directory(directory) => directory.save_folder_state(Some(active_id), workspace),
+            Self::Host(backend) => backend
+                .save_workspace(Some(active_id), workspace)
+                .map_err(StoreError::Backend),
+        }
+    }
+}
+
 pub struct Store {
-    directory: PathBuf,
-    state: PathBuf,
-    settings_path: PathBuf,
-    persist_settings: bool,
-    _directory_lock: File,
-    _lock: File,
+    storage: Storage,
+    /// Every note as storage holds it now.
     files: HashMap<String, Saved>,
+    /// Notes that storage changed and no editor has taken yet. Nothing is written
+    /// over them until the change is acknowledged.
     pending: HashSet<String>,
+    /// What the editors last saw of a pending note: the version their edits were made against.
     previous: HashMap<String, Saved>,
     removed: HashMap<String, Note>,
-    /// Notes whose local edits were kept as a conflicted copy because disk won.
+    /// Notes whose local edits were kept as a conflicted copy because storage won.
     disk_won: HashSet<String>,
     /// Where the last save's deletions landed in the Trash, for the window to reveal.
     trashed: Vec<PathBuf>,
     /// Notes the last save was asked to delete and left in place.
     kept: Vec<String>,
-    manifest: Manifest,
-    manifest_bytes: Vec<u8>,
     sources: Arc<Sources>,
-    settings: Settings,
     notices: Notices,
-    loose: HashSet<PathBuf>,
     /// The style new Markdown is spelled in; the application hands over its own
-    /// through [`Store::set_house`], so a saved file follows the preferences the
+    /// through [`Store::set_house`], so a saved note follows the preferences the
     /// editor does.
     house: markraft_commonmark::HouseStyleHandle,
+    /// Asks the worker to read named notes again.
+    notify: Option<ChangeNotifier>,
+    /// The local versions already kept as a copy in a host backend, by note and
+    /// text. One conflict seen twice leaves one copy.
+    copies: HashSet<(String, String)>,
 }
 impl Store {
-    pub(crate) fn storage_revisions(&self) -> Vec<(String, crate::StorageRevision)> {
-        use sha2::{Digest, Sha256};
+    /// The revision each note's editors last saw, for every note that storage holds.
+    pub(crate) fn storage_revisions(&self) -> Vec<(String, StorageRevision)> {
         self.files
-            .iter()
-            .map(|(id, saved)| {
-                (
-                    id.clone(),
-                    crate::StorageRevision(format!("{:x}", Sha256::digest(&saved.bytes))),
-                )
-            })
+            .keys()
+            .chain(self.previous.keys())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .filter_map(|id| Some((id.clone(), self.baseline_of(id)?.revision.clone())))
             .collect()
     }
     /// Open the notes in `directory`, keeping the folder's state under the
@@ -282,57 +269,39 @@ impl Store {
         settings_path: PathBuf,
         settings: Settings,
     ) -> Result<(Self, Library), StoreError> {
-        if !directory.exists() {
-            return Err(describe(
-                &directory,
-                &io::Error::new(io::ErrorKind::NotFound, "not found"),
-            ));
-        }
-        let directory = fs::canonicalize(&directory).map_err(|e| describe(&directory, &e))?;
-        let mut hash = 0xcbf29ce484222325u64;
-        for byte in directory.as_os_str().as_encoded_bytes() {
-            hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
-        }
-        let settings_directory = settings_path.parent().unwrap_or(Path::new("."));
-        fs::create_dir_all(settings_directory).map_err(|e| describe(settings_directory, &e))?;
-        let state = fs::canonicalize(settings_directory)
-            .map_err(|e| describe(settings_directory, &e))?
-            .join("workspaces")
-            .join(format!("{hash:016x}"));
-        if state.starts_with(&directory) {
-            return Err(Message::new("error.settings-outside-folder").into());
-        }
-        fs::create_dir_all(&state).map_err(|e| describe(&state, &e))?;
-        // Lock the directory descriptor itself: every host coordinates on the
-        // same filesystem object without placing application files in the vault.
-        let directory_lock = File::open(&directory).map_err(|e| describe(&directory, &e))?;
-        directory_lock
-            .try_lock()
-            .map_err(|_| StoreError::Locked(Message::new("error.folder-locked")))?;
-        let lock_path = state.join("lock");
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|e| describe(&lock_path, &e))?;
-        lock.try_lock()
-            .map_err(|_| StoreError::Locked(Message::new("error.folder-locked")))?;
-        let manifest_path = state.join("manifest.json");
-        let (manifest, reset) =
-            match read_optional(&manifest_path).map_err(|e| describe(&manifest_path, &e))? {
-                Some(bytes) => read_manifest(&manifest_path, &bytes)?,
-                None => (Manifest::default(), false),
-            };
-        let loose: HashSet<PathBuf> = manifest.loose.iter().cloned().collect();
-        let mut store = Self {
+        let directory = MarkdownDirectory::open(directory, settings_path, settings)?;
+        Self::start(Storage::Directory(Box::new(directory)), Default::default())
+    }
+    /// Open a headless library without reading or writing a host settings file.
+    pub fn open_library(
+        directory: PathBuf,
+        state_directory: PathBuf,
+    ) -> Result<(Self, Library), StoreError> {
+        let directory = MarkdownDirectory::open(
             directory,
-            state,
-            settings_path,
-            persist_settings: true,
-            _directory_lock: directory_lock,
-            _lock: lock,
+            state_directory.join("settings.json"),
+            Settings::default(),
+        )?
+        .without_settings();
+        Self::start(Storage::Directory(Box::new(directory)), Default::default())
+    }
+    /// Open the notes that a host keeps in its own storage.
+    pub(crate) fn from_backend(
+        backend: Box<dyn NotesBackend>,
+        house: markraft_commonmark::HouseStyleHandle,
+    ) -> Result<(Self, Library), StoreError> {
+        Self::start(Storage::Host(backend), house)
+    }
+    fn start(
+        storage: Storage,
+        house: markraft_commonmark::HouseStyleHandle,
+    ) -> Result<(Self, Library), StoreError> {
+        let notices = storage
+            .directory()
+            .map(MarkdownDirectory::notices)
+            .unwrap_or_default();
+        let mut store = Self {
+            storage,
             files: HashMap::new(),
             pending: HashSet::new(),
             previous: HashMap::new(),
@@ -340,54 +309,50 @@ impl Store {
             disk_won: HashSet::new(),
             trashed: Vec::new(),
             kept: Vec::new(),
-            manifest,
-            manifest_bytes: Vec::new(),
             sources: Arc::default(),
-            settings,
-            notices: Notices::default(),
-            loose,
-            house: Default::default(),
+            notices,
+            house,
+            notify: None,
+            copies: HashSet::new(),
         };
-        if reset {
-            store
-                .notices
-                .raise(Message::new("error.folder-settings-reset"));
-        }
-        let mut library = store.scan_library()?;
-        store.restore_recovery(&mut library);
-        store.rebuild_sources();
-        Ok((store, library))
-    }
-    /// Open a headless library without reading or writing a host settings file.
-    pub fn open_library(
-        directory: PathBuf,
-        state_directory: PathBuf,
-    ) -> Result<(Self, Library), StoreError> {
-        let (mut store, library) = Self::open(
-            directory,
-            state_directory.join("settings.json"),
-            Settings::default(),
-        )?;
-        store.persist_settings = false;
+        let library = store.scan_library()?;
         Ok((store, library))
     }
 
     pub fn notices(&self) -> Notices {
         self.notices.clone()
     }
-    pub fn directory(&self) -> &Path {
-        &self.directory
+    #[cfg(test)]
+    fn state(&self) -> &Path {
+        self.storage.directory().expect("a notes folder").state()
+    }
+    #[cfg(test)]
+    fn remembers_no_paths(&self) -> bool {
+        self.storage
+            .directory()
+            .expect("a notes folder")
+            .remembers_no_paths()
+    }
+    /// The notes folder, when the notes are files.
+    pub fn directory(&self) -> Option<&Path> {
+        self.storage.directory().map(MarkdownDirectory::directory)
     }
     pub fn extra_watch_directories(&self) -> Vec<PathBuf> {
-        self.loose
-            .iter()
-            .filter(|p| !p.starts_with(&self.directory))
-            .filter_map(|p| p.parent().map(Path::to_owned))
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect()
+        self.storage
+            .directory()
+            .map(MarkdownDirectory::extra_watch_directories)
+            .unwrap_or_default()
     }
-    /// Notes whose local edits were kept as a conflicted copy because disk won.
+    pub(crate) fn capabilities(&self) -> BackendCapabilities {
+        self.storage.capabilities()
+    }
+    pub(crate) fn set_change_notifier(&mut self, notify: ChangeNotifier) {
+        self.notify = Some(notify.clone());
+        if let Storage::Host(backend) = &mut self.storage {
+            backend.set_change_notifier(notify);
+        }
+    }
+    /// Notes whose local edits were kept as a conflicted copy because storage won.
     pub fn conflicts(&self) -> Vec<String> {
         self.disk_won.iter().cloned().collect()
     }
@@ -396,39 +361,28 @@ impl Store {
     pub fn trashed(&self) -> Vec<PathBuf> {
         self.trashed.clone()
     }
-    /// Notes the last save was asked to delete and left in place: another program
-    /// changed the file since it was read, or the Trash refused it. The file still
-    /// holds the note, so the deletion is dropped rather than retried.
+    /// Notes the last save was asked to delete and left in place: storage holds a
+    /// version nobody here has seen, or refused the deletion. Storage still holds
+    /// the note, so the deletion is dropped rather than retried.
     pub fn kept(&self) -> Vec<String> {
         self.kept.clone()
     }
     pub fn paths(&self) -> Vec<(String, PathBuf)> {
-        self.files
-            .iter()
-            .map(|(id, s)| (id.clone(), s.path.clone()))
-            .collect()
-    }
-    fn persist_manifest(&mut self) -> Result<(), StoreError> {
-        self.manifest.version = MANIFEST_VERSION;
-        self.manifest.loose = self.loose.iter().cloned().collect();
-        self.manifest.loose.sort();
-        let path = self.state.join("manifest.json");
-        let bytes = serde_json::to_vec_pretty(&self.manifest).map_err(|e| StoreError::Json {
-            path: path.clone(),
-            detail: e.to_string().into(),
-        })?;
-        if bytes == self.manifest_bytes {
-            return Ok(());
-        }
-        atomic_write(&path, &bytes)?;
-        self.manifest_bytes = bytes;
-        Ok(())
+        self.storage
+            .directory()
+            .map(MarkdownDirectory::paths)
+            .unwrap_or_default()
     }
     pub(crate) fn source_cache(&self) -> Arc<Sources> {
         self.sources.clone()
     }
     pub(crate) fn house(&self) -> markraft_commonmark::HouseStyleHandle {
         self.house.clone()
+    }
+    /// The version of a note that its editors last saw. While a change that storage
+    /// made is pending, that is the version before the change.
+    fn baseline_of(&self, id: &str) -> Option<&Saved> {
+        self.previous.get(id).or_else(|| self.files.get(id))
     }
     fn update_source(&self, id: &str) {
         let version = |saved: &Saved| SourceVersion {
@@ -485,50 +439,42 @@ impl Store {
             self.update_source(id);
         }
     }
-    // File changes must reach the editor even when auxiliary metadata cannot be
-    // persisted. Keep the new baseline and report that independent failure.
-    fn persist_refresh(&mut self) {
-        if let Err(error) = self.persist_manifest() {
-            log::warn!("saving refreshed folder metadata failed: {error}");
-            self.notices
-                .raise(Message::new("error.folder-settings-save").arg("detail", error));
+    /// A note as storage returned it. An unchanged version is the one already
+    /// known: its editors keep the document and the track they hold.
+    fn decode(&self, stored: BackendNote, known: Option<&Saved>) -> Result<Saved, StoreError> {
+        let id = stored.id.to_string();
+        if id.is_empty() {
+            return Err(invalid("Note identity cannot be empty"));
         }
-    }
-    fn read_path(
-        &self,
-        path: &Path,
-        previous: Option<&Saved>,
-    ) -> Result<Option<Saved>, StoreError> {
-        let Some(bytes) = read_optional(path).map_err(|e| describe(path, &e))? else {
-            return Ok(None);
+        let (path, unwritable) = match self.storage.directory() {
+            Some(directory) => (directory.path(&id), directory.read_only(&id)),
+            None => (None, None),
         };
-        if let Some(previous) = previous
-            && previous.bytes == bytes
+        if let Some(known) = known
+            && known.revision == stored.revision
         {
-            let mut saved = previous.clone();
-            let content_error = previous
+            let mut saved = known.clone();
+            let unparsed = known
                 .note
                 .read_only
                 .as_ref()
-                .filter(|reason| {
-                    reason.is_key("error.not-utf8") || reason.is_key("error.markdown-parse")
-                })
+                .filter(|reason| reason.is_key("error.markdown-parse"))
                 .cloned();
-            saved.note.read_only = unsafe_file(path)?.or(content_error);
-            return Ok(Some(saved));
+            saved.note.read_only = unwritable.or(unparsed);
+            if path.is_some() {
+                saved.note.path = path;
+            }
+            return Ok(saved);
         }
-        let metadata = fs::symlink_metadata(path).map_err(|e| describe(path, &e))?;
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_millis() as u64);
-        let identity = self.manifest.paths.get(path);
-        let mut read_only = unsafe_file(path)?;
-        let text = std::str::from_utf8(&bytes);
+        let unreadable = unwritable
+            .as_ref()
+            .is_some_and(|reason| reason.is_key("error.not-utf8"));
+        let mut read_only = unwritable;
         let mut track = None;
-        let document = match text {
-            Ok(text) => match SourceDocument::parse(doc::schema(), text) {
+        let document = if unreadable {
+            doc::empty()
+        } else {
+            match SourceDocument::parse(doc::schema(), &stored.markdown) {
                 Ok(source) => {
                     let document = source.document().clone();
                     track = Some(Arc::new(SourceTrack::new(source)));
@@ -539,144 +485,96 @@ impl Store {
                         Some(Message::new("error.markdown-parse").arg("detail", error.to_string()));
                     doc::empty()
                 }
-            },
-            Err(_) => {
-                read_only = Some(Message::new("error.not-utf8"));
-                doc::empty()
             }
         };
         let note = Note {
-            id: previous
-                .map(|s| s.note.id.clone())
-                .or_else(|| identity.map(|i| i.id.clone()))
-                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+            id,
             document,
-            title_override: None,
-            logical_key: None,
-            created_at: identity.map_or(modified, |i| i.created),
-            updated_at: modified,
+            title_override: stored.title,
+            logical_key: stored.logical_key,
+            created_at: stored.created_at,
+            updated_at: stored.updated_at,
             deleted_at: None,
-            pinned: identity.is_some_and(|i| i.pinned),
-            path: Some(path.to_owned()),
+            pinned: stored.pinned,
+            path,
             read_only,
             conflicted: false,
         };
-        Ok(Some(Saved {
-            path: path.to_owned(),
+        Ok(Saved {
+            revision: stored.revision,
+            text: stored.markdown,
             track,
-            bytes,
             note,
-        }))
+        })
     }
-    fn read_folder(&self) -> Result<HashMap<String, Saved>, StoreError> {
-        let mut paths = self.loose.iter().cloned().collect::<Vec<_>>();
-        collect_markdown(&self.directory, &mut paths)?;
-        paths.sort();
-        paths.dedup();
-        let known: HashMap<_, _> = self.files.values().map(|s| (&s.path, s)).collect();
+    fn decode_all(&self, stored: Vec<BackendNote>) -> Result<HashMap<String, Saved>, StoreError> {
         let mut files = HashMap::new();
-        for path in paths {
-            if let Some(saved) = self.read_path(&path, known.get(&path).copied())? {
-                files.insert(saved.note.id.clone(), saved);
+        for stored in stored {
+            let known = self.files.get(stored.id.as_str());
+            let saved = self.decode(stored, known)?;
+            if files.insert(saved.note.id.clone(), saved).is_some() {
+                return Err(invalid("Duplicate note identity"));
             }
         }
         Ok(files)
     }
+    /// The note that storage holds under `id` now.
+    fn read_one(&mut self, id: &str, known: Option<&Saved>) -> Result<Option<Saved>, StoreError> {
+        let id = NoteId::new(id);
+        let stored = self
+            .storage
+            .read(std::slice::from_ref(&id))?
+            .into_iter()
+            .find(|stored| stored.id == id);
+        stored.map(|stored| self.decode(stored, known)).transpose()
+    }
     pub fn reload(&mut self) -> Result<Library, StoreError> {
         let library = self.scan_library()?;
-        let folder = self.state.join("recovery");
-        let cleanup = (|| -> Result<(), StoreError> {
-            if folder.exists() {
-                for entry in fs::read_dir(&folder).map_err(|e| describe(&folder, &e))? {
-                    let path = entry.map_err(|e| e.to_string())?.path();
-                    if path.extension().is_some_and(|e| e == "json") {
-                        fs::remove_file(&path).map_err(|e| describe(&path, &e))?;
-                    }
-                }
-            }
-            Ok(())
-        })();
-        if let Err(error) = cleanup {
-            log::warn!("clearing legacy recovery drafts failed: {error}");
-            self.notices
-                .raise(Message::new("error.recovery-cleanup").arg("detail", error));
+        if let Some(directory) = self.storage.directory() {
+            directory.drop_recovery_drafts();
         }
         // Nothing after adopting the new baseline can turn this into an error:
         // the UI must receive the library that the store will now save against.
         Ok(library)
     }
     fn scan_library(&mut self) -> Result<Library, StoreError> {
-        self.files = self.read_folder()?;
+        let snapshot = self.storage.load()?;
+        let files = self.decode_all(snapshot.notes)?;
+        let mut library = Library {
+            notes: files.values().map(|s| s.note.clone()).collect(),
+            workspace: snapshot.workspace,
+            ..Library::default()
+        };
+        library.notes.sort_by(|a, b| a.id.cmp(&b.id));
+        if library.notes.is_empty() {
+            library.new_note(doc::empty());
+        }
+        library.active_id = snapshot
+            .active_id
+            .map(|id| id.to_string())
+            .filter(|id| library.note(id).is_some())
+            .unwrap_or_else(|| library.notes[0].id.clone());
+        library.validate()?;
+        library.changes.clear();
+        library.deletions.clear();
+        // Only now does the store take the new baseline: a load that failed above
+        // leaves the one the editors are working against.
+        self.files = files;
         self.pending.clear();
         self.previous.clear();
         self.removed.clear();
         self.disk_won.clear();
-        let mut library = Library {
-            notes: self.files.values().map(|s| s.note.clone()).collect(),
-            workspace: self.manifest.workspace.clone(),
-            ..Library::default()
-        };
-        if library.notes.is_empty() {
-            library.new_note(doc::empty());
+        if let Some(directory) = self.storage.directory_mut() {
+            directory.forget_missing();
         }
-        library.active_id = library
-            .note(&self.manifest.active_id)
-            .map(|n| n.id.clone())
-            .unwrap_or_else(|| library.notes[0].id.clone());
-        self.forget_missing();
-        for saved in self.files.values() {
-            self.manifest
-                .paths
-                .insert(saved.path.clone(), identity(&saved.note));
-        }
-        self.persist_refresh();
-        library.changes.clear();
-        library.deletions.clear();
         self.rebuild_sources();
         Ok(library)
     }
-    /// A file that left while Markraft was not watching has no note to vanish from
-    /// the window, so the list would simply be shorter with nothing said. Name what
-    /// went, once, and stop expecting it.
-    fn forget_missing(&mut self) {
-        let known: HashSet<_> = self.files.values().map(|saved| &saved.path).collect();
-        let mut missing: Vec<_> = self
-            .manifest
-            .paths
-            .iter()
-            .filter(|(path, _)| {
-                !known.contains(path)
-                    && fs::symlink_metadata(path)
-                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
-            })
-            .map(|(path, identity)| (path.clone(), identity.gone))
-            .collect();
-        missing.sort();
-        for (path, _) in &missing {
-            self.manifest.paths.remove(path);
-        }
-        // One the window already reported leaving is dropped without a second notice.
-        let missing: Vec<_> = missing
-            .into_iter()
-            .filter_map(|(path, reported)| (!reported).then_some(path))
-            .collect();
-        match missing.as_slice() {
-            [] => {}
-            [path] => self
-                .notices
-                .raise(Message::new("error.file-deleted").arg("name", crate::fs::file_label(path))),
-            _ => self
-                .notices
-                .raise(Message::new("error.files-deleted").arg("count", missing.len().to_string())),
-        }
-    }
     /// Give a note's file another name, in the folder it is already in.
-    ///
-    /// The file is moved rather than rewritten, so it keeps its bytes, permissions and
-    /// extended attributes, and the note keeps its identity: the manifest follows the
-    /// file to its new path, which is what stops the watcher from reading the move as
-    /// one note leaving and a stranger arriving.
     pub fn rename(&mut self, id: &str, name: &str) -> Result<PathBuf, StoreError> {
+        if self.storage.directory().is_none() {
+            return Err(unsupported("file rename"));
+        }
         let saved = self
             .files
             .get(id)
@@ -685,82 +583,129 @@ impl Store {
         if self.pending.contains(id) {
             return Err(Message::new("error.rename-pending").into());
         }
-        if let Some(reason) = unsafe_file(&saved.path)? {
-            return Err(reason.into());
-        }
-        let extension = saved
-            .path
-            .extension()
-            .map(|e| e.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "md".into());
-        let stem = typed_stem(name, &extension)?;
-        let target = saved.path.with_file_name(format!("{stem}.{extension}"));
-        if target == saved.path {
-            return Ok(target);
-        }
-        let disk = read_optional(&saved.path).map_err(|e| describe(&saved.path, &e))?;
-        if disk.as_ref() != Some(&saved.bytes) {
-            return Err(Message::new("error.rename-changed")
-                .arg("title", saved.note.title_message())
-                .into());
-        }
-        move_without_replacing(&saved.path, &target)?;
-        let parent = target.parent().ok_or(Message::new("error.no-parent"))?;
-        File::open(parent)
-            .and_then(|f| f.sync_all())
-            .map_err(|e| describe(parent, &e))?;
-        self.manifest.paths.remove(&saved.path);
-        if self.loose.remove(&saved.path) {
-            self.loose.insert(target.clone());
-            self.settings.open_files = self.loose.iter().cloned().collect();
-            self.settings.open_files.sort();
-            if self.persist_settings {
-                self.settings.write(&self.settings_path)?;
-            }
-        }
+        let Some(directory) = self.storage.directory_mut() else {
+            return Err(unsupported("file rename"));
+        };
+        let target = directory.rename(id, name, &saved.revision, saved.note.title_message())?;
         if let Some(current) = self.files.get_mut(id) {
-            current.path.clone_from(&target);
             current.note.path = Some(target.clone());
-            self.manifest
-                .paths
-                .insert(target.clone(), identity(&current.note));
         }
-        self.persist_manifest()?;
         Ok(target)
     }
-    pub fn add_file(&mut self, path: PathBuf) -> Result<Note, StoreError> {
-        let path = absolute_file(&path)?;
-        if let Some(saved) = self
-            .files
-            .values()
-            .find(|s| s.path == path || same_regular_file(&s.path, &path))
-        {
-            return Ok(saved.note.clone());
+    /// Give a note another name: its file's name in a folder, and the title its
+    /// host keeps for it elsewhere. The Markdown is not rewritten.
+    pub(crate) fn rename_note(&mut self, id: &str, name: &str) -> Result<Note, StoreError> {
+        if self.storage.directory().is_some() {
+            self.rename(id, name)?;
+            return self
+                .files
+                .get(id)
+                .map(|saved| saved.note.clone())
+                .ok_or_else(|| invalid("Note does not exist"));
         }
-        let saved = self
-            .read_path(&path, None)?
-            .ok_or(Message::new("error.file-gone"))?;
-        self.loose.insert(path.clone());
-        self.settings.open_files = self.loose.iter().cloned().collect();
-        self.settings.open_files.sort();
-        if self.persist_settings {
-            self.settings.write(&self.settings_path)?;
+        let base = self
+            .baseline_of(id)
+            .ok_or_else(|| invalid("Note does not exist"))?
+            .clone();
+        let mut note = base.note.clone();
+        note.title_override = Some(name.to_owned());
+        note.updated_at = crate::storage::timestamp();
+        let revision = self.put(&note, &base.text, Some(&base.revision))?;
+        self.files.insert(
+            id.to_owned(),
+            Saved {
+                revision,
+                note: note.clone(),
+                ..base
+            },
+        );
+        self.update_source(id);
+        Ok(note)
+    }
+    /// Open the stored note with this ID, if storage has one. Opening an existing
+    /// note does not acknowledge a remote update on behalf of a dirty mounted editor.
+    fn adopt(&mut self, id: &NoteId) -> Result<Option<Note>, StoreError> {
+        let Some(stored) = self
+            .storage
+            .read(std::slice::from_ref(id))?
+            .into_iter()
+            .find(|stored| &stored.id == id)
+        else {
+            return Ok(None);
+        };
+        if let Some(known) = self.baseline_of(id.as_str()) {
+            return Ok(Some(known.note.clone()));
         }
-        self.manifest.paths.insert(path, identity(&saved.note));
+        let saved = self.decode(stored, None)?;
         let note = saved.note.clone();
         self.files.insert(note.id.clone(), saved);
         self.update_source(&note.id);
-        self.persist_manifest()?;
-        Ok(note)
+        Ok(Some(note))
+    }
+    /// Take a Markdown file as a note. A folder opens the file where it is. A
+    /// host backend keeps a copy of its text.
+    pub fn add_file(&mut self, path: PathBuf) -> Result<Note, StoreError> {
+        match &mut self.storage {
+            Storage::Directory(directory) => {
+                let id = directory.add_loose(path)?;
+                self.adopt(&id)?
+                    .ok_or_else(|| Message::new("error.file-gone").into())
+            }
+            Storage::Host(_) => self.import(&path),
+        }
+    }
+    fn import(&mut self, path: &Path) -> Result<Note, StoreError> {
+        use std::io::Read;
+        const MAX_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
+        let file = std::fs::File::open(path).map_err(|e| crate::fs::describe(path, &e))?;
+        let mut bytes = Vec::new();
+        file.take(MAX_IMPORT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| crate::fs::describe(path, &e))?;
+        if bytes.len() as u64 > MAX_IMPORT_BYTES {
+            return Err(invalid("Markdown import exceeds 64 MiB"));
+        }
+        let markdown =
+            String::from_utf8(bytes).map_err(|_| invalid("Markdown import must be UTF-8"))?;
+        let source =
+            SourceDocument::parse(doc::schema(), &markdown).map_err(|e| invalid(&e.to_string()))?;
+        let portable = |url: &str| {
+            url.starts_with('#')
+                || url.starts_with("https://")
+                || url.starts_with("http://")
+                || url.starts_with("mailto:")
+                || url.starts_with("markraft-asset:")
+                || url.starts_with("data:")
+        };
+        let mut relative = false;
+        source.document().descendants(&mut |node, _, _, _| {
+            if let Some(url) = node.attrs().get("src").and_then(|v| v.as_str()) {
+                relative |= !portable(url);
+            }
+            for mark in node.marks().iter() {
+                if let Some(url) = mark.attrs.get("href").and_then(|v| v.as_str()) {
+                    relative |= !portable(url);
+                }
+            }
+            true
+        });
+        if relative {
+            return Err(unsupported(
+                "importing relative file resources into a database; import attachments first",
+            ));
+        }
+        self.create_record(NewRecord {
+            markdown,
+            title: path
+                .file_stem()
+                .map(|name| name.to_string_lossy().into_owned()),
+            logical_key: None,
+        })
     }
     /// The text of the file at `relative` in the notes folder, or `None` when there is
     /// no such readable text file there.
     pub fn read_text(&self, relative: &Path) -> Option<String> {
-        if !safe_relative(relative) {
-            return None;
-        }
-        let bytes = read_optional(&self.directory.join(relative)).ok()??;
-        String::from_utf8(bytes).ok()
+        self.storage.directory()?.read_text(relative)
     }
     /// Make the note at `relative` with `contents`, or take the one already there.
     ///
@@ -769,42 +714,127 @@ impl Store {
     /// It is tracked before this returns, so the watcher reading it afterwards finds
     /// nothing new.
     pub fn create_note(&mut self, relative: &Path, contents: &str) -> Result<Note, StoreError> {
-        if !safe_relative(relative) || relative.as_os_str().is_empty() {
-            return Err(Message::new("error.new-note-outside").into());
-        }
-        let path = self.directory.join(relative);
-        if let Some(saved) = self.files.values().find(|saved| saved.path == path) {
-            return Ok(saved.note.clone());
-        }
-        let parent = path.parent().ok_or(Message::new("error.no-parent"))?;
-        reject_symlink_components(&self.directory, parent)?;
-        fs::create_dir_all(parent).map_err(|e| describe(parent, &e))?;
-        if let Err(error) = write_document(&path, contents.as_bytes(), None)
-            && !path.exists()
-        {
-            return Err(error);
-        }
-        let saved = self
-            .read_path(&path, None)?
-            .ok_or(Message::new("error.file-gone"))?;
-        let note = saved.note.clone();
-        self.manifest.paths.insert(path, identity(&note));
-        self.files.insert(note.id.clone(), saved);
-        self.update_source(&note.id);
-        self.persist_refresh();
-        Ok(note)
+        let Some(directory) = self.storage.directory_mut() else {
+            return Err(unsupported("file creation"));
+        };
+        let id = directory.create_at(relative, contents)?;
+        self.adopt(&id)?
+            .ok_or_else(|| Message::new("error.file-gone").into())
     }
+    /// Make a note in a host backend, or open the one that already has its logical key.
+    pub(crate) fn create_record(&mut self, request: NewRecord) -> Result<Note, StoreError> {
+        if self.storage.directory().is_some() {
+            return Err(unsupported("logical note creation"));
+        }
+        let id = match &request.logical_key {
+            Some(key) => {
+                let id = NoteId::for_logical_key(key);
+                if let Some(existing) = self.adopt(&id)? {
+                    return Ok(existing);
+                }
+                id
+            }
+            None => NoteId::new(uuid::Uuid::new_v4().to_string()),
+        };
+        let now = crate::storage::timestamp();
+        let source = SourceDocument::parse(doc::schema(), &request.markdown)
+            .map_err(|e| invalid(&e.to_string()))?;
+        let note = Note {
+            id: id.to_string(),
+            document: source.document().clone(),
+            title_override: request.title,
+            logical_key: request.logical_key,
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            pinned: false,
+            path: None,
+            read_only: None,
+            conflicted: false,
+        };
+        match self.put(&note, &request.markdown, None) {
+            Ok(revision) => {
+                self.files.insert(
+                    note.id.clone(),
+                    Saved {
+                        revision,
+                        text: request.markdown,
+                        track: Some(Arc::new(SourceTrack::new(source))),
+                        note: note.clone(),
+                    },
+                );
+                self.update_source(&note.id);
+                Ok(note)
+            }
+            // Another writer created the logical note first. Open that note.
+            Err(conflict @ StoreError::Backend(BackendError::Conflict { .. }))
+                if note.logical_key.is_some() =>
+            {
+                self.adopt(&id)?.ok_or(conflict)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    pub(crate) fn read_asset(&mut self, id: &AssetId) -> Result<Asset, StoreError> {
+        let Storage::Host(backend) = &mut self.storage else {
+            return Err(unsupported("attachments"));
+        };
+        let asset = backend.read_asset(id).map_err(StoreError::Backend)?;
+        if &AssetId::for_content(&asset.bytes) != id {
+            return Err(invalid("Stored asset does not match its ID"));
+        }
+        Ok(asset)
+    }
+    pub(crate) fn write_asset(&mut self, asset: Asset) -> Result<(), StoreError> {
+        let Storage::Host(backend) = &mut self.storage else {
+            return Err(unsupported("attachments"));
+        };
+        if AssetId::for_content(&asset.bytes) != asset.id {
+            return Err(invalid("An asset ID must be the SHA-256 of its content"));
+        }
+        backend.write_asset(asset).map_err(StoreError::Backend)
+    }
+    /// Read every note again and report what storage changed.
     pub fn refresh(&mut self) -> Result<Vec<External>, StoreError> {
-        let files = self.read_folder()?;
+        let stored = self.storage.load()?.notes;
+        let found = self.decode_all(stored)?;
+        Ok(self.reconcile(found, None))
+    }
+    /// Read only these notes again. A note that storage no longer returns has left.
+    pub(crate) fn refresh_notes(&mut self, ids: &[NoteId]) -> Result<Vec<External>, StoreError> {
+        let mut stored = self.storage.read(ids)?;
+        stored.retain(|stored| ids.contains(&stored.id));
+        let found = self.decode_all(stored)?;
+        Ok(self.reconcile(found, Some(ids)))
+    }
+    /// File events only read affected paths. Directory events and explicit refreshes rescan.
+    pub fn refresh_paths(&mut self, paths: &[PathBuf]) -> Result<Vec<External>, StoreError> {
+        let Some(directory) = self.storage.directory_mut() else {
+            return self.refresh();
+        };
+        let ids = directory.ids_for_paths(paths)?;
+        self.refresh_notes(&ids)
+    }
+    /// Compare what storage returned with what it held at the last read. `scope`
+    /// limits the comparison to the notes that were read; `None` means all notes.
+    /// Each difference is held back from saves until an editor acknowledges it.
+    fn reconcile(
+        &mut self,
+        found: HashMap<String, Saved>,
+        scope: Option<&[NoteId]>,
+    ) -> Vec<External> {
+        let in_scope = |id: &str| scope.is_none_or(|ids| ids.iter().any(|i| i.as_str() == id));
         let mut changes = Vec::new();
-        for (id, saved) in &files {
+        for (id, saved) in &found {
+            // A version that storage won a save with was taken without saying so.
+            // The editors still hold the one before it, and are told of this one now.
             let old = if self.disk_won.contains(id) {
-                self.previous.get(id).or_else(|| self.files.get(id))
+                self.baseline_of(id)
             } else {
                 self.files.get(id)
             };
             if old.is_none_or(|old| {
-                old.bytes != saved.bytes || old.note.read_only != saved.note.read_only
+                old.revision != saved.revision || old.note.read_only != saved.note.read_only
             }) {
                 let old = old.cloned();
                 if let Some(old) = &old {
@@ -818,16 +848,20 @@ impl Store {
                 });
             }
         }
-        for (id, saved) in &self.files {
-            if !files.contains_key(id) {
-                self.previous
-                    .entry(id.clone())
-                    .or_insert_with(|| saved.clone());
-                changes.push(External::Removed(saved.note.clone()));
-                if let Some(identity) = self.manifest.paths.get_mut(&saved.path) {
-                    identity.gone = true;
-                }
-            }
+        let gone: Vec<String> = self
+            .files
+            .keys()
+            .filter(|id| in_scope(id) && !found.contains_key(*id))
+            .cloned()
+            .collect();
+        let mut left = Vec::new();
+        for id in &gone {
+            let Some(saved) = self.files.remove(id) else {
+                continue;
+            };
+            left.extend(saved.note.path.clone());
+            changes.push(External::Removed(saved.note.clone()));
+            self.previous.entry(id.clone()).or_insert(saved);
         }
         for change in &changes {
             let (External::Updated { note, .. } | External::Removed(note)) = change;
@@ -841,97 +875,20 @@ impl Store {
                 }
             }
         }
-        self.files = files;
-        for saved in self.files.values() {
-            self.manifest
-                .paths
-                .insert(saved.path.clone(), identity(&saved.note));
+        match scope {
+            None => self.files = found,
+            Some(_) => self.files.extend(found),
+        }
+        if let Some(directory) = self.storage.directory_mut()
+            && !left.is_empty()
+        {
+            directory.mark_gone(&left);
         }
         for change in &changes {
             let (External::Updated { note, .. } | External::Removed(note)) = change;
             self.update_source(&note.id);
         }
-        self.persist_refresh();
-        Ok(changes)
-    }
-    /// File events only read affected paths. Directory events and explicit refreshes rescan.
-    pub fn refresh_paths(&mut self, paths: &[PathBuf]) -> Result<Vec<External>, StoreError> {
-        let mut staged = Vec::new();
-        let mut seen = HashSet::new();
-        for path in paths {
-            let path = absolute_file(path)?;
-            if !seen.insert(path.clone()) {
-                continue;
-            }
-            let relative = path.strip_prefix(&self.directory).ok();
-            if !self.loose.contains(&path) && (relative.is_none() || relative.is_some_and(|p|p.components().any(|c| matches!(c,Component::Normal(name) if matches!(name.to_str(),Some(".git"|".obsidian"|".markraft"|".trash"|"node_modules")))))) { continue; }
-            let old = self
-                .manifest
-                .paths
-                .get(&path)
-                .and_then(|identity| self.files.get(&identity.id))
-                .cloned();
-            if old.is_none()
-                && !self.loose.contains(&path)
-                && fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink())
-            {
-                continue;
-            }
-            let next = self.read_path(&path, old.as_ref())?;
-            let old = old.map(|old| {
-                if self.disk_won.contains(&old.note.id) {
-                    self.previous.get(&old.note.id).cloned().unwrap_or(old)
-                } else {
-                    old
-                }
-            });
-            staged.push((old, next));
-        }
-        let mut changes = Vec::new();
-        for (old, next) in staged {
-            match (old, next) {
-                (Some(old), Some(next))
-                    if old.bytes == next.bytes && old.note.read_only == next.note.read_only => {}
-                (old, Some(next)) => {
-                    let id = next.note.id.clone();
-                    if let Some(old) = &old {
-                        self.previous
-                            .entry(id.clone())
-                            .or_insert_with(|| old.clone());
-                    }
-                    changes.push(External::Updated {
-                        previous: old.map(|s| s.note),
-                        note: next.note.clone(),
-                    });
-                    self.pending.insert(id.clone());
-                    self.removed.remove(&id);
-                    self.manifest
-                        .paths
-                        .insert(next.path.clone(), identity(&next.note));
-                    self.files.insert(id, next);
-                }
-                (Some(old), None) => {
-                    let id = old.note.id.clone();
-                    changes.push(External::Removed(old.note.clone()));
-                    if let Some(identity) = self.manifest.paths.get_mut(&old.path) {
-                        identity.gone = true;
-                    }
-                    self.pending.insert(id.clone());
-                    self.removed.insert(id.clone(), old.note.clone());
-                    self.files.remove(&id);
-                    self.previous.entry(id).or_insert(old);
-                }
-                (None, None) => {}
-            }
-        }
-        if !changes.is_empty() {
-            for change in &changes {
-                let (External::Updated { note, .. } | External::Removed(note)) = change;
-                self.update_source(&note.id);
-            }
-            self.persist_refresh();
-        }
-        Ok(changes)
+        changes
     }
     pub fn acknowledge_changes(&mut self, changes: &[External]) {
         for change in changes {
@@ -969,11 +926,10 @@ impl Store {
     pub fn markdown(&self, note: &Note) -> Result<String, StoreError> {
         render(self.baseline(note), note, &self.house)
     }
-    /// The file `note`'s edits are written against. A note that already says
-    /// what the file on disk says — the disk version an external change was
-    /// just adopted as — takes those bytes as its baseline. The pre-change
-    /// copy is kept only for edits made against it until the change is
-    /// acknowledged.
+    /// The version `note`'s edits are written against. A note that already says
+    /// what storage holds — the version an external change was just adopted as —
+    /// takes that version as its baseline. The version before the change is kept
+    /// only for edits made against it until the change is acknowledged.
     #[cfg(any(test, feature = "test-support"))]
     fn baseline(&self, note: &Note) -> Option<&Saved> {
         let current = self
@@ -984,365 +940,342 @@ impl Store {
             .or_else(|| self.previous.get(&note.id))
             .or_else(|| self.files.get(&note.id))
     }
-    /// Keep the note's local text as a conflicted copy beside the file. Used when disk wins.
-    pub fn recover(&mut self, note: &Note) -> Result<(), StoreError> {
-        let original = self
-            .previous
-            .get(&note.id)
-            .or_else(|| self.files.get(&note.id));
-        let path = original
-            .map(|s| s.path.clone())
-            .or_else(|| note.path.clone());
-        let Some(path) = path else {
-            // Nothing to stand beside. Saying so is what keeps the caller from
-            // reporting a copy that was never written.
-            return Err(Message::new("error.no-recovery-path").into());
-        };
-        let parent = path.parent().ok_or(Message::new("error.no-parent"))?;
-        if !parent.exists() {
-            return Err(describe(
-                parent,
-                &io::Error::new(io::ErrorKind::NotFound, "not found"),
-            ));
+    /// The Markdown that says `note`, written against the version `base`. A note
+    /// that storage has never held is written against the source it was made from.
+    fn text_of(&self, note: &Note, base: Option<&Saved>) -> Result<String, StoreError> {
+        if base.is_some() {
+            return render(base, note, &self.house);
         }
-        // Whichever way the text was rendered, the copy is a text file and ends in a
-        // newline. It also makes two sightings of one conflict compare equal, which
-        // is what keeps the second from becoming a second file.
+        match self.sources.source(note)? {
+            Some(track) => track
+                .snapshot()
+                .render(doc::schema(), &note.document)
+                .map_err(|error| StoreError::from(error.to_string())),
+            None => render(None, note, &self.house),
+        }
+    }
+    /// Keep the note's local text as a conflicted copy: a file beside the note's
+    /// own in a folder, a note of its own in a host backend. Used when storage wins.
+    pub fn recover(&mut self, note: &Note) -> Result<(), StoreError> {
+        let original = self.baseline_of(&note.id).cloned();
         let local = ends_with_newline(
-            render(original, note, &self.house)
+            self.text_of(note, original.as_ref())
                 .unwrap_or_else(|_| doc::to_markdown_in(&note.document, &self.house)),
         );
-        if !already_kept_beside(&path, local.as_bytes()) {
-            let target = conflicted_copy_path(&path);
-            write_document(&target, local.as_bytes(), None)?;
+        if let Some(directory) = self.storage.directory() {
+            let path = original
+                .as_ref()
+                .and_then(|saved| saved.note.path.clone())
+                .or_else(|| note.path.clone());
+            let Some(path) = path else {
+                // Nothing to stand beside. Saying so is what keeps the caller from
+                // reporting a copy that was never written.
+                return Err(Message::new("error.no-recovery-path").into());
+            };
+            directory.keep_beside(&path, &local)?;
+            directory.clear_recovery(&note.id);
+            return Ok(());
         }
-        self.clear_recovery(&note.id);
+        let kept = (note.id.clone(), local.clone());
+        if !self.copies.insert(kept.clone()) {
+            return Ok(());
+        }
+        let copy = self
+            .create_record(NewRecord {
+                markdown: local,
+                title: Some(conflicted_copy_name(&note.title())),
+                logical_key: None,
+            })
+            .inspect_err(|_| {
+                self.copies.remove(&kept);
+            })?;
+        // The copy reaches the mounted editors the way any other new note does:
+        // as a change that the next read of storage reports.
+        self.files.remove(&copy.id);
+        self.update_source(&copy.id);
+        if let Some(notify) = &self.notify {
+            notify.changed(vec![NoteId::new(copy.id)]);
+        }
         Ok(())
     }
-    /// On open: migrate leftover recovery JSON from the versions that kept it.
-    /// When the file is still there the local text is kept beside it as a conflicted
-    /// copy; when the file is gone it is written back once.
-    ///
-    /// Best effort throughout. A draft nobody can read is discarded, because there is
-    /// no text left in it to keep; one that cannot be written yet is left where it is
-    /// for the next launch. Neither is worth refusing to open the whole folder over,
-    /// which is what a leftover file that always fails would otherwise do forever.
-    fn restore_recovery(&mut self, library: &mut Library) {
-        let history = self.state.join("recovery-history");
-        if history.exists() {
-            let _ = fs::remove_dir_all(&history);
-        }
-        let dir = self.state.join("recovery");
-        let Ok(entries) = fs::read_dir(&dir) else {
-            return;
-        };
-        let (mut conflicted, mut held) = (0, 0);
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let record: Recovery =
-                match fs::read(&path)
-                    .map_err(|e| describe(&path, &e))
-                    .and_then(|bytes| {
-                        serde_json::from_slice(&bytes).map_err(|e| StoreError::Json {
-                            path: path.clone(),
-                            detail: Message::new("error.unreadable-draft")
-                                .arg("detail", e.to_string()),
-                        })
-                    }) {
-                    Ok(record) => record,
-                    Err(error) => {
-                        log::warn!("{} was discarded: {error}", path.display());
-                        let _ = fs::remove_file(&path);
-                        continue;
-                    }
-                };
-            let Some(file_path) = record.path.clone() else {
-                let _ = fs::remove_file(&path);
-                continue;
-            };
-            let record = Recovery {
-                local: ends_with_newline(record.local),
-                ..record
-            };
-            if file_path.exists() {
-                if already_kept_beside(&file_path, record.local.as_bytes()) {
-                    let _ = fs::remove_file(&path);
-                    continue;
-                }
-                let target = conflicted_copy_path(&file_path);
-                match write_document(&target, record.local.as_bytes(), None) {
-                    Ok(()) => {
-                        conflicted += 1;
-                        let _ = fs::remove_file(&path);
-                    }
-                    Err(error) => {
-                        log::warn!("{error}");
-                        held += 1;
-                    }
-                }
-                continue;
-            }
-            // Path missing: recreate the file from the recovery local text once.
-            let Ok(source) = SourceDocument::parse(doc::schema(), &record.local) else {
-                log::warn!("{} holds text no document can be made of", path.display());
-                let _ = fs::remove_file(&path);
-                continue;
-            };
-            let mut note = Note {
-                id: record.id.clone(),
-                document: source.document().clone(),
-                title_override: None,
-                logical_key: None,
-                created_at: crate::storage::timestamp(),
-                updated_at: crate::storage::timestamp(),
-                deleted_at: None,
-                pinned: false,
-                path: Some(file_path.clone()),
-                read_only: None,
-                conflicted: false,
-            };
-            if let Some(existing) = library.note(&record.id) {
-                note.created_at = existing.created_at;
-                note.pinned = existing.pinned;
-            }
-            let bytes = record.local.clone().into_bytes();
-            if let Some(parent) = file_path.parent()
-                && let Err(error) = fs::create_dir_all(parent)
-            {
-                log::warn!("{}", describe(parent, &error));
-                held += 1;
-                continue;
-            }
-            if let Err(error) = write_document(&file_path, &bytes, None) {
-                log::warn!("{error}");
-                held += 1;
-                continue;
-            }
-            note.path = Some(file_path.clone());
-            self.manifest
-                .paths
-                .insert(file_path.clone(), identity(&note));
-            self.files.insert(
-                note.id.clone(),
-                Saved {
-                    path: file_path,
-                    track: track_of(if record.source.is_empty() {
-                        &bytes
-                    } else {
-                        &record.source
-                    }),
-                    bytes,
-                    note: note.clone(),
-                },
-            );
-            library.adopt(note);
-            let _ = fs::remove_file(&path);
-        }
-        if conflicted > 0 {
-            self.notices.raise(crate::storage::conflict_kept());
-        }
-        if held > 0 {
-            self.notices.raise(Message::new("error.recovery-retry"));
-        }
-    }
-    fn clear_recovery(&self, id: &str) {
-        let current = self.state.join("recovery").join(format!("{id}.json"));
-        let _ = fs::remove_file(current);
-    }
-    /// Write the library out. New non-blank notes are filed immediately, under the
-    /// name the folder's naming setting gives them. Mid-write disk conflicts keep a conflicted copy of local edits
-    /// and keep the disk version. After a note has a file, renaming is explicit —
-    /// not driven by later title edits.
+    /// Write the library out, and say whether every note in it reached storage.
     pub fn save(&mut self, library: &Library, preferences: &Preferences) -> Result<(), StoreError> {
-        library.validate()?;
-        preferences.validate()?;
-        self.manifest.workspace = library.workspace.clone();
+        self.write(0, library, preferences).result
+    }
+    /// Write the library out. A new note that says something is stored at once; in a
+    /// folder, under the name the folder's naming setting gives it. When storage
+    /// holds a version of a note that no editor here has seen, that version wins,
+    /// and the local edits are kept as a conflicted copy. Each note is reported on
+    /// its own: a failure of one does not undo the others.
+    pub(crate) fn write(
+        &mut self,
+        revision: u64,
+        library: &Library,
+        preferences: &Preferences,
+    ) -> crate::persistence::Saved {
+        let saved = |store: &Self, result, changes, outcomes| crate::persistence::Saved {
+            revision,
+            changes,
+            result,
+            paths: store.paths(),
+            conflicts: store.conflicts(),
+            trashed: store.trashed(),
+            kept: store.kept(),
+            outcomes,
+        };
         self.disk_won.clear();
         self.trashed.clear();
         self.kept.clear();
+        if let Err(error) = library.validate().and_then(|()| preferences.validate()) {
+            return saved(self, Err(error), Vec::new(), Vec::new());
+        }
+        if let Some(directory) = self.storage.directory_mut() {
+            directory.set_workspace(&library.workspace);
+        }
+        let mut changes: Vec<(String, u64)> = Vec::new();
+        let mut acknowledge = |id: &str| {
+            if let Some(generation) = library.changes.get(id) {
+                changes.push((id.to_owned(), *generation));
+            }
+        };
+        let mut outcomes = Vec::new();
+        let mut outcome = |id: &str, result: Result<StorageRevision, BackendError>, deleted| {
+            if library.changes.contains_key(id) {
+                outcomes.push(NoteSaveOutcome {
+                    id: NoteId::new(id),
+                    result,
+                    deleted,
+                });
+            }
+        };
         let mut errors: Vec<StoreError> = Vec::new();
-        // The notes disk won over, by title: one conflict error at the end, so a
+        // The notes storage won over, by title: one conflict error at the end, so a
         // caller can tell it from a failure and still not take them as saved.
         let mut conflicts: Vec<Message> = Vec::new();
-        // A stale snapshot cannot authorize deleting a file it has never seen.
-        for id in library.deletions.keys() {
-            if let Some(saved) = self.files.get(id).cloned() {
-                let unchanged = !self.pending.contains(id)
-                    && read_optional(&saved.path)
-                        .is_ok_and(|bytes| bytes.as_ref() == Some(&saved.bytes));
-                if !unchanged {
-                    self.kept.push(id.clone());
-                    continue;
+        for (id, note) in &library.deletions {
+            let Some(saved) = self.files.get(id).cloned() else {
+                acknowledge(id);
+                continue;
+            };
+            // A stale snapshot cannot authorize deleting a version it has never seen.
+            let deleted = if self.pending.contains(id) {
+                Err(StoreError::Backend(BackendError::Conflict {
+                    id: NoteId::new(id.clone()),
+                    actual: Some(saved.revision.clone()),
+                }))
+            } else {
+                self.storage.commit(BackendMutation::Delete {
+                    id: NoteId::new(id.clone()),
+                    expected: saved.revision.clone(),
+                    deleted_at: note.deleted_at.unwrap_or_else(crate::storage::timestamp),
+                })
+            };
+            match deleted {
+                Ok(revision) => {
+                    self.files.remove(id);
+                    self.pending.remove(id);
+                    self.previous.remove(id);
+                    self.removed.remove(id);
+                    self.update_source(id);
+                    acknowledge(id);
+                    outcome(id, Ok(revision), true);
                 }
-                if let Err(error) = self.trash_note(&saved) {
-                    log::warn!("{} could not be trashed: {error}", saved.path.display());
+                Err(error) => {
+                    if !matches!(error, StoreError::Backend(BackendError::Conflict { .. })) {
+                        log::warn!("note {id} could not be deleted: {error}");
+                    }
                     self.kept.push(id.clone());
+                    outcome(id, Err(backend_error(error)), true);
                 }
             }
         }
+        if let Some(directory) = self.storage.directory_mut() {
+            self.trashed = directory.take_trashed();
+        }
         for note in &library.notes {
-            if let Some(saved) = self.files.get_mut(&note.id) {
-                self.manifest
-                    .paths
-                    .insert(saved.path.clone(), identity(note));
-                saved.note.pinned = note.pinned;
-                if !library.changes.contains_key(&note.id) {
+            let id = &note.id;
+            if let Some(saved) = self.files.get_mut(id) {
+                // A pin in a folder is the manifest's to remember, not the file's:
+                // it is kept whether or not the note has anything to write.
+                if let Some(directory) = self.storage.directory_mut() {
+                    directory.identify(id, note.pinned, note.created_at);
+                    saved.note.pinned = note.pinned;
+                }
+                if !library.changes.contains_key(id) {
                     continue;
                 }
             }
-            let saved = self.files.get(&note.id).cloned();
-            if self.pending.contains(&note.id) {
-                let adopted_disk = self
-                    .files
-                    .get(&note.id)
-                    .is_some_and(|saved| saved.note.document == note.document);
-                let locally_changed = !adopted_disk
+            let saved = self.files.get(id).cloned();
+            if self.pending.contains(id) {
+                let adopted = saved
+                    .as_ref()
+                    .is_some_and(|saved| !differs(&saved.note, note));
+                let locally_changed = !adopted
                     && self
-                        .previous
-                        .get(&note.id)
-                        .or_else(|| self.files.get(&note.id))
-                        .is_none_or(|base| base.note.document != note.document);
-                if locally_changed {
-                    // Disk already won via refresh; keep local edits as a conflicted copy.
-                    if let Err(error) = self.recover(note) {
-                        errors.push(error);
-                    } else {
-                        self.disk_won.insert(note.id.clone());
+                        .baseline_of(id)
+                        .is_none_or(|base| differs(&base.note, note));
+                if !locally_changed {
+                    acknowledge(id);
+                    if let Some(saved) = &saved {
+                        outcome(id, Ok(saved.revision.clone()), false);
+                    }
+                    continue;
+                }
+                // Storage already won via refresh; keep local edits as a conflicted copy.
+                match self.recover(note) {
+                    Ok(()) => {
+                        self.disk_won.insert(id.clone());
                         conflicts.push(note.title_message());
                     }
+                    Err(error) => errors.push(error),
                 }
-                continue;
-            }
-            if saved
-                .as_ref()
-                .is_some_and(|s| s.note.document == note.document)
-            {
-                continue;
-            }
-            if note.read_only.is_some() {
-                errors.push(
-                    Message::new("error.note-read-only")
-                        .arg("title", note.title_message())
-                        .into(),
+                outcome(
+                    id,
+                    Err(BackendError::Conflict {
+                        id: NoteId::new(id.clone()),
+                        actual: saved.as_ref().map(|saved| saved.revision.clone()),
+                    }),
+                    false,
                 );
                 continue;
             }
-            if saved.is_none() && doc::is_blank(&note.document) {
-                self.clear_recovery(&note.id);
+            if let Some(saved) = &saved
+                && !differs(&saved.note, note)
+                && saved.note.pinned == note.pinned
+            {
+                acknowledge(id);
+                outcome(id, Ok(saved.revision.clone()), false);
                 continue;
             }
-            let result = self.save_note(note, saved.as_ref(), library);
-            if let Err(error) = result {
-                let external = saved.as_ref().is_some_and(|s| {
-                    read_optional(&s.path).is_ok_and(|disk| disk.as_ref() != Some(&s.bytes))
-                });
-                if external {
+            if note.read_only.is_some() {
+                let error = StoreError::from(
+                    Message::new("error.note-read-only").arg("title", note.title_message()),
+                );
+                outcome(id, Err(BackendError::Invalid(error.to_string())), false);
+                errors.push(error);
+                continue;
+            }
+            if saved.is_none()
+                && doc::is_blank(&note.document)
+                && note.title_override.is_none()
+                && note.logical_key.is_none()
+            {
+                if let Some(directory) = self.storage.directory() {
+                    directory.clear_recovery(id);
+                }
+                acknowledge(id);
+                continue;
+            }
+            match self.save_note(note, saved.as_ref()) {
+                Ok(revision) => {
+                    acknowledge(id);
+                    outcome(id, Ok(revision), false);
+                }
+                // Storage holds a version that no editor here has seen.
+                Err(StoreError::Backend(BackendError::Conflict { actual, .. })) => {
+                    let conflicted = Err(BackendError::Conflict {
+                        id: NoteId::new(id.clone()),
+                        actual,
+                    });
+                    // Only where the note sits in a list changed here. There is no
+                    // text to keep, so the version in storage is simply read again.
+                    if saved
+                        .as_ref()
+                        .is_some_and(|saved| !differs(&saved.note, note))
+                    {
+                        if let Some(notify) = &self.notify {
+                            notify.changed(vec![NoteId::new(id.clone())]);
+                        }
+                        outcome(id, conflicted, false);
+                        continue;
+                    }
                     // Preserve the local version before advancing any conflict
                     // state. Failed recovery must remain retryable against its base.
                     match self.recover(note) {
                         Ok(()) => {
                             if let Some(saved) = &saved {
                                 self.previous
-                                    .entry(note.id.clone())
+                                    .entry(id.clone())
                                     .or_insert_with(|| saved.clone());
-                                if let Ok(Some(mut disk)) = self.read_path(&saved.path, Some(saved))
-                                {
-                                    disk.note.id = note.id.clone();
-                                    self.files.insert(note.id.clone(), disk);
+                                if let Ok(Some(current)) = self.read_one(id, Some(saved)) {
+                                    self.files.insert(id.clone(), current);
                                 }
                             }
-                            self.disk_won.insert(note.id.clone());
-                            self.pending.insert(note.id.clone());
-                            self.update_source(&note.id);
+                            self.disk_won.insert(id.clone());
+                            self.pending.insert(id.clone());
+                            self.update_source(id);
                             conflicts.push(note.title_message());
                         }
-                        Err(e) => errors.push(
+                        Err(copy_error) => errors.push(
                             Message::new("error.conflicted-copy-failed")
-                                .arg("detail", error)
-                                .arg("copy_error", e)
+                                .arg(
+                                    "detail",
+                                    Message::new("error.note-changed")
+                                        .arg("title", note.title_message()),
+                                )
+                                .arg("copy_error", copy_error)
                                 .into(),
                         ),
                     }
-                } else {
+                    outcome(id, conflicted, false);
+                }
+                Err(error) => {
+                    outcome(id, Err(backend_error(error.clone())), false);
                     errors.push(error);
                 }
             }
         }
-        self.manifest.active_id.clone_from(&library.active_id);
-        if let Err(error) = self.persist_manifest() {
+        if let Err(error) = self
+            .storage
+            .save_workspace(&NoteId::new(library.active_id.clone()), &library.workspace)
+        {
             errors.push(error);
         }
-        let settings = Settings {
-            preferences: preferences.clone(),
-            open_files: {
-                let mut paths: Vec<_> = self.loose.iter().cloned().collect();
-                paths.sort();
-                paths
-            },
-            ..self.settings.clone()
-        };
-        if self.persist_settings && (settings != self.settings || !self.settings_path.exists()) {
-            match settings.write(&self.settings_path) {
-                Ok(()) => self.settings = settings,
-                Err(error) => errors.push(error),
-            }
+        if let Some(directory) = self.storage.directory_mut()
+            && let Err(error) = directory.save_settings(preferences)
+        {
+            errors.push(error);
         }
         if !conflicts.is_empty() {
             errors.push(StoreError::Conflict(conflicts));
         }
-        if errors.is_empty() {
+        let result = if errors.is_empty() {
             Ok(())
         } else {
             Err(StoreError::several(errors))
-        }
+        };
+        saved(self, result, changes, outcomes)
     }
+    /// Write one note, naming the version it replaces.
     fn save_note(
         &mut self,
         note: &Note,
         saved: Option<&Saved>,
-        library: &Library,
-    ) -> Result<(), StoreError> {
-        if let Some(saved) = saved {
-            let current = read_optional(&saved.path).map_err(|e| describe(&saved.path, &e))?;
-            if current.as_ref() != Some(&saved.bytes) {
-                return Err(Message::new("error.note-changed")
-                    .arg("title", note.title_message())
-                    .into());
-            }
-        }
+    ) -> Result<StorageRevision, StoreError> {
         let render_started = std::time::Instant::now();
-        let rendered = if saved.is_none() {
-            match self.sources.source(note)? {
-                Some(track) => track
-                    .snapshot()
-                    .render(doc::schema(), &note.document)
-                    .map_err(|error| StoreError::from(error.to_string())),
-                None => render(saved, note, &self.house),
-            }
-        } else {
-            render(saved, note, &self.house)
-        };
+        let rendered = self.text_of(note, saved);
         log::debug!(
             "save_render note={} elapsed_us={} success={}",
             note.id,
             render_started.elapsed().as_micros(),
             rendered.is_ok()
         );
-        let bytes = rendered?.into_bytes();
-        // A tree that writes what the file already holds — a picture spelled
+        let text = rendered?;
+        let mut stored = note.clone();
+        stored.conflicted = false;
+        stored.deleted_at = None;
+        // A tree that writes what storage already holds — a picture spelled
         // out under the caret, which saves as the same characters as the
-        // picture — is not written again: the file keeps its bytes and its
-        // modification time, and only the record follows the tree.
+        // picture — is not written again: storage keeps its version, and only
+        // the record follows the tree.
         if let Some(saved) = saved
-            && saved.bytes == bytes
+            && saved.text == text
+            && saved.note.title_override == note.title_override
+            && saved.note.logical_key == note.logical_key
+            && saved.note.pinned == note.pinned
         {
-            let mut stored = note.clone();
-            stored.path = Some(saved.path.clone());
-            stored.conflicted = false;
-            stored.deleted_at = None;
+            stored.path.clone_from(&saved.note.path);
+            let revision = saved.revision.clone();
             self.files.insert(
                 note.id.clone(),
                 Saved {
@@ -1351,120 +1284,100 @@ impl Store {
                 },
             );
             self.update_source(&note.id);
-            return Ok(());
+            return Ok(revision);
         }
-        let path = match saved {
-            Some(s) => s.path.clone(),
-            None if note.path.is_some() => {
-                let path = note.path.as_ref().unwrap();
-                if !path.is_absolute() {
-                    return Err(Message::new("error.absolute-path").into());
-                }
-                absolute_file(path)?
-            }
-            None => {
-                let relative = &library.workspace.new_note_directory;
-                if !safe_relative(relative) {
-                    return Err(Message::new("error.new-note-outside").into());
-                }
-                let folder = self.directory.join(relative);
-                reject_symlink_components(&self.directory, &folder)?;
-                fs::create_dir_all(&folder).map_err(|e| describe(&folder, &e))?;
-                let name = file_name(note, library.workspace.new_note_name);
-                (1..)
-                    .map(|n| {
-                        folder.join(if n == 1 {
-                            format!("{name}.md")
-                        } else {
-                            format!("{name} {n}.md")
-                        })
-                    })
-                    .find(|p| !p.exists())
-                    .unwrap()
-            }
+        if saved.is_none()
+            && let Some(path) = &note.path
+            && let Some(directory) = self.storage.directory_mut()
+        {
+            directory.place(&note.id, path)?;
+        }
+        let revision = self.put(note, &text, saved.map(|saved| &saved.revision))?;
+        if let Some(directory) = self.storage.directory() {
+            stored.path = directory.path(&note.id);
+        }
+        // Keep the track the editor already holds across saves, so undo can still
+        // address the source the note began as.
+        let track = match saved {
+            Some(saved) => saved.track.clone(),
+            None => self
+                .sources
+                .source(note)
+                .ok()
+                .flatten()
+                .or_else(|| track_of(&text)),
         };
-        if let Some(saved) = saved {
-            atomic_write(
-                &self.state.join("backups").join(format!("{}.md", note.id)),
-                &saved.bytes,
-            )?;
-        }
-        if path.starts_with(&self.directory) {
-            reject_symlink_components(&self.directory, path.parent().unwrap())?;
-        }
-        let write_started = std::time::Instant::now();
-        let written = write_document(&path, &bytes, saved.map(|s| s.bytes.as_slice()));
-        log::debug!(
-            "save_write note={} bytes={} elapsed_us={} success={}",
-            note.id,
-            bytes.len(),
-            write_started.elapsed().as_micros(),
-            written.is_ok()
-        );
-        written?;
-        let mut stored = note.clone();
-        stored.path = Some(path.clone());
-        stored.conflicted = false;
-        stored.deleted_at = None;
-        self.manifest.paths.insert(path.clone(), identity(&stored));
-        if !path.starts_with(&self.directory) {
-            self.loose.insert(path.clone());
-        }
-        self.clear_recovery(&note.id);
         self.files.insert(
             note.id.clone(),
             Saved {
-                path,
-                track: match saved {
-                    Some(saved) => saved.track.clone(),
-                    None => track_of(&bytes),
-                },
-                bytes,
+                revision: revision.clone(),
+                text,
+                track,
                 note: stored,
             },
         );
         self.update_source(&note.id);
-        Ok(())
+        Ok(revision)
     }
-    /// Move the file to the system trash and drop it from the store. No in-app
-    /// restore tombstone is kept.
-    fn trash_note(&mut self, saved: &Saved) -> Result<(), StoreError> {
-        if let Some(landed) = move_to_trash(&saved.path)? {
-            self.trashed.push(landed);
+    /// Commit one note. A commit can succeed after its reply is lost, and the retry
+    /// then names a version that storage has replaced. Storage that already holds
+    /// exactly this write is the outcome the retry asked for, not a conflict.
+    fn put(
+        &mut self,
+        note: &Note,
+        text: &str,
+        expected: Option<&StorageRevision>,
+    ) -> Result<StorageRevision, StoreError> {
+        let id = NoteId::new(note.id.clone());
+        let committed = self.storage.commit(BackendMutation::Put {
+            id: id.clone(),
+            expected: expected.cloned(),
+            markdown: text.to_owned(),
+            title: note.title_override.clone(),
+            logical_key: note.logical_key.clone(),
+            created_at: note.created_at,
+            updated_at: note.updated_at,
+            pinned: note.pinned,
+        });
+        match committed {
+            Err(conflict @ StoreError::Backend(BackendError::Conflict { .. })) => self
+                .storage
+                .read(std::slice::from_ref(&id))?
+                .into_iter()
+                .find(|stored| {
+                    stored.id == id
+                        && stored.markdown == text
+                        && stored.title == note.title_override
+                        && stored.logical_key == note.logical_key
+                        && stored.pinned == note.pinned
+                })
+                .map(|stored| stored.revision)
+                .ok_or(conflict),
+            other => other,
         }
-        self.files.remove(&saved.note.id);
-        self.manifest.paths.remove(&saved.path);
-        self.loose.remove(&saved.path);
-        self.pending.remove(&saved.note.id);
-        self.previous.remove(&saved.note.id);
-        self.removed.remove(&saved.note.id);
-        self.clear_recovery(&saved.note.id);
-        self.update_source(&saved.note.id);
-        Ok(())
     }
     /// Spell new Markdown in `house`'s style from now on.
     pub fn set_house(&mut self, house: markraft_commonmark::HouseStyleHandle) {
         self.house = house;
     }
+    /// Change the settings file that a notes folder writes. Notes that a host
+    /// keeps have none.
     pub fn update_settings(
         &mut self,
         update: impl FnOnce(&mut Settings),
     ) -> Result<(), StoreError> {
-        let mut settings = self.settings.clone();
-        update(&mut settings);
-        if self.persist_settings {
-            settings.write(&self.settings_path)?;
+        match self.storage.directory_mut() {
+            Some(directory) => directory.update_settings(update),
+            None => Ok(()),
         }
-        self.settings = settings;
-        Ok(())
     }
 }
-fn identity(note: &Note) -> Identity {
-    Identity {
-        id: note.id.clone(),
-        pinned: note.pinned,
-        created: note.created_at,
-        gone: false,
+
+/// A store failure as one note's outcome reports it.
+fn backend_error(error: StoreError) -> BackendError {
+    match error {
+        StoreError::Backend(error) => error,
+        other => BackendError::Unavailable(other.to_string()),
     }
 }
 fn render(
@@ -1487,99 +1400,15 @@ fn render(
     }
 }
 
-/// A track for a file whose bytes are `bytes`, when they are Markdown.
-fn track_of(bytes: &[u8]) -> Option<Arc<SourceTrack>> {
-    let text = std::str::from_utf8(bytes).ok()?;
+/// A track for a note whose text is `text`, when it is Markdown.
+fn track_of(text: &str) -> Option<Arc<SourceTrack>> {
     let source = SourceDocument::parse(doc::schema(), text).ok()?;
     Some(Arc::new(SourceTrack::new(source)))
 }
 
-fn collect_markdown(folder: &Path, paths: &mut Vec<PathBuf>) -> Result<(), StoreError> {
-    for entry in fs::read_dir(folder).map_err(|e| describe(folder, &e))? {
-        let entry = entry.map_err(|e| describe(folder, &e))?;
-        let path = entry.path();
-        let kind = entry.file_type().map_err(|e| describe(&path, &e))?;
-        if kind.is_symlink() {
-            continue;
-        }
-        if kind.is_dir() {
-            if !matches!(
-                entry.file_name().to_str(),
-                Some(".git" | ".obsidian" | ".markraft" | ".trash" | "node_modules")
-            ) {
-                collect_markdown(&path, paths)?
-            }
-        } else if kind.is_file()
-            && path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
-        {
-            paths.push(path)
-        }
-    }
-    Ok(())
-}
-fn absolute_file(path: &Path) -> Result<PathBuf, StoreError> {
-    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file()) {
-        return fs::canonicalize(path).map_err(|e| describe(path, &e));
-    }
-    let parent = path.parent().ok_or(Message::new("error.no-parent"))?;
-    let parent = fs::canonicalize(parent).map_err(|e| describe(parent, &e))?;
-    Ok(parent.join(path.file_name().ok_or(Message::new("error.no-name"))?))
-}
 pub fn safe_relative(path: &Path) -> bool {
     path.components()
         .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
-}
-fn reject_symlink_components(root: &Path, path: &Path) -> Result<(), StoreError> {
-    let mut current = root.to_owned();
-    for part in path
-        .strip_prefix(root)
-        .map_err(|_| Message::new("error.path-outside"))?
-        .components()
-    {
-        current.push(part);
-        if fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err(Message::new("error.symlink-directory").into());
-        }
-    }
-    Ok(())
-}
-fn unsafe_file(path: &Path) -> Result<Option<Message>, StoreError> {
-    use std::os::unix::fs::MetadataExt;
-    let m = fs::symlink_metadata(path).map_err(|e| describe(path, &e))?;
-    Ok(if m.file_type().is_symlink() {
-        Some(Message::new("error.symlink-read-only"))
-    } else if m.nlink() > 1 {
-        Some(Message::new("error.hardlink-read-only"))
-    } else if m.permissions().readonly() {
-        Some(Message::new("error.file-read-only"))
-    } else {
-        None
-    })
-}
-fn file_name(note: &Note, naming: crate::storage::NoteNaming) -> String {
-    if naming == crate::storage::NoteNaming::DateTime {
-        return date_time_name(
-            note.created_at
-                .saturating_add_signed(crate::platform::local_utc_offset() * 1000),
-        );
-    }
-    let mut name = safe_stem(&note.title());
-    while name.len() > 180 {
-        name.pop();
-    }
-    if name.is_empty() {
-        "Untitled".into()
-    } else {
-        name
-    }
-}
-/// A local timestamp as a file name, `2026-09-23 14.05`: sortable, and free of the
-/// `:` a name cannot hold.
-fn date_time_name(local_milliseconds: u64) -> String {
-    let (year, month, day, hour, minute, ..) = civil(local_milliseconds);
-    format!("{year:04}-{month:02}-{day:02} {hour:02}.{minute:02}")
 }
 
 /// What a file may be called, with everything a name cannot carry taken out of it.
@@ -1622,50 +1451,6 @@ pub fn safe_stem(title: &str) -> String {
     }
     name.trim_matches(|c: char| c == '.' || c.is_whitespace())
         .to_owned()
-}
-fn write_document(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> Result<(), StoreError> {
-    if expected.is_some()
-        && let Some(reason) = unsafe_file(path)?
-    {
-        return Err(reason.into());
-    }
-    let parent = path.parent().ok_or(Message::new("error.no-parent"))?;
-    faults::check(path, Stage::Create).map_err(|e| describe(parent, &e))?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| describe(parent, &e))?;
-    faults::check(path, Stage::Write)
-        .and_then(|_| temp.write_all(bytes))
-        .map_err(|e| describe(path, &e))?;
-    if expected.is_some() {
-        copy_metadata(path, temp.path())?;
-        temp.as_file()
-            .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::now()))
-            .map_err(|e| describe(path, &e))?;
-    } else {
-        // A file that does not exist yet has no permissions of its own to keep, and
-        // the temporary file it is written through is private. A note in a folder
-        // shared with other tools should sit there like its neighbours, so it takes
-        // the folder's own permissions: a 755 folder gives a 644 note.
-        inherit_folder_mode(parent, temp.path())?;
-    }
-    temp.as_file().sync_all().map_err(|e| describe(path, &e))?;
-    if read_optional(path)
-        .map_err(|e| describe(path, &e))?
-        .as_deref()
-        != expected
-    {
-        return Err(Message::new("error.changed-during-save").into());
-    }
-    faults::check(path, Stage::Persist).map_err(|e| describe(path, &e))?;
-    if expected.is_some() {
-        temp.persist(path).map_err(|e| describe(path, &e.error))?;
-    } else {
-        temp.persist_noclobber(path)
-            .map_err(|e| describe(path, &e.error))?;
-    }
-    File::open(parent)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| describe(parent, &e))?;
-    Ok(())
 }
 /// The stem a user typed for a file, or why it cannot be one. A generated name is
 /// quietly made safe; a typed one is refused instead, because silently filing the note
@@ -1726,78 +1511,10 @@ pub fn civil(milliseconds: u64) -> (i64, u32, u32, u32, u32, u32, u32) {
     )
 }
 
-/// `text` with the newline a text file ends in.
-fn ends_with_newline(mut text: String) -> String {
-    if !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text
-}
-
-/// What every sibling copy of `original` is called before the date: the part that
-/// finds the ones already standing there, whatever day they were written on.
-fn conflicted_copy_prefix(original: &Path) -> String {
-    let stem = original
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Untitled".into());
-    format!("{stem} (conflicted copy")
-}
-
-/// The conflicted copies already beside `original`.
-fn conflicted_copies(original: &Path) -> Vec<PathBuf> {
-    let parent = original.parent().unwrap_or(Path::new("."));
-    let prefix = conflicted_copy_prefix(original);
-    let Ok(entries) = fs::read_dir(parent) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| {
-            path.file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
-        })
-        .collect()
-}
-
-/// Whether this exact text is already kept beside the file. One conflict can be seen
-/// by a queued save and by the flush behind it, and a second identical copy says
-/// nothing the first does not — it only leaves another file to clean up.
-fn already_kept_beside(original: &Path, bytes: &[u8]) -> bool {
-    conflicted_copies(original)
-        .into_iter()
-        .any(|path| fs::read(&path).is_ok_and(|existing| existing == bytes))
-}
-
 /// The name of a copy that keeps local edits when storage wins.
-pub(crate) fn conflicted_copy_name(name: &str) -> String {
+fn conflicted_copy_name(name: &str) -> String {
     let (year, month, day, ..) = civil(crate::storage::timestamp());
     format!("{name} (conflicted copy {year:04}-{month:02}-{day:02})")
-}
-
-/// The sibling that keeps local edits when disk wins:
-/// `{stem} (conflicted copy YYYY-MM-DD).md`, with ` 2`, ` 3`, … on collision.
-fn conflicted_copy_path(original: &Path) -> PathBuf {
-    let parent = original.parent().unwrap_or(Path::new("."));
-    let extension = original
-        .extension()
-        .map(|e| e.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "md".into());
-    let (year, month, day, ..) = civil(crate::storage::timestamp());
-    let base = format!(
-        "{} {year:04}-{month:02}-{day:02})",
-        conflicted_copy_prefix(original)
-    );
-    (1..)
-        .map(|n| {
-            parent.join(if n == 1 {
-                format!("{base}.{extension}")
-            } else {
-                format!("{base} {n}.{extension}")
-            })
-        })
-        .find(|p| !p.exists())
-        .unwrap()
 }
 
 /// [`Store::open`] over the settings file as it stands, the way a launch reads it.
@@ -1816,6 +1533,9 @@ pub fn open_reading_settings(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::directory::{collect_markdown, date_time_name, file_name, write_document};
+    use std::fs::{self, File};
+    use std::time::UNIX_EPOCH;
     fn open(root: &Path) -> (Store, Library) {
         let notes = root.join("notes");
         fs::create_dir_all(&notes).unwrap();
@@ -1837,7 +1557,7 @@ mod tests {
     /// The folder's manifest, once `root` has been opened and closed.
     fn manifest_path(root: &Path) -> PathBuf {
         let (store, _) = open(root);
-        store.state.join("manifest.json")
+        store.state().join("manifest.json")
     }
     #[test]
     fn mid_save_conflict_is_delivered_on_the_next_refresh() {
@@ -1877,7 +1597,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fixture(root.path(), "note.md", b"Original");
         let (mut store, _) = open(root.path());
-        let manifest = store.state.join("manifest.json");
+        let manifest = store.state().join("manifest.json");
         fs::remove_file(&manifest).unwrap();
         fs::create_dir(&manifest).unwrap();
         fixture(root.path(), "added.md", b"Added");
@@ -2035,7 +1755,7 @@ mod tests {
         fs::remove_file(&path).unwrap();
         fs::remove_dir(path.parent().unwrap()).unwrap();
         assert!(store.save(&library, &Preferences::default()).is_err());
-        assert_eq!(store.files[&id].bytes, b"Original");
+        assert_eq!(store.files[&id].text, "Original");
         assert!(!store.pending.contains(&id));
         assert!(!store.disk_won.contains(&id));
         assert_eq!(
@@ -2051,7 +1771,7 @@ mod tests {
             let path = fixture(root.path(), "note.md", b"Original");
             let (mut store, library) = open(root.path());
             let original = library.active_note().clone();
-            let manifest = store.state.join("manifest.json");
+            let manifest = store.state().join("manifest.json");
             fs::remove_file(&manifest).unwrap();
             fs::create_dir(&manifest).unwrap();
             fs::write(&path, b"External content").unwrap();
@@ -2175,7 +1895,7 @@ mod tests {
         drop(store);
         let (store, _) = open(root.path());
         assert!(store.notices().take().is_empty());
-        assert!(store.manifest.paths.is_empty());
+        assert!(store.remembers_no_paths());
     }
     #[test]
     fn a_missing_folder_is_refused() {
@@ -2539,7 +2259,7 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), text);
         assert!(
             !store
-                .state
+                .state()
                 .join("backups")
                 .join(format!("{id}.md"))
                 .exists(),
@@ -2562,7 +2282,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&copies[0]).unwrap().trim_end(), "Local");
         assert!(
             !store
-                .state
+                .state()
                 .join("recovery")
                 .join(format!("{id}.json"))
                 .exists()
@@ -2600,7 +2320,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fixture(root.path(), "Note.md", b"text");
         let (store, _) = open(root.path());
-        let recovery = store.state.join("recovery");
+        let recovery = store.state().join("recovery");
         fs::create_dir_all(&recovery).unwrap();
         let damaged = recovery.join("broken.json");
         fs::write(&damaged, b"{ not json at all").unwrap();
@@ -2670,7 +2390,7 @@ mod tests {
         let (mut store, mut library) = open(root.path());
         let id = library.new_note(doc::from_markdown("Fresh note"));
         store.save(&library, &Preferences::default()).unwrap();
-        let path = store.files.get(&id).unwrap().path.clone();
+        let path = store.files.get(&id).unwrap().note.path.clone().unwrap();
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o644,
@@ -2679,7 +2399,14 @@ mod tests {
         fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
         let private = library.new_note(doc::from_markdown("Private note"));
         store.save(&library, &Preferences::default()).unwrap();
-        let path = store.files.get(&private).unwrap().path.clone();
+        let path = store
+            .files
+            .get(&private)
+            .unwrap()
+            .note
+            .path
+            .clone()
+            .unwrap();
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600,
@@ -2736,7 +2463,7 @@ mod tests {
         fs::write(&second, b"Second edited").unwrap();
         let changes = store.refresh_paths(&[first]).unwrap();
         assert_eq!(changes.len(), 1);
-        assert!(store.files.values().any(|s| s.bytes == b"Two"));
+        assert!(store.files.values().any(|s| s.text == "Two"));
         assert_eq!(store.refresh().unwrap().len(), 1);
     }
     #[test]
@@ -2756,11 +2483,7 @@ mod tests {
     }
     #[test]
     fn a_generated_name_keeps_nothing_a_wiki_link_cannot_reach() {
-        let name = |source: &str| {
-            let mut library = Library::default();
-            let id = library.new_note(doc::from_markdown(source));
-            file_name(library.note(&id).unwrap(), Default::default())
-        };
+        let name = |source: &str| file_name(None, source, 0, Default::default());
         for (source, expected) in [
             // A wiki link is an atom, and the title reads it as the label the editor
             // draws — never as its brackets, which is what keeps the stem reachable.
@@ -2808,7 +2531,7 @@ mod tests {
         let id = library.new_note(doc::from_markdown("Meeting notes"));
         let created = library.note(&id).unwrap().created_at;
         store.save(&library, &Preferences::default()).unwrap();
-        let path = store.files.get(&id).unwrap().path.clone();
+        let path = store.files.get(&id).unwrap().note.path.clone().unwrap();
         let local = created.saturating_add_signed(crate::platform::local_utc_offset() * 1000);
         assert_eq!(
             path.file_name().unwrap().to_string_lossy(),
@@ -2823,7 +2546,7 @@ mod tests {
         let target = root.path().join("notes/draft.md");
         library.notes.iter_mut().find(|n| n.id == id).unwrap().path = Some(target.clone());
         store.save(&library, &Preferences::default()).unwrap();
-        let path = store.files.get(&id).unwrap().path.clone();
+        let path = store.files.get(&id).unwrap().note.path.clone().unwrap();
         assert_eq!(path, fs::canonicalize(&target).unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap(), "Draft text\n");
     }
@@ -2911,7 +2634,7 @@ mod tests {
         assert_eq!(fs::read(path).unwrap(), b"Existing");
         assert!(
             !store
-                .state
+                .state()
                 .join("recovery")
                 .join(format!("{id}.json"))
                 .exists()

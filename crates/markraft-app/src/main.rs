@@ -124,7 +124,7 @@ fn main() {
         Ok((mut store, library)) => {
             // Remember --dir, the default folder, or a path that only matched
             // after canonicalization.
-            let folder = store.directory().to_owned();
+            let folder = store.directory().unwrap_or(&directory).to_owned();
             if !notes_folder_matches(settings.notes_folder.as_deref(), &folder)
                 && let Err(error) =
                     store.update_settings(|settings| settings.notes_folder = Some(folder))

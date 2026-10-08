@@ -4,8 +4,8 @@
 pub mod backend;
 #[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
+mod directory;
 mod engine;
-mod records;
 pub use backend::*;
 pub use engine::{NewRecord, NoteSaveOutcome, NotesSession};
 pub mod daily;
