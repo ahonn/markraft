@@ -9,43 +9,26 @@ license.workspace = true
 
 [features]
 default = ["direct-distribution"]
-direct-distribution = ["dep:sparkle-updater"]
-mac-app-store = []
+direct-distribution = ["dep:sparkle-updater", "markraft-workspace/direct-distribution"]
+mac-app-store = ["markraft-workspace/mac-app-store"]
 # Local update integration tests use an isolated app identity and data directory.
 updater-mock = ["direct-distribution"]
 
 [dependencies]
-futures-channel = "0.3"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
+markraft-notes = { path = "../markraft-notes" }
+markraft-workspace = { path = "../markraft-workspace", features = ["bundled-settings", "native-translation"] }
 gpui.workspace = true
 gpui_platform.workspace = true
-gpui-base.workspace = true
-markraft-core.workspace = true
-markraft-commonmark.workspace = true
 markraft-gpui.workspace = true
-markraft-math.workspace = true
-markraft-media.workspace = true
-markraft-syntax.workspace = true
-markraft-vim.workspace = true
 tempfile = "3"
-unicode-segmentation = "1.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 log = "0.4"
-uuid = { version = "1", features = ["v4"] }
 notify = "8"
 url = "2"
-ureq = "3"
-rust-i18n = "4"
-base64 = "0.22"
-# Formulas become PNGs for readers that do not draw SVG; gpui links the same version.
-resvg = { version = "0.46", default-features = false }
-# Preserve the logical size of 2x formula images in native rich-text readers.
-png = "0.17"
 
 [dev-dependencies]
-# The app's own flows run headless against GPUI's test platform; see src/e2e.rs.
+# Process integration tests; workspace behavior tests live in markraft-workspace.
 gpui = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -53,19 +36,12 @@ libc = "0.2"
 global-hotkey = "0.7"
 tray-icon = { version = "0.21", default-features = false }
 objc2 = "0.6"
-block2 = "0.6"
-objc2-natural-language = { version = "0.3.2", default-features = false, features = ["NLTagger", "NLTagScheme", "NLTokenizer"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSApplication", "NSAttributedString", "NSPasteboard", "NSBitmapImageRep", "NSButton", "NSColor", "NSControl", "NSFontDescriptor",
     "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSResponder",
     "NSStatusBarButton", "NSStatusItem", "NSView", "NSPrintInfo", "NSPrintOperation", "NSWindow",
     "NSBezierPath", "NSWritingToolsCoordinator", "NSWritingToolsCoordinatorContext", "NSWritingToolsCoordinatorAnimationParameters", "block2",
     "objc2-core-foundation",
-] }
-# Printing lays notes out with WebKit, which paginates HTML.
-objc2-web-kit = { version = "0.3.2", default-features = false, features = [
-    "WKNavigation", "WKNavigationDelegate", "WKPreferences", "WKWebView",
-    "WKWebViewConfiguration", "objc2-app-kit", "objc2-core-foundation",
 ] }
 raw-window-handle = "0.6"
 sparkle-updater = { version = "=0.1.0", optional = true }

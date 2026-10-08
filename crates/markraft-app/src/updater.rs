@@ -10,9 +10,9 @@ compile_error!("select a distribution channel: direct-distribution or mac-app-st
 #[cfg(feature = "direct-distribution")]
 mod direct;
 #[cfg(feature = "direct-distribution")]
-pub use direct::{Updater, resume};
+pub use direct::Updater;
 
 #[cfg(not(feature = "direct-distribution"))]
 mod store;
 #[cfg(not(feature = "direct-distribution"))]
-pub use store::{Updater, resume};
+pub use store::Updater;

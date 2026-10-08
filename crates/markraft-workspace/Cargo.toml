@@ -1,0 +1,73 @@
+[package]
+name = "markraft-workspace"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Embeddable GPUI Markdown notes workspace with host-controlled application services"
+repository.workspace = true
+license.workspace = true
+
+[features]
+default = []
+bundled-settings = ["dep:gpui-base"]
+native-translation = []
+direct-distribution = []
+mac-app-store = []
+
+[dependencies]
+markraft-notes = { path = "../markraft-notes" }
+futures-channel = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+gpui.workspace = true
+gpui-base = { workspace = true, optional = true }
+markraft-core.workspace = true
+markraft-commonmark.workspace = true
+markraft-gpui.workspace = true
+markraft-math.workspace = true
+markraft-media.workspace = true
+markraft-syntax.workspace = true
+markraft-vim.workspace = true
+tempfile = "3"
+unicode-segmentation = "1.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+log = "0.4"
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+ureq = "3"
+base64 = "0.22"
+# Formulas become PNGs for readers that do not draw SVG; gpui links the same version.
+resvg = { version = "0.46", default-features = false }
+# Preserve the logical size of 2x formula images in native rich-text readers.
+png = "0.17"
+
+[dev-dependencies]
+global-hotkey = "0.7"
+markraft-notes = { path = "../markraft-notes", features = ["test-support"] }
+# The app's own flows run headless against GPUI's test platform; see src/e2e.rs.
+gpui = { workspace = true, features = ["test-support"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+muda = { version = "0.17", default-features = false }
+objc2 = "0.6"
+block2 = "0.6"
+objc2-natural-language = { version = "0.3.2", default-features = false, features = ["NLTagger", "NLTagScheme", "NLTokenizer"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSApplication", "NSAttributedString", "NSPasteboard", "NSBitmapImageRep", "NSButton", "NSColor", "NSControl", "NSFontDescriptor",
+    "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSResponder",
+    "NSStatusBarButton", "NSStatusItem", "NSView", "NSPrintInfo", "NSPrintOperation", "NSWindow",
+    "NSBezierPath", "NSTextCheckingClient", "NSWritingToolsCoordinator", "NSWritingToolsCoordinatorContext", "NSWritingToolsCoordinatorAnimationParameters", "block2",
+    "objc2-core-foundation",
+] }
+# Printing lays notes out with WebKit, which paginates HTML.
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+    "WKNavigation", "WKNavigationDelegate", "WKPreferences", "WKWebView",
+    "WKWebViewConfiguration", "objc2-app-kit", "objc2-core-foundation",
+] }
+raw-window-handle = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSBundle", "NSData", "NSError", "NSString", "NSURL"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }

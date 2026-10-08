@@ -8,6 +8,8 @@ members = [
     "crates/markraft-syntax",
     "crates/markraft-gpui",
     "crates/markraft-vim",
+    "crates/markraft-notes",
+    "crates/markraft-workspace",
     "crates/markraft-app",
     "xtask",
 ]
@@ -30,12 +32,20 @@ markraft-media = { path = "crates/markraft-media" }
 markraft-syntax = { path = "crates/markraft-syntax" }
 markraft-gpui = { path = "crates/markraft-gpui" }
 markraft-vim = { path = "crates/markraft-vim" }
+markraft-notes = { path = "crates/markraft-notes" }
+markraft-workspace = { path = "crates/markraft-workspace", default-features = false }
 
 [profile.dev]
 debug = 1
 
 [profile.dev.package."*"]
 debug = 0
+# Rust's debug-info stripping can misalign proc-macro dylibs on macOS 27.
+# Keep the linker output intact: rust-lang/rust#157750.
+strip = "none"
+
+[profile.release.build-override]
+strip = "none"
 
 # Xcode archives need Rust debug information for their matching dSYMs.
 # Keep direct-distribution release artifacts on the existing release profile.

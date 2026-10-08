@@ -42,8 +42,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - name: Check the Mac App Store channel
-        run: cargo clippy -p markraft-app --all-targets --no-default-features --features mac-app-store --locked -- -D warnings
+        run: cargo clippy -p markraft-app -p markraft-workspace --all-targets --no-default-features --features markraft-app/mac-app-store --locked -- -D warnings
       - name: Test the Mac App Store channel
-        run: cargo test -p markraft-app --no-default-features --features mac-app-store --locked
+        run: cargo test -p markraft-app -p markraft-workspace --no-default-features --features markraft-app/mac-app-store --locked
       - name: Verify Sparkle release notes generation
         run: cargo test -p xtask --locked sparkle_embeds_release_notes_in_generated_feed -- --ignored

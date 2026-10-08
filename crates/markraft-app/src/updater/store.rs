@@ -1,21 +1,11 @@
 use crate::locale::Message;
 
-/// The App Store manages updates, so no relaunch can originate here.
-pub enum RelaunchContinuation {}
-
-pub fn resume(continuation: RelaunchContinuation) {
-    match continuation {}
-}
+use markraft_workspace::updater::RelaunchContinuation;
 
 pub struct Updater;
 
 impl Updater {
     pub fn new() -> Self {
-        Self
-    }
-
-    #[cfg(test)]
-    pub fn disabled() -> Self {
         Self
     }
 
@@ -26,7 +16,7 @@ impl Updater {
         None
     }
     pub fn postpone(&self, continuation: RelaunchContinuation) {
-        match continuation {}
+        drop(continuation);
     }
     pub fn check(&self) -> Result<(), Message> {
         Err(Message::new("error.updates-unconfigured"))
