@@ -20,8 +20,20 @@ versioned_files = [
     { path = "Cargo.lock", dependency = "markraft-gpui" },
     { path = "Cargo.lock", dependency = "markraft-math" },
     { path = "Cargo.lock", dependency = "markraft-media" },
+    { path = "Cargo.lock", dependency = "markraft-notes" },
     { path = "Cargo.lock", dependency = "markraft-syntax" },
     { path = "Cargo.lock", dependency = "markraft-vim" },
+    { path = "Cargo.lock", dependency = "markraft-workspace" },
+    # The consumer examples build with --locked against the same crates.
+    { path = "examples/integration/Cargo.lock", dependency = "markraft-commonmark" },
+    { path = "examples/integration/Cargo.lock", dependency = "markraft-core" },
+    { path = "examples/integration/Cargo.lock", dependency = "markraft-gpui" },
+    { path = "examples/integration/Cargo.lock", dependency = "markraft-math" },
+    { path = "examples/integration/Cargo.lock", dependency = "markraft-media" },
+    { path = "examples/integration/Cargo.lock", dependency = "markraft-notes" },
+    { path = "examples/integration/Cargo.lock", dependency = "markraft-syntax" },
+    { path = "examples/integration/Cargo.lock", dependency = "markraft-vim" },
+    { path = "examples/integration/Cargo.lock", dependency = "markraft-workspace" },
 ]
 changelog = "CHANGELOG.md"
 
