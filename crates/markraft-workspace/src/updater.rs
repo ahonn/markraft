@@ -4,6 +4,11 @@ pub fn resume(continuation: RelaunchContinuation) {
     continuation();
 }
 pub trait UpdateServices {
+    /// Whether this copy updates itself. A copy that a store updates, or that a
+    /// host embeds, shows no update controls.
+    fn updates_itself(&self) -> bool {
+        false
+    }
     fn take_startup_error(&mut self) -> Option<Message> {
         None
     }

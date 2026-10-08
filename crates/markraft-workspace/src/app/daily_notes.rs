@@ -5,7 +5,7 @@
 //! library, the persistence worker and the note on screen.
 
 use super::*;
-#[cfg(any(feature = "bundled-settings", test))]
+#[cfg(any(feature = "unstable-standalone", test))]
 use crate::daily::DailySettings;
 use crate::daily::DateLocale;
 use crate::persistence::NewNote;
@@ -253,7 +253,7 @@ impl MarkraftApp {
     }
 
     /// Settings › Save daily notes in › Choose Folder….
-    #[cfg(feature = "bundled-settings")]
+    #[cfg(feature = "unstable-standalone")]
     pub(super) fn configure_daily_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.choose_inside_folder(
             false,
@@ -269,7 +269,7 @@ impl MarkraftApp {
 
     /// Settings › Daily note template › Choose File…: a Markdown file in the notes
     /// folder.
-    #[cfg(feature = "bundled-settings")]
+    #[cfg(feature = "unstable-standalone")]
     pub(super) fn choose_daily_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.choose_inside_folder(
             true,
@@ -295,7 +295,7 @@ impl MarkraftApp {
     /// Ask for a folder, or a file, inside the notes folder and hand `apply` where it
     /// is relative to it. What `apply` or the choice itself refuses is said beside the
     /// daily note settings.
-    #[cfg(feature = "bundled-settings")]
+    #[cfg(feature = "unstable-standalone")]
     fn choose_inside_folder(
         &mut self,
         files: bool,
@@ -357,7 +357,7 @@ impl MarkraftApp {
     /// The daily note settings of the Obsidian vault this folder is, with its template
     /// found among the notes, when they can be read and used here. Read when the
     /// Settings window comes forward, never while it draws.
-    #[cfg(any(feature = "bundled-settings", test))]
+    #[cfg(any(feature = "unstable-standalone", test))]
     pub(super) fn read_obsidian_daily(&self) -> Option<DailySettings> {
         let root = self.path.as_ref()?;
         let obsidian = crate::daily::read_obsidian(root)?;

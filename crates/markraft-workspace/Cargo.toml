@@ -9,10 +9,14 @@ license.workspace = true
 
 [features]
 default = []
-bundled-settings = ["dep:gpui-base"]
+# Names what only the standalone Markraft application uses: its window services,
+# its updater, its single-instance requests, and its settings window. No
+# compatibility promise. A host does not enable it.
+unstable-standalone = ["dep:gpui-base"]
 native-translation = []
-direct-distribution = []
-mac-app-store = []
+# The host runs in the macOS App Sandbox. The workspace does not read the data of
+# other applications, and the standalone application stores folder grants.
+sandbox = []
 
 [dependencies]
 markraft-notes = { path = "../markraft-notes", features = ["unstable-internals"] }

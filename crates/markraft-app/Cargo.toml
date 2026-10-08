@@ -9,14 +9,14 @@ license.workspace = true
 
 [features]
 default = ["direct-distribution"]
-direct-distribution = ["dep:sparkle-updater", "markraft-workspace/direct-distribution"]
-mac-app-store = ["markraft-workspace/mac-app-store"]
+direct-distribution = ["dep:sparkle-updater"]
+mac-app-store = ["markraft-workspace/sandbox"]
 # Local update integration tests use an isolated app identity and data directory.
 updater-mock = ["direct-distribution"]
 
 [dependencies]
 markraft-notes = { path = "../markraft-notes", features = ["unstable-internals"] }
-markraft-workspace = { path = "../markraft-workspace", features = ["bundled-settings", "native-translation"] }
+markraft-workspace = { path = "../markraft-workspace", features = ["unstable-standalone", "native-translation"] }
 gpui.workspace = true
 gpui_platform.workspace = true
 markraft-gpui.workspace = true

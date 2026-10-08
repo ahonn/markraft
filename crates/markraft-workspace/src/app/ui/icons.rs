@@ -44,10 +44,10 @@ define_icons! {
     Close => "xmark.circle",
     ChevronDown => "chevron.down",
     // Clearing a field: the shortcut recorder's chord.
-    #[cfg(feature = "bundled-settings")]
+    #[cfg(feature = "unstable-standalone")]
     ClearField => "xmark.circle.fill",
     // A pop-up button's pair of chevrons.
-    #[cfg(feature = "bundled-settings")]
+    #[cfg(feature = "unstable-standalone")]
     UpDown => "chevron.up.chevron.down",
     Check => "checkmark",
     Pin => "pin",
@@ -63,11 +63,11 @@ define_icons! {
     Settings => "gearshape",
     // The Settings pages for the editor and for the syntax it writes: typing, and the
     // plain text a note is kept as.
-    #[cfg(feature = "bundled-settings")]
+    #[cfg(feature = "unstable-standalone")]
     Typing => "character.cursor.ibeam",
-    #[cfg(feature = "bundled-settings")]
+    #[cfg(feature = "unstable-standalone")]
     Markdown => "doc.plaintext",
-    #[cfg(feature = "bundled-settings")]
+    #[cfg(feature = "unstable-standalone")]
     About => "info.circle",
     Bold => "bold",
     Italic => "italic",

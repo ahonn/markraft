@@ -2,6 +2,7 @@
 use markraft_notes::{fs, locale, storage, vault};
 use markraft_workspace::app;
 use markraft_workspace::file_access;
+use markraft_workspace::standalone::Standalone;
 mod crash;
 mod host;
 mod instance;
@@ -192,7 +193,7 @@ fn main() {
             },
             move |window, cx| {
                 let app = cx.new(|cx| {
-                    let mut view = MarkraftApp::new(
+                    let mut view = MarkraftApp::standalone(
                         Some(directory),
                         settings_path,
                         store,
@@ -246,7 +247,7 @@ fn main() {
                                 cx.defer(move |cx| {
                                     let _ = handle.update(cx, |_, window, cx| {
                                         view.update(cx, |view, cx| {
-                                            view.open_bundled_settings(window, cx)
+                                            view.open_settings_window(window, cx)
                                         })
                                     });
                                 });
@@ -290,6 +291,8 @@ fn main() {
                             markraft_workspace::WorkspaceEvent::LocaleChanged(i18n) => {
                                 host::set_app_menus(i18n, cx)
                             }
+                            // A request this build does not know is one it does not answer.
+                            _ => {}
                         }
                     },
                 )

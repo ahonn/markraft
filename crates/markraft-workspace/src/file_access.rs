@@ -7,14 +7,14 @@
 use crate::{locale::Message, storage::Settings};
 use std::path::Path;
 
-#[cfg(any(feature = "mac-app-store", test))]
+#[cfg(any(feature = "sandbox", test))]
 mod bookmarks;
-#[cfg(feature = "mac-app-store")]
+#[cfg(feature = "sandbox")]
 mod native;
 
 #[derive(Default)]
 pub struct FileAccess {
-    #[cfg(feature = "mac-app-store")]
+    #[cfg(feature = "sandbox")]
     store: Option<bookmarks::Store<native::Native>>,
 }
 
@@ -22,7 +22,7 @@ impl FileAccess {
     /// Only the primary process owns the bookmark file. Direct-download builds
     /// and headless application tests use the disabled default instance.
     pub fn load(settings_path: &Path) -> (Self, Vec<Message>) {
-        #[cfg(feature = "mac-app-store")]
+        #[cfg(feature = "sandbox")]
         {
             let path = settings_path.with_extension("bookmarks.json");
             let (store, errors) = bookmarks::Store::load(path, native::Native);
@@ -31,7 +31,7 @@ impl FileAccess {
                 errors.into_iter().map(Message::from).collect(),
             )
         }
-        #[cfg(not(feature = "mac-app-store"))]
+        #[cfg(not(feature = "sandbox"))]
         {
             let _ = settings_path;
             (Self::default(), Vec::new())
@@ -41,7 +41,7 @@ impl FileAccess {
     /// Restore permissions before the store, watchers, or session restoration
     /// first access external paths. A moved directory also relocates its notes.
     pub fn restore(&mut self, settings: &mut Settings) -> Vec<Message> {
-        #[cfg(feature = "mac-app-store")]
+        #[cfg(feature = "sandbox")]
         if let Some(store) = &mut self.store {
             let mut paths = settings.open_files.clone();
             paths.extend(settings.notes_folder.iter().cloned());
@@ -58,9 +58,9 @@ impl FileAccess {
 
     /// Atomic saves create a sibling temporary file, so a file-only grant is
     /// insufficient. This checks the already-active directory scopes only.
-    #[cfg(feature = "mac-app-store")]
+    #[cfg(feature = "sandbox")]
     pub fn has_write_access(&self, parent: &Path) -> bool {
-        #[cfg(feature = "mac-app-store")]
+        #[cfg(feature = "sandbox")]
         if let Some(store) = &self.store {
             return inside_container(parent) || store.has_write_access(parent);
         }
@@ -71,7 +71,7 @@ impl FileAccess {
     /// Call while the process still holds the implicit grant from an open panel,
     /// drag-and-drop, or Finder. This API never obtains access without that grant.
     pub fn remember(&mut self, path: &Path) -> Result<(), Message> {
-        #[cfg(feature = "mac-app-store")]
+        #[cfg(feature = "sandbox")]
         if let Some(store) = &mut self.store {
             if inside_container(path) {
                 return Ok(());
@@ -93,7 +93,7 @@ impl FileAccess {
     }
 }
 
-#[cfg(feature = "mac-app-store")]
+#[cfg(feature = "sandbox")]
 fn inside_container(path: &Path) -> bool {
     let home = objc2_foundation::NSHomeDirectory();
     // Container paths may include symlinks to external user folders.

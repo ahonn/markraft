@@ -80,7 +80,7 @@ impl Command {
         }
     }
     /// The label names `value` where its message says `%{name}`.
-    #[cfg(not(feature = "mac-app-store"))]
+    #[cfg(not(feature = "sandbox"))]
     pub(super) fn arg(mut self, name: &'static str, value: String) -> Self {
         self.arg = Some((name, value));
         self

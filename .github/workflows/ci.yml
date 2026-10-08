@@ -41,6 +41,9 @@ jobs:
         run: python3 -m unittest discover -s ci_scripts/tests -v
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      # The workspace build above enables what only the application uses.
+      - name: Check the embeddable crates with the features a host gets
+        run: cargo clippy -p markraft-workspace -p markraft-notes --all-targets --locked -- -D warnings
       - name: Check independent integration consumers
         run: sh examples/integration/check.sh
       - uses: taiki-e/install-action@v2

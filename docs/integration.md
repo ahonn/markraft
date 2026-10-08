@@ -23,8 +23,11 @@ For Markdown storage, provide separate notes, state, and cache locations.
 The notes directory contains Markdown files.
 The state directory contains component recovery and workspace data.
 For a custom backend, pass the backend to the workspace constructor.
-`WorkspaceOptions` holds only the cache directory and the editor preferences.
 Database notes do not need a Markdown directory or a fabricated file path.
+
+`WorkspaceOptions` holds only the cache directory and the editor preferences.
+Start from `WorkspaceOptions::default()` and set the fields that the host needs.
+A later release can add fields to the options and to the preferences.
 
 The cache directory contains replaceable component data.
 Keep host preferences separate from component state.
@@ -174,6 +177,8 @@ Dropping the session requests storage-worker shutdown.
 Render the workspace entity inside the host's layout.
 
 Retain subscriptions to `WorkspaceEvent` while the host uses the workspace.
+Handle the events that the host supports, and ignore the others.
+A later release can add events.
 Handle `OptionsChanged` by saving the editor preferences in the host's own configuration.
 The example writes `host-preferences.json` beside its temporary directories, outside the component state directory.
 
@@ -256,6 +261,17 @@ This preserves loadable procedural macro libraries with the Xcode 27 tools used 
 For a separate repository, provide a reproducible patch preparation step and update the patch path in the consumer manifest.
 See [the patch instructions](../patches/README.md) for the pinned archive, checksum, and build requirements.
 
+## macOS App Sandbox
+
+The `sandbox` feature is disabled by default.
+Enable it when the host executable runs in the App Sandbox.
+The workspace then does not read the data of other applications.
+For example, it does not list Obsidian vaults.
+
+The Markraft application also stores folder grants for files from outside the notes folder.
+That interface is not yet available to a host.
+The host must keep its own security-scoped bookmarks for each directory and file that it gives to the workspace.
+
 ## Optional macOS translation
 
 The `native-translation` feature is disabled by default.
@@ -283,12 +299,15 @@ The public interface of `markraft-notes` is `NotesLibrary`, `NotesBackend`, and 
 The public interface of `markraft-workspace` is `WorkspaceView`, its options, and its events.
 The store, the storage worker, and the settings file have no compatibility promise.
 A host cannot name them without the `unstable-internals` feature of `markraft-notes`.
-Do not enable that feature in a host.
+The `unstable-standalone` feature of `markraft-workspace` names what only the Markraft application uses.
+Do not enable these two features in a host.
 
 `scripts/check-public-api.sh` compares both public interfaces with the latest release.
 It uses `cargo-semver-checks`, and it runs on each pull request.
 A change that breaks a host fails the check.
 To release such a change, add a change file that declares the release `major`.
+A new value of an option, such as a new line width, is such a change.
+A new preference, event, or receipt field is not.
 
 ## Verification boundaries
 

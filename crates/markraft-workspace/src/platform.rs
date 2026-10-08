@@ -134,7 +134,6 @@ pub enum PlatformEvent {
     NewNote,
     DailyNote,
     Settings,
-    #[cfg(feature = "direct-distribution")]
     CheckForUpdates,
     ReportIssue,
     Quit,

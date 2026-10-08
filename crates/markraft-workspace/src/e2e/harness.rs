@@ -63,7 +63,7 @@ pub(crate) fn open_with<'a>(
     }
     let settings = root.path().join("settings.json");
     cx.update(|cx| {
-        #[cfg(feature = "bundled-settings")]
+        #[cfg(feature = "unstable-standalone")]
         gpui_base::init(cx);
         markraft_gpui::bind_keys(cx);
         markraft_vim::bind_keys(cx);
@@ -533,7 +533,7 @@ fn open_backend_with(
 ) -> Harness<'_> {
     let root = tempfile::tempdir().unwrap();
     cx.update(|cx| {
-        #[cfg(feature = "bundled-settings")]
+        #[cfg(feature = "unstable-standalone")]
         gpui_base::init(cx);
         markraft_gpui::bind_keys(cx);
         markraft_vim::bind_keys(cx);

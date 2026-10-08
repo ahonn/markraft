@@ -254,9 +254,17 @@ The host handles settings, hide, quit, diagnostic, and locale requests through `
 `flush` provides a save barrier. `prepare_close` saves committed edits and stops persistence.
 The host retains the view until close succeeds.
 
-The optional `bundled-settings` feature retains Markraft's settings UI for its standalone app.
-Third-party hosts can supply their own settings UI without this feature.
+The optional `unstable-standalone` feature names what only the standalone application uses.
+That is its window services, its updater, its instance requests, and its settings window.
+The application reaches the view through the `Standalone` trait. A host does not enable this feature.
+The optional `sandbox` feature adds the folder grants that the macOS App Sandbox requires.
 The optional `native-translation` feature builds the Swift translation bridge.
+
+The workspace has no distribution-channel feature.
+It asks the host's update service whether this copy updates itself, and shows update controls only then.
+
+**Invariant:** a type that the workspace builds and the host reads is `#[non_exhaustive]`.
+A new preference, option, event, or receipt field does not break a host.
 
 **Invariant:** mounting a workspace does not create process services or replace application menus.
 The host owns tray icons, global shortcuts, IPC, updater integration, and process termination.

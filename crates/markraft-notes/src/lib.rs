@@ -37,7 +37,7 @@ pub use fs::StoreError;
 pub use library::*;
 pub use storage::{
     AttachmentPolicy, BulletMarker, CodeFence, EditorFont, EmphasisMarker, HardBreakStyle,
-    ImageNaming, LineHeight, LineWidth, NoteNaming, OrderedDelimiter, Pref, Preferences,
+    ImageNaming, LineHeight, LineWidth, NoteNaming, OrderedDelimiter, Preferences,
     SettingsWindowPlacement, Summon, TabKey, TextCheckingPreferences, TextCheckingSetting,
     WorkspaceSettings,
 };

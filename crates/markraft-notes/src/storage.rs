@@ -18,6 +18,7 @@ use uuid::Uuid;
 /// Native prose services are shared across notes; code remains literal.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct TextCheckingPreferences {
     pub spelling: bool,
     pub grammar: bool,
@@ -160,6 +161,7 @@ impl SettingsWindowPlacement {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct Preferences {
     pub text_checking: TextCheckingPreferences,
     /// Requested display language; old settings continue to follow the system.
@@ -930,6 +932,7 @@ pub enum AttachmentPolicy {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct WorkspaceSettings {
     pub new_note_directory: PathBuf,
     pub attachments: AttachmentPolicy,

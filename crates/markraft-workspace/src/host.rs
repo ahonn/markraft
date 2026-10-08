@@ -5,11 +5,13 @@ use std::path::PathBuf;
 /// What every workspace needs, whatever stores its notes. The storage itself is
 /// an argument of the constructor: Markdown folders, a backend, or a session.
 #[derive(Clone, Default)]
+#[non_exhaustive]
 pub struct WorkspaceOptions {
     pub cache_directory: Option<PathBuf>,
     pub preferences: Preferences,
 }
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum WorkspaceEvent {
     OpenSettings,
     /// The host persists editor preferences changed through workspace controls.
@@ -22,6 +24,7 @@ pub enum WorkspaceEvent {
 }
 /// A save receipt distinguishes the committed revision and actual Markdown paths.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SaveReceipt {
     pub revision: u64,
     pub notes: Vec<markraft_notes::NoteSaveOutcome>,
@@ -30,6 +33,7 @@ pub struct SaveReceipt {
 }
 /// Host-observable operation failures, independent of translated UI messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WorkspaceError {
     Storage(crate::fs::StoreError),
     /// An accepted operation or another close must finish before retrying.

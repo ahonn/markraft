@@ -12,6 +12,9 @@ impl Updates {
     }
 }
 impl UpdateServices for Updates {
+    fn updates_itself(&self) -> bool {
+        cfg!(feature = "direct-distribution")
+    }
     fn take_startup_error(&mut self) -> Option<Message> {
         self.updater.take_startup_error()
     }
