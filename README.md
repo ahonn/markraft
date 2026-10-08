@@ -6,7 +6,7 @@
 
 <p align="center">
   The floating Markdown notepad for Mac.<br>
-  An open source alternative to Raycast Notes.
+  A free, open-source alternative to Raycast Notes.
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
   <img src="assets/screenshots/hero.gif" alt="A Markraft note formats its Markdown as three points are typed and checked off, then shows the plain .md source underneath" width="640">
 </p>
 
-Press <kbd>⌥N</kbd> in any app to write, and again to put it away. Notes are plain Markdown files in a folder you choose, so any other editor can open them too.
+Press <kbd>⌥N</kbd> in any app to write, and again to put it away. Markraft keeps your notes as plain Markdown files in a folder you choose, so Obsidian or any other editor can open them too.
 
 <p align="center">
   <a href="https://github.com/ahonn/markraft/releases/latest/download/Markraft.dmg"><b>Download for macOS</b></a>
@@ -74,7 +74,7 @@ Normal, Insert, Visual and Visual Line modes work with the usual motions, operat
 
 ## Your notes
 
-Notes are Markdown files in `~/Documents/Markraft` by default. You can choose another folder, including one you already keep notes in, and open any other `.md` file on your Mac.
+Notes are Markdown files in `~/Documents/Markraft` by default. You can choose another folder, including an Obsidian vault or any folder you already keep notes in, and open any other `.md` file on your Mac.
 
 - Changes made by other apps show up in the open note. If another app changes a file at the same moment you edit it, your version is kept as a separate conflicted copy.
 - Deleting a note moves its file to the Trash.
