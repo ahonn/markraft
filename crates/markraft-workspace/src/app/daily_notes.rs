@@ -30,11 +30,24 @@ impl MarkraftApp {
     /// Every daily note the library holds, by day.
     fn daily_notes(&self) -> BTreeMap<NaiveDate, String> {
         let Some(root) = &self.path else {
-            return BTreeMap::new();
+            return self
+                .notes
+                .library
+                .notes
+                .iter()
+                .filter_map(|note| {
+                    let day = note.logical_key.as_deref()?.strip_prefix("daily:")?;
+                    Some((
+                        NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?,
+                        note.id.clone(),
+                    ))
+                })
+                .collect();
         };
-        let settings = &self.library.workspace.daily;
+        let settings = &self.notes.library.workspace.daily;
         let locale = date_locale();
-        self.library
+        self.notes
+            .library
             .notes
             .iter()
             .filter_map(|note| {
@@ -46,15 +59,25 @@ impl MarkraftApp {
 
     /// The day the note on screen stands for, when it is a daily note.
     pub(super) fn active_daily_day(&self) -> Option<NaiveDate> {
+        if let Some(key) = self.notes.library.active_note().logical_key.as_deref() {
+            return key
+                .strip_prefix("daily:")
+                .and_then(|day| NaiveDate::parse_from_str(day, "%Y-%m-%d").ok());
+        }
         let root = self.path.as_ref()?;
         let relative = self
+            .notes
             .library
             .active_note()
             .path
             .as_deref()?
             .strip_prefix(root)
             .ok()?;
-        self.library.workspace.daily.day_of(relative, date_locale())
+        self.notes
+            .library
+            .workspace
+            .daily
+            .day_of(relative, date_locale())
     }
 
     /// The nearest daily note before or after the one on screen, skipping the days
@@ -104,15 +127,62 @@ impl MarkraftApp {
         if self.is_reloading() {
             return;
         }
-        let Some(root) = self.path.clone().filter(|_| self.persistence.is_some()) else {
+        if self.record_backed() {
+            if let Some(id) = self.daily_notes().get(&day).cloned() {
+                self.select_note(&id, window, cx);
+                return;
+            }
+            self.close_popover(cx);
+            self.cancel_input(cx);
+            self.editor()
+                .update(cx, |editor, cx| editor.cancel_composition(cx));
+            self.sync_documents(cx);
+            self.io.opening += 1;
+            let opening = self.io.opening;
+            let future = self
+                .notes
+                .persistence
+                .as_ref()
+                .unwrap()
+                .create_record_async(markraft_notes::NewRecord {
+                    markdown: String::new(),
+                    title: Some(day.to_string()),
+                    logical_key: Some(format!("daily:{day}")),
+                });
+            self.run_io(
+                future,
+                window,
+                cx,
+                move |this, result, window, cx| match result {
+                    Ok(note) => {
+                        let id = note.id.clone();
+                        if this.notes.library.note(&id).is_none() {
+                            this.notes.library.adopt(note);
+                        }
+                        if this.io.opening == opening {
+                            this.select_note(&id, window, cx);
+                        }
+                        this.notes_changed(cx);
+                    }
+                    Err(error) => this.inform(error, cx),
+                },
+            );
+            return;
+        }
+        let Some(root) = self
+            .path
+            .clone()
+            .filter(|_| self.notes.persistence.is_some())
+        else {
             self.inform(Message::new("notice.folder-daily"), cx);
             return;
         };
-        let settings = self.library.workspace.daily.clone();
+        let settings = self.notes.library.workspace.daily.clone();
         let locale = date_locale();
         let relative = settings.path_for(day, locale);
         let path = root.join(&relative);
         if let Some(id) = self
+            .notes
             .library
             .notes
             .iter()
@@ -135,7 +205,7 @@ impl MarkraftApp {
             .and_then(std::path::Path::file_stem)
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let Some(persistence) = &self.persistence else {
+        let Some(persistence) = &self.notes.persistence else {
             return;
         };
         let future = persistence.create_note_async(NewNote {
@@ -162,10 +232,10 @@ impl MarkraftApp {
                 );
             }
             let id = created.note.id.clone();
-            if this.library.note(&id).is_none() {
-                this.library.adopt(created.note);
+            if this.notes.library.note(&id).is_none() {
+                this.notes.library.adopt(created.note);
             }
-            if this.io.opening == opening && this.library.select(&id) {
+            if this.io.opening == opening && this.notes.library.select(&id) {
                 this.ensure_session(window, cx);
                 this.set_panel(Panel::Editor, cx);
                 // The template has been written; what the day adds goes after it.
@@ -191,7 +261,7 @@ impl MarkraftApp {
             window,
             cx,
             |this, relative| {
-                this.library.workspace.daily.folder = relative;
+                this.notes.library.workspace.daily.folder = relative;
                 Ok(())
             },
         );
@@ -216,7 +286,7 @@ impl MarkraftApp {
                 if !markdown {
                     return Err(Message::new("notice.choose-markdown-inside"));
                 }
-                this.library.workspace.daily.template = Some(relative);
+                this.notes.library.workspace.daily.template = Some(relative);
                 Ok(())
             },
         );
@@ -297,12 +367,13 @@ impl MarkraftApp {
                 target,
                 None,
                 Some(root),
-                self.library
+                self.notes
+                    .library
                     .notes
                     .iter()
                     .filter_map(|note| Some((note.id.as_str(), note.path.as_deref()?))),
             )?;
-            let path = self.library.note(&id)?.path.as_deref()?;
+            let path = self.notes.library.note(&id)?.path.as_deref()?;
             Some(path.strip_prefix(root).ok()?.to_owned())
         });
         Some(DailySettings {
@@ -315,7 +386,7 @@ impl MarkraftApp {
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_set_daily(&mut self, daily: DailySettings) {
-        self.library.workspace.daily = daily;
+        self.notes.library.workspace.daily = daily;
     }
 
     #[cfg(test)]
@@ -334,6 +405,6 @@ impl MarkraftApp {
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_note_count(&self) -> usize {
-        self.library.notes.len()
+        self.notes.library.notes.len()
     }
 }

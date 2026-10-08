@@ -111,7 +111,8 @@ fn retarget(
 
 impl MarkraftApp {
     fn places(&self) -> Places {
-        self.library
+        self.notes
+            .library
             .notes
             .iter()
             .filter_map(|note| Some((note.id.clone(), note.path.clone()?)))
@@ -135,7 +136,8 @@ impl MarkraftApp {
                 .find(|(note, _)| before.iter().any(|(b, p)| b == note && p == path))
                 .map_or_else(|| path.to_owned(), |(_, path)| path.clone())
         };
-        self.library
+        self.notes
+            .library
             .notes
             .iter()
             .filter(|note| note.read_only.is_none())
@@ -170,20 +172,23 @@ impl MarkraftApp {
 
     /// Click on the title, or Rename… in the command panel.
     pub(super) fn open_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.persistence.is_none() {
+        if self.notes.persistence.is_none() {
             return;
         }
         self.set_panel(Panel::Editor, cx);
         self.ring.release();
-        let note = self.library.active_note();
+        let note = self.notes.library.active_note();
         // A note with no file yet has nothing to rename: one with text is saved first,
         // and the pill opens once that save has given it a file.
-        let Some(path) = note.path.clone() else {
+        let file_backend = self.file_backed();
+        let path = note.path.clone();
+        if file_backend && path.is_none() {
             if !note.document_is_empty() {
                 let id = note.id.clone();
                 self.flush_then(window, cx, move |this, window, cx| {
-                    if this.library.active_id == id
+                    if this.notes.library.active_id == id
                         && this
+                            .notes
                             .library
                             .note(&id)
                             .is_some_and(|note| note.path.is_some())
@@ -193,16 +198,17 @@ impl MarkraftApp {
                 });
             }
             return;
-        };
+        }
         if note.read_only.is_some() {
             self.inform(Message::new("notice.readonly-rename"), cx);
             return;
         }
         let id = note.id.clone();
         let stem = path
-            .file_stem()
+            .as_deref()
+            .and_then(Path::file_stem)
             .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_default();
+            .unwrap_or_else(|| note.title());
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
         self.sync_documents(cx);
         // Any other name moves every link that reaches this one, so the count does not
@@ -227,7 +233,15 @@ impl MarkraftApp {
             cx,
         );
         self.set_query(stem, cx);
-        self.query().update(cx, |query, cx| query.select_all(cx));
+        let label = self.i18n.text(if file_backend {
+            "input.name-label"
+        } else {
+            "command.rename"
+        });
+        self.query().update(cx, |query, cx| {
+            query.set_aria_label(label, cx);
+            query.select_all(cx);
+        });
         window.focus(&self.query().focus_handle(cx), cx);
         cx.notify();
     }
@@ -256,19 +270,47 @@ impl MarkraftApp {
             return;
         }
         let (id, update_links) = (rename.id.clone(), rename.update_links);
-        if self.library.active_id != id {
+        if self.notes.library.active_id != id {
             self.close_rename(window, cx);
             return;
         }
         let name = self.query().read(cx).text().trim().to_owned();
         let operation = std::rc::Rc::new(());
         self.interaction.rename_mut().unwrap().operation = Some(operation.clone());
+        if self.record_backed() {
+            if name.is_empty() {
+                self.finish_rename(&operation, false, window, cx);
+                return;
+            }
+            if let Some(note) = self
+                .notes
+                .library
+                .notes
+                .iter_mut()
+                .find(|note| note.id == id)
+            {
+                note.title_override = Some(name);
+                note.updated_at = crate::storage::timestamp();
+            }
+            self.notes.library.mark_changed(&id);
+            self.notes_changed(cx);
+            self.flush_then(window, cx, move |this, window, cx| {
+                this.refresh_link_targets();
+                this.finish_rename(&operation, true, window, cx);
+            });
+            return;
+        }
         self.flush_then(window, cx, move |this, window, cx| {
-            let Some(before) = this.library.note(&id).and_then(|note| note.path.clone()) else {
+            let Some(before) = this
+                .notes
+                .library
+                .note(&id)
+                .and_then(|note| note.path.clone())
+            else {
                 this.finish_rename(&operation, false, window, cx);
                 return;
             };
-            let Some(persistence) = &this.persistence else {
+            let Some(persistence) = &this.notes.persistence else {
                 this.finish_rename(&operation, false, window, cx);
                 return;
             };
@@ -331,7 +373,7 @@ impl MarkraftApp {
         // A save receipt can publish this operation's path first. Accept either
         // address, but never resurrect a deleted note or undo a later rename.
         if path == before
-            || !self.library.note(id).is_some_and(|note| {
+            || !self.notes.library.note(id).is_some_and(|note| {
                 note.path.as_deref() == Some(before) || note.path.as_ref() == Some(&path)
             })
         {
@@ -359,7 +401,7 @@ impl MarkraftApp {
         self.update_paths(vec![(id.to_owned(), path)], cx);
         let (mut updated, mut kept) = (0, 0);
         for (note_id, document, links) in edits {
-            let Some(mut note) = self.library.note(&note_id).cloned() else {
+            let Some(mut note) = self.notes.library.note(&note_id).cloned() else {
                 continue;
             };
             let accepted = if self.sessions.get(&note_id).is_some() {
@@ -368,13 +410,13 @@ impl MarkraftApp {
                 note.document = document.clone();
                 // Unopened notes need no editor, but still must round-trip before
                 // changing the library. Snapshot validation never advances source.
-                let writable = self.persistence.as_ref().is_some_and(|p| {
+                let writable = self.notes.persistence.as_ref().is_some_and(|p| {
                     p.source(note.clone()).is_ok_and(|source| match source {
                         Some(track) => track.snapshot().render(doc::schema(), &document).is_ok(),
                         None => p.markdown(note).is_ok(),
                     })
                 });
-                writable && self.library.set_document(&note_id, document)
+                writable && self.notes.library.set_document(&note_id, document)
             };
             if accepted {
                 updated += links;
@@ -437,6 +479,7 @@ mod tests {
         h.cx.update(|window, cx| {
             app.update(cx, |app, cx| {
                 let target = app
+                    .notes
                     .library
                     .notes
                     .iter()
@@ -449,6 +492,7 @@ mod tests {
                 let id = target.id.clone();
                 let before = target.path.clone().unwrap();
                 let future = app
+                    .notes
                     .persistence
                     .as_ref()
                     .unwrap()

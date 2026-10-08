@@ -110,6 +110,8 @@ pub struct Options {
     pub image_root: markraft_media::ImageRoot,
     /// Whether pictures on the web are linked; otherwise their alt text stands in.
     pub remote_images: bool,
+    /// Host-owned attachments captured with the document, keyed by source URI.
+    pub assets: std::collections::HashMap<String, markraft_notes::Asset>,
     /// Whether standalone display formulas are numbered.
     pub auto_number_equations: bool,
     /// The interface language, for callout titles and the page's `lang`.

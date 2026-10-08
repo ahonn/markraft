@@ -260,12 +260,15 @@ fn cmd_w_hides_the_window_in_every_mode_but_closes_settings_first(cx: &mut TestA
     }
     // Settings is a window of its own, so the note's context never reaches it; its
     // root context sits under the same keymap, and there ⌘W must close it.
-    let settings = [KeyContext::parse("MarkraftSettings").expect("a context")];
-    let runs = cmd_w_runs(&mut h, &settings);
-    assert_eq!(
-        runs.as_ref().map(|action| action.name()),
-        Some("markraft_settings::CloseSettings")
-    );
+    #[cfg(feature = "bundled-settings")]
+    {
+        let settings = [KeyContext::parse("MarkraftSettings").expect("a context")];
+        let runs = cmd_w_runs(&mut h, &settings);
+        assert_eq!(
+            runs.as_ref().map(|action| action.name()),
+            Some("markraft_settings::CloseSettings")
+        );
+    }
     drop(h);
 
     let mut h = open_with(cx, &[("w.md", "abc\n")], |p| p.vim_mode = false);

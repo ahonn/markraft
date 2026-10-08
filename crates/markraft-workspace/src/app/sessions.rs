@@ -159,13 +159,13 @@ impl Sessions {
 impl MarkraftApp {
     pub(super) fn editor(&self) -> Entity<EditorView> {
         self.sessions
-            .get(&self.library.active_id)
+            .get(&self.notes.library.active_id)
             .expect("the active note has an editor")
             .editor()
             .clone()
     }
     pub(super) fn ensure_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let id = self.library.active_id.clone();
+        let id = self.notes.library.active_id.clone();
         if self.find_vim.as_ref().is_some_and(|find| find.note != id) {
             self.cancel_vim_find(cx);
         }
@@ -191,8 +191,8 @@ impl MarkraftApp {
             return;
         }
         let restore_focus = self.close_popover(cx) || restore_focus;
-        let document = self.library.active_note().document.clone();
-        let note = self.library.active_note();
+        let document = self.notes.library.active_note().document.clone();
+        let note = self.notes.library.active_note();
         let image_base = note
             .path
             .as_ref()
@@ -202,23 +202,19 @@ impl MarkraftApp {
         let reloading = self.reloading.clone();
         // The editor checks each keystroke against the track the store saves
         // through, so what it takes is what a save writes.
-        let source = note
-            .path
-            .as_ref()
-            .and(self.persistence.as_ref())
-            .map(|persistence| {
-                match persistence.source(note.clone()) {
-                    Ok(Some(track)) => Ok(track),
-                    // A file the store holds no copy of is written whole.
-                    Ok(None) => persistence.markdown(note.clone()).and_then(|text| {
-                        markraft_commonmark::SourceDocument::parse(doc::schema(), &text)
-                            .map(|source| Arc::new(SourceTrack::new(source)))
-                            .map_err(|error| error.to_string().into())
-                    }),
-                    Err(error) => Err(error),
-                }
-                .map_err(|error| error.message())
-            });
+        let source = self.notes.persistence.as_ref().map(|persistence| {
+            match persistence.source(note.clone()) {
+                Ok(Some(track)) => Ok(track),
+                // A file the store holds no copy of is written whole.
+                Ok(None) => persistence.markdown(note.clone()).and_then(|text| {
+                    markraft_commonmark::SourceDocument::parse(doc::schema(), &text)
+                        .map(|source| Arc::new(SourceTrack::new(source)))
+                        .map_err(|error| error.to_string().into())
+                }),
+                Err(error) => Err(error),
+            }
+            .map_err(|error| error.message())
+        });
         let image_root = source
             .as_ref()
             .and_then(|source| source.as_ref().ok())
@@ -230,7 +226,7 @@ impl MarkraftApp {
         // refuses what a whole write could not say — the same edits a saved note's
         // guard refuses — rather than taking them and losing them on that first save.
         let source = source.or_else(|| {
-            (note.path.is_none() && self.persistence.is_some()).then(|| {
+            (note.path.is_none() && self.notes.persistence.is_some()).then(|| {
                 markraft_commonmark::SourceDocument::parse(doc::schema(), "")
                     .map(|source| Arc::new(SourceTrack::new(source)))
                     .map_err(|error| Message::from(error.to_string()))
@@ -323,6 +319,7 @@ impl MarkraftApp {
         let extensions = editor.update(cx, |editor, cx| {
             editor.set_wiki_resolver(resolver, cx);
             editor.set_remote_images(self.remote_image_fetcher(), cx);
+            editor.set_asset_loader(self.asset_loader(), cx);
             editor.set_animate_images(self.preferences.animate_images, cx);
             editor.set_auto_number_equations(self.preferences.auto_number_equations, cx);
             editor.set_indent_text(self.preferences.tab_key.text(), cx);
@@ -343,13 +340,13 @@ impl MarkraftApp {
             window,
             move |this, editor, event: &EditorEvent, window, cx| {
                 if let EditorEvent::ContextMenuRequested(request) = event {
-                    if this.library.active_id == note_id {
+                    if this.notes.library.active_id == note_id {
                         this.request_context_menu(editor, request.clone(), window, cx);
                     }
                     return;
                 }
                 if let EditorEvent::FilesPasted(item) = event {
-                    if this.library.active_id == note_id {
+                    if this.notes.library.active_id == note_id {
                         this.insert_assets(assets::from_clipboard(item.clone()), window, cx);
                     }
                     return;
@@ -357,19 +354,21 @@ impl MarkraftApp {
                 if let EditorEvent::Extension { id, payload } = event {
                     if *id == markraft_vim::VIM {
                         this.vim_effect(&note_id, payload, cx);
-                    } else if *id == ui::slash::SLASH_MENU && this.library.active_id == note_id {
+                    } else if *id == ui::slash::SLASH_MENU
+                        && this.notes.library.active_id == note_id
+                    {
                         this.slash_effect(payload, window, cx);
                     }
                     return;
                 }
                 if matches!(event, EditorEvent::CodeCopied) {
-                    if this.library.active_id == note_id {
+                    if this.notes.library.active_id == note_id {
                         this.inform(Message::new("notice.copied-code"), cx);
                     }
                     return;
                 }
                 if let EditorEvent::CodeLanguageRequested { pos } = event {
-                    if this.library.active_id == note_id
+                    if this.notes.library.active_id == note_id
                         && this.interaction.panel() == Panel::Editor
                     {
                         this.open_code_language(*pos, cx);
@@ -377,7 +376,7 @@ impl MarkraftApp {
                     return;
                 }
                 if let EditorEvent::WikiLinkClicked { target, embed } = event {
-                    if this.library.active_id == note_id
+                    if this.notes.library.active_id == note_id
                         && this.interaction.panel() == Panel::Editor
                     {
                         this.follow_wiki_link(target, *embed, window, cx);
@@ -385,7 +384,7 @@ impl MarkraftApp {
                     return;
                 }
                 if matches!(event, EditorEvent::LinkClicked) {
-                    if this.library.active_id == note_id
+                    if this.notes.library.active_id == note_id
                         && this.interaction.panel() == Panel::Editor
                     {
                         this.close_popover(cx);
@@ -394,7 +393,7 @@ impl MarkraftApp {
                     }
                     return;
                 }
-                if this.library.active_id == note_id
+                if this.notes.library.active_id == note_id
                     && matches!(
                         this.interaction.popover(),
                         Some(Popover::Link(_) | Popover::CodeLanguage(_))
@@ -402,7 +401,7 @@ impl MarkraftApp {
                 {
                     this.close_popover(cx);
                 }
-                if this.library.active_id == note_id {
+                if this.notes.library.active_id == note_id {
                     let trigger = if matches!(
                         event,
                         EditorEvent::Changed {
@@ -418,10 +417,10 @@ impl MarkraftApp {
                 }
                 let document = editor.read(cx).committed_document().clone();
                 this.reconcile_vim_find(window, cx);
-                let title = this.library.note(&note_id).map(|note| note.title());
-                if this.library.set_document(&note_id, document) {
+                let title = this.notes.library.note(&note_id).map(|note| note.title());
+                if this.notes.library.set_document(&note_id, document) {
                     this.links.invalidate_if(
-                        title != this.library.note(&note_id).map(|note| note.title()),
+                        title != this.notes.library.note(&note_id).map(|note| note.title()),
                     );
                     this.schedule_save(cx);
                 }
@@ -430,7 +429,7 @@ impl MarkraftApp {
         );
         let state_note_id = id.clone();
         let state_changes = cx.observe(&editor, move |this, editor, cx| {
-            if this.library.active_id != state_note_id {
+            if this.notes.library.active_id != state_note_id {
                 return;
             }
             this.invalidate_text_service(cx);
@@ -488,13 +487,14 @@ impl MarkraftApp {
             editor.dispatch_isolated([spec], cx)
         });
         if accepted {
-            let title = self.library.note(id).map(|note| note.title());
+            let title = self.notes.library.note(id).map(|note| note.title());
             if self
+                .notes
                 .library
                 .set_document(id, editor.read(cx).committed_document().clone())
             {
                 self.links
-                    .invalidate_if(title != self.library.note(id).map(|note| note.title()));
+                    .invalidate_if(title != self.notes.library.note(id).map(|note| note.title()));
                 self.schedule_save(cx);
             }
         }
@@ -504,10 +504,10 @@ impl MarkraftApp {
     pub(super) fn sync_documents(&mut self, cx: &App) {
         for (id, session) in self.sessions.iter() {
             let document = session.editor().read(cx).committed_document().clone();
-            let title = self.library.note(id).map(|note| note.title());
-            if self.library.set_document(id, document) {
+            let title = self.notes.library.note(id).map(|note| note.title());
+            if self.notes.library.set_document(id, document) {
                 self.links
-                    .invalidate_if(title != self.library.note(id).map(|note| note.title()));
+                    .invalidate_if(title != self.notes.library.note(id).map(|note| note.title()));
                 self.save.schedule(Instant::now());
             }
         }
@@ -522,7 +522,7 @@ impl MarkraftApp {
         self.cancel_input(cx);
         self.io.reset();
         self.save_waiters.clear();
-        self.library = library;
+        self.notes.library = library;
         self.sessions.clear();
         self.save.reset();
         self.links.invalidate();
@@ -531,13 +531,44 @@ impl MarkraftApp {
 }
 
 impl MarkraftApp {
-    /// What a note editor fetches remote images with: nothing while the preference
-    /// is off, so each one reads as an image this editor does not load.
+    /// Whether notes are files in a Markdown folder. File commands, such as
+    /// reveal, rename on disk, and open in place, need this.
+    pub(in crate::app) fn file_backed(&self) -> bool {
+        self.notes
+            .persistence
+            .as_ref()
+            .is_some_and(|p| p.capabilities().file_operations)
+    }
+
+    /// Whether notes are records in a host backend, with no file behind them.
+    pub(in crate::app) fn record_backed(&self) -> bool {
+        self.notes
+            .persistence
+            .as_ref()
+            .is_some_and(|p| !p.capabilities().file_operations)
+    }
+
     pub(in crate::app) fn remote_image_fetcher(&self) -> Option<markraft_gpui::RemoteImageFetcher> {
         self.preferences
             .remote_images
             .then(|| self.remote_fetcher.clone())
             .flatten()
+    }
+
+    /// Load host-owned assets from storage. The network-image preference does not apply.
+    pub(in crate::app) fn asset_loader(&self) -> Option<markraft_gpui::AssetLoader> {
+        let read = self
+            .notes
+            .persistence
+            .as_ref()
+            .filter(|persistence| persistence.capabilities().assets)
+            .map(|persistence| persistence.asset_reader())?;
+        Some(std::sync::Arc::new(move |source| {
+            let id =
+                markraft_notes::AssetId::from_source(source).ok_or("Not an asset reference")?;
+            let asset = futures_executor::block_on(read(id)).map_err(|error| error.to_string())?;
+            Ok(asset.bytes)
+        }))
     }
 }
 
@@ -595,7 +626,7 @@ mod tests {
                 assert!(!app.save.is_dirty());
                 assert!(app.edit_session_document(&id, crate::doc::from_markdown("Changed"), cx));
                 assert!(app.save.is_dirty());
-                assert!(app.library.changes.contains_key(&id));
+                assert!(app.notes.library.changes.contains_key(&id));
             });
         });
         h.keys("cmd-z");
@@ -649,13 +680,14 @@ mod tests {
         let app = h.app.clone();
         h.cx.update(|_, cx| {
             app.update(cx, |app, cx| {
-                let before = app.library.active_note().document.clone();
-                let generations = app.library.changes.clone();
+                let before = app.notes.library.active_note().document.clone();
+                let generations = app.notes.library.changes.clone();
                 let track = app
+                    .notes
                     .persistence
                     .as_ref()
                     .unwrap()
-                    .source(app.library.active_note().clone())
+                    .source(app.notes.library.active_note().clone())
                     .unwrap()
                     .unwrap();
                 let source = track
@@ -667,9 +699,9 @@ mod tests {
                     .unwrap()
                     .set_read_only(Some("Protected".into()));
                 assert!(!app.edit_session_document(&id, crate::doc::from_markdown("Changed"), cx));
-                assert_eq!(app.library.active_note().document, before);
+                assert_eq!(app.notes.library.active_note().document, before);
                 assert_eq!(app.editor().read(cx).committed_document(), &before);
-                assert_eq!(app.library.changes, generations);
+                assert_eq!(app.notes.library.changes, generations);
                 assert_eq!(
                     track
                         .snapshot()

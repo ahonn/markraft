@@ -66,7 +66,7 @@ impl CheckRun {
     /// active note.
     fn editor(&self, app: &MarkraftApp) -> Option<Entity<EditorView>> {
         if app.context_menus.checking.generation != self.generation
-            || app.library.active_id != self.note
+            || app.notes.library.active_id != self.note
         {
             return None;
         }
@@ -281,7 +281,7 @@ impl MarkraftApp {
         let editor = self.editor();
         if (!target.checker.panel_visible(CheckingPanel::Spelling)
             && !target.checker.panel_visible(CheckingPanel::Substitutions))
-            || target.note != self.library.active_id
+            || target.note != self.notes.library.active_id
             || target.editor.upgrade().as_ref() != Some(&editor)
             || self.interaction.panel() != Panel::Editor
         {
@@ -323,7 +323,7 @@ impl MarkraftApp {
         let request = editor
             .read(cx)
             .context_snapshot(Default::default(), markraft_gpui::ContextTarget::Text);
-        let editable = self.library.active_note().read_only.is_none() && !self.is_reloading();
+        let editable = self.notes.library.active_note().read_only.is_none() && !self.is_reloading();
         let Ok((session, mut commands)) = CheckingPanelSession::attach(
             window,
             &checker,
@@ -349,7 +349,7 @@ impl MarkraftApp {
             generation: 0,
             checker: checker.clone(),
             session,
-            note: self.library.active_id.clone(),
+            note: self.notes.library.active_id.clone(),
             editor: editor.downgrade(),
             request,
         });
@@ -406,7 +406,7 @@ impl MarkraftApp {
         let editor = self.editor();
         if (!target.checker.panel_visible(CheckingPanel::Spelling)
             && !target.checker.panel_visible(CheckingPanel::Substitutions))
-            || target.note != self.library.active_id
+            || target.note != self.notes.library.active_id
             || target.editor.upgrade().as_ref() != Some(&editor)
             || !editor.read(cx).context_is_current(&target.request)
         {
@@ -420,7 +420,7 @@ impl MarkraftApp {
             }
             PanelCommand::Next => self.schedule_text_checking(CheckTrigger::Requested, cx),
             PanelCommand::Replace(text) => {
-                if self.library.active_note().read_only.is_none() && !self.is_reloading() {
+                if self.notes.library.active_note().read_only.is_none() && !self.is_reloading() {
                     editor.update(cx, |editor, cx| {
                         editor.replace_context_text(&request, &text, cx);
                     });
@@ -477,7 +477,7 @@ impl MarkraftApp {
             .context_text(&request)
             .map(|text| text.text)
             .unwrap_or_default();
-        let editable = self.library.active_note().read_only.is_none() && !self.is_reloading();
+        let editable = self.notes.library.active_note().read_only.is_none() && !self.is_reloading();
         if let Some(target) = self.context_menus.checking.panel.as_mut() {
             // A preference refresh changes no editor target. Keep queued native
             // setters valid until the actual document or selection changes.
@@ -505,7 +505,7 @@ impl MarkraftApp {
         kind: SubstitutionKind,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.library.active_note().read_only.is_some() || self.is_reloading() {
+        if self.notes.library.active_note().read_only.is_some() || self.is_reloading() {
             return false;
         }
         self.ensure_spell_document();
@@ -568,7 +568,7 @@ impl MarkraftApp {
         checks: Vec<TextCheck>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.library.active_note().read_only.is_some() || self.is_reloading() {
+        if self.notes.library.active_note().read_only.is_some() || self.is_reloading() {
             return false;
         }
         let editor = self.editor();
@@ -606,7 +606,7 @@ impl MarkraftApp {
         self.context_menus
             .checking
             .documents
-            .get(&self.library.active_id)
+            .get(&self.notes.library.active_id)
             .cloned()
     }
 
@@ -616,13 +616,13 @@ impl MarkraftApp {
                 .context_menus
                 .checking
                 .documents
-                .contains_key(&self.library.active_id)
+                .contains_key(&self.notes.library.active_id)
             && let Ok(document) = SpellDocument::new()
         {
             self.context_menus
                 .checking
                 .documents
-                .insert(self.library.active_id.clone(), Rc::new(document));
+                .insert(self.notes.library.active_id.clone(), Rc::new(document));
         }
     }
 
@@ -663,7 +663,7 @@ impl MarkraftApp {
             .flatten();
         let run = CheckRun {
             generation: self.context_menus.checking.generation,
-            note: self.library.active_id.clone(),
+            note: self.notes.library.active_id.clone(),
             editor: editor.downgrade(),
             snapshot: editor.read(cx).context_document_snapshot(),
             checker,
@@ -761,7 +761,7 @@ impl MarkraftApp {
         checks: Vec<TextCheck>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.library.active_note().read_only.is_some() || self.is_reloading() {
+        if self.notes.library.active_note().read_only.is_some() || self.is_reloading() {
             return false;
         }
         for check in checks.into_iter().rev() {
@@ -1119,8 +1119,9 @@ mod tests {
                 .editor()
                 .read(cx)
                 .context_snapshot(Default::default(), markraft_gpui::ContextTarget::Text);
-            let id = app.library.active_id.clone();
-            app.library
+            let id = app.notes.library.active_id.clone();
+            app.notes
+                .library
                 .update_read_only(&id, Some(Message::new("notice.text-service-rejected")));
             app.apply_checked_substitutions(&request, vec![replacement(6..8, "—")], cx)
         });

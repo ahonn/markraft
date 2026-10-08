@@ -223,7 +223,7 @@ impl MarkraftApp {
     /// Read every frame of the Settings window, including each step of its resize, so
     /// it asks nothing of the system: what macOS keeps is cached by [`Change::Refresh`].
     fn settings_snapshot(&self) -> Snapshot {
-        let workspace = &self.library.workspace;
+        let workspace = &self.notes.library.workspace;
         let placed = |root: &PathBuf| {
             let new_notes = (
                 folder_label(root, &workspace.new_note_directory),
@@ -322,7 +322,7 @@ impl MarkraftApp {
             }
             Change::ResetNewNoteLocation => {
                 self.settings_errors.new_notes = None;
-                self.library.workspace.new_note_directory = PathBuf::new();
+                self.notes.library.workspace.new_note_directory = PathBuf::new();
                 self.schedule_save(cx);
             }
             Change::ImageLocation => {
@@ -331,7 +331,8 @@ impl MarkraftApp {
             }
             Change::ResetImageLocation => {
                 self.settings_errors.images = None;
-                self.library.workspace.attachments = crate::storage::AttachmentPolicy::Default;
+                self.notes.library.workspace.attachments =
+                    crate::storage::AttachmentPolicy::Default;
                 self.schedule_save(cx);
             }
             Change::RevealFolder => {
@@ -340,7 +341,7 @@ impl MarkraftApp {
                 }
             }
             Change::NewNoteName(naming) => {
-                self.library.workspace.new_note_name = naming;
+                self.notes.library.workspace.new_note_name = naming;
                 self.schedule_save(cx);
             }
             #[cfg(feature = "direct-distribution")]
@@ -350,7 +351,7 @@ impl MarkraftApp {
                 }
             }
             Change::ImageName(naming) => {
-                self.library.workspace.image_name = naming;
+                self.notes.library.workspace.image_name = naming;
                 self.schedule_save(cx);
             }
             #[cfg(feature = "direct-distribution")]
@@ -363,16 +364,16 @@ impl MarkraftApp {
             }
             Change::ResetDailyFolder => {
                 self.settings_errors.daily = None;
-                self.library.workspace.daily.folder = PathBuf::new();
+                self.notes.library.workspace.daily.folder = PathBuf::new();
                 self.schedule_save(cx);
             }
             Change::DailyFormat(format) => {
-                self.library.workspace.daily.format = format;
+                self.notes.library.workspace.daily.format = format;
                 self.schedule_save(cx);
             }
             Change::DailyTemplate(template) => {
                 self.settings_errors.daily = None;
-                self.library.workspace.daily.template = template;
+                self.notes.library.workspace.daily.template = template;
                 self.schedule_save(cx);
             }
             Change::ChooseDailyTemplate => {
@@ -382,7 +383,7 @@ impl MarkraftApp {
             Change::SyncDailyFromObsidian => {
                 if let Some(obsidian) = self.obsidian_daily.clone() {
                     self.settings_errors.daily = None;
-                    self.library.workspace.daily = obsidian;
+                    self.notes.library.workspace.daily = obsidian;
                     self.schedule_save(cx);
                 }
             }
@@ -682,7 +683,7 @@ impl SettingsView {
         let (format, dark, i18n) = {
             let app = app.read(cx);
             (
-                app.library.workspace.daily.format.clone(),
+                app.notes.library.workspace.daily.format.clone(),
                 app.dark,
                 app.i18n.clone(),
             )
@@ -792,7 +793,7 @@ impl SettingsView {
     fn follow_daily_format(&mut self, app: &Entity<MarkraftApp>, cx: &mut Context<Self>) {
         let (format, dark) = {
             let app = app.read(cx);
-            (app.library.workspace.daily.format.clone(), app.dark)
+            (app.notes.library.workspace.daily.format.clone(), app.dark)
         };
         if dark != self.daily_format_dark {
             self.daily_format_dark = dark;

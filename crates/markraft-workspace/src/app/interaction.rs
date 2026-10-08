@@ -225,7 +225,8 @@ impl MarkraftApp {
 
     pub(super) fn show_popover(&mut self, popover: Popover, cx: &mut Context<Self>) {
         self.leave_input(cx);
-        self.interaction.open(&self.library.active_id, popover);
+        self.interaction
+            .open(&self.notes.library.active_id, popover);
     }
 
     pub(super) fn close_popover(&mut self, cx: &mut Context<Self>) -> bool {

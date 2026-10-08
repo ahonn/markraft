@@ -1,7 +1,30 @@
 //! The host owns its window, controls, menus, and close decision.
 
 use gpui::{prelude::*, *};
+use markraft_notes::{Asset, BackendMutation, NoteId, NotesBackend, NotesConfig};
+use markraft_sqlite_example::SqliteNotesBackend;
 use markraft_workspace::{WorkspaceEvent, WorkspaceOptions, WorkspaceView, bind_workspace_keys};
+
+#[derive(Clone, Copy)]
+enum Storage {
+    Markdown,
+    Sqlite,
+}
+
+impl Storage {
+    fn from_args() -> Self {
+        let arguments: Vec<_> = std::env::args().skip(1).collect();
+        match arguments.as_slice() {
+            [] => Self::Markdown,
+            [flag, value] if flag == "--storage" && value == "markdown" => Self::Markdown,
+            [flag, value] if flag == "--storage" && value == "sqlite" => Self::Sqlite,
+            _ => {
+                eprintln!("Usage: markraft-workspace-consumer [--storage markdown|sqlite]");
+                std::process::exit(2);
+            }
+        }
+    }
+}
 
 actions!(integration_host, [QuitHost]);
 
@@ -17,26 +40,62 @@ struct Host {
 }
 
 impl Host {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(storage: Storage, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let data = tempfile::tempdir().expect("create the sample data directory");
         let notes = data.path().join("notes");
         let state = data.path().join("state");
         let cache = data.path().join("cache");
-        for directory in [&notes, &state, &cache] {
-            std::fs::create_dir_all(directory).expect("create a sample directory");
+        std::fs::create_dir_all(&cache).expect("create the sample cache");
+        if matches!(storage, Storage::Markdown) {
+            for directory in [&notes, &state] {
+                std::fs::create_dir_all(directory).expect("create a sample directory");
+            }
         }
-        std::fs::write(
-            notes.join("Welcome.md"),
-            "# An embedded workspace\n\nEdit this note, then use the host's Save button.\n\n- The host owns this window.\n- The workspace owns note editing.\n",
-        )
-        .expect("write the sample note");
-        let mut options = WorkspaceOptions::new(notes, state);
+        let source = "# An embedded workspace\n\nEdit this note, then use the host's Save button.\n\n- The host owns this window.\n- The workspace owns note editing.\n";
+        let backend = match storage {
+            Storage::Markdown => {
+                std::fs::write(notes.join("Welcome.md"), source).expect("write the sample note");
+                None
+            }
+            Storage::Sqlite => {
+                let mut backend = SqliteNotesBackend::open(data.path().join("notes.sqlite3"))
+                    .expect("open the sample database");
+                let image = Asset::new(
+                    "image/svg+xml",
+                    br##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="48"><rect width="120" height="48" rx="8" fill="#283e50"/><circle cx="60" cy="24" r="14" fill="#5ed0df"/></svg>"##.to_vec(),
+                );
+                let image_source = image.id.source();
+                backend
+                    .write_asset(image)
+                    .expect("write the sample attachment");
+                backend
+                    .commit(BackendMutation::Put {
+                        id: NoteId::new("welcome"),
+                        expected: None,
+                        markdown: format!("{source}\n![A database attachment]({image_source})\n"),
+                        created_at: 1,
+                        updated_at: 1,
+                        pinned: false,
+                        title: Some("Welcome".into()),
+                        logical_key: None,
+                    })
+                    .expect("write the sample note");
+                Some(backend)
+            }
+        };
+        let mut options = WorkspaceOptions::default();
         options.cache_directory = Some(cache);
         options.preferences.remote_images = false;
         options.preferences.auto_height = false;
         options.preferences.hide_on_deactivate = false;
         let workspace = cx.new(|cx| {
-            WorkspaceView::open(options, window, cx).expect("open the temporary workspace")
+            match backend {
+                Some(backend) => {
+                    WorkspaceView::with_backend(Box::new(backend), options, window, cx)
+                }
+                None => WorkspaceView::open(NotesConfig::new(notes, state), options, window, cx),
+            }
+            .expect("open the temporary workspace")
         });
         let events = cx.subscribe_in(
             &workspace,
@@ -114,10 +173,13 @@ impl Host {
                     let _ = host.update(cx, |host, cx| {
                         host.busy = false;
                         host.status = match result {
+                            Ok(receipt) if receipt.notes.is_empty() => {
+                                "All changes are saved locally.".into()
+                            }
                             Ok(receipt) => format!(
-                                "Saved revision {}. Markdown files: {}.",
+                                "Saved revision {}. Notes updated: {}.",
                                 receipt.revision,
-                                receipt.markdown_paths.len()
+                                receipt.notes.len()
                             ),
                             Err(error) => format!("Save failed. Retry after resolving: {error}"),
                         };
@@ -223,7 +285,8 @@ impl Render for Host {
 }
 
 fn main() {
-    gpui_platform::application().run(|cx| {
+    let storage = Storage::from_args();
+    gpui_platform::application().run(move |cx| {
         bind_workspace_keys(cx);
         cx.bind_keys([KeyBinding::new("cmd-q", QuitHost, None)]);
         cx.set_menus([Menu::new("Example host").items([MenuItem::action("Quit", QuitHost)])]);
@@ -241,8 +304,8 @@ fn main() {
                     ))),
                     ..Default::default()
                 },
-                |window, cx| {
-                    let host = cx.new(|cx| Host::new(window, cx));
+                move |window, cx| {
+                    let host = cx.new(|cx| Host::new(storage, window, cx));
                     let weak = host.downgrade();
                     window.on_window_should_close(cx, move |window, cx| {
                         let _ = weak.update(cx, |host, cx| host.close(true, window, cx));

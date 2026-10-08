@@ -6,8 +6,14 @@ This directory is a separate Cargo workspace. Its packages use public crate inte
 | --- | --- |
 | `markraft-workspace-consumer` | Embed the complete workspace inside a host window with host-owned controls. |
 | `markraft-notes-consumer` | Create, search, edit, save, close, and reopen notes without GPUI. |
+| `markraft-sqlite-example` | Implement host-owned SQLite storage with revisions, tombstones, attachments, and durable pending changes. |
 
-Both programs create temporary notes and state directories. The graphical host also creates a temporary cache directory.
+Both programs accept `--storage markdown` or `--storage sqlite`.
+Markdown is the default.
+Both programs use temporary data directories.
+SQLite mode stores note content in `notes.sqlite3`, without Markdown copies.
+The graphical host also creates a temporary cache directory.
+
 The programs retain those directories while their services are active.
 They do not use your Markraft settings or notes.
 
@@ -22,7 +28,7 @@ The first dependency preparation requires network access.
    ./examples/integration/check.sh
    ```
 
-2. Confirm that the notes consumer reports successful creation, search, editing, saving, closing, and reopening.
+2. Confirm that both storage modes report successful creation, search, editing, saving, closing, and reopening.
 3. Confirm that the dependency check reports no GPUI, workspace, or application dependency for the notes consumer.
 
 The script uses the repository `target` directory unless you set `CARGO_TARGET_DIR`.
@@ -42,17 +48,44 @@ The script builds and links the graphical host. It does not launch the host or v
    ```sh
    CARGO_TARGET_DIR="$PWD/target" CARGO_BUILD_JOBS=4 cargo run \
      --manifest-path examples/integration/Cargo.toml \
-     --package markraft-workspace-consumer --locked
+     --package markraft-workspace-consumer --locked -- --storage sqlite
    ```
 
 3. Edit the sample note inside the workspace.
 4. Select the host's **Save** button and inspect the status.
 5. Select the host's **Close workspace** button and inspect the result.
 
+To test the file backend, replace `sqlite` with `markdown` in the command.
 The host retains its own header and controls outside the embedded workspace.
 When editor options change, the host writes its own temporary `host-preferences.json` file.
 The close action must wait for the component's close result before releasing the workspace.
 Use the integration guide for the lifecycle contract and platform requirements.
+
+## Use the SQLite backend
+
+The [backend source](sqlite-backend/src/lib.rs) contains the complete reference implementation.
+It uses `rusqlite` and the public `NotesBackend` contract.
+It has no GPUI or application dependency.
+
+A successful commit stores content, immutable revision history, a change record, and a dirty marker in one transaction.
+Compare-and-swap checks reject stale writers, including writers in another database connection.
+Deletion retains a tombstone for a later synchronization service.
+A create replaces a tombstone and continues the note's history.
+Asset IDs are content hashes, and asset bytes are immutable.
+The tests run the `markraft-notes` conformance checks against a real database file.
+
+The backend's pending records survive process restarts.
+An upload acknowledgement clears dirty state only when its revision still matches the current record.
+The example includes no network synchronization.
+Production hosts own their schema, migrations, conflict policy, account state, and CloudKit integration.
+
+Run the focused backend tests from the repository root:
+
+```sh
+CARGO_TARGET_DIR="$PWD/target" CARGO_BUILD_JOBS=4 cargo test \
+  --manifest-path examples/integration/Cargo.toml \
+  --package markraft-sqlite-example --locked
+```
 
 ## Dependency patches
 

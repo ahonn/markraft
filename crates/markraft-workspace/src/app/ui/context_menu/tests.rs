@@ -639,7 +639,7 @@ fn asynchronous_service_writeback_rechecks_snapshot_and_readonly(cx: &mut TestAp
     let (note, editor, request) = h.app.update(h.cx, |app, cx| {
         let editor = app.editor();
         (
-            app.library.active_id.clone(),
+            app.notes.library.active_id.clone(),
             editor.downgrade(),
             editor
                 .read(cx)
@@ -683,7 +683,7 @@ fn proofreading_preserves_local_styles_and_undoes_as_one_edit(cx: &mut TestAppCo
     let (note, editor, request) = h.app.update(h.cx, |app, cx| {
         let editor = app.editor();
         (
-            app.library.active_id.clone(),
+            app.notes.library.active_id.clone(),
             editor.downgrade(),
             editor
                 .read(cx)
@@ -717,7 +717,7 @@ fn service_origins_apply_distinct_styles_even_when_returned_text_is_unchanged(
     let (note, editor, request) = h.app.update(h.cx, |app, cx| {
         let editor = app.editor();
         (
-            app.library.active_id.clone(),
+            app.notes.library.active_id.clone(),
             editor.downgrade(),
             editor
                 .read(cx)

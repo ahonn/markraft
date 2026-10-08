@@ -367,3 +367,26 @@ impl Harness<'_> {
         out
     }
 }
+
+pub(crate) fn open_backend(
+    cx: &mut TestAppContext,
+    backend: Box<dyn markraft_notes::NotesBackend>,
+) -> Harness<'_> {
+    let root = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        markraft_gpui::bind_keys(cx);
+        markraft_vim::bind_keys(cx);
+        bind_app_keys(cx);
+    });
+    let (app, cx) = cx.add_window_view(|window, cx| {
+        MarkraftApp::with_backend(backend, crate::WorkspaceOptions::default(), window, cx).unwrap()
+    });
+    cx.update(|window, cx| app.update(cx, |app, cx| app.test_focus_editor(window, cx)));
+    cx.run_until_parked();
+    Harness {
+        app,
+        cx,
+        notes: root.path().join("unused"),
+        _root: root,
+    }
+}

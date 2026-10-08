@@ -65,7 +65,7 @@ impl MarkraftApp {
         if !self.preferences.vim_mode {
             return None;
         }
-        let mode = self.sessions.get(&self.library.active_id)?.vim_mode();
+        let mode = self.sessions.get(&self.notes.library.active_id)?.vim_mode();
         let full_label = self.i18n.text(match mode {
             Mode::Normal => "surfaces.vim.normal",
             Mode::Insert => "surfaces.vim.insert",

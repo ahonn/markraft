@@ -564,6 +564,10 @@ impl Pref {
 pub struct Note {
     pub id: String,
     pub document: Node,
+    /// Host-defined display name, independent of Markdown headings.
+    pub title_override: Option<String>,
+    /// Backend-defined unique identity, for example `daily:2026-10-08`.
+    pub logical_key: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     pub deleted_at: Option<u64>,
@@ -581,6 +585,9 @@ impl Note {
         crate::doc::is_blank(&self.document)
     }
     pub fn title(&self) -> String {
+        if let Some(title) = &self.title_override {
+            return title.clone();
+        }
         doc::title_line(&self.document)
             .as_deref()
             .unwrap_or("Untitled")
@@ -608,7 +615,7 @@ impl Note {
     /// note with nothing to title it but a file, such as a daily note made from no
     /// template, goes by the file's name, as the title bar names it.
     pub fn title_message(&self) -> Message {
-        if doc::title_line(&self.document).is_some() {
+        if self.title_override.is_some() || doc::title_line(&self.document).is_some() {
             return self.title().into();
         }
         match self.path.as_deref().and_then(Path::file_stem) {
@@ -698,6 +705,8 @@ impl Library {
         self.notes.push(Note {
             id: id.clone(),
             document,
+            title_override: None,
+            logical_key: None,
             created_at: now,
             updated_at: now,
             deleted_at: None,
@@ -839,7 +848,7 @@ impl Library {
                     text: doc::plain_text(&note.document).to_lowercase(),
                     title: note.title().to_lowercase(),
                 });
-                if entry.document != note.document {
+                if entry.document != note.document || entry.title != note.title().to_lowercase() {
                     *entry = SearchEntry {
                         document: note.document.clone(),
                         text: doc::plain_text(&note.document).to_lowercase(),
@@ -847,6 +856,7 @@ impl Library {
                     };
                 }
                 if !entry.text.contains(&query)
+                    && !entry.title.contains(&query)
                     && !note
                         .location(root)
                         .is_some_and(|path| path.to_lowercase().contains(&query))

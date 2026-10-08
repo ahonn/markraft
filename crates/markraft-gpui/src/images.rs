@@ -2,6 +2,9 @@
 //!
 //! A remote image — an `http:`, `https:` or protocol-relative source — is fetched only
 //! when the host has handed the view a [`RemoteImageFetcher`](crate::RemoteImageFetcher).
+//! A host-owned `markraft-asset:` reference is loaded only when the host has handed
+//! the view an [`AssetLoader`](crate::AssetLoader). It shares the asynchronous queue,
+//! but the remote switch does not affect it.
 //! Layout never waits for one: the first [`Images::load`] of a source answers
 //! [`ImageError::Loading`] and queues it, the view fetches the queue in the background,
 //! and the result is kept here until the source leaves the document.
@@ -99,6 +102,9 @@ pub(crate) struct Images {
     /// Whether remote sources are fetched at all. Off, every one reads as
     /// [`ImageError::Remote`].
     remote_enabled: bool,
+    /// Whether host-owned assets are loaded. Off, every one reads as
+    /// [`ImageError::Missing`].
+    assets_enabled: bool,
     remote: RefCell<HashMap<String, RemoteImage>>,
     /// Remote sources layout asked for that no fetch has been started for yet.
     requested: RefCell<Vec<String>>,
@@ -149,8 +155,11 @@ impl Images {
     }
 
     pub(crate) fn load(&self, source: &str) -> ImageResult {
+        if is_asset(source) {
+            return self.load_queued(source, self.assets_enabled, ImageError::Missing);
+        }
         if is_fetchable(source) {
-            return self.load_remote(source);
+            return self.load_queued(source, self.remote_enabled, ImageError::Remote);
         }
         let path = self.resolve(source)?;
         let current = stamp(&path);
@@ -171,9 +180,9 @@ impl Images {
         result
     }
 
-    fn load_remote(&self, source: &str) -> ImageResult {
-        if !self.remote_enabled {
-            return Err(ImageError::Remote);
+    fn load_queued(&self, source: &str, enabled: bool, disabled: ImageError) -> ImageResult {
+        if !enabled {
+            return Err(disabled);
         }
         let mut remote = self.remote.borrow_mut();
         match remote.get(source) {
@@ -194,8 +203,19 @@ impl Images {
             return;
         }
         self.remote_enabled = enabled;
-        self.remote.get_mut().clear();
-        self.requested.get_mut().clear();
+        self.remote.get_mut().retain(|source, _| is_asset(source));
+        self.requested.get_mut().retain(|source| is_asset(source));
+    }
+
+    /// Load host-owned assets from now on, or stop. Either way what was loaded
+    /// is dropped. Remote images keep their state.
+    pub(crate) fn set_assets_enabled(&mut self, enabled: bool) {
+        if self.assets_enabled == enabled {
+            return;
+        }
+        self.assets_enabled = enabled;
+        self.remote.get_mut().retain(|source, _| !is_asset(source));
+        self.requested.get_mut().retain(|source| !is_asset(source));
     }
 
     /// Whether layout has asked for a remote source no fetch has started for.
@@ -228,7 +248,7 @@ impl Images {
         let mut remote = HashSet::new();
         let mut paths = HashSet::new();
         for source in sources {
-            if is_fetchable(source) {
+            if is_fetchable(source) || is_asset(source) {
                 remote.insert(source);
             } else if let Ok(path) = self.resolve(source) {
                 paths.insert(path);
@@ -312,10 +332,19 @@ fn gpui_format(kind: ImageType) -> ImageFormat {
     }
 }
 
+pub(crate) fn is_asset(source: &str) -> bool {
+    source.starts_with(crate::ASSET_SCHEME)
+}
+
 /// Fetch `source` with `fetcher` and decode it. Runs on a background thread.
+/// A host-owned asset reference reaches its loader unchanged.
 pub(crate) fn fetch(fetcher: &crate::RemoteImageFetcher, source: &str) -> ImageResult {
-    let bytes =
-        fetcher(&markraft_media::fetch_url(source)).map_err(|_| ImageError::RemoteFailed)?;
+    let address = if is_asset(source) {
+        source.to_owned()
+    } else {
+        markraft_media::fetch_url(source)
+    };
+    let bytes = fetcher(&address).map_err(|_| ImageError::RemoteFailed)?;
     if bytes.len() as u64 > MAX_IMAGE_BYTES {
         return Err(ImageError::TooLarge);
     }
@@ -522,5 +551,30 @@ mod tests {
         assert_eq!(images.cache.borrow().len(), 30);
         images.retain_sources(sources.iter().take(2).map(String::as_str));
         assert_eq!(images.cache.borrow().len(), 2);
+    }
+    #[test]
+    fn host_assets_load_without_a_file_path_while_remote_images_are_off() {
+        let source = "markraft-asset:one";
+        let remote = "https://example.com/image.png";
+        let mut images = Images::new(None);
+        assert!(matches!(images.load(source), Err(ImageError::Missing)));
+        images.set_assets_enabled(true);
+        assert!(matches!(images.load(remote), Err(ImageError::Remote)));
+        assert!(matches!(images.load(source), Err(ImageError::Loading)));
+        assert_eq!(images.take_requests(), vec![source.to_owned()]);
+        let fetcher: crate::RemoteImageFetcher = Arc::new(|source| {
+            assert_eq!(source, "markraft-asset:one");
+            Ok(b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>".to_vec())
+        });
+        assert!(images.finish_remote(source, fetch(&fetcher, source)));
+        assert!(images.load(source).is_ok());
+        images.retain_sources([source].into_iter());
+        assert!(images.load(source).is_ok());
+        assert!(images.take_requests().is_empty());
+        // The remote switch leaves a loaded asset alone.
+        images.set_remote_enabled(true);
+        images.set_remote_enabled(false);
+        assert!(images.load(source).is_ok());
+        assert!(images.take_requests().is_empty());
     }
 }

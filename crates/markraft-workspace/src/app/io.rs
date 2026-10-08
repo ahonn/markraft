@@ -72,7 +72,11 @@ impl MarkraftApp {
 
     pub(super) fn watch_persistence(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self._persistence_wake = None;
-        let wake = self.persistence.as_mut().and_then(Persistence::take_wake);
+        let wake = self
+            .notes
+            .persistence
+            .as_mut()
+            .and_then(Persistence::take_wake);
         #[cfg(test)]
         {
             let _ = (wake, window, cx);
@@ -154,14 +158,17 @@ impl MarkraftApp {
 
     fn flush_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_documents(cx);
-        let Some(persistence) = &self.persistence else {
+        let Some(persistence) = &self.notes.persistence else {
             self.save_waiters.clear();
             return;
         };
         self.io.flushing = true;
         let revision = self.save.barrier();
-        let future =
-            persistence.flush_async(revision, self.library.clone(), self.preferences.clone());
+        let future = persistence.flush_async(
+            revision,
+            self.notes.library.clone(),
+            self.preferences.clone(),
+        );
         self.run_io(future, window, cx, move |this, result, window, cx| {
             this.io.flushing = false;
             match result {
@@ -169,7 +176,7 @@ impl MarkraftApp {
                     let success = saved.result.is_ok();
                     this.apply_saved(saved, cx);
                     if success {
-                        if this.save.is_dirty() || !this.library.changes.is_empty() {
+                        if this.save.is_dirty() || !this.notes.library.changes.is_empty() {
                             this.flush_pending(window, cx);
                         } else {
                             let waiters = std::mem::take(&mut this.save_waiters);
@@ -193,7 +200,7 @@ impl MarkraftApp {
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_refresh_files(&self) {
-        if let Some(persistence) = &self.persistence {
+        if let Some(persistence) = &self.notes.persistence {
             persistence.refresh();
         }
     }

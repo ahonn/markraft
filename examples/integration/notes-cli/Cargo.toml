@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+markraft-sqlite-example = { path = "../sqlite-backend" }
 markraft-notes = { path = "../../../crates/markraft-notes" }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 tempfile = "3"

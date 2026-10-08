@@ -106,12 +106,17 @@ enum FormatMenu {
     Inline,
     List,
 }
+/// The notes model and its storage worker. Persistence is None only after close.
+struct Notes {
+    library: Library,
+    persistence: Option<crate::persistence::Persistence>,
+}
 /// A complete, embeddable notes interface with host-owned process services.
 pub struct WorkspaceView {
     i18n: crate::locale::I18n,
     locale_state: std::sync::Arc<std::sync::RwLock<crate::locale::I18n>>,
     slash_commands: ui::slash::SlashCommands,
-    library: Library,
+    notes: Notes,
     /// This Mac's preferences, kept in the settings file outside the notes folder;
     /// the settings window changes them and [`MarkraftApp::apply_preferences`]
     /// carries each change to whatever reads it.
@@ -119,7 +124,6 @@ pub struct WorkspaceView {
     /// The house style every editor's codecs and formatting commands were
     /// built over; the preferences set it, and they read it as they write.
     house: markraft_commonmark::HouseStyleHandle,
-    persistence: Option<Persistence>,
     /// The notes folder, once one has been chosen.
     path: Option<PathBuf>,
     settings_path: PathBuf,
@@ -225,6 +229,42 @@ impl MarkraftApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let house = markraft_commonmark::HouseStyleHandle::default();
+        let notes = Notes {
+            library,
+            persistence: store.map(|store| Self::start_persistence(store, house.clone())),
+        };
+        Self::new_with_session(
+            path,
+            settings_path,
+            notes,
+            house,
+            preferences,
+            error,
+            platform,
+            updater,
+            instance,
+            window,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_session(
+        path: Option<PathBuf>,
+        settings_path: PathBuf,
+        notes: Notes,
+        house: markraft_commonmark::HouseStyleHandle,
+        preferences: Preferences,
+        error: Option<Message>,
+        // None runs without the menu bar, the shortcuts and the native window: the
+        // headless tests, which have none of them.
+        platform: Option<Result<Platform, Message>>,
+        updater: Updater,
+        instance: Instance,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let path = path.map(|path| path.canonicalize().unwrap_or(path));
         let i18n = crate::locale::I18n::for_preference(&preferences.language);
 
@@ -279,7 +319,7 @@ impl MarkraftApp {
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.presence.set_window_active(window.is_window_active());
             if this.presence.window_active()
-                && let Some(persistence) = &this.persistence
+                && let Some(persistence) = &this.notes.persistence
             {
                 persistence.refresh();
             }
@@ -303,7 +343,6 @@ impl MarkraftApp {
         let shortcuts = std::sync::Arc::new(preferences.markdown_shortcuts.into());
         let pairs = std::sync::Arc::new(preferences.auto_pair.into());
         let quote_pairs = std::sync::Arc::new((!preferences.text_checking.quotes).into());
-        let house = markraft_commonmark::HouseStyleHandle::default();
         apply_markdown_style(&house, &preferences);
         let find_editor = cx.new(|cx| {
             let mut editor = EditorView::single_line(cx)
@@ -325,9 +364,8 @@ impl MarkraftApp {
             locale_state: std::sync::Arc::new(std::sync::RwLock::new(i18n.clone())),
             i18n,
             slash_commands: Default::default(),
-            library,
+            notes,
             preferences,
-            persistence: store.map(|store| Self::start_persistence(store, house.clone())),
             house,
             path,
             settings_path,
@@ -383,7 +421,7 @@ impl MarkraftApp {
         app.ensure_session(window, cx);
         app.watch_persistence(window, cx);
         if app.platform.is_some() {
-            if app.persistence.is_some() {
+            if app.notes.persistence.is_some() {
                 app.focus_editor(window, cx);
             } else {
                 window.focus(app.ring.panel(), cx);
@@ -413,23 +451,49 @@ impl MarkraftApp {
         for change in changes {
             let (External::Updated { note, .. } | External::Removed(note)) = &change;
             let id = note.id.clone();
-            if self.library.deletions.contains_key(&id) {
-                if let Some(persistence) = &self.persistence {
-                    persistence.acknowledge_changes(vec![change]);
+            if self.notes.library.deletions.contains_key(&id) {
+                if self.record_backed() {
+                    // A local delete must not acquire a newer CAS token for unseen content.
+                    // Restore the note before adopting the external version.
+                    self.notes.library.restore_deleted(&id);
+                    self.feedback.queue(crate::storage::conflicts_kept(1));
+                } else {
+                    if let Some(persistence) = &self.notes.persistence {
+                        persistence.acknowledge_changes(vec![change]);
+                    }
+                    continue;
                 }
-                continue;
             }
             let revision = self.io.external_revision(&id);
             self.io.retry.retain(|event| {
                 let (External::Updated { note, .. } | External::Removed(note)) = event;
                 note.id != id
             });
-            let local = self.library.note(&id).cloned();
-            if !workspace::needs_recovery(local.as_ref(), &change) {
+            let local = self.notes.library.note(&id).cloned();
+            let metadata_conflict = self.record_backed()
+                && local.as_ref().is_some_and(|local| match &change {
+                    External::Updated { previous, note } => {
+                        previous.as_ref().is_some_and(|previous| {
+                            let metadata = |note: &crate::storage::Note| {
+                                (
+                                    note.title_override.clone(),
+                                    note.logical_key.clone(),
+                                    note.pinned,
+                                )
+                            };
+                            metadata(local) != metadata(previous)
+                                && metadata(local) != metadata(note)
+                        })
+                    }
+                    External::Removed(note) => {
+                        local.title_override != note.title_override || local.pinned != note.pinned
+                    }
+                });
+            if !metadata_conflict && !workspace::needs_recovery(local.as_ref(), &change) {
                 ready.push(change);
                 continue;
             }
-            let Some(persistence) = &self.persistence else {
+            let Some(persistence) = &self.notes.persistence else {
                 self.io.retry.push(change);
                 continue;
             };
@@ -439,8 +503,8 @@ impl MarkraftApp {
                 if this.io.external.get(&id) != Some(&revision) {
                     return;
                 }
-                if this.library.note(&id).is_none() {
-                    if let Some(persistence) = &this.persistence {
+                if this.notes.library.note(&id).is_none() {
+                    if let Some(persistence) = &this.notes.persistence {
                         persistence.acknowledge_changes(vec![change]);
                     }
                     return;
@@ -449,11 +513,12 @@ impl MarkraftApp {
                     Ok(()) => {
                         // Editing stays available while the recovery copy is written.
                         // Recover any newer local content before advancing the baseline.
-                        if this
-                            .library
-                            .note(&id)
-                            .is_some_and(|now| now.document != local.document)
-                        {
+                        if this.notes.library.note(&id).is_some_and(|now| {
+                            now.document != local.document
+                                || now.title_override != local.title_override
+                                || now.logical_key != local.logical_key
+                                || now.pinned != local.pinned
+                        }) {
                             this.apply_external(vec![change], window, cx);
                         } else {
                             this.adopt_external(vec![change], window, cx);
@@ -482,7 +547,7 @@ impl MarkraftApp {
         let editor_was_focused = self.editor().focus_handle(cx).is_focused(window);
         self.sync_documents(cx);
         // The active note's caret, to carry over to the version read from disk.
-        let active = self.library.active_id.clone();
+        let active = self.notes.library.active_id.clone();
         let caret = self.sessions.get(&active).map(|session| {
             let state = session.editor().read(cx).state();
             (state.doc().clone(), state.selection().clone())
@@ -492,24 +557,29 @@ impl MarkraftApp {
         for change in changes {
             let (External::Updated { note, .. } | External::Removed(note)) = &change;
             let id = note.id.clone();
-            let local = self.library.note(&id).cloned();
+            let local = self.notes.library.note(&id).cloned();
             match change {
                 External::Updated { previous, note } => {
                     // The bytes on disk still say what they said: only the file's
                     // permissions moved. Keep the document the user is looking at
                     // and take the new read-only state.
-                    let permissions_only = previous
-                        .as_ref()
-                        .is_some_and(|previous| previous.document == note.document);
+                    let permissions_only = previous.as_ref().is_some_and(|previous| {
+                        previous.document == note.document
+                            && previous.title_override == note.title_override
+                            && previous.logical_key == note.logical_key
+                            && previous.pinned == note.pinned
+                    });
                     if permissions_only && local.is_some() {
-                        self.library.update_read_only(&id, note.read_only.clone());
+                        self.notes
+                            .library
+                            .update_read_only(&id, note.read_only.clone());
                         if let Some(session) = self.sessions.get(&id) {
                             session.set_read_only(note.read_only);
                         }
                         ids.push(id);
                         continue;
                     }
-                    self.library.adopt(note);
+                    self.notes.library.adopt(note);
                 }
                 External::Removed(note) => {
                     if local
@@ -519,10 +589,10 @@ impl MarkraftApp {
                         if local.is_some() {
                             vanished += 1;
                         }
-                        self.library.remove(&id);
+                        self.notes.library.remove(&id);
                     } else if local.is_some() {
                         // Recovery was completed before this transition was admitted.
-                        self.library.remove(&id);
+                        self.notes.library.remove(&id);
                         vanished += 1;
                     }
                 }
@@ -532,7 +602,7 @@ impl MarkraftApp {
         }
         self.ensure_session(window, cx);
         if let Some((old, selection)) = caret
-            && self.library.active_id == active
+            && self.notes.library.active_id == active
             && ids.contains(&active)
         {
             let editor = self.editor();
@@ -549,7 +619,7 @@ impl MarkraftApp {
         if editor_was_focused {
             self.focus_editor(window, cx);
         }
-        if let Some(persistence) = &self.persistence {
+        if let Some(persistence) = &self.notes.persistence {
             persistence.acknowledge_changes(acknowledgements);
         }
         if vanished > 0 {
@@ -595,12 +665,14 @@ impl MarkraftApp {
         }
         self.sync_documents(cx);
         let revision = self.save.barrier();
-        let Some(persistence) = &self.persistence else {
+        let Some(persistence) = &self.notes.persistence else {
             return;
         };
-        if let Err(error) =
-            persistence.save(revision, self.library.clone(), self.preferences.clone())
-        {
+        if let Err(error) = persistence.save(
+            revision,
+            self.notes.library.clone(),
+            self.preferences.clone(),
+        ) {
             self.save.apply_completion(revision, false);
             self.feedback.set_error(error);
             cx.notify();
@@ -617,27 +689,28 @@ impl MarkraftApp {
         // take the note with it.
         let mut restored = false;
         for id in &saved.kept {
-            restored |= self.library.restore_deleted(id);
+            restored |= self.notes.library.restore_deleted(id);
         }
         if restored {
             self.links.invalidate();
             // The file may hold what another program wrote; disk wins as usual.
-            if let Some(persistence) = &self.persistence {
+            if let Some(persistence) = &self.notes.persistence {
                 persistence.refresh();
             }
         }
-        if saved.result.is_ok() {
-            self.library.acknowledge_saved(&saved.changes);
-        }
+        // A backend can commit some notes before another note fails.
+        self.notes.library.acknowledge_saved(&saved.changes);
         self.update_paths(saved.paths, cx);
         if completion == SaveCompletion::Current {
             self.trashed = saved.trashed;
         }
         if !saved.conflicts.is_empty() && completion == SaveCompletion::Current {
             // Disk won mid-save: toast and refresh so the editor adopts disk content.
-            self.feedback
-                .queue(crate::storage::conflicts_kept(saved.conflicts.len()));
-            if let Some(persistence) = &self.persistence {
+            if self.file_backed() {
+                self.feedback
+                    .queue(crate::storage::conflicts_kept(saved.conflicts.len()));
+            }
+            if let Some(persistence) = &self.notes.persistence {
                 persistence.refresh();
             }
         }
@@ -684,7 +757,7 @@ impl MarkraftApp {
         self.reconcile_interaction(window, cx);
         if let Some((rejection, semantic_message)) = self
             .sessions
-            .get(&self.library.active_id)
+            .get(&self.notes.library.active_id)
             .expect("the active note has an editor")
             .take_edit_error(cx)
         {
@@ -768,6 +841,7 @@ impl MarkraftApp {
             }
         }
         for notice in self
+            .notes
             .persistence
             .as_ref()
             .map(Persistence::notices)
@@ -776,6 +850,7 @@ impl MarkraftApp {
             self.feedback.queue(notice);
         }
         let events = self
+            .notes
             .persistence
             .as_ref()
             .map(Persistence::poll)
@@ -785,7 +860,8 @@ impl MarkraftApp {
                 Event::Saved(saved) => self.apply_saved(saved, cx),
                 Event::External(mut changes) => {
                     changes.retain(|change| {
-                        self.persistence
+                        self.notes
+                            .persistence
                             .as_ref()
                             .is_some_and(|p| p.is_current_external(change))
                     });
@@ -799,11 +875,11 @@ impl MarkraftApp {
             && let Some(continuation) = self.updater.take_relaunch()
         {
             self.sync_documents(cx);
-            if let Some(persistence) = &self.persistence {
+            if let Some(persistence) = &self.notes.persistence {
                 let revision = self.save.barrier();
                 let future = persistence.flush_async(
                     revision,
-                    self.library.clone(),
+                    self.notes.library.clone(),
                     self.preferences.clone(),
                 );
                 self.run_io(future, window, cx, move |this, result, window, cx| {
@@ -834,8 +910,12 @@ impl MarkraftApp {
         }
         if !self.is_reloading()
             && let Some(revision) = self.save.take_due(Instant::now())
-            && let Some(p) = &self.persistence
-            && let Err(e) = p.save(revision, self.library.clone(), self.preferences.clone())
+            && let Some(p) = &self.notes.persistence
+            && let Err(e) = p.save(
+                revision,
+                self.notes.library.clone(),
+                self.preferences.clone(),
+            )
         {
             self.feedback.set_error(e);
         }
@@ -845,9 +925,9 @@ impl MarkraftApp {
         let auto_height = self.platform.is_some()
             && self.interaction.panel() == Panel::Editor
             && self.preferences.auto_height
-            && self.persistence.is_some();
+            && self.notes.persistence.is_some();
         if !auto_height {
-            if self.sessions.get(&self.library.active_id).is_some() {
+            if self.sessions.get(&self.notes.library.active_id).is_some() {
                 self.editor()
                     .update(cx, |editor, cx| editor.set_exact_height(None, cx));
             }
@@ -903,7 +983,7 @@ impl MarkraftApp {
             window.activate_window();
         }
         self.ring.release();
-        if self.persistence.is_none() {
+        if self.notes.persistence.is_none() {
             window.focus(self.ring.panel(), cx);
         } else if self.interaction.panel() != Panel::Editor {
             window.focus(&self.query().focus_handle(cx), cx);
@@ -945,7 +1025,7 @@ impl MarkraftApp {
     }
     /// The note brought back from hiding: what Show on open asks for.
     fn summon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.persistence.is_none() || self.interaction.panel() != Panel::Editor {
+        if self.notes.persistence.is_none() || self.interaction.panel() != Panel::Editor {
             return;
         }
         match self.preferences.summon {
@@ -955,7 +1035,7 @@ impl MarkraftApp {
             // empty notes. A blank note that is a file, such as today's daily note
             // made from no template, is somewhere else's page to write in.
             crate::storage::Summon::NewNote => {
-                let active = self.library.active_note();
+                let active = self.notes.library.active_note();
                 if !doc::is_blank(&active.document) || active.path.is_some() {
                     self.new_note(window, cx);
                 }
@@ -1082,13 +1162,13 @@ impl MarkraftApp {
         self.io.opening += 1;
         self.close_popover(cx);
         self.cancel_input(cx);
-        if self.persistence.is_none() {
+        if self.notes.persistence.is_none() {
             self.choose_folder(window, cx);
             return;
         }
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
         self.sync_documents(cx);
-        self.library.new_note(doc::empty());
+        self.notes.library.new_note(doc::empty());
         self.ensure_session(window, cx);
         self.set_panel(Panel::Editor, cx);
         if !self.find_open {
@@ -1103,7 +1183,7 @@ impl MarkraftApp {
         self.cancel_input(cx);
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
         self.sync_documents(cx);
-        if self.library.select(id) {
+        if self.notes.library.select(id) {
             self.io.opening += 1;
             self.ensure_session(window, cx);
             self.set_panel(Panel::Editor, cx);
@@ -1133,12 +1213,30 @@ impl MarkraftApp {
             // is not something this does.
             return;
         }
-        let from = self.library.active_note().path.clone();
+        if self.record_backed() {
+            let mut matches = self.notes.library.notes.iter().filter(|note| {
+                page.strip_prefix("note:").map_or_else(
+                    || note.title().eq_ignore_ascii_case(page),
+                    |id| note.id == id,
+                )
+            });
+            let first = matches.next().map(|note| note.id.clone());
+            let found = first.filter(|_| matches.next().is_none());
+            if let Some(id) = found {
+                self.select_note(&id, window, cx);
+            } else {
+                self.feedback
+                    .queue(Message::new("notice.missing-note").arg("name", page));
+            }
+            return;
+        }
+        let from = self.notes.library.active_note().path.clone();
         let found = resolve_wiki_link(
             target,
             from.as_deref(),
             self.path.as_deref(),
-            self.library
+            self.notes
+                .library
                 .notes
                 .iter()
                 .filter_map(|note| Some((note.id.as_str(), note.path.as_deref()?))),
@@ -1166,7 +1264,7 @@ impl MarkraftApp {
         // the way, and ⌘F from the panel comes back to the note first.
         self.close_find(false, window, cx);
         self.close_popover(cx);
-        if self.persistence.is_none() {
+        if self.notes.persistence.is_none() {
             return;
         }
         self.editor().update(cx, |e, cx| e.cancel_composition(cx));
@@ -1207,11 +1305,11 @@ impl MarkraftApp {
         cx.notify();
     }
     fn matching_notes(&self, query: &str) -> Vec<&crate::storage::Note> {
-        let mut notes = self.library.search(query, self.path.as_deref());
+        let mut notes = self.notes.library.search(query, self.path.as_deref());
         // The note on screen heads the list only when nothing was searched for; a
         // search puts the best answer first, whichever note it is.
         if query.trim().is_empty() {
-            notes.sort_by_key(|note| note.id != self.library.active_id);
+            notes.sort_by_key(|note| note.id != self.notes.library.active_id);
         }
         notes
     }
@@ -1219,9 +1317,15 @@ impl MarkraftApp {
         if self.is_reloading() {
             return;
         }
-        if let Some(note) = self.library.notes.iter_mut().find(|note| note.id == id) {
+        if let Some(note) = self
+            .notes
+            .library
+            .notes
+            .iter_mut()
+            .find(|note| note.id == id)
+        {
             note.pinned = !note.pinned;
-            self.library.mark_changed(id);
+            self.notes.library.mark_changed(id);
             self.notes_changed(cx);
         }
         // Pinning reorders results; keep the same note selected.
@@ -1243,6 +1347,7 @@ impl MarkraftApp {
         cx: &mut Context<Self>,
     ) {
         let title = self
+            .notes
             .library
             .note(&id)
             .map(|note| note.display_title(&self.i18n))
@@ -1251,7 +1356,7 @@ impl MarkraftApp {
         let trash = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
             if from_browse {
                 this.trash_note(&id, window, cx);
-            } else if this.library.active_id == id {
+            } else if this.notes.library.active_id == id {
                 this.delete_note(window, cx);
             }
         };
@@ -1289,19 +1394,24 @@ impl MarkraftApp {
         }
         self.sync_documents(cx);
         let folder = self
+            .notes
             .library
             .note(id)
             .and_then(|note| note.path.as_ref())
             .and_then(|path| path.parent().map(ToOwned::to_owned));
-        let was_active = self.library.active_id == id;
-        if self.library.delete(id) {
+        let was_active = self.notes.library.active_id == id;
+        if self.notes.library.delete(id) {
             self.sessions.remove(id);
             self.ensure_session(window, cx);
-            let successor = was_active.then(|| self.library.active_id.clone());
+            let successor = was_active.then(|| self.notes.library.active_id.clone());
             let query = self.search_text(cx);
             let root = self.path.clone();
-            self.picker
-                .clamp_to(self.library.search(query.trim(), root.as_deref()).len());
+            self.picker.clamp_to(
+                self.notes
+                    .library
+                    .search(query.trim(), root.as_deref())
+                    .len(),
+            );
             self.ring.release();
             window.focus(&self.query().focus_handle(cx), cx);
             self.notes_changed(cx);
@@ -1315,17 +1425,18 @@ impl MarkraftApp {
         if self.is_reloading() {
             return;
         }
-        let id = self.library.active_id.clone();
+        let id = self.notes.library.active_id.clone();
         self.sync_documents(cx);
         let folder = self
+            .notes
             .library
             .note(&id)
             .and_then(|note| note.path.as_ref())
             .and_then(|path| path.parent().map(ToOwned::to_owned));
-        if self.library.delete(&id) {
+        if self.notes.library.delete(&id) {
             self.sessions.remove(&id);
             self.ensure_session(window, cx);
-            let successor = Some(self.library.active_id.clone());
+            let successor = Some(self.notes.library.active_id.clone());
             self.set_panel(Panel::Editor, cx);
             self.focus_editor(window, cx);
             self.notes_changed(cx);
@@ -1351,11 +1462,11 @@ impl MarkraftApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.library.note(id).is_some() {
-            if successor.as_deref() == Some(self.library.active_id.as_str()) {
+        if self.notes.library.note(id).is_some() {
+            if successor.as_deref() == Some(self.notes.library.active_id.as_str()) {
                 if self.interaction.panel() == Panel::Editor {
                     self.select_note(id, window, cx);
-                } else if self.library.select(id) {
+                } else if self.notes.library.select(id) {
                     self.io.opening += 1;
                     self.ensure_session(window, cx);
                     self.notes_changed(cx);
@@ -1399,8 +1510,8 @@ impl MarkraftApp {
         notes: crate::storage::NoteNaming,
         images: crate::storage::ImageNaming,
     ) {
-        self.library.workspace.new_note_name = notes;
-        self.library.workspace.image_name = images;
+        self.notes.library.workspace.new_note_name = notes;
+        self.notes.library.workspace.image_name = images;
     }
     /// A new note holding `markdown`, not yet saved: what a note is before its first
     /// save, with no file for the guard to hold it to.
@@ -1413,7 +1524,7 @@ impl MarkraftApp {
         cx: &mut Context<Self>,
     ) {
         self.sync_documents(cx);
-        self.library.new_note(doc::from_markdown(markdown));
+        self.notes.library.new_note(doc::from_markdown(markdown));
         self.ensure_session(window, cx);
         self.set_panel(Panel::Editor, cx);
         self.focus_editor(window, cx);
@@ -1439,12 +1550,12 @@ impl MarkraftApp {
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_active_note(&self) -> crate::storage::Note {
-        self.library.active_note().clone()
+        self.notes.library.active_note().clone()
     }
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_note(&self, id: &str) -> Option<crate::storage::Note> {
-        self.library.note(id).cloned()
+        self.notes.library.note(id).cloned()
     }
     /// The notices waiting to be shown.
     #[cfg(test)]
@@ -1514,7 +1625,7 @@ impl MarkraftApp {
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn active_path(&self) -> Option<PathBuf> {
-        self.library.active_note().path.clone()
+        self.notes.library.active_note().path.clone()
     }
     /// The active note's document as its editor holds it.
     #[cfg(test)]
@@ -1554,7 +1665,7 @@ impl MarkraftApp {
     }
     /// ⌘L: a link under the caret shows its actions, anything else asks for an address.
     fn open_link_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.persistence.is_none() || self.interaction.panel() != Panel::Editor {
+        if self.notes.persistence.is_none() || self.interaction.panel() != Panel::Editor {
             return;
         }
         self.close_popover(cx);
@@ -1642,6 +1753,13 @@ impl MarkraftApp {
     /// stays open when the new one cannot be. Missing folders are created so Change…
     /// and Retry can recover an empty path.
     fn open_folder(&mut self, directory: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.record_backed() {
+            self.inform(
+                "This workspace uses host-owned storage and cannot switch to a folder.",
+                cx,
+            );
+            return;
+        }
         if self.is_reloading() {
             return;
         }
@@ -1649,7 +1767,7 @@ impl MarkraftApp {
             self.inform(error, cx);
             return;
         }
-        if self.persistence.is_some() {
+        if self.notes.persistence.is_some() {
             if self.path.as_ref() == Some(&directory) {
                 self.flush_then(window, cx, |_, _, _| {});
                 return;
@@ -1692,12 +1810,12 @@ impl MarkraftApp {
             match result {
                 Ok((directory, persistence, library)) => {
                     // Never discard edits made while the new folder was loading.
-                    if this.save.is_dirty() && this.persistence.is_some() {
+                    if this.save.is_dirty() && this.notes.persistence.is_some() {
                         this.open_folder(directory, window, cx);
                         return;
                     }
                     this.path = Some(directory);
-                    this.persistence = Some(persistence);
+                    this.notes.persistence = Some(persistence);
                     this.watch_persistence(window, cx);
                     this.replace_library(library, window, cx);
                     this.feedback.clear_error();
@@ -1716,17 +1834,17 @@ impl MarkraftApp {
 
     fn write_copy(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_documents(cx);
-        let Some(persistence) = &self.persistence else {
+        let Some(persistence) = &self.notes.persistence else {
             self.inform(Message::new("notice.open-folder-save"), cx);
             return;
         };
-        let snapshot = self.library.active_note().clone();
+        let snapshot = self.notes.library.active_note().clone();
         let original = snapshot.clone();
         let activation = self.io.opening;
         let filename = snapshot.file_name("md");
         let rendering = persistence.snapshot_async(
             snapshot,
-            self.library.generation(),
+            self.notes.library.generation(),
             self.preferences.auto_number_equations,
         );
         let directory = self.path.clone().unwrap_or_default();
@@ -1762,7 +1880,7 @@ impl MarkraftApp {
             cx,
             move |this, result, window, cx| match result {
                 Ok(Some(path)) if open => {
-                    let Some(persistence) = &this.persistence else {
+                    let Some(persistence) = &this.notes.persistence else {
                         return;
                     };
                     let future = persistence.open_file_async(path);
@@ -1773,24 +1891,25 @@ impl MarkraftApp {
                         move |this, result, window, cx| match result {
                             Ok(note) => {
                                 let id = note.id.clone();
-                                if this.library.note(&id).is_none() {
-                                    this.library.adopt(note);
+                                if this.notes.library.note(&id).is_none() {
+                                    this.notes.library.adopt(note);
                                 }
                                 if this.io.opening == activation
-                                    && this.library.active_id == original.id
+                                    && this.notes.library.active_id == original.id
                                     && this
+                                        .notes
                                         .library
                                         .note(&original.id)
                                         .is_some_and(|now| now.document == original.document)
                                 {
-                                    this.library.select(&id);
+                                    this.notes.library.select(&id);
                                 }
                                 if original.id != id
-                                    && this.library.note(&original.id).is_some_and(|now| {
+                                    && this.notes.library.note(&original.id).is_some_and(|now| {
                                         now.path.is_none() && now.document == original.document
                                     })
                                 {
-                                    this.library.delete(&original.id);
+                                    this.notes.library.delete(&original.id);
                                     this.sessions.remove(&original.id);
                                 }
                                 // The title bar names the new file.
@@ -1829,7 +1948,7 @@ impl MarkraftApp {
                             .update(cx, |editor, cx| editor.cancel_composition(cx));
                         this.sync_documents(cx);
                         this.save.barrier();
-                        let Some(persistence) = &this.persistence else {
+                        let Some(persistence) = &this.notes.persistence else {
                             return;
                         };
                         this.reloading
@@ -1850,7 +1969,8 @@ impl MarkraftApp {
                             }
                             let mut deferred = std::mem::take(&mut this.deferred_external);
                             deferred.retain(|change| {
-                                this.persistence
+                                this.notes
+                                    .persistence
                                     .as_ref()
                                     .is_some_and(|p| p.is_current_external(change))
                             });
@@ -1907,7 +2027,7 @@ impl MarkraftApp {
             );
         }
         if !dropped.images.is_empty() {
-            if self.interaction.panel() == Panel::Editor && self.persistence.is_some() {
+            if self.interaction.panel() == Panel::Editor && self.notes.persistence.is_some() {
                 self.insert_assets(
                     dropped
                         .images
@@ -1998,7 +2118,7 @@ impl MarkraftApp {
         if paths.is_empty() {
             return;
         }
-        let Some(persistence) = &self.persistence else {
+        let Some(persistence) = &self.notes.persistence else {
             self.inform(Message::new("notice.folder-before-files"), cx);
             return;
         };
@@ -2029,14 +2149,14 @@ impl MarkraftApp {
                         match result {
                             Ok(note) => {
                                 let id = note.id.clone();
-                                if this.library.deletions.contains_key(&id) {
+                                if this.notes.library.deletions.contains_key(&id) {
                                     continue;
                                 }
-                                if this.library.note(&id).is_none() {
-                                    this.library.adopt(note);
+                                if this.notes.library.note(&id).is_none() {
+                                    this.notes.library.adopt(note);
                                 }
                                 if this.io.opening == opening {
-                                    this.library.select(&id);
+                                    this.notes.library.select(&id);
                                 }
                             }
                             Err(error) => this.feedback.queue(
@@ -2060,7 +2180,12 @@ impl MarkraftApp {
 
     fn update_paths(&mut self, paths: Vec<(String, PathBuf)>, cx: &mut Context<Self>) {
         for (id, path) in paths {
-            if let Some(note) = self.library.notes.iter_mut().find(|note| note.id == id)
+            if let Some(note) = self
+                .notes
+                .library
+                .notes
+                .iter_mut()
+                .find(|note| note.id == id)
                 && note.path.as_ref() != Some(&path)
             {
                 note.path = Some(path.clone());
@@ -2103,7 +2228,7 @@ impl MarkraftApp {
                 let _ = this.update(cx, |this, cx| {
                     match relative {
                         Ok(relative) if this.path.as_ref() == Some(&root) => {
-                            this.library.workspace.new_note_directory = relative;
+                            this.notes.library.workspace.new_note_directory = relative;
                             this.schedule_save(cx);
                         }
                         Ok(_) => this.set_settings_error_new_notes(Some(Message::new(
@@ -2147,7 +2272,7 @@ impl MarkraftApp {
                 let _ = this.update(cx, |this, cx| {
                     match relative {
                         Ok(relative) if this.path.as_ref() == Some(&root) => {
-                            this.library.workspace.attachments =
+                            this.notes.library.workspace.attachments =
                                 crate::storage::AttachmentPolicy::WorkspaceFolder(relative);
                             this.schedule_save(cx);
                         }
@@ -2194,7 +2319,7 @@ impl MarkraftApp {
         if assets.is_empty() {
             return;
         }
-        if self.library.active_note().read_only.is_some() {
+        if self.notes.library.active_note().read_only.is_some() {
             self.feedback.queue(Message::new("notice.resolve-readonly"));
             return;
         }
@@ -2203,9 +2328,9 @@ impl MarkraftApp {
         }) {
             return;
         }
-        let id = self.library.active_id.clone();
+        let id = self.notes.library.active_id.clone();
         self.flush_then(window, cx, move |this, window, cx| {
-            if this.library.active_id == id {
+            if this.notes.library.active_id == id {
                 this.insert_saved_assets(assets, context, window, cx);
             }
         });
@@ -2218,8 +2343,17 @@ impl MarkraftApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let id = self.library.active_id.clone();
-        let Some(path) = self.library.active_note().path.clone() else {
+        if self
+            .notes
+            .persistence
+            .as_ref()
+            .is_some_and(|persistence| persistence.capabilities().assets)
+        {
+            self.insert_backend_assets(assets, context, window, cx);
+            return;
+        }
+        let id = self.notes.library.active_id.clone();
+        let Some(path) = self.notes.library.active_note().path.clone() else {
             self.feedback
                 .queue(Message::new("notice.save-before-images"));
             return;
@@ -2234,8 +2368,8 @@ impl MarkraftApp {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let policy = self.library.workspace.attachments.clone();
-        let naming = self.library.workspace.image_name;
+        let policy = self.notes.library.workspace.attachments.clone();
+        let naming = self.notes.library.workspace.image_name;
         let journal = self
             .settings_path
             .parent()
@@ -2246,7 +2380,7 @@ impl MarkraftApp {
             // A menu request additionally retains its exact editor and selection.
             if !this
                 .update(cx, |this, cx| {
-                    this.library.active_id == id
+                    this.notes.library.active_id == id
                         && context.as_ref().is_none_or(|(editor, request)| {
                             *editor == this.editor() && editor.read(cx).context_is_current(request)
                         })
@@ -2281,8 +2415,8 @@ impl MarkraftApp {
                         inserted.paths.first().cloned(),
                     )
                 };
-                let note = this.library.active_note();
-                if this.library.active_id != id
+                let note = this.notes.library.active_note();
+                if this.notes.library.active_id != id
                     || note.read_only.is_some()
                     || context
                         .as_ref()
@@ -2323,6 +2457,68 @@ impl MarkraftApp {
             });
         })
         .detach();
+    }
+    fn insert_backend_assets(
+        &mut self,
+        assets: Vec<assets::Asset>,
+        context: Option<(Entity<EditorView>, markraft_gpui::ContextRequest)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(persistence) = &self.notes.persistence else {
+            return;
+        };
+        let write = persistence.asset_writer();
+        let id = self.notes.library.active_id.clone();
+        let executor = cx.background_executor().clone();
+        let pending = async move {
+            let prepared = executor
+                .spawn(async move { assets::prepare_backend(assets) })
+                .await
+                .map_err(StoreError::Invalid)?;
+            let mut references = Vec::new();
+            for asset in prepared {
+                let url = asset.id.source();
+                write(asset).await?;
+                references.push(format!("![image]({url})"));
+            }
+            Ok::<_, StoreError>(references.join("\n\n"))
+        };
+        self.run_io(pending, window, cx, move |this, result, _, cx| {
+            let markdown = match result {
+                Ok(markdown) => markdown,
+                Err(error) => {
+                    this.feedback.set_error(error);
+                    return;
+                }
+            };
+            if this.notes.library.active_id != id
+                || this.notes.library.active_note().read_only.is_some()
+                || context.as_ref().is_some_and(|(editor, request)| {
+                    *editor != this.editor() || !editor.read(cx).context_is_current(request)
+                })
+            {
+                this.feedback
+                    .queue(Message::new("notice.images-not-inserted"));
+                return;
+            }
+            let slice = match markraft_commonmark::from_markdown_fragment(doc::schema(), &markdown)
+            {
+                Ok(slice) => slice,
+                Err(error) => {
+                    this.feedback.set_error(StoreError::from(error.to_string()));
+                    return;
+                }
+            };
+            let applied = this.editor().update(cx, |editor, cx| {
+                let command = markraft_core::commands::replace_selection(slice);
+                command(editor.state()).is_some_and(|spec| editor.dispatch_isolated([spec], cx))
+            });
+            if !applied {
+                this.feedback
+                    .queue(Message::new("notice.images-not-inserted"));
+            }
+        });
     }
 }
 /// What to tell someone whose keystroke the source-preserving codec could not

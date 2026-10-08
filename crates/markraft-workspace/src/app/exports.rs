@@ -39,6 +39,51 @@ pub(super) struct ExportInput {
 }
 
 impl ExportInput {
+    /// Export database attachments beside the selected Markdown file.
+    fn markdown_with_assets(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<(String, tempfile::TempDir), StoreError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| StoreError::from("Export directory is unavailable".to_owned()))?;
+        let folder = tempfile::Builder::new()
+            .prefix("note-assets-")
+            .tempdir_in(parent)
+            .map_err(|error| StoreError::from(error.to_string()))?;
+        let mut references = std::collections::HashMap::new();
+        for (source, asset) in &self.options.assets {
+            let kind = markraft_media::ImageType::sniff(&asset.bytes)
+                .ok_or_else(|| StoreError::Invalid(Message::new("asset.images-only")))?;
+            let extension = match kind {
+                markraft_media::ImageType::Png => "png",
+                markraft_media::ImageType::Jpeg => "jpg",
+                markraft_media::ImageType::Gif => "gif",
+                markraft_media::ImageType::Webp => "webp",
+                markraft_media::ImageType::Svg => "svg",
+                markraft_media::ImageType::Bmp => "bmp",
+                markraft_media::ImageType::Tiff => "tiff",
+                markraft_media::ImageType::Ico => "ico",
+            };
+            let target = folder
+                .path()
+                .join(format!("{}.{}", uuid::Uuid::new_v4(), extension));
+            crate::fs::atomic_write_shared(&target, &asset.bytes)?;
+            references.insert(
+                source.clone(),
+                markraft_media::relative_url(parent, &target),
+            );
+        }
+        let document = assets::relink_backend_sources(&self.document, &references);
+        let markdown = match &self.source {
+            Some(source) => source
+                .render(doc::schema(), &document)
+                .map_err(|error| StoreError::from(error.to_string())),
+            None => Ok(format!("{}\n", doc::to_markdown_in(&document, &self.house))),
+        }?;
+        Ok((markdown, folder))
+    }
+
     /// The note as `profile` reads it.
     fn render(&self, profile: Profile) -> String {
         crate::export::render(&self.document, profile, &self.options)
@@ -54,24 +99,31 @@ impl MarkraftApp {
         cx: &mut Context<Self>,
     ) -> impl std::future::Future<Output = Result<ExportInput, StoreError>> + 'static {
         self.sync_documents(cx);
-        let note = self.library.active_note().clone();
+        let note = self.notes.library.active_note().clone();
         let options = Options {
             title: note.title(),
             base: None,
             image_root: markraft_media::ImageRoot::None,
             remote_images: self.preferences.remote_images,
+            assets: Default::default(),
             auto_number_equations: self.preferences.auto_number_equations,
             i18n: self.i18n.clone(),
         };
         let note_path = note.path.clone();
-        let rendering = self.persistence.as_ref().map(|persistence| {
+        let rendering = self.notes.persistence.as_ref().map(|persistence| {
             persistence.snapshot_async(
                 note.clone(),
-                self.library.generation(),
+                self.notes.library.generation(),
                 self.preferences.auto_number_equations,
             )
         });
         let house = self.house.clone();
+        let asset_reader = self
+            .notes
+            .persistence
+            .as_ref()
+            .filter(|persistence| persistence.capabilities().assets)
+            .map(|persistence| persistence.asset_reader());
         async move {
             let Some(rendering) = rendering else {
                 return Ok(ExportInput {
@@ -83,6 +135,21 @@ impl MarkraftApp {
                 });
             };
             let snapshot = rendering.await?;
+            let mut captured_assets = std::collections::HashMap::new();
+            if let Some(read) = asset_reader {
+                for source in assets::backend_sources(&snapshot.document) {
+                    let id =
+                        markraft_notes::AssetId::from_source(&source).expect("asset reference");
+                    let asset = read(id).await?;
+                    if asset.bytes.len() as u64 > markraft_media::MAX_IMAGE_BYTES {
+                        return Err(StoreError::Invalid(Message::new("asset.too-large")));
+                    }
+                    if markraft_media::ImageType::sniff(&asset.bytes).is_none() {
+                        return Err(StoreError::Invalid(Message::new("asset.images-only")));
+                    }
+                    captured_assets.insert(source, asset);
+                }
+            }
             // A root the note names but that cannot be used refuses absolute
             // paths, as it does in the editor, rather than reading them from `/`.
             let image_root = match note_path
@@ -97,6 +164,7 @@ impl MarkraftApp {
                 options: Options {
                     base: snapshot.base_path.clone(),
                     image_root,
+                    assets: captured_assets,
                     ..options
                 },
                 document: snapshot.document,
@@ -127,6 +195,7 @@ impl MarkraftApp {
         // The save panel asks before replacing a file, but an export never
         // replaces a note: that would lose it.
         let notes: Vec<PathBuf> = self
+            .notes
             .library
             .notes
             .iter()
@@ -202,16 +271,32 @@ impl MarkraftApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let name = self.library.active_note().file_name(format.extension());
+        let name = self
+            .notes
+            .library
+            .active_note()
+            .file_name(format.extension());
         self.deliver(
             Some(name),
             move |input, path| {
                 let path = path.expect("a file is asked for");
+                let mut exported_assets = None;
                 let bytes = match format {
-                    ExportFormat::Markdown => input.markdown.into_bytes(),
+                    ExportFormat::Markdown => {
+                        if input.options.assets.is_empty() {
+                            input.markdown.into_bytes()
+                        } else {
+                            let (markdown, directory) = input.markdown_with_assets(&path)?;
+                            exported_assets = Some(directory);
+                            markdown.into_bytes()
+                        }
+                    }
                     ExportFormat::Html => input.render(Profile::Page).into_bytes(),
                 };
                 crate::fs::atomic_write_shared(&path, &bytes)?;
+                if let Some(directory) = exported_assets {
+                    let _ = directory.keep();
+                }
                 Ok(path)
             },
             |this, path, _, cx| this.exported(path, cx),
@@ -222,7 +307,7 @@ impl MarkraftApp {
 
     /// The note on paper through the print panel, or as a PDF when `to_pdf`.
     pub(super) fn print_note(&mut self, to_pdf: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let name = to_pdf.then(|| self.library.active_note().file_name("pdf"));
+        let name = to_pdf.then(|| self.notes.library.active_note().file_name("pdf"));
         self.deliver(
             name,
             |input, path| Ok((input.render(Profile::Print), path)),
@@ -347,10 +432,32 @@ impl MarkraftApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let name = self.library.active_note().file_stem();
+        let name = self.notes.library.active_note().file_stem();
         self.deliver(
             None,
             move |input, _| {
+                if !input.options.assets.is_empty() {
+                    let staging =
+                        tempfile::tempdir().map_err(|error| StoreError::from(error.to_string()))?;
+                    let (markdown, _attachments) =
+                        input.markdown_with_assets(&staging.path().join("note.md"))?;
+                    let origin =
+                        markraft_commonmark::SourceDocument::parse(doc::schema(), &markdown)
+                            .map_err(|error| StoreError::from(error.to_string()))?;
+                    let source = markraft_commonmark::SourceTrack::new(origin.clone()).snapshot();
+                    return crate::send::obsidian::send(
+                        &vault,
+                        &crate::send::obsidian::Note {
+                            name: &name,
+                            document: origin.document(),
+                            markdown: &markdown,
+                            source: Some(&source),
+                            house: &input.house,
+                            base: Some(staging.path()),
+                            root: markraft_media::Root::None,
+                        },
+                    );
+                }
                 let note = crate::send::obsidian::Note {
                     name: &name,
                     document: &input.document,
@@ -421,6 +528,63 @@ mod store_tests {
         assert_eq!(
             std::fs::read_to_string(vault.join("alpha.md")).unwrap(),
             "A note for Obsidian\n"
+        );
+    }
+}
+
+#[cfg(test)]
+mod backend_asset_tests {
+    use super::{ExportInput, Options, doc};
+
+    #[test]
+    fn markdown_export_materializes_assets_and_preserves_untouched_source() {
+        let source =
+            "---\ntitle: keep\n---\n\nSetext title\n============\n\n![image](markraft-asset:one)\n";
+        let origin = markraft_commonmark::SourceDocument::parse(doc::schema(), source).unwrap();
+        let input = ExportInput {
+            document: origin.document().clone(),
+            markdown: source.into(),
+            source: Some(markraft_commonmark::SourceTrack::new(origin).snapshot()),
+            house: Default::default(),
+            options: Options {
+                title: "Keep".into(),
+                base: None,
+                image_root: markraft_media::ImageRoot::None,
+                remote_images: false,
+                auto_number_equations: false,
+                i18n: crate::locale::I18n::english(),
+                assets: [(
+                    "markraft-asset:one".into(),
+                    markraft_notes::Asset {
+                        id: markraft_notes::AssetId("one".into()),
+                        media_type: "image/svg+xml".into(),
+                        bytes: b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec(),
+                    },
+                )]
+                .into(),
+            },
+        };
+        let destination = tempfile::tempdir().unwrap();
+        let (markdown, assets) = input
+            .markdown_with_assets(&destination.path().join("note.md"))
+            .unwrap();
+        assert!(markdown.starts_with("---\ntitle: keep\n---\n\nSetext title\n============\n"));
+        assert!(!markdown.contains("markraft-asset:"));
+        let attachment = std::fs::read_dir(assets.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert!(markdown.contains(attachment.file_name().unwrap().to_str().unwrap()));
+        assert_eq!(
+            std::fs::read(&attachment).unwrap(),
+            input.options.assets["markraft-asset:one"].bytes
+        );
+        drop(assets);
+        assert!(
+            !attachment.exists(),
+            "Uncommitted exports clean their staged attachments"
         );
     }
 }

@@ -204,9 +204,26 @@ save receipts, and explicit shutdown. It has no GPUI dependency.
 - `doc.rs` supplies the concrete Markdown kind and export snapshots.
 - `fs.rs` supplies atomic writes, trash operations, and storage errors.
 - `locale.rs` supplies explicit `Message` and `I18n` values.
+- `backend.rs` defines `NotesBackend`, the contract for storage that the host owns.
+- `records.rs` adapts a `NotesBackend` to the storage worker.
+- `engine.rs` defines the worker's internal store interface, which the Markdown store and the record store both implement.
+- `conformance.rs` holds the contract checks that a host runs against its backend.
 
-The public facade uses host-selected notes and state directories.
+The public facade uses host-selected notes and state directories, or a host backend.
 It does not read or write the standalone application's settings.
+
+The Markdown store and the record store are two implementations behind one worker.
+`NotesBackend` is not the worker's internal interface.
+It has no file paths, watchers, or manifest, because a database has none of them.
+
+**Invariant:** every backend write carries an expected revision.
+A write that reports a conflict is accepted only when storage already holds exactly that write.
+
+**Invariant:** the ID of a note with a logical key is derived from the key.
+The storage identity keeps the key unique, on one device and across devices.
+
+**Invariant:** an asset ID is the SHA-256 of the asset's bytes.
+The component never deletes an asset.
 Compatibility modules remain hidden from generated API documentation for the workspace adapter.
 
 **Invariant:** a save receipt reports completed persistence work.
@@ -221,7 +238,8 @@ Native watcher cleanup runs separately because FSEvents registration and unregis
 
 The embeddable workspace owns editor sessions, note navigation, save coordination,
 rename flows, daily notes, and note UI.
-Its public entry point is `WorkspaceView::open(WorkspaceOptions, ...)`.
+`WorkspaceView::open()` mounts Markdown folders.
+`with_backend()` and `with_session()` mount host-owned storage.
 The host handles settings, hide, quit, diagnostic, and locale requests through `WorkspaceEvent`.
 
 `flush` provides a save barrier. `prepare_close` saves committed edits and stops persistence.

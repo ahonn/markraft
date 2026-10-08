@@ -19,14 +19,14 @@ pub(super) struct VimFind {
 impl MarkraftApp {
     /// `/` borrows the ordinary input without giving it modal key bindings.
     pub(super) fn open_vim_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.persistence.is_none() || self.editor().read(cx).is_composing() {
+        if self.notes.persistence.is_none() || self.editor().read(cx).is_composing() {
             return;
         }
         self.close_popover(cx);
         self.ring.release();
         if self.find_vim.is_none() {
             self.find_vim = Some(VimFind {
-                note: self.library.active_id.clone(),
+                note: self.notes.library.active_id.clone(),
                 query: self.find_editor.read(cx).text().to_owned(),
             });
             self.editor()
@@ -89,7 +89,7 @@ impl MarkraftApp {
     /// End the input session too, rather than accepting an obsolete position.
     pub(super) fn reconcile_vim_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.find_vim.as_ref().is_some_and(|preview| {
-            preview.note != self.library.active_id
+            preview.note != self.notes.library.active_id
                 || self
                     .sessions
                     .get(&preview.note)
@@ -128,7 +128,7 @@ impl MarkraftApp {
     /// ⌘F. A panel gives the note back first. A bar that is already open
     /// selects its query so the next keystroke replaces it.
     pub(super) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.persistence.is_none() {
+        if self.notes.persistence.is_none() {
             return;
         }
         if self.interaction.panel() != Panel::Editor {
@@ -184,12 +184,14 @@ impl MarkraftApp {
             return true;
         }
         self.find_open = false;
-        if self.persistence.is_some() && self.sessions.get(&self.library.active_id).is_some() {
+        if self.notes.persistence.is_some()
+            && self.sessions.get(&self.notes.library.active_id).is_some()
+        {
             self.editor()
                 .update(cx, |editor, cx| editor.set_find_query(String::new(), cx));
         }
         self.restyle_editors(cx);
-        if focus_note && self.persistence.is_some() {
+        if focus_note && self.notes.persistence.is_some() {
             self.focus_editor(window, cx);
         }
         cx.notify();
@@ -209,7 +211,7 @@ impl MarkraftApp {
     }
 
     fn step_find(&mut self, next: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.persistence.is_none() {
+        if self.notes.persistence.is_none() {
             return;
         }
         if self.find_editor.read(cx).is_composing() {
@@ -224,7 +226,7 @@ impl MarkraftApp {
             self.open_find(window, cx);
             return;
         }
-        if self.sessions.get(&self.library.active_id).is_none() {
+        if self.sessions.get(&self.notes.library.active_id).is_none() {
             return;
         }
         let applied = self.editor().read(cx).find_status().query;
@@ -243,15 +245,16 @@ impl MarkraftApp {
     /// Give the note on screen the field's query. A newly opened note has an
     /// empty find field of its own, and a document replaced under it does too.
     pub(super) fn sync_find(&mut self, cx: &mut Context<Self>) {
-        if !self.find_open || self.persistence.is_none() {
+        if !self.find_open || self.notes.persistence.is_none() {
             return;
         }
-        if self.sessions.get(&self.library.active_id).is_none() {
+        if self.sessions.get(&self.notes.library.active_id).is_none() {
             return;
         }
         let query = self.find_editor.read(cx).text().to_owned();
         if let Some(preview) = &self.find_vim {
-            if preview.note != self.library.active_id || !self.editor().read(cx).has_find_preview()
+            if preview.note != self.notes.library.active_id
+                || !self.editor().read(cx).has_find_preview()
             {
                 // The editor's change subscription has a Window, so it can end
                 // this invalidated session and return keyboard focus together.
