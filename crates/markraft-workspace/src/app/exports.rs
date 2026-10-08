@@ -483,7 +483,7 @@ impl MarkraftApp {
     }
 }
 
-#[cfg(all(test, feature = "mac-app-store"))]
+#[cfg(all(test, feature = "sandbox"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod store_tests {
     use crate::e2e::harness::{Harness, open_with};

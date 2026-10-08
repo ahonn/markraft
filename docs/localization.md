@@ -89,7 +89,7 @@ User-authored titles remain unchanged.
 
 ```sh
 cargo test -p markraft-notes locale --locked
-cargo test -p markraft-workspace --features bundled-settings language --locked
+cargo test -p markraft-workspace --features unstable-standalone language --locked
 cargo test -p xtask macos::tests --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings

@@ -60,6 +60,7 @@ impl NewRecord {
 
 /// The outcome for one note. Partial saves never imply the failed notes are durable.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct NoteSaveOutcome {
     pub id: crate::NoteId,
     pub result: Result<StorageRevision, BackendError>,

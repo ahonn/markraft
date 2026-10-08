@@ -6,7 +6,7 @@ mod carry;
 mod daily_notes;
 mod exports;
 mod feedback;
-#[cfg(feature = "mac-app-store")]
+#[cfg(feature = "sandbox")]
 mod file_access;
 mod find;
 mod interaction;
@@ -157,12 +157,12 @@ pub struct WorkspaceView {
     /// Whether macOS will launch Markraft at login, as last asked. Asking takes a
     /// round trip to a system service, too slow for every frame of the Settings
     /// window, so it is asked when that window comes forward and after a change.
-    #[cfg(feature = "bundled-settings")]
+    #[cfg(feature = "unstable-standalone")]
     launch_at_login: Option<bool>,
     /// The daily note settings of the Obsidian vault this folder also is, as last read
     /// when the Settings window came forward. `None` when it is not one, or they
     /// cannot be used here.
-    #[cfg(feature = "bundled-settings")]
+    #[cfg(feature = "unstable-standalone")]
     obsidian_daily: Option<crate::daily::DailySettings>,
     /// Whether Markraft was the active app at the last poll, so the note hides once
     /// when another app takes over rather than on every poll after.
@@ -208,13 +208,11 @@ pub struct WorkspaceView {
     remote_fetcher: Option<markraft_gpui::RemoteImageFetcher>,
     closing: bool,
 }
-#[doc(hidden)]
 pub type MarkraftApp = WorkspaceView;
 
 impl MarkraftApp {
-    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         path: Option<PathBuf>,
         settings_path: PathBuf,
         store: Option<Store>,
@@ -389,9 +387,9 @@ impl MarkraftApp {
             _persistence_wake: None,
             feedback,
             settings_errors: Default::default(),
-            #[cfg(feature = "bundled-settings")]
+            #[cfg(feature = "unstable-standalone")]
             launch_at_login: None,
-            #[cfg(feature = "bundled-settings")]
+            #[cfg(feature = "unstable-standalone")]
             obsidian_daily: None,
             app_active: true,
             trashed: Vec::new(),
@@ -832,7 +830,6 @@ impl MarkraftApp {
                 }
                 PlatformEvent::DailyNote => self.toggle_daily_note(window, cx),
                 PlatformEvent::Settings => self.open_settings(window, cx),
-                #[cfg(feature = "direct-distribution")]
                 PlatformEvent::CheckForUpdates => self.check_for_updates(window, cx),
                 PlatformEvent::ReportIssue => self.report_issue(cx),
                 PlatformEvent::Quit => self.quit(window, cx),
@@ -971,7 +968,7 @@ impl MarkraftApp {
         self.ring.release();
         window.focus(&self.editor().focus_handle(cx), cx);
     }
-    pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let follow_pointer = self.preferences.follow_pointer;
         if let Some(p) = &mut self.platform {
             if let Err(e) = p.show(window, follow_pointer) {
@@ -990,7 +987,7 @@ impl MarkraftApp {
         }
         cx.notify();
     }
-    pub fn hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.context_menus.dismiss();
         self.cancel_checking_panel();
         self.close_popover(cx);
@@ -1067,28 +1064,28 @@ impl MarkraftApp {
         });
     }
     /// Open the tracker's bug form with this copy's environment filled in.
-    pub fn report_issue(&mut self, cx: &mut Context<Self>) {
+    fn report_issue(&mut self, cx: &mut Context<Self>) {
         cx.emit(crate::host::WorkspaceEvent::ReportIssue);
     }
 
     /// Show the log in Finder, beside whatever crash reports there are.
-    pub fn reveal_logs(&mut self, cx: &mut Context<Self>) {
+    fn reveal_logs(&mut self, cx: &mut Context<Self>) {
         cx.emit(crate::host::WorkspaceEvent::RevealLogs);
     }
 
     /// Retain startup security scopes for all asynchronous file consumers.
-    pub fn with_file_access(mut self, file_access: crate::file_access::FileAccess) -> Self {
+    pub(crate) fn with_file_access(mut self, file_access: crate::file_access::FileAccess) -> Self {
         self.file_access = file_access;
         self
     }
 
-    pub fn announce(&mut self, text: Message, cx: &mut Context<Self>) {
+    pub(crate) fn announce(&mut self, text: Message, cx: &mut Context<Self>) {
         self.feedback.queue(text);
         cx.notify();
     }
 
     /// Put what a bug report needs on the clipboard, and say so.
-    pub fn copy_debug_info(&mut self, cx: &mut Context<Self>) {
+    fn copy_debug_info(&mut self, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(crate::platform::debug_info()));
         self.feedback.inform(Message::new("notice.copied-debug"));
         cx.notify();
@@ -1097,11 +1094,16 @@ impl MarkraftApp {
     /// Say something found on the way to the first window — a crash report the
     /// last run left, settings that were set aside — with a button that shows
     /// the file.
-    pub fn announce_with_reveal(&mut self, text: Message, path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn announce_with_reveal(
+        &mut self,
+        text: Message,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
         self.feedback.queue_with_reveal(text, path);
         cx.notify();
     }
-    pub fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(error) = self.updater.check() {
             self.show(window, cx);
             self.inform(&error, cx);
@@ -2085,11 +2087,11 @@ impl MarkraftApp {
             self.open_folder(paths[0].clone(), window, cx);
             return;
         }
-        #[cfg(feature = "mac-app-store")]
+        #[cfg(feature = "sandbox")]
         {
             self.authorize_open_paths(paths, window, cx);
         }
-        #[cfg(not(feature = "mac-app-store"))]
+        #[cfg(not(feature = "sandbox"))]
         self.open_authorized_paths(paths, window, cx);
     }
 
@@ -2197,7 +2199,7 @@ impl MarkraftApp {
         }
     }
 
-    #[cfg(feature = "bundled-settings")]
+    #[cfg(feature = "unstable-standalone")]
     fn configure_new_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.path.clone() else {
             self.inform(Message::new("notice.folder-new-location"), cx);
@@ -2241,7 +2243,7 @@ impl MarkraftApp {
         .detach();
     }
 
-    #[cfg(feature = "bundled-settings")]
+    #[cfg(feature = "unstable-standalone")]
     fn configure_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.path.clone() else {
             self.inform(Message::new("notice.folder-image-location"), cx);
@@ -2730,7 +2732,7 @@ fn location_budget(status: &str, current: bool) -> usize {
 
 /// Where inside the notes folder a setting points, written the way the user reads
 /// the folder itself: its own name, then the path under it.
-#[cfg(any(feature = "bundled-settings", test))]
+#[cfg(any(feature = "unstable-standalone", test))]
 fn folder_label(root: &std::path::Path, relative: &std::path::Path) -> String {
     let name = root
         .file_name()

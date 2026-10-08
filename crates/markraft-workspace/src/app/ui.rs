@@ -7,9 +7,9 @@ mod formatting;
 mod icons;
 mod link;
 mod rename;
-#[cfg(feature = "bundled-settings")]
+#[cfg(feature = "unstable-standalone")]
 pub(in crate::app) mod settings;
-#[cfg(not(feature = "bundled-settings"))]
+#[cfg(not(feature = "unstable-standalone"))]
 #[path = "ui/settings_disabled.rs"]
 pub(in crate::app) mod settings;
 pub(in crate::app) mod slash;
@@ -1593,7 +1593,7 @@ impl MarkraftApp {
                 SlashEffect::Block(doc::Block::Divider),
             ),
         ];
-        #[cfg(feature = "mac-app-store")]
+        #[cfg(feature = "sandbox")]
         if self.path.is_some() {
             items.push(Command::new(
                 "send-to-obsidian",
@@ -1601,7 +1601,7 @@ impl MarkraftApp {
                 Intent::SendToObsidian(None),
             ));
         }
-        #[cfg(not(feature = "mac-app-store"))]
+        #[cfg(not(feature = "sandbox"))]
         {
             let vaults = crate::send::obsidian::vaults();
             // Without a notes folder there is no file for pictures to be found

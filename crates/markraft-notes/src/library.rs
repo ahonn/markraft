@@ -48,6 +48,7 @@ impl fmt::Display for NoteId {
 /// Lightweight list/search metadata. Unreadable files remain visible without
 /// requiring their contents to be decoded or rendered as part of a search.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct NoteSummary {
     pub id: NoteId,
     pub title: String,
@@ -64,6 +65,7 @@ pub struct NoteSummary {
 
 /// An immutable committed document. It contains no view or input-composition state.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct NoteSnapshot {
     pub id: NoteId,
     pub title: String,
@@ -83,6 +85,7 @@ pub struct NoteSnapshot {
 /// A local durability barrier. Success means the backend committed the requested
 /// snapshot. It does not promise network sync or treat recovery copies as a save.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SaveReceipt {
     /// Save barrier revision within this opened library, not across restarts.
     pub revision: u64,

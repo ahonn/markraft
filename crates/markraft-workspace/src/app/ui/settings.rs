@@ -101,7 +101,6 @@ pub(in crate::app) struct SettingsErrors {
     new_notes: Option<Message>,
     daily: Option<Message>,
     images: Option<Message>,
-    #[cfg(feature = "direct-distribution")]
     updates: Option<Message>,
 }
 
@@ -122,9 +121,7 @@ enum Change {
     ResetImageLocation,
     RevealFolder,
     NewNoteName(NoteNaming),
-    #[cfg(feature = "direct-distribution")]
     AutomaticUpdates(bool),
-    #[cfg(feature = "direct-distribution")]
     CheckForUpdates,
     ImageName(ImageNaming),
     DailyFolder,
@@ -186,8 +183,10 @@ struct Snapshot {
     new_notes: Option<(String, bool)>,
     images: Option<(String, bool)>,
     new_note_name: NoteNaming,
+    /// Whether this copy updates itself. One that a store updates has no update
+    /// controls to show.
+    self_updating: bool,
     /// None where this copy has no updater to ask: unbundled, or not configured.
-    #[cfg(feature = "direct-distribution")]
     automatic_updates: Option<bool>,
     image_name: ImageNaming,
     daily: crate::daily::DailySettings,
@@ -200,7 +199,7 @@ struct Snapshot {
 
 impl MarkraftApp {
     /// ⌘, and the Settings commands: open the window, or bring the open one forward.
-    pub fn open_bundled_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_bundled_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(platform) = &mut self.platform {
             platform.remember_frontmost_app();
         }
@@ -255,7 +254,7 @@ impl MarkraftApp {
             new_notes,
             images,
             new_note_name: workspace.new_note_name,
-            #[cfg(feature = "direct-distribution")]
+            self_updating: self.updater.updates_itself(),
             automatic_updates: self.updater.automatically_checks(),
             image_name: workspace.image_name,
             daily: workspace.daily.clone(),
@@ -344,7 +343,6 @@ impl MarkraftApp {
                 self.notes.library.workspace.new_note_name = naming;
                 self.schedule_save(cx);
             }
-            #[cfg(feature = "direct-distribution")]
             Change::AutomaticUpdates(enabled) => {
                 if let Err(error) = self.updater.set_automatically_checks(enabled) {
                     self.settings_errors.updates = Some(error);
@@ -354,7 +352,6 @@ impl MarkraftApp {
                 self.notes.library.workspace.image_name = naming;
                 self.schedule_save(cx);
             }
-            #[cfg(feature = "direct-distribution")]
             Change::CheckForUpdates => {
                 self.settings_errors.updates = self.updater.check().err();
             }
@@ -1909,7 +1906,6 @@ impl SettingsView {
                     .child(version),
             );
 
-        #[cfg(feature = "direct-distribution")]
         let updates = {
             let mut updates = vec![
                 checkbox(
@@ -1963,13 +1959,15 @@ impl SettingsView {
             )
             .into_any_element(),
         ];
-        let mut page = vec![
-            identity,
-            group_gap(),
-            #[cfg(feature = "direct-distribution")]
-            row(Some(s.i18n.text("settings.updates")), updates, p),
-            row(Some(s.i18n.text("settings.links")), vec![line(links)], p),
-        ];
+        let mut page = vec![identity, group_gap()];
+        if s.self_updating {
+            page.push(row(Some(s.i18n.text("settings.updates")), updates, p));
+        }
+        page.push(row(
+            Some(s.i18n.text("settings.links")),
+            vec![line(links)],
+            p,
+        ));
         page.push(
             div()
                 .pt(px(10.))

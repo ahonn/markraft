@@ -14,13 +14,13 @@ use markraft_media::{ImageLocation, ImageType};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-#[cfg(not(feature = "mac-app-store"))]
+#[cfg(not(feature = "sandbox"))]
 use std::sync::Mutex;
-#[cfg(not(feature = "mac-app-store"))]
+#[cfg(not(feature = "sandbox"))]
 use std::time::SystemTime;
 
 /// A vault Obsidian knows about.
-#[cfg(not(feature = "mac-app-store"))]
+#[cfg(not(feature = "sandbox"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Vault {
     /// The vault's folder name, which is how Obsidian names it.
@@ -28,14 +28,14 @@ pub struct Vault {
     pub path: PathBuf,
 }
 
-#[cfg(not(feature = "mac-app-store"))]
+#[cfg(not(feature = "sandbox"))]
 #[derive(Deserialize)]
 struct Registry {
     #[serde(default)]
     vaults: HashMap<String, RegisteredVault>,
 }
 
-#[cfg(not(feature = "mac-app-store"))]
+#[cfg(not(feature = "sandbox"))]
 #[derive(Deserialize)]
 struct RegisteredVault {
     path: PathBuf,
@@ -48,7 +48,7 @@ struct RegisteredVault {
 ///
 /// The ⌘K panel asks on every draw, so the registry is read again only when it
 /// changes.
-#[cfg(not(feature = "mac-app-store"))]
+#[cfg(not(feature = "sandbox"))]
 pub fn vaults() -> Vec<Vault> {
     static CACHE: Mutex<Option<(SystemTime, Vec<Vault>)>> = Mutex::new(None);
     let Some(home) = std::env::var_os("HOME") else {
@@ -76,7 +76,7 @@ pub fn vaults() -> Vec<Vault> {
         .collect()
 }
 
-#[cfg(not(feature = "mac-app-store"))]
+#[cfg(not(feature = "sandbox"))]
 fn parse_registry(json: &str) -> Vec<Vault> {
     let Ok(registry) = serde_json::from_str::<Registry>(json) else {
         return Vec::new();
@@ -630,7 +630,7 @@ pub fn open_url(note: &Path) -> String {
 
 /// Whether `folder` is inside one of `vaults`, where a note already is in
 /// Obsidian and sending it would only make a copy.
-#[cfg(not(feature = "mac-app-store"))]
+#[cfg(not(feature = "sandbox"))]
 pub fn within(folder: &Path, vaults: &[Vault]) -> bool {
     // Through links and aliases such as /private/var for /var.
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
@@ -646,7 +646,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(not(feature = "mac-app-store"))]
+    #[cfg(not(feature = "sandbox"))]
     fn the_registry_lists_vaults_most_recent_first() {
         let json = r#"{"vaults":{
             "a1":{"path":"/Users/me/Old","ts":100},
@@ -857,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "mac-app-store"))]
+    #[cfg(not(feature = "sandbox"))]
     fn a_folder_inside_a_vault_is_already_there() {
         let vaults = [Vault {
             name: "V".into(),
