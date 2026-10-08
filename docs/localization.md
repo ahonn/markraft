@@ -1,15 +1,15 @@
 # Localization
 
 Markraft embeds JSON translations with `rust-i18n`. The app owns an `I18n` value
-and passes it explicitly to views; shared crates do not own language preferences.
+and passes it explicitly to views. Shared crates do not own language preferences.
 English (`en`) is the fallback language.
 
 ## Adding a language
 
-1. Copy every `crates/markraft-app/locales/{domain}/en.json` to
+1. Copy every `crates/markraft-notes/locales/{domain}/en.json` to
    `{domain}/{locale}.json` and translate the values.
 2. Add the BCP 47 tag and native display name to
-   `crates/markraft-app/locale_catalog.json`, for example:
+   `crates/markraft-notes/locale_catalog.json`, for example:
    `{ "id": "zh-Hans", "name": "简体中文" }`. Keep `en` first.
 3. Run the checks below and verify the packaged app on macOS.
 
@@ -55,10 +55,10 @@ Translate labels, menus, tooltips, accessibility text, and application-owned err
 explanations. Preserve user Markdown, custom titles, filenames, URLs, code
 identifiers, shortcut names, and external diagnostics. Logs and CLI syntax stay
 outside the UI catalog. Use `Note::display_title` or `Note::title_message` for
-empty-note labels; never translate persisted filenames.
+empty-note labels. Never translate persisted filenames.
 
 Dates use translated templates and month labels. Counts use explicit
-singular/plural keys; interpolation does not provide general CLDR plural rules.
+singular and plural keys. Interpolation does not provide general CLDR plural rules.
 Regional date and number formatting is separate from UI language selection.
 
 ## Language changes
@@ -75,19 +75,21 @@ The shared editor exposes `EditorMessage` keys with English defaults. The app
 injects translations through `EditorMessages`:
 
 ```rust
+use markraft_workspace::EditorLocaleExt;
+
 editor.with_messages(i18n.editor_messages());
 editor.set_messages(i18n.editor_messages(), cx);
 ```
 
 For new editor text, add its typed key and English default in `markraft-gpui`,
-then add matching `editor.*` resources in the app. Generated labels are translated;
-user-authored titles remain unchanged.
+then add matching `editor.*` resources in `markraft-notes`. Generated labels are translated.
+User-authored titles remain unchanged.
 
 ## Verification
 
 ```sh
-cargo test -p markraft-app locale --locked
-cargo test -p markraft-app language --locked
+cargo test -p markraft-notes locale --locked
+cargo test -p markraft-workspace --features bundled-settings language --locked
 cargo test -p xtask macos::tests --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings

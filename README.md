@@ -84,6 +84,14 @@ Notes are Markdown files in `~/Documents/Markraft` by default. You can choose an
 
 Markraft has no account and sends no telemetry. It connects to the network only to check for updates and to load images that notes link to on the web; both can be turned off in Settings.
 
+## Integration
+
+Embed `markraft-workspace` in a GPUI host, or use `markraft-notes` without a GUI.
+The host owns application services and supplies its notes, state, and cache directories.
+
+See the [integration guide](docs/integration.md) and the
+[external consumer examples](examples/integration/README.md).
+
 ## Contributing
 
 Bug reports and feature requests are welcome as issues. Pull requests are open to collaborators only, so to propose a change, please open an issue and describe it there.
