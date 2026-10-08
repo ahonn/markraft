@@ -575,3 +575,75 @@ fn a_file_the_trash_refuses_keeps_its_note(cx: &mut TestAppContext) {
         "a flush after the refusal never finished"
     );
 }
+
+// Opening an external Markdown file leaves the edited note safe and changes
+// the save destination to that file, without importing a duplicate into the vault.
+#[gpui::test]
+fn opening_an_external_file_preserves_edits_and_saves_to_the_opened_path(cx: &mut TestAppContext) {
+    let mut h = open_with(cx, &[("alpha.md", "alpha\n")], |_| {});
+    h.keys("cmd-down cmd-right");
+    h.type_text(" local");
+    let outside = tempfile::tempdir().unwrap();
+    let path = outside.path().join("external.md");
+    std::fs::write(&path, "outside\n").unwrap();
+    h.open_path(&path);
+    assert_eq!(h.markdown(), "outside");
+    assert_eq!(
+        h.wait_for_file("alpha.md", |s| s == "alpha local\n"),
+        "alpha local\n"
+    );
+    h.keys("cmd-down cmd-right");
+    h.type_text(" changed");
+    h.save();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "outside changed\n");
+    assert_eq!(h.files(), ["alpha.md"]);
+
+    h.browse_to("alpha");
+    assert_eq!(h.markdown(), "alpha local");
+    h.keys("cmd-z");
+    assert_eq!(h.markdown(), "alpha");
+}
+
+#[gpui::test]
+fn rename_after_a_name_conflict_updates_open_backlinks_and_keeps_them_editable(
+    cx: &mut TestAppContext,
+) {
+    let mut h = open_with(
+        cx,
+        &[
+            ("Welcome.md", "Welcome\n"),
+            ("Backlinks.md", "Backlinks\n\n[[Welcome]]\n"),
+        ],
+        |_| {},
+    );
+    // Keep the backlink's editor alive before the rename, including its source guard.
+    h.browse_to("Backlinks");
+    h.browse_to("Welcome.md");
+    h.keys("cmd-k");
+    h.type_text("Rename");
+    h.keys("enter");
+    h.type_text("Backlinks");
+    h.keys("enter");
+    h.wait_for_io();
+    assert_eq!(h.active_name(), "Welcome.md");
+
+    h.keys("cmd-k");
+    h.type_text("Rename");
+    h.keys("enter");
+    h.type_text("Renamed");
+    h.keys("enter cmd-s cmd-p");
+    h.type_text("Backlinks");
+    h.keys("enter");
+    h.wait_for_io();
+    assert_eq!(h.active_name(), "Backlinks.md");
+    assert_eq!(h.markdown(), "Backlinks\n\n[[Renamed]]");
+    h.keys("cmd-down cmd-right");
+    h.type_text(" retained");
+    h.save();
+    assert_eq!(h.markdown(), "Backlinks\n\n[[Renamed]] retained");
+    assert_eq!(
+        std::fs::read_to_string(h.notes.join("Backlinks.md")).unwrap(),
+        "Backlinks\n\n[[Renamed]] retained\n"
+    );
+    assert_eq!(h.files(), ["Backlinks.md", "Renamed.md"]);
+}

@@ -130,13 +130,14 @@ fn the_input_method_sees_the_note_in_utf16_units(cx: &mut TestAppContext) {
 #[gpui::test]
 fn the_link_and_emoji_menus_open_as_they_are_typed(cx: &mut TestAppContext) {
     let mut h = open_with(cx, &[("Target note.md", "t\n"), ("here.md", "h\n")], |_| {});
+    let link = h.wiki_link("Target note.md");
     h.keys("cmd-n");
     h.type_text("see [[Targ");
     h.keys("enter");
-    assert_eq!(h.markdown(), "see [[Target note]]");
+    assert_eq!(h.markdown(), format!("see {link}"));
     h.type_text(" :smil");
     h.keys("enter");
-    assert_eq!(h.markdown(), "see [[Target note]] :smile:");
+    assert_eq!(h.markdown(), format!("see {link} :smile:"));
     h.assert_round_trip("a link and an emoji from the menus");
 }
 

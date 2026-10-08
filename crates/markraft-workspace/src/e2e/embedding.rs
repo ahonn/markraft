@@ -128,78 +128,17 @@ fn constructing_an_embedded_workspace_preserves_host_focus(cx: &mut TestAppConte
     });
 }
 
-#[derive(Clone, Default)]
-struct MemoryBackend(std::sync::Arc<std::sync::Mutex<markraft_notes::BackendSnapshot>>);
-impl markraft_notes::NotesBackend for MemoryBackend {
-    fn load(&mut self) -> Result<markraft_notes::BackendSnapshot, markraft_notes::BackendError> {
-        Ok(self.0.lock().unwrap().clone())
-    }
-    fn commit(
-        &mut self,
-        mutation: markraft_notes::BackendMutation,
-    ) -> Result<markraft_notes::StorageRevision, markraft_notes::BackendError> {
-        use markraft_notes::*;
-        let mut state = self.0.lock().unwrap();
-        let revision = StorageRevision(uuid::Uuid::new_v4().to_string());
-        match mutation {
-            BackendMutation::Put {
-                id,
-                expected,
-                markdown,
-                title,
-                logical_key,
-                created_at,
-                updated_at,
-                pinned,
-            } => {
-                let actual = state
-                    .notes
-                    .iter()
-                    .find(|note| note.id == id)
-                    .map(|note| note.revision.clone());
-                if actual != expected {
-                    return Err(BackendError::Conflict { id, actual });
-                }
-                state.notes.retain(|note| note.id != id);
-                state.notes.push(BackendNote {
-                    id,
-                    markdown,
-                    title,
-                    logical_key,
-                    revision: revision.clone(),
-                    created_at,
-                    updated_at,
-                    pinned,
-                });
-            }
-            BackendMutation::Delete { id, expected, .. } => {
-                let actual = state
-                    .notes
-                    .iter()
-                    .find(|note| note.id == id)
-                    .map(|note| note.revision.clone());
-                if actual.as_ref() != Some(&expected) {
-                    return Err(BackendError::Conflict { id, actual });
-                }
-                state.notes.retain(|note| note.id != id);
-            }
-        }
-        Ok(revision)
-    }
-}
+use markraft_notes::memory::MemoryBackend;
 
 #[gpui::test]
 fn database_workspace_saves_without_creating_markdown_files(cx: &mut TestAppContext) {
     let backend = MemoryBackend::default();
-    let state = backend.0.clone();
-    let mut h = super::harness::open_backend(cx, Box::new(backend));
+    let mut h = super::harness::open_backend(cx, Box::new(backend.clone()));
     h.type_text("Saved through a host backend");
     h.save();
     assert!(
-        state
-            .lock()
-            .unwrap()
-            .notes
+        backend
+            .notes()
             .iter()
             .any(|note| note.markdown.contains("host backend"))
     );
@@ -223,25 +162,27 @@ fn database_workspace_preserves_unedited_source_on_close(cx: &mut TestAppContext
     use markraft_notes::*;
     let source = "---\ncustom: preserved\n---\n\nTitle\n=====\n\nA  paragraph.\n";
     let backend = MemoryBackend::default();
-    backend.0.lock().unwrap().notes.push(BackendNote {
-        id: NoteId::new("original"),
-        markdown: source.into(),
-        title: None,
-        logical_key: None,
-        revision: StorageRevision("1".into()),
-        created_at: 1,
-        updated_at: 1,
-        pinned: false,
-    });
-    let state = backend.0.clone();
-    let mut h = super::harness::open_backend(cx, Box::new(backend));
+    backend.state().records.insert(
+        "original".into(),
+        BackendNote {
+            id: NoteId::new("original"),
+            markdown: source.into(),
+            title: None,
+            logical_key: None,
+            revision: StorageRevision("original-revision".into()),
+            created_at: 1,
+            updated_at: 1,
+            pinned: false,
+        },
+    );
+    let mut h = super::harness::open_backend(cx, Box::new(backend.clone()));
     h.save();
-    assert_eq!(state.lock().unwrap().notes[0].markdown, source);
+    assert_eq!(backend.notes()[0].markdown, source);
     assert!(h.active_note().path.is_none());
     h.keys("cmd-down");
     h.type_text(" Edited.");
     h.save();
-    let saved = state.lock().unwrap().notes[0].markdown.clone();
+    let saved = backend.notes()[0].markdown.clone();
     assert!(saved.starts_with("---\ncustom: preserved\n---\n\nTitle\n=====\n"));
     assert!(saved.contains("Edited."));
 }
@@ -249,11 +190,10 @@ fn database_workspace_preserves_unedited_source_on_close(cx: &mut TestAppContext
 #[gpui::test]
 fn database_workspace_rename_changes_metadata_without_rewriting_markdown(cx: &mut TestAppContext) {
     let backend = MemoryBackend::default();
-    let state = backend.0.clone();
-    let mut h = super::harness::open_backend(cx, Box::new(backend));
+    let mut h = super::harness::open_backend(cx, Box::new(backend.clone()));
     h.type_text("Original body");
     h.save();
-    let original = state.lock().unwrap().notes[0].markdown.clone();
+    let original = backend.notes()[0].markdown.clone();
     h.keys("cmd-k");
     h.type_text("Rename");
     h.keys("enter");
@@ -261,16 +201,15 @@ fn database_workspace_rename_changes_metadata_without_rewriting_markdown(cx: &mu
     h.type_text("Renamed record");
     h.keys("enter");
     h.wait_for_io();
-    let state = state.lock().unwrap();
-    assert_eq!(state.notes[0].title.as_deref(), Some("Renamed record"));
-    assert_eq!(state.notes[0].markdown, original);
+    let notes = backend.notes();
+    assert_eq!(notes[0].title.as_deref(), Some("Renamed record"));
+    assert_eq!(notes[0].markdown, original);
 }
 
 #[gpui::test]
 fn database_daily_notes_use_a_stable_logical_key(cx: &mut TestAppContext) {
     let backend = MemoryBackend::default();
-    let state = backend.0.clone();
-    let mut h = super::harness::open_backend(cx, Box::new(backend));
+    let mut h = super::harness::open_backend(cx, Box::new(backend.clone()));
     for _ in 0..2 {
         h.keys("cmd-k");
         h.type_text("today");
@@ -278,17 +217,15 @@ fn database_daily_notes_use_a_stable_logical_key(cx: &mut TestAppContext) {
         h.wait_for_io();
     }
     let expected = format!("daily:{}", chrono::Local::now().date_naive());
-    let state = state.lock().unwrap();
+    let notes = backend.notes();
     assert_eq!(
-        state
-            .notes
+        notes
             .iter()
             .filter(|note| note.logical_key.as_deref() == Some(&expected))
             .count(),
         1
     );
-    let daily = state
-        .notes
+    let daily = notes
         .iter()
         .find(|note| note.logical_key.as_deref() == Some(&expected))
         .unwrap();

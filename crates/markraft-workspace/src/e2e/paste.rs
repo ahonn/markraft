@@ -1,46 +1,7 @@
-//! Pastes: Markdown into items, cells and paragraphs, and an image beside its note.
+//! Pastes: Markdown into items, cells and paragraphs.
 
-use super::harness::{open, open_with};
+use super::harness::open_with;
 use gpui::TestAppContext;
-
-// A pasted image is written beside the note and referenced with nothing after it;
-// named for a note named for today, its name holds the date once.
-#[gpui::test]
-fn a_pasted_image_lands_beside_the_note_under_its_name(cx: &mut TestAppContext) {
-    use crate::storage::{ImageNaming, NoteNaming};
-    let mut h = open(cx, |_| {});
-    h.app.update(h.cx, |app, _| {
-        app.set_workspace_naming(NoteNaming::DateTime, ImageNaming::NoteAndDate)
-    });
-    h.type_text("x");
-    h.save();
-    let png = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/assets/icon/markraft-menubar.png"
-    ))
-    .expect("an image to paste");
-    h.cx.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(
-        gpui::ImageFormat::Png,
-        png,
-    )));
-    h.keys("cmd-v");
-    h.wait_until(|h| h.markdown().ends_with(".png)"));
-    let markdown = h.markdown();
-    // At the caret, inline: `x![image](…)`, with nothing typed after it.
-    assert!(markdown.starts_with("x![image](assets/"), "{markdown:?}");
-    assert!(
-        markdown.ends_with(".png)"),
-        "text after the image: {markdown:?}"
-    );
-    let image = std::fs::read_dir(h.notes.join("assets"))
-        .expect("the assets folder")
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .next()
-        .expect("the pasted image");
-    let date = &image[..10];
-    assert_eq!(image.matches(date).count(), 1, "{image}");
-}
 
 // Markdown pasted into a list item and into a table cell. A GFM row is one
 // line, so what is pasted into a cell goes in as its inline content, a

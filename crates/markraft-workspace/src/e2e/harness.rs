@@ -1,4 +1,6 @@
-//! The app opened over a notes folder of its own, and the ways a test drives it.
+//! The app opened over notes of its own, and the ways a test drives it. The notes
+//! are files in a temporary folder, or records in a host backend: a suite that
+//! says nothing about files runs over both, and reads what was stored by name.
 
 use crate::app::{MarkraftApp, bind_app_keys};
 
@@ -6,6 +8,7 @@ use crate::storage::Preferences;
 
 use crate::vault::Store;
 use gpui::{Entity, TestAppContext, VisualTestContext};
+use markraft_notes::memory::MemoryBackend;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -13,7 +16,25 @@ pub(crate) struct Harness<'a> {
     pub(crate) app: Entity<MarkraftApp>,
     pub(crate) cx: &'a mut VisualTestContext,
     pub(crate) notes: PathBuf,
+    /// The host backend that holds the notes, when they are not files.
+    records: Option<MemoryBackend>,
     _root: tempfile::TempDir,
+}
+
+/// What a note in a host backend is called here, as its file would be: the title
+/// its host gave it, or the name a folder would file it under.
+fn record_name(note: &markraft_notes::BackendNote) -> String {
+    let stem = note.title.clone().unwrap_or_else(|| {
+        let document = crate::doc::from_markdown(&note.markdown);
+        let title = crate::doc::title_line(&document).unwrap_or_else(|| "Untitled".into());
+        crate::vault::safe_stem(&title)
+    });
+    format!("{stem}.md")
+}
+
+/// Whether `text` reads back as the Markdown `expected`.
+fn reads_as(text: &str, expected: &str) -> bool {
+    crate::doc::to_markdown(&crate::doc::from_markdown(text)) == expected
 }
 
 /// Open the app over an empty notes folder, with `configure` applied to the
@@ -78,8 +99,35 @@ pub(crate) fn open_with<'a>(
         app,
         cx,
         notes: notes.canonicalize().unwrap_or(notes),
+        records: None,
         _root: root,
     }
+}
+
+/// [`open_with`], over a host backend that holds `files` as records. A record is
+/// titled by its file's name, which is what a test then asks for it by.
+pub(crate) fn open_records<'a>(
+    cx: &'a mut TestAppContext,
+    files: &[(&str, &str)],
+    configure: impl FnOnce(&mut Preferences),
+) -> Harness<'a> {
+    let backend = MemoryBackend::default();
+    for (name, text) in files {
+        let stem = std::path::Path::new(name)
+            .file_stem()
+            .expect("a seeded note's name")
+            .to_string_lossy();
+        backend.seed(Some(&stem), text);
+    }
+    let mut preferences = Preferences::default();
+    configure(&mut preferences);
+    let options = crate::WorkspaceOptions {
+        preferences,
+        ..Default::default()
+    };
+    let mut harness = open_backend_with(cx, Box::new(backend.clone()), options);
+    harness.records = Some(backend);
+    harness
 }
 
 impl Harness<'_> {
@@ -203,15 +251,91 @@ impl Harness<'_> {
         })
     }
 
-    /// The file named `name` in the notes folder, once it holds what `ready` wants,
-    /// or the last thing it held when the wait ran out.
+    /// The stored note named `name`, once it holds what `ready` wants, or the last
+    /// thing it held when the wait ran out.
     pub(crate) fn wait_for_file(&mut self, name: &str, ready: impl Fn(&str) -> bool) -> String {
-        let path = self.notes.join(name);
-        self.wait_for_path(&path, ready)
+        let mut text = String::new();
+        self.wait_until(|h| {
+            text = h.stored(name);
+            ready(&text)
+        });
+        text
     }
 
-    /// Every Markdown file in the notes folder, by name.
+    /// What storage holds now for the note named `name`: nothing when there is none.
+    pub(crate) fn stored(&self, name: &str) -> String {
+        match &self.records {
+            Some(backend) => backend
+                .notes()
+                .into_iter()
+                .find(|note| record_name(note) == name)
+                .map(|note| note.markdown)
+                .unwrap_or_default(),
+            None => std::fs::read_to_string(self.notes.join(name)).unwrap_or_default(),
+        }
+    }
+
+    /// Change the stored note named `name` as another program does. The app
+    /// learns of it at its next look at storage.
+    pub(crate) fn write_outside(&mut self, name: &str, text: &str) {
+        match &self.records {
+            Some(backend) => {
+                let note = backend
+                    .notes()
+                    .into_iter()
+                    .find(|note| record_name(note) == name)
+                    .expect("a stored note to change");
+                backend.rewrite(&note.id, text);
+            }
+            None => std::fs::write(self.notes.join(name), text).expect("rewrite the note"),
+        }
+    }
+
+    /// How a link to the stored note named `name` is spelled. A folder names the
+    /// file. A host backend names the note's identity, because a title there is
+    /// not a name that only one note has.
+    pub(crate) fn wiki_link(&self, name: &str) -> String {
+        let title = name.strip_suffix(".md").unwrap_or(name);
+        match &self.records {
+            Some(backend) => {
+                let note = backend
+                    .notes()
+                    .into_iter()
+                    .find(|note| record_name(note) == name)
+                    .expect("a stored note to link to");
+                format!("[[note:{}|{title}]]", note.id)
+            }
+            None => format!("[[{title}]]"),
+        }
+    }
+
+    /// The name the note the window shows is stored under.
+    pub(crate) fn active_name(&mut self) -> String {
+        let note = self.active_note();
+        match &self.records {
+            Some(backend) => backend
+                .notes()
+                .iter()
+                .find(|stored| stored.id.as_str() == note.id)
+                .map(record_name)
+                .expect("a stored note"),
+            None => note
+                .path
+                .expect("a note with a file")
+                .file_name()
+                .expect("a file name")
+                .to_string_lossy()
+                .into_owned(),
+        }
+    }
+
+    /// Every stored note, by name.
     pub(crate) fn files(&self) -> Vec<String> {
+        if let Some(backend) = &self.records {
+            let mut names: Vec<_> = backend.notes().iter().map(record_name).collect();
+            names.sort();
+            return names;
+        }
         let mut names: Vec<_> = std::fs::read_dir(&self.notes)
             .map(|entries| {
                 entries
@@ -294,20 +418,36 @@ impl Harness<'_> {
         done
     }
 
-    /// Save, then hold the note to what the file now says: no failure shown, and the
-    /// file read back is the document the editor holds. `step` names the edit in
-    /// the message.
+    /// Save, then hold the note to what storage now says: no failure shown, and
+    /// what was stored reads back as the document the editor holds. `step` names
+    /// the edit in the message.
     pub(crate) fn assert_round_trip(&mut self, step: &str) {
         self.save();
         assert_eq!(self.error(), None, "{step}: {:?}", self.markdown());
-        let path = self
-            .app
-            .update(self.cx, |app, _| app.active_path())
-            .unwrap_or_else(|| panic!("{step}: the note has no file"));
         let expected = self.markdown();
-        let on_disk = self.wait_for_path(&path, |text| {
-            crate::doc::to_markdown(&crate::doc::from_markdown(text)) == expected
-        });
+        let on_disk = match self.records.clone() {
+            Some(backend) => {
+                let id = self.active_note().id;
+                let mut text = String::new();
+                self.wait_until(|_| {
+                    text = backend
+                        .state()
+                        .records
+                        .get(&id)
+                        .map(|note| note.markdown.clone())
+                        .unwrap_or_default();
+                    reads_as(&text, &expected)
+                });
+                text
+            }
+            None => {
+                let path = self
+                    .app
+                    .update(self.cx, |app, _| app.active_path())
+                    .unwrap_or_else(|| panic!("{step}: the note has no file"));
+                self.wait_for_path(&path, |text| reads_as(text, &expected))
+            }
+        };
         let read_back = crate::doc::to_markdown(&crate::doc::from_markdown(&on_disk));
         assert_eq!(
             read_back, expected,
@@ -347,8 +487,18 @@ impl Harness<'_> {
         self.app.update(self.cx, |app, _| app.test_queued_notices())
     }
 
-    /// The Markdown files in the notes folder other than `name`, with their text.
+    /// The stored notes other than `name`, with their text.
     pub(crate) fn other_files(&self, name: &str) -> Vec<(String, String)> {
+        if let Some(backend) = &self.records {
+            let mut out: Vec<_> = backend
+                .notes()
+                .into_iter()
+                .map(|note| (record_name(&note), note.markdown))
+                .filter(|(stored, _)| stored != name)
+                .collect();
+            out.sort();
+            return out;
+        }
         let mut out: Vec<(String, String)> = std::fs::read_dir(&self.notes)
             .expect("the notes folder")
             .filter_map(Result::ok)
@@ -368,18 +518,29 @@ impl Harness<'_> {
     }
 }
 
+/// The app mounted on `backend`, as a host mounts it.
 pub(crate) fn open_backend(
     cx: &mut TestAppContext,
     backend: Box<dyn markraft_notes::NotesBackend>,
 ) -> Harness<'_> {
+    open_backend_with(cx, backend, crate::WorkspaceOptions::default())
+}
+
+fn open_backend_with(
+    cx: &mut TestAppContext,
+    backend: Box<dyn markraft_notes::NotesBackend>,
+    options: crate::WorkspaceOptions,
+) -> Harness<'_> {
     let root = tempfile::tempdir().unwrap();
     cx.update(|cx| {
+        #[cfg(feature = "bundled-settings")]
+        gpui_base::init(cx);
         markraft_gpui::bind_keys(cx);
         markraft_vim::bind_keys(cx);
         bind_app_keys(cx);
     });
     let (app, cx) = cx.add_window_view(|window, cx| {
-        MarkraftApp::with_backend(backend, crate::WorkspaceOptions::default(), window, cx).unwrap()
+        MarkraftApp::with_backend(backend, options, window, cx).unwrap()
     });
     cx.update(|window, cx| app.update(cx, |app, cx| app.test_focus_editor(window, cx)));
     cx.run_until_parked();
@@ -387,6 +548,7 @@ pub(crate) fn open_backend(
         app,
         cx,
         notes: root.path().join("unused"),
+        records: None,
         _root: root,
     }
 }

@@ -98,7 +98,7 @@ fn every_edit_in_the_corpus_leaves_a_note_a_file_can_hold(cx: &mut TestAppContex
             // yet saved — through an empty one, which holds a new note to what the
             // guard holds a saved one to.
             let source = if on_disk {
-                std::fs::read_to_string(h.notes.join(&name)).expect("the corpus file")
+                h.stored(&name)
             } else {
                 String::new()
             };
