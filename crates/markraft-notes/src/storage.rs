@@ -585,15 +585,7 @@ impl Note {
         crate::doc::is_blank(&self.document)
     }
     pub fn title(&self) -> String {
-        if let Some(title) = &self.title_override {
-            return title.clone();
-        }
-        doc::title_line(&self.document)
-            .as_deref()
-            .unwrap_or("Untitled")
-            .graphemes(true)
-            .take(64)
-            .collect()
+        title_of(self.title_override.as_deref(), &self.document)
     }
 
     /// The note's file name without its extension, which copies of the note
@@ -637,6 +629,19 @@ impl Note {
             None => Some(path.file_name()?.to_string_lossy().into_owned()),
         }
     }
+}
+
+/// What a note is called: the name its host gave it, or the first line it says.
+pub(crate) fn title_of(title_override: Option<&str>, document: &Node) -> String {
+    if let Some(title) = title_override {
+        return title.to_owned();
+    }
+    doc::title_line(document)
+        .as_deref()
+        .unwrap_or("Untitled")
+        .graphemes(true)
+        .take(64)
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]

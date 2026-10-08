@@ -86,6 +86,16 @@ After a commit fails, the component can send the same write again.
 If the first commit succeeded but its reply was lost, the retry reports a conflict.
 The component then reads the note, and accepts the stored note when it equals the write.
 
+When any other commit reports a conflict, the stored note wins.
+The component first commits the local Markdown as a new note.
+The title of that note ends with `(conflicted copy <date>)`.
+The component then reads the stored note and shows it.
+The save receipt reports the note as a conflict, not as saved.
+One conflict creates one copy, also when a retry finds the conflict again.
+
+A deletion that reports a conflict is not sent again.
+The component restores the note and reads the stored version.
+
 Each note commit must atomically persist content, its new revision, and any pending synchronization marker.
 A save can contain several note commits.
 A backend does not need to offer a transaction across every note in a save.

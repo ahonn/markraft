@@ -543,14 +543,37 @@ impl NotesLibrary {
                     .map(|outcome| outcome.id.clone())
                     .collect()
             },
-            conflicts: saved.conflicts.iter().cloned().map(NoteId).collect(),
+            conflicts: saved
+                .conflicts
+                .iter()
+                .chain(&saved.kept)
+                .cloned()
+                .map(NoteId)
+                .collect(),
             outcomes: saved.outcomes.clone(),
         };
+        // A deletion that storage refused did not commit the snapshot, so the
+        // barrier reports it. The note is back in the library, as storage holds it.
+        let refused: Vec<_> = saved
+            .kept
+            .iter()
+            .filter_map(|id| self.session.library.deletions.get(id))
+            .map(crate::storage::Note::title_message)
+            .collect();
         for id in &saved.kept {
             self.session.library.restore_deleted(id);
         }
+        if !saved.kept.is_empty() {
+            // The restored note may be a version behind. Read storage again, so
+            // that the next poll takes what it holds.
+            self.worker()?.refresh();
+        }
         self.session.library.acknowledge_saved(&saved.changes);
-        match saved.result {
+        let result = match saved.result {
+            Ok(()) if !refused.is_empty() => Err(StoreError::Conflict(refused)),
+            other => other,
+        };
+        match result {
             Ok(()) => {
                 self.last_receipt = Some(receipt.clone());
                 Ok(receipt)

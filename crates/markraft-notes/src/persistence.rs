@@ -1,6 +1,5 @@
 //! One worker owns the notes folder: it preserves save ordering, and it watches the
 //! folder so that changes made by other programs reach the application.
-use crate::engine::WorkerBackend;
 use crate::fs::StoreError;
 use crate::locale::Message;
 use crate::{Asset, AssetId, BackendCapabilities, NewRecord, NoteSaveOutcome, StorageRevision};
@@ -122,7 +121,7 @@ pub struct Created {
 }
 
 impl NewNote {
-    fn create(self, store: &mut dyn WorkerBackend) -> Result<Created, StoreError> {
+    fn create(self, store: &mut Store) -> Result<Created, StoreError> {
         let template = self
             .template
             .as_deref()
@@ -158,22 +157,26 @@ impl Persistence {
     /// Markdown in `house`'s style.
     pub fn new(mut store: Store, house: markraft_commonmark::HouseStyleHandle) -> Self {
         store.set_house(house);
-        Self::start(Box::new(store), true)
-    }
-    pub(crate) fn from_worker(store: Box<dyn WorkerBackend>) -> Self {
         Self::start(store, true)
     }
-    fn start(mut store: Box<dyn WorkerBackend>, watching: bool) -> Self {
+    /// Start saving a store that already spells Markdown in its host's style.
+    pub(crate) fn from_store(store: Store) -> Self {
+        Self::start(store, true)
+    }
+    fn start(mut store: Store, watching: bool) -> Self {
         let (requests, incoming) = mpsc::channel();
         let (outgoing, events) = mpsc::channel();
         let (pulse, wake) = unbounded();
         let notices = store.notices();
         let capabilities = store.capabilities();
         let persisted = Arc::new(std::sync::Mutex::new(
-            store.persisted().into_iter().collect::<HashMap<_, _>>(),
+            store
+                .storage_revisions()
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
         ));
         let persisted_worker = persisted.clone();
-        let sources = store.sources();
+        let sources = store.source_cache();
         let notify_requests = requests.clone();
         store.set_change_notifier(crate::ChangeNotifier::new(move |ids| {
             let _ = notify_requests.send(match ids {
@@ -184,7 +187,11 @@ impl Persistence {
         let house = store.house();
         let (watches, watch_requests) = mpsc::channel::<Option<std::path::PathBuf>>();
         let watcher_cancelled = Arc::new(AtomicBool::new(false));
-        if let Some(directory) = store.watch_root().filter(|_| watching) {
+        if let Some(directory) = store
+            .directory()
+            .map(ToOwned::to_owned)
+            .filter(|_| watching)
+        {
             let extra = store.extra_watch_directories();
             let requests = requests.clone();
             let notices = notices.clone();
@@ -243,12 +250,12 @@ impl Persistence {
                     Request::Shutdown => break,
                     Request::CreateRecord(request, response) => {
                         let result = store.create_record(request);
-                        sync_versions(store.as_ref(), &persisted_worker);
+                        sync_versions(&store, &persisted_worker);
                         let _ = response.send(result);
                     }
                     Request::RenameRecord(id, name, response) => {
-                        let result = store.rename_record(&id, &name);
-                        sync_versions(store.as_ref(), &persisted_worker);
+                        let result = store.rename_note(&id, &name);
+                        sync_versions(&store, &persisted_worker);
                         let _ = response.send(result);
                     }
                     Request::ReadAsset(id, response) => {
@@ -265,17 +272,17 @@ impl Persistence {
                     }
                     Request::OpenFile(path, response) => {
                         let result = store.add_file(path);
-                        sync_versions(store.as_ref(), &persisted_worker);
+                        sync_versions(&store, &persisted_worker);
                         let _ = response.send(result);
                     }
                     Request::CreateNote(new, response) => {
-                        let result = new.create(store.as_mut());
-                        sync_versions(store.as_ref(), &persisted_worker);
+                        let result = new.create(&mut store);
+                        sync_versions(&store, &persisted_worker);
                         let _ = response.send(result);
                     }
                     Request::Rename(id, name, response) => {
                         let result = store.rename(&id, &name);
-                        sync_versions(store.as_ref(), &persisted_worker);
+                        sync_versions(&store, &persisted_worker);
                         let _ = response.send(result);
                     }
                     Request::Save(revision, library, preferences, queued_at) => {
@@ -283,8 +290,8 @@ impl Persistence {
                             "save_queue revision={revision} wait_us={}",
                             queued_at.elapsed().as_micros()
                         );
-                        let saved = store.save(revision, &library, &preferences);
-                        sync_versions(store.as_ref(), &persisted_worker);
+                        let saved = store.write(revision, &library, &preferences);
+                        sync_versions(&store, &persisted_worker);
                         for (_, path) in &saved.paths {
                             let _ = watch_saved.send(Some(path.clone()));
                         }
@@ -295,8 +302,8 @@ impl Persistence {
                             "flush_queue revision={revision} wait_us={}",
                             queued_at.elapsed().as_micros()
                         );
-                        let saved = store.save(revision, &library, &preferences);
-                        sync_versions(store.as_ref(), &persisted_worker);
+                        let saved = store.write(revision, &library, &preferences);
+                        sync_versions(&store, &persisted_worker);
                         for (_, path) in &saved.paths {
                             let _ = watch_saved.send(Some(path.clone()));
                         }
@@ -304,7 +311,7 @@ impl Persistence {
                     }
                     Request::Reload(response) => {
                         let result = store.reload();
-                        sync_versions(store.as_ref(), &persisted_worker);
+                        sync_versions(&store, &persisted_worker);
                         let _ = response.send(result);
                     }
                     Request::RefreshPaths(paths) => match store.refresh_paths(&paths) {
@@ -341,7 +348,7 @@ impl Persistence {
                     #[cfg(any(test, feature = "test-support"))]
                     Request::Acknowledge(ids) => store.acknowledge(&ids),
                 }
-                sync_versions(store.as_ref(), &persisted_worker);
+                sync_versions(&store, &persisted_worker);
                 let _ = pulse.unbounded_send(());
             }
         });
@@ -479,7 +486,7 @@ impl Persistence {
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn new_unwatched(mut store: Store, house: markraft_commonmark::HouseStyleHandle) -> Self {
         store.set_house(house);
-        Self::start(Box::new(store), false)
+        Self::start(store, false)
     }
     fn watch_file(&self, path: &std::path::Path) {
         let _ = self.watches.send(Some(path.to_owned()));
@@ -708,11 +715,9 @@ fn next_request(incoming: &Receiver<Request>, deferred: &mut Option<Request>) ->
 }
 
 /// Capture metadata after every attempt, including errors after some notes were written.
-fn sync_versions(
-    store: &dyn WorkerBackend,
-    versions: &std::sync::Mutex<HashMap<String, StorageRevision>>,
-) {
-    *versions.lock().unwrap_or_else(|e| e.into_inner()) = store.persisted().into_iter().collect();
+fn sync_versions(store: &Store, versions: &std::sync::Mutex<HashMap<String, StorageRevision>>) {
+    *versions.lock().unwrap_or_else(|e| e.into_inner()) =
+        store.storage_revisions().into_iter().collect();
 }
 
 /// The worker's channel is closed: the thread is gone.
@@ -920,7 +925,7 @@ mod tests {
     fn async_flush_is_enqueued_before_its_future_is_polled() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());
-        let persistence = Persistence::start(Box::new(store), false);
+        let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Before barrier"));
         let unpolled = persistence.flush_async(1, library.clone(), Preferences::default());
@@ -955,7 +960,7 @@ mod tests {
     fn export_snapshot_is_frozen_before_later_edits_and_does_not_mark_dirty() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());
-        let persistence = Persistence::start(Box::new(store), false);
+        let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Captured"));
         let note = library.active_note().clone();
@@ -997,7 +1002,7 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());
-        let persistence = Persistence::start(Box::new(store), false);
+        let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
         let document = doc::from_markdown("hello");
         let mut state = EditorState::create(
@@ -1047,7 +1052,7 @@ mod tests {
     fn flush_saves_the_latest_snapshot_after_queued_revisions() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());
-        let persistence = Persistence::start(Box::new(store), false);
+        let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Title\n\nFirst 中文"));
         persistence
@@ -1084,7 +1089,7 @@ mod tests {
     fn a_new_note_is_filed_under_its_title_immediately() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());
-        let persistence = Persistence::start(Box::new(store), false);
+        let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Meeting notes for Q3"));
         let filed = persistence
@@ -1103,7 +1108,7 @@ mod tests {
     fn a_note_changed_by_another_program_keeps_disk_and_a_conflicted_copy() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());
-        let persistence = Persistence::start(Box::new(store), false);
+        let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Shared"));
         persistence
@@ -1215,7 +1220,7 @@ mod tests {
         let Request::Flush(revision, library, _, response, _) = incoming.try_recv().unwrap() else {
             panic!("the timed-out flush must remain queued");
         };
-        let saved = WorkerBackend::save(&mut store, revision, &library, &Preferences::default());
+        let saved = store.write(revision, &library, &Preferences::default());
         assert_eq!(saved.revision, 42);
         assert!(saved.result.is_ok());
         assert!(response.send(saved).is_err());
@@ -1236,7 +1241,7 @@ mod tests {
     fn reload_is_a_barrier_after_disk_wins_and_new_edits_can_be_saved() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut local) = open(directory.path());
-        let persistence = Persistence::start(Box::new(store), false);
+        let persistence = Persistence::start(store, false);
         let id = local.active_id.clone();
         local.set_document(&id, doc::from_markdown("Original"));
         persistence
@@ -1289,7 +1294,7 @@ mod tests {
     fn changes_by_other_programs_are_reported_and_held_back_until_acknowledged() {
         let directory = tempfile::tempdir().unwrap();
         let (store, mut library) = open(directory.path());
-        let persistence = Persistence::start(Box::new(store), false);
+        let persistence = Persistence::start(store, false);
         let id = library.active_id.clone();
         library.set_document(&id, doc::from_markdown("Original"));
         persistence

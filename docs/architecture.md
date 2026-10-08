@@ -199,22 +199,30 @@ The notes engine exposes `NotesLibrary`, revision-checked edits, immutable snaps
 save receipts, and explicit shutdown. It has no GPUI dependency.
 
 - `storage.rs` holds note identities, the library, preferences, and search.
-- `vault.rs` scans, saves, renames, and detects external changes.
+- `vault.rs` holds the store: the rules for saving, conflicts, and external changes.
+- `directory.rs` implements `NotesBackend` over a folder of Markdown files.
 - `persistence.rs` owns the storage worker and file watcher.
 - `doc.rs` supplies the concrete Markdown kind and export snapshots.
 - `fs.rs` supplies atomic writes, trash operations, and storage errors.
 - `locale.rs` supplies explicit `Message` and `I18n` values.
 - `backend.rs` defines `NotesBackend`, the contract for storage that the host owns.
-- `records.rs` adapts a `NotesBackend` to the storage worker.
-- `engine.rs` defines the worker's internal store interface, which the Markdown store and the record store both implement.
+- `engine.rs` defines the session and the save outcome that a host exchanges with the store.
 - `conformance.rs` holds the contract checks that a host runs against its backend.
 
 The public facade uses host-selected notes and state directories, or a host backend.
 It does not read or write the standalone application's settings.
 
-The Markdown store and the record store are two implementations behind one worker.
-`NotesBackend` is not the worker's internal interface.
-It has no file paths, watchers, or manifest, because a database has none of them.
+The store has one implementation of save, refresh, and conflict handling.
+It reads and writes notes through `NotesBackend` only.
+A Markdown folder and a host backend are the two implementations of that trait.
+`NotesBackend` has no file paths, watchers, or manifest, because a database has none of them.
+For those, the store calls the Markdown folder directly: a path, a rename that moves the file, the Trash, and the manifest.
+
+**Invariant:** storage wins a conflict, and the local edits are stored before the stored version is shown.
+A Markdown folder keeps them as a file beside the note. A host backend keeps them as a note of its own.
+
+**Invariant:** a deletion never removes a version that no editor has seen.
+The store drops that deletion, and the note returns as storage holds it.
 
 **Invariant:** every backend write carries an expected revision.
 A write that reports a conflict is accepted only when storage already holds exactly that write.
@@ -393,7 +401,9 @@ waiting.
 ### External changes
 
 A separate `notify` watcher, plus a refresh on every window activation,
-reports changes made by other programs. Disk always wins. If local text differs from both the old and new disk contents, storage writes the local text beside the file as a conflicted copy. A change that lands in the middle
+reports changes made by other programs. A host backend reports its changes through a change notifier.
+
+Storage always wins. If local text differs from both the old and new stored contents, the store keeps the local text as a conflicted copy. A change that lands in the middle
 of a save produces a conflicted copy too. Affected notes hold back saves until
 the app acknowledges the change. An explicit reload refuses edits (through the
 source guard) until it finishes.
