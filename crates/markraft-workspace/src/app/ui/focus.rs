@@ -41,7 +41,7 @@ enum Act {
 
 /// One keyboard stop, in Tab order.
 struct Stop {
-    /// Matches the [`MarkraftApp::ring`] call that decorates the control.
+    /// Matches the [`WorkspaceView::ring`] call that decorates the control.
     id: SharedString,
     act: Act,
     /// The list row the stop belongs to, so reaching it also selects that row.
@@ -72,7 +72,7 @@ impl Stop {
     }
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     pub(super) fn surface(&self) -> Surface {
         if self.notes.persistence.is_none() {
             return Surface::Chooser;

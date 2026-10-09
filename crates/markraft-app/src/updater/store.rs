@@ -1,6 +1,6 @@
 use crate::locale::Message;
 
-use markraft_workspace::updater::RelaunchContinuation;
+use markraft_workspace::standalone::updater::RelaunchContinuation;
 
 pub struct Updater;
 

@@ -47,56 +47,7 @@ unsafe impl Encode for NSRect {
     );
 }
 
-/// The version this copy says it is, and its build when that says something more:
-/// from the bundle, or from the crate when running outside one.
-pub fn app_version() -> (String, Option<String>) {
-    use objc2_foundation::{NSBundle, NSString};
-    let bundle = NSBundle::mainBundle();
-    let value = |key: &str| {
-        bundle
-            .objectForInfoDictionaryKey(&NSString::from_str(key))
-            .and_then(|value| value.downcast::<NSString>().ok())
-            .map(|value| value.to_string())
-    };
-    let version =
-        value("CFBundleShortVersionString").unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
-    let build = value("CFBundleVersion").filter(|build| *build != version);
-    (version, build)
-}
-
-/// The macOS version, such as `26.0.1`, read from the kernel.
-pub fn system_version() -> Option<String> {
-    let name = c"kern.osproductversion";
-    let mut buffer = [0u8; 64];
-    let mut length = buffer.len();
-    let status = unsafe {
-        libc::sysctlbyname(
-            name.as_ptr(),
-            buffer.as_mut_ptr().cast(),
-            &mut length,
-            ptr::null_mut(),
-            0,
-        )
-    };
-    (status == 0).then(|| {
-        CStr::from_bytes_until_nul(&buffer[..length.min(buffer.len())])
-            .map(|version| version.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    })
-}
-
-/// What a bug report needs to know about this copy and this Mac.
-pub fn debug_info() -> String {
-    let (version, build) = app_version();
-    let build = build.map(|build| format!(" ({build})")).unwrap_or_default();
-    let system = system_version().unwrap_or_else(|| "unknown".to_owned());
-    format!(
-        "Markraft {version}{build}\nmacOS {system}, {}",
-        std::env::consts::ARCH
-    )
-}
-
-pub use markraft_workspace::platform::{PlatformEvent, Shortcut};
+pub use markraft_workspace::standalone::platform::{PlatformEvent, Shortcut};
 pub struct Platform {
     _tray: TrayIcon,
     hotkeys: GlobalHotKeyManager,
@@ -545,6 +496,8 @@ fn menu_bar_failure(detail: impl std::fmt::Display) -> Message {
 /// drawn at its own scale against the view's top edge.
 const NS_VIEW_LAYER_CONTENTS_PLACEMENT_TOP: isize = 4;
 
+/// Move `native` to the display under the pointer, where it sits as far from that
+/// display's top-left as it did from its own, pulled back inside if it would overhang.
 fn move_to_pointer_screen(native: *mut AnyObject) {
     unsafe {
         let pointer: NSPoint = msg_send![class!(NSEvent), mouseLocation];
@@ -702,7 +655,7 @@ fn diagnostics(event: &str) {
     }
 }
 
-impl markraft_workspace::platform::PlatformServices for Platform {
+impl markraft_workspace::standalone::platform::PlatformServices for Platform {
     fn set_locale(&mut self, i18n: &crate::locale::I18n) {
         Platform::set_locale(self, i18n)
     }
@@ -773,18 +726,6 @@ mod tests {
                 .join(name);
             assert!(std::fs::read(copy).unwrap() == original, "{name}");
         }
-    }
-
-    #[test]
-    fn debug_info_names_the_version_and_the_system() {
-        let system = system_version().expect("the kernel reports a product version");
-        assert!(system.starts_with(|c: char| c.is_ascii_digit()), "{system}");
-        let info = debug_info();
-        assert!(info.starts_with("Markraft "), "{info}");
-        assert!(
-            info.contains(&format!("macOS {system}, {}", std::env::consts::ARCH)),
-            "{info}"
-        );
     }
 
     // A re-rendered asset of the wrong size would otherwise only show up as a soft

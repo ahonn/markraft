@@ -53,9 +53,10 @@ into the notes folder.
   - `manifest.json` maps path → note identity (a UUID), pinned state and
     workspace settings such as daily notes.
   - `backups/` holds the previous bytes of each overwritten note.
-  - `lock` protects the state directory. An additional advisory lock on the notes
-    directory prevents two hosts from opening it with separate state directories.
-    A volume that cannot lock a directory still opens, with the state lock alone.
+  - `lock` protects the state directory. Nothing is locked or held open in the
+    notes folder, so its volume can be ejected while the application runs. Two
+    hosts with separate state directories can open one folder. Each takes the
+    other's writes as external changes.
 - A note is identified by its UUID, not its path. A new note has no path until
   its first save names it. After that the name only changes through an explicit
   rename.
@@ -214,10 +215,12 @@ The public facade uses host-selected notes and state directories, or a host back
 It does not read or write the standalone application's settings.
 
 The store has one implementation of save, refresh, and conflict handling.
-It reads and writes notes through `NotesBackend` only.
-A Markdown folder and a host backend are the two implementations of that trait.
+It reads and writes notes through the three operations of the `NotesBackend` contract: load, read, and commit.
+A Markdown folder and a host backend both provide them.
+For a folder, the store calls them on the folder type and not through the trait, so that a failure names the file in the reader's language.
 `NotesBackend` has no file paths, watchers, or manifest, because a database has none of them.
-For those, the store calls the Markdown folder directly: a path, a rename that moves the file, the Trash, and the manifest.
+The store's `Storage` type holds that work for a folder and does nothing for a host backend: where a file is, the manifest, the settings file, and the recovery drafts.
+An operation that only one kind of storage has, such as a rename that moves a file, checks for that kind where it starts.
 
 **Invariant:** storage wins a conflict, and the local edits are stored before the stored version is shown.
 A Markdown folder keeps them as a file beside the note. A host backend keeps them as a note of its own.
@@ -239,7 +242,7 @@ The workspace and the application enable it. A host does not.
 **Invariant:** a save receipt reports completed persistence work.
 An empty draft is not reported as a Markdown file on disk.
 
-**Invariant:** successful close stops the storage worker and releases the directory lock.
+**Invariant:** successful close stops the storage worker and releases the lock on the folder's state.
 A failed save keeps the library available for retry.
 Close cancels watcher callbacks before it stops storage.
 Native watcher cleanup runs separately because FSEvents registration and unregistration can block on a system service.
@@ -258,6 +261,8 @@ The host retains the view until close succeeds.
 The optional `unstable-standalone` feature names what only the standalone application uses.
 That is its window services, its updater, its instance requests, and its settings window.
 The application reaches the view through the `Standalone` trait. A host does not enable this feature.
+The feature adds one module, `standalone`, which lists each item that the application may name.
+The workspace's other modules are private in every build, so the compiler reports an item that neither the workspace nor the application uses.
 The optional `sandbox` feature adds the folder grants that the macOS App Sandbox requires.
 The optional `native-translation` feature builds the Swift translation bridge.
 

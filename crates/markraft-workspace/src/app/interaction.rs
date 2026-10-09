@@ -140,7 +140,7 @@ pub(super) struct InputSession {
     _changes: Subscription,
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// Only a surface with an input may read it. Each opening creates a fresh editor,
     /// so selection, undo and IME state cannot leak into the next surface.
     pub(super) fn query(&self) -> &Entity<EditorView> {

@@ -25,6 +25,9 @@ pub mod locale {
     }
 }
 
+/// Seconds this machine's clock stands ahead of UTC, including whatever daylight
+/// saving is in force. Timestamps are stored in UTC; a date shown to the user has
+/// to be the one on their calendar, so it is read through this.
 pub fn local_utc_offset() -> i64 {
     i64::from(chrono::Local::now().offset().local_minus_utc())
 }

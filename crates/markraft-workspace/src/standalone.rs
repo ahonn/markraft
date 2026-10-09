@@ -3,34 +3,60 @@
 //! and spoken through as its menu bar and shortcuts ask.
 use crate::{
     WorkspaceView,
-    file_access::FileAccess,
-    instance::Instance,
     locale::Message,
-    platform::Platform,
     storage::{Library, Preferences},
-    updater::Updater,
     vault::Store,
 };
+use file_access::FileAccess;
+use instance::Instance;
+use platform::Platform;
+use updater::Updater;
+
+/// The actions that the application's menus and shortcuts dispatch to the view.
+pub mod app {
+    pub use crate::app::{
+        Browse, CheckForUpdates, Export, ExportHtml, ExportPdf, Find, FindNext, FindPrevious,
+        NewNote, OpenMarkdown, Print, Quit, Save, Settings, Show,
+    };
+}
+/// The folder grants that a sandboxed application restores at launch.
+pub mod file_access {
+    pub use crate::file_access::FileAccess;
+}
+/// The requests that a second launch hands to the running application.
+pub mod instance {
+    pub use crate::instance::{Instance, Request, RequestSource};
+}
+/// The window services that the application provides, and what they report.
+pub mod platform {
+    pub use crate::platform::{Platform, PlatformEvent, PlatformServices, Shortcut, debug_info};
+}
+/// The update service that the application provides.
+pub mod updater {
+    pub use crate::updater::{RelaunchContinuation, UpdateServices, Updater};
+}
 use gpui::{Context, Window};
 use std::path::PathBuf;
 
+/// What the application hands over to build its view from.
+pub struct StandaloneParts {
+    /// The notes folder, when one could be opened.
+    pub path: Option<PathBuf>,
+    pub settings_path: PathBuf,
+    /// `None` when the folder could not be opened. `error` then says why.
+    pub store: Option<Store>,
+    pub library: Library,
+    pub preferences: Preferences,
+    pub error: Option<Message>,
+    /// The menu bar, the shortcuts and the native window, or why they could not start.
+    pub platform: Result<Platform, Message>,
+    pub updater: Updater,
+    pub instance: Instance,
+}
+
 pub trait Standalone: Sized {
-    /// The view of the application's one window. `platform` is `None` where
-    /// there is no menu bar, shortcut or native window to drive.
-    #[allow(clippy::too_many_arguments)]
-    fn standalone(
-        path: Option<PathBuf>,
-        settings_path: PathBuf,
-        store: Option<Store>,
-        library: Library,
-        preferences: Preferences,
-        error: Option<Message>,
-        platform: Option<Result<Platform, Message>>,
-        updater: Updater,
-        instance: Instance,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self;
+    /// The view of the application's one window.
+    fn standalone(parts: StandaloneParts, window: &mut Window, cx: &mut Context<Self>) -> Self;
     /// Keep the folder grants that the application restored at launch, for every
     /// worker and reader that the view starts.
     fn with_file_access(self, file_access: FileAccess) -> Self;
@@ -46,29 +72,22 @@ pub trait Standalone: Sized {
 }
 
 impl Standalone for WorkspaceView {
-    fn standalone(
-        path: Option<PathBuf>,
-        settings_path: PathBuf,
-        store: Option<Store>,
-        library: Library,
-        preferences: Preferences,
-        error: Option<Message>,
-        platform: Option<Result<Platform, Message>>,
-        updater: Updater,
-        instance: Instance,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn standalone(parts: StandaloneParts, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let services = crate::app::Services::Standalone {
+            platform: Some(parts.platform),
+            updater: parts.updater,
+            instance: parts.instance,
+        };
         WorkspaceView::new(
-            path,
-            settings_path,
-            store,
-            library,
-            preferences,
-            error,
-            platform,
-            updater,
-            instance,
+            crate::app::Parts::over_store(
+                parts.path,
+                parts.settings_path,
+                parts.store,
+                parts.library,
+                parts.preferences,
+                services,
+            )
+            .with_error(parts.error),
             window,
             cx,
         )

@@ -20,6 +20,7 @@ use std::{
 /// to distinguish a lock from a full disk, or several failures from one, reads
 /// the variant.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StoreError {
     /// A host-owned backend rejected or could not persist an operation.
     Backend(crate::BackendError),

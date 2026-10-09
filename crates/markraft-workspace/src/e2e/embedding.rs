@@ -5,7 +5,7 @@ use gpui::{AppContext, TestAppContext};
 use std::{cell::RefCell, rc::Rc};
 
 #[gpui::test]
-fn explicit_close_saves_and_releases_the_notes_directory(cx: &mut TestAppContext) {
+fn explicit_close_saves_and_releases_the_folder_state(cx: &mut TestAppContext) {
     let mut h = open(cx, |_| {});
     h.type_text("A note saved by the host close barrier");
     h.wait_for_io();
@@ -20,15 +20,15 @@ fn explicit_close_saves_and_releases_the_notes_directory(cx: &mut TestAppContext
     });
     h.wait_until(|_| result.borrow().is_some());
     assert!(result.borrow_mut().take().expect("close completes").is_ok());
-    let state = tempfile::tempdir().unwrap();
+    // The same state as the workspace held: its lock is what a close releases.
     let reopened = crate::vault::Store::open(
         h.notes.clone(),
-        state.path().join("workspace.json"),
+        h.root().join("settings.json"),
         Default::default(),
     );
     assert!(
         reopened.is_ok(),
-        "close acknowledgement releases the directory lock"
+        "close acknowledgement releases the lock on the folder's state"
     );
     let (_, library) = reopened.unwrap();
     assert!(
@@ -63,6 +63,27 @@ fn system_quit_during_a_reload_writes_nothing(cx: &mut TestAppContext) {
         std::fs::read_to_string(h.notes.join("n.md")).unwrap(),
         "on disk\n"
     );
+}
+
+// A save panel stays open for as long as the person leaves it. A close that is
+// asked for meanwhile is not held back by it.
+#[gpui::test]
+fn an_open_save_panel_does_not_hold_back_a_close(cx: &mut TestAppContext) {
+    let mut h = super::harness::open_with(cx, &[("n.md", "kept\n")], |_| {});
+    h.cx.update(|window, cx| h.app.update(cx, |view, cx| view.test_save_as(window, cx)));
+    h.wait_for_io();
+    assert!(h.cx.did_prompt_for_new_path());
+    let result = Rc::new(RefCell::new(None));
+    let completed = result.clone();
+    h.cx.update(|window, cx| {
+        h.app.update(cx, |view, cx| {
+            view.prepare_close(window, cx, move |saved, _, _| {
+                *completed.borrow_mut() = Some(saved)
+            });
+        })
+    });
+    h.wait_until(|_| result.borrow().is_some());
+    assert_eq!(result.borrow_mut().take(), Some(Ok(())));
 }
 
 #[gpui::test]
@@ -126,7 +147,7 @@ fn close_rejects_pending_open_and_remains_retryable(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn embedded_rendering_preserves_the_host_window_title_and_size(cx: &mut TestAppContext) {
-    let mut h = open(cx, |preferences| preferences.auto_height = true);
+    let mut h = super::harness::open_records(cx, &[], |preferences| preferences.auto_height = true);
     let bounds = h.cx.update(|window, _| {
         window.set_window_title("Host application");
         window.bounds()
@@ -135,6 +156,16 @@ fn embedded_rendering_preserves_the_host_window_title_and_size(cx: &mut TestAppC
     h.wait_for_io();
     assert_eq!(h.cx.window_title().as_deref(), Some("Host application"));
     h.cx.update(|window, _| assert_eq!(window.bounds(), bounds));
+}
+
+// Leaving the window alone is for a host. The standalone application names its
+// window whether or not its menu bar and shortcuts could start: the headless
+// harness is that application without them.
+#[gpui::test]
+fn a_standalone_window_is_named_after_its_note(cx: &mut TestAppContext) {
+    let mut h = super::harness::open_with(cx, &[("named.md", "body\n")], |_| {});
+    h.wait_for_io();
+    assert_eq!(h.cx.window_title().as_deref(), Some("named"));
 }
 
 #[gpui::test]
@@ -242,7 +273,7 @@ fn database_daily_notes_use_a_stable_logical_key(cx: &mut TestAppContext) {
         h.keys("enter");
         h.wait_for_io();
     }
-    let expected = format!("daily:{}", chrono::Local::now().date_naive());
+    let expected = crate::daily::record_key(chrono::Local::now().date_naive());
     let notes = backend.notes();
     assert_eq!(
         notes

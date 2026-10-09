@@ -1,5 +1,5 @@
 //! Public construction and host request contracts.
-use crate::storage::Preferences;
+use crate::storage::EditorPreferences;
 use std::path::PathBuf;
 
 /// What every workspace needs, whatever stores its notes. The storage itself is
@@ -8,29 +8,36 @@ use std::path::PathBuf;
 #[non_exhaustive]
 pub struct WorkspaceOptions {
     pub cache_directory: Option<PathBuf>,
-    pub preferences: Preferences,
+    pub preferences: EditorPreferences,
 }
 #[derive(Clone)]
 #[non_exhaustive]
 pub enum WorkspaceEvent {
     OpenSettings,
     /// The host persists editor preferences changed through workspace controls.
-    OptionsChanged(Preferences),
+    OptionsChanged(EditorPreferences),
     HideRequested,
     QuitRequested,
     ReportIssue,
     RevealLogs,
     LocaleChanged(crate::locale::I18n),
 }
-/// A save receipt distinguishes the committed revision and actual Markdown paths.
+/// What a workspace save committed: the revision, each note's outcome and the
+/// Markdown paths when the notes are files. The headless library's receipt is
+/// `markraft_notes::SaveReceipt`, which names notes by ID instead.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct SaveReceipt {
+pub struct WorkspaceSaveReceipt {
     pub revision: u64,
     pub notes: Vec<markraft_notes::NoteSaveOutcome>,
     pub markdown_paths: Vec<(String, PathBuf)>,
     pub conflict_notes: Vec<String>,
 }
+/// A save that was queued when its future was made. The system quit hook has no
+/// window to call back into, so this one request answers through a future.
+pub type PendingSave = std::pin::Pin<
+    Box<dyn Future<Output = Result<WorkspaceSaveReceipt, WorkspaceError>> + Send + 'static>,
+>;
 /// Host-observable operation failures, independent of translated UI messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]

@@ -90,7 +90,7 @@ impl ContextMenus {
 }
 
 struct MenuBuilder<'a> {
-    app: &'a MarkraftApp,
+    app: &'a WorkspaceView,
     cx: &'a App,
     actions: Vec<MenuAction>,
 }
@@ -753,7 +753,7 @@ impl MenuBuilder<'_> {
     }
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     fn context_menu_rows(&self, request: &ContextRequest, cx: &App) -> (Vec<Row>, Vec<MenuAction>) {
         let mut menu = MenuBuilder {
             app: self,

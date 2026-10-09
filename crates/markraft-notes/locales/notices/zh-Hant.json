@@ -16,6 +16,7 @@
   "notice.single-folder": "請拖入單一資料夾以打開。",
   "notice.open-note-images": "請先打開筆記再拖入圖片。",
   "notice.folder-before-files": "請先打開筆記資料夾再打開檔案。",
+  "notice.host-storage-folder": "此工作區的筆記儲存在宿主應用程式的儲存空間中，無法切換到資料夾。",
   "notice.folder-new-location": "請先打開資料夾，再選擇新筆記的儲存位置。",
   "notice.choose-inside-folder": "請選擇筆記資料夾內的資料夾。",
   "notice.folder-changed": "筆記資料夾已變更，請重新選擇位置。",

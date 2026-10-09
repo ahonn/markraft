@@ -73,9 +73,9 @@ impl std::fmt::Display for BackendError {
 }
 impl std::error::Error for BackendError {}
 
+/// What a backend stores besides notes.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BackendCapabilities {
-    pub file_operations: bool,
     pub assets: bool,
 }
 

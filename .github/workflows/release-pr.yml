@@ -48,8 +48,10 @@ jobs:
           git switch -C release
           knope prepare-release
           python3 scripts/prepare-dependencies.py
-          # Reject stale workspace versions before opening a release PR.
+          # Reject stale workspace versions before opening a release PR. The consumer
+          # examples have a lockfile of their own, which CI builds with --locked.
           cargo metadata --format-version 1 --locked > /dev/null
+          cargo metadata --manifest-path examples/integration/Cargo.toml --format-version 1 --locked > /dev/null
           version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
           test -n "$version"
           git commit -m "chore(release): version $version"

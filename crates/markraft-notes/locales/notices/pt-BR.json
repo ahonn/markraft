@@ -16,6 +16,7 @@
   "notice.single-folder": "Solte uma única pasta para abri-la.",
   "notice.open-note-images": "Abra uma nota para soltar imagens nela.",
   "notice.folder-before-files": "Abra uma pasta de notas antes de abrir arquivos.",
+  "notice.host-storage-folder": "Este espaço de trabalho guarda suas notas no armazenamento do app hospedeiro e não pode mudar para uma pasta.",
   "notice.folder-new-location": "Abra uma pasta para escolher onde ficam as novas notas.",
   "notice.choose-inside-folder": "Escolha uma pasta dentro da pasta de notas.",
   "notice.folder-changed": "A pasta de notas mudou; escolha o local novamente.",

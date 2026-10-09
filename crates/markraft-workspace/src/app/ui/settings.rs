@@ -3,7 +3,7 @@
 //! title; each page is a form of right-aligned labels; the window keeps its width and
 //! takes the height of the page on screen.
 //!
-//! The preferences still belong to [`MarkraftApp`]: the window holds no copy of them. It
+//! The preferences still belong to [`WorkspaceView`]: the window holds no copy of them. It
 //! reads what the app holds each frame and hands every change back as a [`Change`],
 //! applied in the note window's context because the theme, the editors and the folder
 //! prompts all belong there. The app is observed, so a change made anywhere redraws it.
@@ -197,7 +197,7 @@ struct Snapshot {
     errors: SettingsErrors,
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// ⌘, and the Settings commands: open the window, or bring the open one forward.
     pub(crate) fn open_bundled_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(platform) = &mut self.platform {
@@ -419,7 +419,7 @@ impl MarkraftApp {
 /// The way back from the window to the app it configures.
 #[derive(Clone)]
 struct Link {
-    app: WeakEntity<MarkraftApp>,
+    app: WeakEntity<WorkspaceView>,
     main: AnyWindowHandle,
 }
 
@@ -667,7 +667,7 @@ pub(in crate::app) struct SettingsView {
 
 impl SettingsView {
     fn new(
-        app: Entity<MarkraftApp>,
+        app: Entity<WorkspaceView>,
         link: Link,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -787,7 +787,7 @@ impl SettingsView {
 
     /// Take a daily note format the folder's settings changed to elsewhere, and the
     /// theme, into the field.
-    fn follow_daily_format(&mut self, app: &Entity<MarkraftApp>, cx: &mut Context<Self>) {
+    fn follow_daily_format(&mut self, app: &Entity<WorkspaceView>, cx: &mut Context<Self>) {
         let (format, dark) = {
             let app = app.read(cx);
             (app.notes.library.workspace.daily.format.clone(), app.dark)

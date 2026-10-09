@@ -1,6 +1,6 @@
 //! Sparkle stays on AppKit's main thread; callbacks hand work to the app's poll loop.
 use crate::locale::Message;
-use markraft_workspace::updater::RelaunchContinuation;
+use markraft_workspace::standalone::updater::RelaunchContinuation;
 use objc2_foundation::{NSBundle, NSString};
 use sparkle_updater::{MainThreadMarker, SparkleUpdater, UpdaterConfig};
 use std::{cell::RefCell, path::Path, rc::Rc};
@@ -71,7 +71,7 @@ impl Updater {
                 },
                 relaunch_handler: Some(Rc::new(move |_, continuation| {
                     // Never borrow GPUI from a native callback: Sparkle can call back
-                    // synchronously while MarkraftApp is already being updated.
+                    // synchronously while WorkspaceView is already being updated.
                     pending.borrow_mut().request(Box::new(move || {
                         if let Some(main_thread) = MainThreadMarker::new() {
                             continuation.resume(main_thread);

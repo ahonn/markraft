@@ -26,7 +26,7 @@ pub(super) fn date_locale() -> DateLocale {
     *LOCALE
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// Every daily note the library holds, by day.
     fn daily_notes(&self) -> BTreeMap<NaiveDate, String> {
         let Some(root) = &self.path else {
@@ -36,11 +36,8 @@ impl MarkraftApp {
                 .notes
                 .iter()
                 .filter_map(|note| {
-                    let day = note.logical_key.as_deref()?.strip_prefix("daily:")?;
-                    Some((
-                        NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?,
-                        note.id.clone(),
-                    ))
+                    let day = crate::daily::day_of_record_key(note.logical_key.as_deref()?)?;
+                    Some((day, note.id.clone()))
                 })
                 .collect();
         };
@@ -60,9 +57,7 @@ impl MarkraftApp {
     /// The day the note on screen stands for, when it is a daily note.
     pub(super) fn active_daily_day(&self) -> Option<NaiveDate> {
         if let Some(key) = self.notes.library.active_note().logical_key.as_deref() {
-            return key
-                .strip_prefix("daily:")
-                .and_then(|day| NaiveDate::parse_from_str(day, "%Y-%m-%d").ok());
+            return crate::daily::day_of_record_key(key);
         }
         let root = self.path.as_ref()?;
         let relative = self
@@ -147,7 +142,7 @@ impl MarkraftApp {
                 .create_record_async(markraft_notes::NewRecord {
                     markdown: String::new(),
                     title: Some(day.to_string()),
-                    logical_key: Some(format!("daily:{day}")),
+                    logical_key: Some(crate::daily::record_key(day)),
                 });
             self.run_io(
                 future,

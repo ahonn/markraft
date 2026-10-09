@@ -5,49 +5,33 @@
 //! and its settings window, is named only with the `unstable-standalone` feature.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-pub use markraft_notes::{Preferences, daily, doc, locale};
+pub use markraft_notes::{EditorPreferences, daily, doc, locale};
 pub(crate) use markraft_notes::{fs, persistence, storage, vault};
-// Only the standalone application names these modules. Without the feature nothing
-// outside this crate reaches them, so what only the application calls reads as unused.
-#[cfg(feature = "unstable-standalone")]
-#[doc(hidden)]
-pub mod app;
-#[cfg(not(feature = "unstable-standalone"))]
-#[allow(dead_code)]
+// These modules are private in every build. The standalone application reaches
+// what it needs of them through `standalone`, which names each item. With the
+// feature on, the compiler therefore reports what neither the workspace nor the
+// application uses. Without it, what only the application calls reads as unused.
+#[cfg_attr(not(feature = "unstable-standalone"), allow(dead_code))]
 mod app;
 mod export;
-#[cfg(feature = "unstable-standalone")]
-#[doc(hidden)]
-pub mod file_access;
-#[cfg(not(feature = "unstable-standalone"))]
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "unstable-standalone"), allow(dead_code))]
 mod file_access;
 mod host;
-#[cfg(feature = "unstable-standalone")]
-#[doc(hidden)]
-pub mod instance;
-#[cfg(not(feature = "unstable-standalone"))]
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "unstable-standalone"), allow(dead_code))]
 mod instance;
-#[cfg(feature = "unstable-standalone")]
-#[doc(hidden)]
-pub mod platform;
-#[cfg(not(feature = "unstable-standalone"))]
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "unstable-standalone"), allow(dead_code))]
 mod platform;
 mod remote_images;
 mod send;
 #[cfg(feature = "unstable-standalone")]
 #[doc(hidden)]
 pub mod standalone;
-#[cfg(feature = "unstable-standalone")]
-#[doc(hidden)]
-pub mod updater;
-#[cfg(not(feature = "unstable-standalone"))]
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "unstable-standalone"), allow(dead_code))]
 mod updater;
 pub use app::WorkspaceView;
-pub use host::{SaveReceipt, WorkspaceError, WorkspaceEvent, WorkspaceOptions};
+pub use host::{
+    PendingSave, WorkspaceError, WorkspaceEvent, WorkspaceOptions, WorkspaceSaveReceipt,
+};
 struct WorkspaceBindings;
 impl gpui::Global for WorkspaceBindings {}
 pub fn bind_workspace_keys(cx: &mut gpui::App) {

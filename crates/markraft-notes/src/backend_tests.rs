@@ -126,7 +126,7 @@ fn logical_creation_is_idempotent_and_rename_does_not_rewrite_heading() {
         let id = notes.create_record(record.clone()).await.unwrap();
         assert_eq!(notes.create_record(record).await.unwrap(), id);
         assert_eq!(notes.search("Daily").unwrap().len(), 1);
-        notes.rename_note(&id, "Renamed metadata").await.unwrap();
+        notes.rename_record(&id, "Renamed metadata").await.unwrap();
         assert_eq!(notes.search("Renamed metadata").unwrap().len(), 1);
         assert!(notes.search("Daily").unwrap().is_empty());
         let note = notes.note(&id).unwrap();

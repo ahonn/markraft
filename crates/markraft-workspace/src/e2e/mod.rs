@@ -1,5 +1,5 @@
 //! The app's own flows, run headless against GPUI's test platform: a real
-//! [`MarkraftApp`] over a real notes folder in a temporary directory, driven by the
+//! [`WorkspaceView`] over a real notes folder in a temporary directory, driven by the
 //! keystrokes and actions a person would use, and judged by what reaches the disk.
 //!
 //! What this layer does not have: the menu bar, the global shortcuts and the native

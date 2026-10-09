@@ -1,8 +1,8 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 use markraft_notes::{fs, locale, storage, vault};
-use markraft_workspace::app;
-use markraft_workspace::file_access;
-use markraft_workspace::standalone::Standalone;
+use markraft_workspace::standalone::app;
+use markraft_workspace::standalone::file_access;
+use markraft_workspace::standalone::{Standalone, StandaloneParts};
 mod crash;
 mod host;
 mod instance;
@@ -10,9 +10,9 @@ mod logging;
 mod platform;
 mod updater;
 
-use app::MarkraftApp;
 use gpui::*;
 use instance::{Instance, Launch, Request};
+use markraft_workspace::WorkspaceView;
 use platform::Platform;
 use std::{env, path::PathBuf};
 use storage::{Library, Settings, notes_folder_matches, resolve_notes_folder};
@@ -193,18 +193,20 @@ fn main() {
             },
             move |window, cx| {
                 let app = cx.new(|cx| {
-                    let mut view = MarkraftApp::standalone(
-                        Some(directory),
-                        settings_path,
-                        store,
-                        library,
-                        preferences,
-                        error,
-                        Some(
-                            platform.map(|p| Box::new(p) as markraft_workspace::platform::Platform),
-                        ),
-                        Box::new(host::Updates::new()),
-                        Box::new(instance),
+                    let mut view = WorkspaceView::standalone(
+                        StandaloneParts {
+                            path: Some(directory),
+                            settings_path,
+                            store,
+                            library,
+                            preferences,
+                            error,
+                            platform: platform.map(|p| {
+                                Box::new(p) as markraft_workspace::standalone::platform::Platform
+                            }),
+                            updater: Box::new(host::Updates::new()),
+                            instance: Box::new(instance),
+                        },
                         window,
                         cx,
                     )
@@ -280,7 +282,9 @@ fn main() {
                             }
                             markraft_workspace::WorkspaceEvent::HideRequested => cx.hide(),
                             markraft_workspace::WorkspaceEvent::ReportIssue => {
-                                cx.open_url(&crash::new_issue_url(&platform::debug_info()))
+                                cx.open_url(&crash::new_issue_url(
+                                    &markraft_workspace::standalone::platform::debug_info(),
+                                ))
                             }
                             markraft_workspace::WorkspaceEvent::RevealLogs => {
                                 if let Some(directory) = crash::directory() {
@@ -382,7 +386,7 @@ fn distance(bounds: Bounds<Pixels>, point: Point<Pixels>) -> f32 {
     ))
 }
 
-fn window_handle_show(app: &WeakEntity<MarkraftApp>, cx: &mut App) -> Result<(), ()> {
+fn window_handle_show(app: &WeakEntity<WorkspaceView>, cx: &mut App) -> Result<(), ()> {
     let handle = cx.windows().first().copied().ok_or(())?;
     handle
         .update(cx, |_, window, cx| {

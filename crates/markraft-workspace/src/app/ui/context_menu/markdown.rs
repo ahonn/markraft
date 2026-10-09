@@ -54,7 +54,7 @@ fn math_insertion(state: &EditorState) -> Option<TransactionSpec> {
     .map(|spec| spec.selection(Selection::cursor(position + 4)))
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     pub(super) fn markdown_action_enabled(&self, action: MarkdownAction, cx: &App) -> bool {
         let editor = self.editor().read(cx);
         if self.is_reloading()
@@ -73,8 +73,7 @@ impl MarkraftApp {
             MarkdownAction::InsertImage => {
                 !doc::types().in_verbatim_block_at(editor.state())
                     && self.notes.persistence.as_ref().is_some_and(|persistence| {
-                        let capabilities = persistence.capabilities();
-                        capabilities.file_operations || capabilities.assets
+                        persistence.file_backed() || persistence.capabilities().assets
                     })
             }
         }

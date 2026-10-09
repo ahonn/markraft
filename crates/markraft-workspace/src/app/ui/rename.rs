@@ -5,7 +5,7 @@ const HEIGHT: Pixels = px(40.);
 /// How far in from either edge the title's band starts, as the toolbar lays it out.
 const TITLE_INSET: Pixels = px(112.);
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// The pill under the title that names the note's file: the link editor's shape,
     /// holding the name where that one holds an address.
     pub(super) fn rename_pill(

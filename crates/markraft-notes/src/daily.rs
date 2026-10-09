@@ -14,6 +14,18 @@ use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
 pub const DEFAULT_FORMAT: &str = "YYYY-MM-DD";
+
+/// What begins the logical key of a daily note that a host backend holds.
+const RECORD_KEY: &str = "daily:";
+/// The logical key of the daily note for `day` in a host backend, which has no
+/// file name to tell the day by. Every device derives the same key for a day.
+pub fn record_key(day: NaiveDate) -> String {
+    format!("{RECORD_KEY}{day}")
+}
+/// The day that a logical key stands for, when it is a daily note's.
+pub fn day_of_record_key(key: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(key.strip_prefix(RECORD_KEY)?, "%Y-%m-%d").ok()
+}
 /// What `{{time}}` writes when the template names no format.
 const DEFAULT_TIME_FORMAT: &str = "HH:mm";
 

@@ -86,8 +86,6 @@ impl Host {
         let mut options = WorkspaceOptions::default();
         options.cache_directory = Some(cache);
         options.preferences.remote_images = false;
-        options.preferences.auto_height = false;
-        options.preferences.hide_on_deactivate = false;
         let workspace = cx.new(|cx| {
             match backend {
                 Some(backend) => {

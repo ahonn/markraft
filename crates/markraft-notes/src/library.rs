@@ -5,7 +5,7 @@ use std::{collections::HashMap, fmt, path::PathBuf};
 
 /// Explicit locations owned by this library, independent of application settings.
 /// `state_dir` must be outside `notes_dir`; manifests and recovery data never
-/// become user Markdown content. A directory lock coordinates all hosts.
+/// become user Markdown content. One library owns a state directory at a time.
 #[derive(Clone, Debug)]
 pub struct NotesConfig {
     pub notes_dir: PathBuf,
@@ -212,7 +212,10 @@ impl NotesLibrary {
         Ok(id)
     }
 
-    pub async fn rename_note(&mut self, id: &NoteId, name: &str) -> Result<(), NotesError> {
+    /// Give a record another title. Local writes finish first. The backend keeps
+    /// the title beside the Markdown, which is not rewritten. A note in a Markdown
+    /// folder is named by its file: see [`Self::rename_file`].
+    pub async fn rename_record(&mut self, id: &NoteId, name: &str) -> Result<(), NotesError> {
         self.note(id)?;
         self.flush().await?;
         let note = self
@@ -421,7 +424,8 @@ impl NotesLibrary {
 
     /// Finish local writes before changing a file's name. The store performs a
     /// no-replace rename so an existing destination is never silently overwritten.
-    pub async fn rename(&mut self, id: &NoteId, name: &str) -> Result<PathBuf, NotesError> {
+    /// A record in a host backend has no file: see [`Self::rename_record`].
+    pub async fn rename_file(&mut self, id: &NoteId, name: &str) -> Result<PathBuf, NotesError> {
         self.note(id)?;
         self.flush().await?;
         let path = self
@@ -665,7 +669,10 @@ mod tests {
             let external = root.path().join("external.md");
             std::fs::write(&external, "External").unwrap();
             let imported = notes.open_file(external).await.unwrap();
-            notes.rename(&imported, "Renamed external").await.unwrap();
+            notes
+                .rename_file(&imported, "Renamed external")
+                .await
+                .unwrap();
             let id = notes.create("# Hello\n\nWorld").unwrap();
             let before = notes.note(&id).unwrap();
             notes
@@ -680,18 +687,26 @@ mod tests {
         });
     }
 
+    // Hosts with their own state share a folder as an editor shares it with any
+    // other program: neither holds the folder, and each takes what the other wrote
+    // as a change. One state directory still has one owner.
     #[test]
-    fn different_host_state_directories_cannot_write_the_same_notes() {
+    fn hosts_with_separate_state_share_a_notes_folder() {
         block_on(async {
             let root = tempfile::tempdir().unwrap();
             let mut first = NotesLibrary::open(config(root.path())).unwrap();
-            let other = NotesConfig::new(root.path().join("notes"), root.path().join("other-host"));
             assert!(matches!(
-                NotesLibrary::open(other.clone()),
+                NotesLibrary::open(config(root.path())),
                 Err(NotesError::Storage(StoreError::Locked(_)))
             ));
+            let other = NotesConfig::new(root.path().join("notes"), root.path().join("other-host"));
+            let mut second = NotesLibrary::open(other).unwrap();
+            first.create("# Shared\n\nfrom the first host").unwrap();
+            first.flush().await.unwrap();
+            second.refresh().await.unwrap();
+            assert_eq!(second.search("first host").unwrap().len(), 1);
             first.close().await.unwrap();
-            NotesLibrary::open(other).unwrap().close().await.unwrap();
+            second.close().await.unwrap();
         });
     }
 

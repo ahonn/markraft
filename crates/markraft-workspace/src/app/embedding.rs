@@ -1,8 +1,8 @@
 //! Host-facing operations; no process or window lifecycle is implied by mounting.
 use super::*;
-use crate::host::{SaveReceipt, WorkspaceError, WorkspaceOptions};
+use crate::host::{PendingSave, WorkspaceError, WorkspaceOptions, WorkspaceSaveReceipt};
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// Create a workspace bound to this window. The host must retain the window
     /// until `prepare_close` completes before releasing or moving the workspace.
     pub fn open(
@@ -11,25 +11,22 @@ impl MarkraftApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Self, WorkspaceError> {
-        options.preferences.validate()?;
         let state_directory = folders.state_dir;
         let settings_path = state_directory.join("workspace.json");
         let notes_directory = crate::storage::ensure_notes_folder(&folders.notes_dir)?;
         let (store, library) = Store::open_library(notes_directory.clone(), state_directory)?;
         let mut view = Self::new(
-            Some(notes_directory),
-            settings_path,
-            Some(store),
-            library,
-            options.preferences,
-            None,
-            None,
-            Box::new(crate::updater::Disabled),
-            Box::new(crate::instance::NoRequests),
+            Parts::over_store(
+                Some(notes_directory),
+                settings_path,
+                Some(store),
+                library,
+                Preferences::embedded(options.preferences),
+                Services::Embedded,
+            ),
             window,
             cx,
         );
-        view.host_settings = false;
         view.remote_fetcher = Some(crate::remote_images::fetcher(options.cache_directory));
         // Initial editors were created before the explicit network capability existed.
         for editor in view.editors() {
@@ -46,14 +43,12 @@ impl MarkraftApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Self, WorkspaceError> {
-        options.preferences.validate()?;
         let house = markraft_commonmark::HouseStyleHandle::default();
         let session = markraft_notes::NotesSession::from_backend(backend, house)?;
         Ok(Self::with_session(session, options, window, cx))
     }
 
     /// Mount a session prepared by the host, including sessions opened off the UI thread.
-    /// The host must validate `options.preferences` before mounting.
     pub fn with_session(
         session: markraft_notes::NotesSession,
         options: WorkspaceOptions,
@@ -62,23 +57,22 @@ impl MarkraftApp {
     ) -> Self {
         let house = session.house();
         let (library, persistence) = session.into_parts();
-        let mut view = Self::new_with_session(
-            None,
-            PathBuf::new(),
-            Notes {
-                library,
-                persistence,
+        let mut view = Self::new(
+            Parts {
+                path: None,
+                settings_path: PathBuf::new(),
+                notes: Notes {
+                    library,
+                    persistence,
+                },
+                house,
+                preferences: Preferences::embedded(options.preferences),
+                error: None,
+                services: Services::Embedded,
             },
-            house,
-            options.preferences,
-            None,
-            None,
-            Box::new(crate::updater::Disabled),
-            Box::new(crate::instance::NoRequests),
             window,
             cx,
         );
-        view.host_settings = false;
         view.set_remote_image_cache(options.cache_directory, cx);
         view
     }
@@ -120,12 +114,12 @@ impl MarkraftApp {
     pub fn active_editor(&self) -> Entity<EditorView> {
         self.editor().clone()
     }
-    pub fn preferences(&self) -> &Preferences {
-        &self.preferences
+    pub fn preferences(&self) -> crate::storage::EditorPreferences {
+        self.preferences.editor()
     }
     pub fn set_options(
         &mut self,
-        preferences: Preferences,
+        preferences: crate::storage::EditorPreferences,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), WorkspaceError> {
@@ -136,8 +130,7 @@ impl MarkraftApp {
                 WorkspaceError::Busy
             });
         }
-        preferences.validate()?;
-        let before = std::mem::replace(&mut self.preferences, preferences);
+        let before = std::mem::replace(&mut self.preferences, Preferences::embedded(preferences));
         self.apply_preferences(&before, window, cx);
         self.refresh_slash_commands();
         self.schedule_save(cx);
@@ -159,17 +152,14 @@ impl MarkraftApp {
     /// Interactive close should use `prepare_close`, which can recover on failure.
     /// While a reload that the user confirmed is replacing the notes, nothing is
     /// written and the receipt names no note.
-    pub fn flush_on_system_quit(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> crate::persistence::Pending<SaveReceipt> {
+    pub fn flush_on_system_quit(&mut self, cx: &mut Context<Self>) -> PendingSave {
         self.sync_documents(cx);
         let revision = self.save.barrier();
         // The reload discards these edits. Queued behind it, a save would write
         // them over the version it has just read.
         if self.is_reloading() {
             return Box::pin(async move {
-                Ok(SaveReceipt {
+                Ok(WorkspaceSaveReceipt {
                     revision,
                     notes: Vec::new(),
                     markdown_paths: Vec::new(),
@@ -178,9 +168,7 @@ impl MarkraftApp {
             });
         }
         let Some(persistence) = &self.notes.persistence else {
-            return Box::pin(async {
-                Err(StoreError::Worker(Message::new("error.worker-unavailable")))
-            });
+            return Box::pin(async { Err(WorkspaceError::Closed) });
         };
         let pending = persistence.flush_async(
             revision,
@@ -190,7 +178,7 @@ impl MarkraftApp {
         Box::pin(async move {
             let saved = pending.await?;
             saved.result?;
-            Ok(SaveReceipt {
+            Ok(WorkspaceSaveReceipt {
                 revision: saved.revision,
                 notes: saved.outcomes.clone(),
                 markdown_paths: saved.paths,
@@ -206,7 +194,7 @@ impl MarkraftApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        done: impl FnOnce(Result<SaveReceipt, WorkspaceError>, &mut Window, &mut Context<Self>)
+        done: impl FnOnce(Result<WorkspaceSaveReceipt, WorkspaceError>, &mut Window, &mut Context<Self>)
         + 'static,
     ) {
         self.flush_with(window, cx, move |_, result, window, cx| {
@@ -260,7 +248,7 @@ impl MarkraftApp {
         cx: &mut Context<Self>,
         done: impl FnOnce(
             &mut Self,
-            Result<SaveReceipt, WorkspaceError>,
+            Result<WorkspaceSaveReceipt, WorkspaceError>,
             &mut Window,
             &mut Context<Self>,
         ) + 'static,
@@ -286,7 +274,7 @@ impl MarkraftApp {
                         .result
                         .clone()
                         .map_err(WorkspaceError::from)
-                        .map(|()| SaveReceipt {
+                        .map(|()| WorkspaceSaveReceipt {
                             revision: saved.revision,
                             notes: saved.outcomes.clone(),
                             markdown_paths: saved.paths.clone(),
@@ -300,7 +288,7 @@ impl MarkraftApp {
         );
     }
 
-    /// Freeze edits, save, and wait for the worker and directory lock to stop.
+    /// Freeze edits, save, and wait for the worker to stop and release its lock.
     /// On failure the workspace returns to an editable, retryable state.
     /// A busy workspace must finish its accepted operation before retrying.
     /// Retain the entity until the callback before releasing it or its window.
@@ -372,16 +360,15 @@ mod tests {
     fn a_startup_error_without_a_worker_can_close(cx: &mut gpui::TestAppContext) {
         let root = tempfile::tempdir().unwrap();
         let (view, cx) = cx.add_window_view(|window, cx| {
-            super::MarkraftApp::new(
-                None,
-                root.path().join("settings.json"),
-                None,
-                Default::default(),
-                Default::default(),
-                None,
-                None,
-                Box::new(crate::updater::Disabled),
-                Box::new(crate::instance::NoRequests),
+            super::WorkspaceView::new(
+                super::Parts::over_store(
+                    None,
+                    root.path().join("settings.json"),
+                    None,
+                    Default::default(),
+                    Default::default(),
+                    super::Services::headless(),
+                ),
                 window,
                 cx,
             )

@@ -16,6 +16,7 @@
   "notice.single-folder": "请拖入单个文件夹以打开。",
   "notice.open-note-images": "请先打开笔记再拖入图片。",
   "notice.folder-before-files": "请先打开笔记文件夹再打开文件。",
+  "notice.host-storage-folder": "此工作区的笔记保存在宿主应用的存储中，无法切换到文件夹。",
   "notice.folder-new-location": "请先打开文件夹，再选择新笔记的保存位置。",
   "notice.choose-inside-folder": "请选择笔记文件夹内的文件夹。",
   "notice.folder-changed": "笔记文件夹已更改，请重新选择位置。",

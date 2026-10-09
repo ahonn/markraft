@@ -183,7 +183,7 @@ impl TypeaheadProvider for WikiProvider {
     fn accept(&self, item: &TypeaheadItem) -> EditCommand {
         let plain = format!("[[{}]]", item.id);
         let labelled = format!("[[{}|{}]]", item.id, item.label);
-        let markdown = if item.id.starts_with("note:")
+        let markdown = if crate::storage::Note::linked_record(&item.id).is_some()
             && markraft_commonmark::wiki::whole_wiki_link(&labelled).is_some()
         {
             labelled
@@ -198,7 +198,7 @@ impl TypeaheadProvider for WikiProvider {
     }
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// The `[[` menu for a note editor. It reads the shared list, so a note written
     /// after this editor opened can still be linked to.
     pub(in crate::app) fn wiki_menu(&self) -> Typeahead {
@@ -244,7 +244,7 @@ impl MarkraftApp {
                     }
                     return Some(LinkTarget {
                         title: note.display_title(&self.i18n),
-                        target: format!("note:{}", note.id),
+                        target: crate::storage::Note::record_link(&note.id),
                         location: String::new(),
                     });
                 };
@@ -292,7 +292,10 @@ impl MarkraftApp {
             }
         }
         for note in live().filter(|note| records && note.path.is_none()) {
-            index.insert(format!("note:{}", note.id).to_lowercase(), ());
+            index.insert(
+                crate::storage::Note::record_link(&note.id).to_lowercase(),
+                (),
+            );
             index.insert(note.title().to_lowercase(), ());
         }
         self.links.fill(targets, index);

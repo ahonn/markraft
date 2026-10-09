@@ -231,6 +231,176 @@ pub struct Preferences {
     pub hard_break: HardBreakStyle,
 }
 
+/// The preferences of a workspace in a host's window: how notes read, how
+/// Markdown is written and what the editor does as the person types. The host
+/// sets them, and keeps them when the workspace reports a change. What belongs to
+/// the standalone application's own window, such as its shortcuts and its place
+/// on the screen, is not here. Each field is documented on [`Preferences`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct EditorPreferences {
+    pub text_checking: TextCheckingPreferences,
+    pub language: LanguagePreference,
+    pub dark_mode: Option<bool>,
+    pub show_word_count: bool,
+    pub vim_mode: bool,
+    pub remote_images: bool,
+    pub animate_images: bool,
+    pub text_size: f32,
+    pub emoji_characters: bool,
+    pub tab_key: TabKey,
+    pub markdown_shortcuts: bool,
+    pub auto_number_equations: bool,
+    pub font: EditorFont,
+    pub line_height: LineHeight,
+    pub bullet_marker: BulletMarker,
+    pub code_fence: CodeFence,
+    pub emphasis_marker: EmphasisMarker,
+    pub line_width: LineWidth,
+    pub auto_pair: bool,
+    pub confirm_delete: bool,
+    pub ordered_delimiter: OrderedDelimiter,
+    pub hard_break: HardBreakStyle,
+}
+impl Default for EditorPreferences {
+    fn default() -> Self {
+        Preferences::default().editor()
+    }
+}
+impl Preferences {
+    /// The part of these preferences that a host sets and keeps.
+    pub fn editor(&self) -> EditorPreferences {
+        // Every field is named: a new preference has to be placed on one side.
+        let Self {
+            text_checking,
+            language,
+            dark_mode,
+            auto_height: _,
+            show_word_count,
+            hotkey: _,
+            window_bounds: _,
+            settings_window: _,
+            vim_mode,
+            remote_images,
+            animate_images,
+            text_size,
+            hide_on_deactivate: _,
+            always_on_top: _,
+            new_note_hotkey: _,
+            daily_note_hotkey: _,
+            emoji_characters,
+            tab_key,
+            markdown_shortcuts,
+            auto_number_equations,
+            font,
+            line_height,
+            bullet_marker,
+            code_fence,
+            emphasis_marker,
+            settings_page: _,
+            summon: _,
+            line_width,
+            auto_pair,
+            confirm_delete,
+            all_spaces: _,
+            follow_pointer: _,
+            ordered_delimiter,
+            hard_break,
+        } = self.clone();
+        EditorPreferences {
+            text_checking,
+            language,
+            dark_mode,
+            show_word_count,
+            vim_mode,
+            remote_images,
+            animate_images,
+            text_size,
+            emoji_characters,
+            tab_key,
+            markdown_shortcuts,
+            auto_number_equations,
+            font,
+            line_height,
+            bullet_marker,
+            code_fence,
+            emphasis_marker,
+            line_width,
+            auto_pair,
+            confirm_delete,
+            ordered_delimiter,
+            hard_break,
+        }
+    }
+
+    /// Preferences for a workspace in a host's window. Everything that drives the
+    /// standalone application's own window is off: its shortcuts, its place and
+    /// size, and how it comes and goes.
+    pub fn embedded(editor: EditorPreferences) -> Self {
+        let EditorPreferences {
+            text_checking,
+            language,
+            dark_mode,
+            show_word_count,
+            vim_mode,
+            remote_images,
+            animate_images,
+            text_size,
+            emoji_characters,
+            tab_key,
+            markdown_shortcuts,
+            auto_number_equations,
+            font,
+            line_height,
+            bullet_marker,
+            code_fence,
+            emphasis_marker,
+            line_width,
+            auto_pair,
+            confirm_delete,
+            ordered_delimiter,
+            hard_break,
+        } = editor;
+        Self {
+            text_checking,
+            language,
+            dark_mode,
+            auto_height: false,
+            show_word_count,
+            hotkey: String::new(),
+            window_bounds: None,
+            settings_window: None,
+            vim_mode,
+            remote_images,
+            animate_images,
+            text_size,
+            hide_on_deactivate: false,
+            always_on_top: false,
+            new_note_hotkey: String::new(),
+            daily_note_hotkey: String::new(),
+            emoji_characters,
+            tab_key,
+            markdown_shortcuts,
+            auto_number_equations,
+            font,
+            line_height,
+            bullet_marker,
+            code_fence,
+            emphasis_marker,
+            settings_page: String::new(),
+            summon: Summon::default(),
+            line_width,
+            auto_pair,
+            confirm_delete,
+            all_spaces: false,
+            follow_pointer: false,
+            ordered_delimiter,
+            hard_break,
+        }
+    }
+}
+
 // The variant names are what the settings file stores, so they keep their shape.
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -581,6 +751,27 @@ pub struct Note {
 }
 
 impl Note {
+    /// The target of a wiki link to a record with this ID. A record has no file
+    /// name to be linked by, and its title is not unique.
+    pub fn record_link(id: &str) -> String {
+        format!("{RECORD_LINK}{id}")
+    }
+    /// The ID that a wiki link target names, when it links a record by ID.
+    pub fn linked_record(target: &str) -> Option<&str> {
+        target.strip_prefix(RECORD_LINK)
+    }
+    /// Whether this version says what `other` says: the same text, given title and
+    /// logical key. A pin is where a note sits in a list, not what it says.
+    pub fn says_the_same(&self, other: &Note) -> bool {
+        self.document == other.document
+            && self.title_override == other.title_override
+            && self.logical_key == other.logical_key
+    }
+    /// Whether storage would keep this version exactly as it keeps `other`:
+    /// what [`Self::says_the_same`] compares, and the pin.
+    pub fn same_record(&self, other: &Note) -> bool {
+        self.says_the_same(other) && self.pinned == other.pinned
+    }
     /// Whether the note holds nothing at all. A file Markraft could not read comes
     /// back like this: it has a name and a reason, but never became a document.
     pub fn document_is_empty(&self) -> bool {
@@ -645,6 +836,9 @@ pub(crate) fn title_of(title_override: Option<&str>, document: &Node) -> String 
         .take(64)
         .collect()
 }
+
+/// What begins the target of a wiki link that names a record by ID.
+const RECORD_LINK: &str = "note:";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Library {
@@ -1507,6 +1701,30 @@ mod tests {
         applied.window_bounds = changed.window_bounds;
         applied.settings_window = changed.settings_window.clone();
         assert_eq!(applied, changed);
+    }
+
+    // A host's preferences keep every editor setting on the way in and out, and
+    // leave everything of the standalone window off.
+    #[test]
+    fn a_hosts_preferences_keep_the_editor_and_leave_the_window_off() {
+        let editor = EditorPreferences {
+            vim_mode: true,
+            text_size: 17.,
+            bullet_marker: BulletMarker::Plus,
+            confirm_delete: false,
+            ..Default::default()
+        };
+        let embedded = Preferences::embedded(editor.clone());
+        assert_eq!(embedded.editor(), editor);
+        assert!(embedded.hotkey.is_empty() && embedded.new_note_hotkey.is_empty());
+        assert!(!embedded.auto_height && !embedded.always_on_top && !embedded.hide_on_deactivate);
+        assert_eq!(embedded.validate(), Ok(()));
+        // The settings file keeps one flat shape, which a host's copy is a part of.
+        let stored = serde_json::to_value(&embedded).unwrap();
+        let kept = serde_json::to_value(&editor).unwrap();
+        for (key, value) in kept.as_object().unwrap() {
+            assert_eq!(&stored[key], value, "{key}");
+        }
     }
 
     #[test]
