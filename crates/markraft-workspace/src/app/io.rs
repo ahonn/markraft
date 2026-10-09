@@ -70,6 +70,14 @@ impl MarkraftApp {
         self.reloading.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Stand in for a confirmed reload that the storage worker has not answered yet.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn test_begin_reload(&self) {
+        self.reloading
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(super) fn watch_persistence(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self._persistence_wake = None;
         let wake = self

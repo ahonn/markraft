@@ -252,14 +252,32 @@ pub struct Store {
 }
 impl Store {
     /// The revision each note's editors last saw, for every note that storage holds.
-    pub(crate) fn storage_revisions(&self) -> Vec<(String, StorageRevision)> {
-        self.files
-            .keys()
-            .chain(self.previous.keys())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .filter_map(|id| Some((id.clone(), self.baseline_of(id)?.revision.clone())))
-            .collect()
+    /// Bring `revisions` to what storage holds for each note now. A table that is
+    /// already current is left as it is: no ID or revision is copied.
+    pub(crate) fn sync_storage_revisions(&self, revisions: &mut HashMap<String, StorageRevision>) {
+        let held = self
+            .files
+            .iter()
+            .map(|(id, saved)| (id, self.previous.get(id).unwrap_or(saved)));
+        let left = self
+            .previous
+            .iter()
+            .filter(|(id, _)| !self.files.contains_key(*id));
+        let mut baselines = 0;
+        for (id, saved) in held.chain(left) {
+            baselines += 1;
+            match revisions.get_mut(id) {
+                Some(known) if *known == saved.revision => {}
+                Some(known) => known.clone_from(&saved.revision),
+                None => {
+                    revisions.insert(id.clone(), saved.revision.clone());
+                }
+            }
+        }
+        // Every baseline is in the table now, so a longer table names notes that left.
+        if revisions.len() > baselines {
+            revisions.retain(|id, _| self.baseline_of(id).is_some());
+        }
     }
     /// Open the notes in `directory`, keeping the folder's state under the
     /// application's settings folder. `settings` is the settings file as the
@@ -1553,6 +1571,38 @@ mod tests {
         collect_markdown(&root.join("notes"), &mut paths).unwrap();
         paths.sort();
         paths
+    }
+    /// The table as a full rebuild would make it.
+    fn rebuilt_revisions(store: &Store) -> HashMap<String, StorageRevision> {
+        let ids = store.files.keys().chain(store.previous.keys());
+        ids.filter_map(|id| Some((id.clone(), store.baseline_of(id)?.revision.clone())))
+            .collect()
+    }
+    // The table that a host reads revisions from is updated in place. It must
+    // follow a note that arrives, one that changes and one that leaves.
+    #[test]
+    fn the_revision_table_follows_every_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        let kept = fixture(root.path(), "kept.md", b"kept\n");
+        let removed = fixture(root.path(), "removed.md", b"removed\n");
+        let (mut store, _) = open(root.path());
+        let mut table = HashMap::new();
+        store.sync_storage_revisions(&mut table);
+        assert_eq!(table.len(), 2);
+        assert_eq!(table, rebuilt_revisions(&store));
+
+        fixture(root.path(), "arrived.md", b"arrived\n");
+        fs::write(&kept, "changed\n").unwrap();
+        fs::remove_file(&removed).unwrap();
+        let changes = store.refresh().unwrap();
+        store.sync_storage_revisions(&mut table);
+        assert_eq!(table, rebuilt_revisions(&store));
+
+        // Once the editors have taken the changes, the removed note has no baseline.
+        store.acknowledge_changes(&changes);
+        store.sync_storage_revisions(&mut table);
+        assert_eq!(table.len(), 2);
+        assert_eq!(table, rebuilt_revisions(&store));
     }
     /// The folder's manifest, once `root` has been opened and closed.
     fn manifest_path(root: &Path) -> PathBuf {

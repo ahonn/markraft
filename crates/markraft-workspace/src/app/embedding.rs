@@ -157,12 +157,26 @@ impl MarkraftApp {
 
     /// Capture a final save before the host's non-cancellable system quit hook.
     /// Interactive close should use `prepare_close`, which can recover on failure.
+    /// While a reload that the user confirmed is replacing the notes, nothing is
+    /// written and the receipt names no note.
     pub fn flush_on_system_quit(
         &mut self,
         cx: &mut Context<Self>,
     ) -> crate::persistence::Pending<SaveReceipt> {
         self.sync_documents(cx);
         let revision = self.save.barrier();
+        // The reload discards these edits. Queued behind it, a save would write
+        // them over the version it has just read.
+        if self.is_reloading() {
+            return Box::pin(async move {
+                Ok(SaveReceipt {
+                    revision,
+                    notes: Vec::new(),
+                    markdown_paths: Vec::new(),
+                    conflict_notes: Vec::new(),
+                })
+            });
+        }
         let Some(persistence) = &self.notes.persistence else {
             return Box::pin(async {
                 Err(StoreError::Worker(Message::new("error.worker-unavailable")))

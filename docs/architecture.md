@@ -55,6 +55,7 @@ into the notes folder.
   - `backups/` holds the previous bytes of each overwritten note.
   - `lock` protects the state directory. An additional advisory lock on the notes
     directory prevents two hosts from opening it with separate state directories.
+    A volume that cannot lock a directory still opens, with the state lock alone.
 - A note is identified by its UUID, not its path. A new note has no path until
   its first save names it. After that the name only changes through an explicit
   rename.
