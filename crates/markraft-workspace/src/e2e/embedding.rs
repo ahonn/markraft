@@ -39,6 +39,32 @@ fn explicit_close_saves_and_releases_the_notes_directory(cx: &mut TestAppContext
     );
 }
 
+// A confirmed reload discards the local edits. A system quit that arrives before
+// the reload is answered must not write them over the file the reload reads.
+#[gpui::test]
+fn system_quit_during_a_reload_writes_nothing(cx: &mut TestAppContext) {
+    let mut h = super::harness::open_with(cx, &[("n.md", "on disk\n")], |_| {});
+    h.keys("cmd-down cmd-right");
+    h.type_text(" and discarded");
+    let result = Rc::new(RefCell::new(None));
+    let completed = result.clone();
+    h.cx.update(|_, cx| {
+        let pending = h.app.update(cx, |view, cx| {
+            view.test_begin_reload();
+            view.flush_on_system_quit(cx)
+        });
+        cx.spawn(async move |_| *completed.borrow_mut() = Some(pending.await))
+            .detach();
+    });
+    h.wait_until(|_| result.borrow().is_some());
+    let receipt = result.borrow_mut().take().expect("the flush answers");
+    assert!(receipt.expect("nothing to refuse").notes.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(h.notes.join("n.md")).unwrap(),
+        "on disk\n"
+    );
+}
+
 #[gpui::test]
 fn mounting_another_workspace_does_not_change_existing_format_preferences(cx: &mut TestAppContext) {
     let mut h = open(cx, |preferences| {

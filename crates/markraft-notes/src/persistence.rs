@@ -169,12 +169,8 @@ impl Persistence {
         let (pulse, wake) = unbounded();
         let notices = store.notices();
         let capabilities = store.capabilities();
-        let persisted = Arc::new(std::sync::Mutex::new(
-            store
-                .storage_revisions()
-                .into_iter()
-                .collect::<HashMap<_, _>>(),
-        ));
+        let persisted = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        sync_versions(&store, &persisted);
         let persisted_worker = persisted.clone();
         let sources = store.source_cache();
         let notify_requests = requests.clone();
@@ -716,8 +712,7 @@ fn next_request(incoming: &Receiver<Request>, deferred: &mut Option<Request>) ->
 
 /// Capture metadata after every attempt, including errors after some notes were written.
 fn sync_versions(store: &Store, versions: &std::sync::Mutex<HashMap<String, StorageRevision>>) {
-    *versions.lock().unwrap_or_else(|e| e.into_inner()) =
-        store.storage_revisions().into_iter().collect();
+    store.sync_storage_revisions(&mut versions.lock().unwrap_or_else(|e| e.into_inner()));
 }
 
 /// The worker's channel is closed: the thread is gone.

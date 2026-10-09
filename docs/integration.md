@@ -223,6 +223,7 @@ Register the host's application quit hook for system-initiated termination.
 Capture `flush_on_system_quit(cx)` before returning the future that the hook awaits.
 Report a failed result through the host's logging mechanism.
 That hook cannot offer the interactive close flow's retry decision.
+While a reload that the user confirmed is in progress, the flush writes nothing and its receipt names no note.
 The pinned GPUI version waits at most 200 milliseconds for application quit hooks.
 System quit saving is therefore best-effort cleanup, not a durability guarantee for slow storage.
 

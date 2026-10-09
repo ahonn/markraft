@@ -79,6 +79,19 @@ pub struct BackendCapabilities {
     pub assets: bool,
 }
 
+/// The SHA-256 of `bytes` in lowercase hexadecimal. Stored notes and their hosts
+/// keep these strings, so the spelling never changes.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
 /// The scheme of an image source that names an asset in the backend.
 pub const ASSET_SCHEME: &str = "markraft-asset:";
 
@@ -90,8 +103,7 @@ pub const ASSET_SCHEME: &str = "markraft-asset:";
 pub struct AssetId(pub String);
 impl AssetId {
     pub fn for_content(bytes: &[u8]) -> Self {
-        use sha2::{Digest, Sha256};
-        Self(format!("{:x}", Sha256::digest(bytes)))
+        Self(sha256_hex(bytes))
     }
     /// The image source that refers to this asset.
     pub fn source(&self) -> String {

@@ -761,6 +761,20 @@ impl markraft_workspace::platform::PlatformServices for Platform {
 mod tests {
     use super::*;
 
+    // The workspace crate builds without this repository's root, so it carries its
+    // own copy of each image it draws. A copy must not fall behind the original.
+    #[test]
+    fn the_workspace_carries_the_same_icons_as_the_application() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for name in ["Markraft.png", "markraft-menubar.png"] {
+            let original = std::fs::read(root.join("assets/icon").join(name)).unwrap();
+            let copy = root
+                .join("crates/markraft-workspace/assets/icon")
+                .join(name);
+            assert!(std::fs::read(copy).unwrap() == original, "{name}");
+        }
+    }
+
     #[test]
     fn debug_info_names_the_version_and_the_system() {
         let system = system_version().expect("the kernel reports a product version");

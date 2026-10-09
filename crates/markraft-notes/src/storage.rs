@@ -672,6 +672,18 @@ struct SearchEntry {
     document: Node,
     text: String,
     title: String,
+    /// The title a host gave the note, which neither its text nor its path says.
+    given_title: Option<String>,
+}
+impl SearchEntry {
+    fn of(note: &Note) -> Self {
+        Self {
+            document: note.document.clone(),
+            text: doc::plain_text(&note.document).to_lowercase(),
+            title: note.title().to_lowercase(),
+            given_title: note.title_override.clone(),
+        }
+    }
 }
 
 impl Default for Library {
@@ -831,9 +843,10 @@ impl Library {
         true
     }
 
-    /// Notes matching `query`, by what they say or by where their file is. A file's name
-    /// can differ from its note's title, so a search has to reach both; `root` is the notes
-    /// folder, which is what makes a match read like the path the Browse row shows.
+    /// Notes matching `query`, by what they say, by a title their host gave them or by
+    /// where their file is. A file's name can differ from its note's title, so a search has
+    /// to reach both; `root` is the notes folder, which is what makes a match read like the
+    /// path the Browse row shows.
     pub fn search(&self, query: &str, root: Option<&Path>) -> Vec<&Note> {
         let query = query.trim().to_lowercase();
         let mut index = self
@@ -850,24 +863,21 @@ impl Library {
             let rank = if query.is_empty() {
                 0
             } else {
-                let entry = index.entry(note.id.clone()).or_insert_with(|| SearchEntry {
-                    document: note.document.clone(),
-                    text: doc::plain_text(&note.document).to_lowercase(),
-                    title: note.title().to_lowercase(),
-                });
-                if entry.document != note.document || entry.title != note.title().to_lowercase() {
-                    *entry = SearchEntry {
-                        document: note.document.clone(),
-                        text: doc::plain_text(&note.document).to_lowercase(),
-                        title: note.title().to_lowercase(),
-                    };
+                let entry = index
+                    .entry(note.id.clone())
+                    .or_insert_with(|| SearchEntry::of(note));
+                if entry.document != note.document || entry.given_title != note.title_override {
+                    *entry = SearchEntry::of(note);
                 }
-                if !entry.text.contains(&query)
-                    && !entry.title.contains(&query)
-                    && !note
+                // A title taken from the text is matched there, and a placeholder
+                // title is not something the note says.
+                let titled = entry.given_title.is_some() && entry.title.contains(&query);
+                let found = titled
+                    || entry.text.contains(&query)
+                    || note
                         .location(root)
-                        .is_some_and(|path| path.to_lowercase().contains(&query))
-                {
+                        .is_some_and(|path| path.to_lowercase().contains(&query));
+                if !found {
                     continue;
                 }
                 if entry.title == query {
@@ -1130,6 +1140,22 @@ mod tests {
         assert!(library.delete(&initial));
         assert_eq!(library.search("", None).len(), 1);
         assert_eq!(library.active_note().document, doc::empty());
+    }
+
+    // A note with nothing to title it goes by a placeholder, which is not something
+    // it says. A title that a host gave is in neither its text nor its path.
+    #[test]
+    fn a_search_reaches_a_given_title_but_not_the_placeholder() {
+        let mut library = Library::default();
+        let blank = library.active_id.clone();
+        assert_eq!(library.active_note().title(), "Untitled");
+        assert!(library.search("untitled", None).is_empty());
+        library.notes[0].title_override = Some("Quarterly plan".into());
+        assert_eq!(library.search("quarterly", None)[0].id, blank);
+        library.notes[0].title_override = Some("Renamed".into());
+        assert!(library.search("quarterly", None).is_empty());
+        library.notes[0].title_override = None;
+        assert!(library.search("renamed", None).is_empty());
     }
 
     #[test]

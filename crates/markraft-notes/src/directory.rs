@@ -23,7 +23,7 @@ use markraft_commonmark::SourceDocument;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, File, OpenOptions},
+    fs::{self, File, OpenOptions, TryLockError},
     io::{self, Write},
     path::{Component, Path, PathBuf},
     time::UNIX_EPOCH,
@@ -127,8 +127,25 @@ pub(crate) struct MarkdownDirectory {
 /// What storage calls a file that holds `bytes`: equal content is one revision,
 /// in this session and the next.
 fn revision(bytes: &[u8]) -> StorageRevision {
-    use sha2::{Digest, Sha256};
-    StorageRevision(format!("{:x}", Sha256::digest(bytes)))
+    StorageRevision(crate::backend::sha256_hex(bytes))
+}
+
+/// Read a lock attempt on `path`. A lock that another handle holds always refuses
+/// the folder. A lock that could not be attempted refuses it only when `required`:
+/// a volume that cannot lock a directory still opens, guarded by the state lock
+/// alone, and is not reported as in use by another instance.
+fn claim(attempt: Result<(), TryLockError>, path: &Path, required: bool) -> Result<(), StoreError> {
+    match attempt {
+        Ok(()) => Ok(()),
+        Err(TryLockError::WouldBlock) => {
+            Err(StoreError::Locked(Message::new("error.folder-locked")))
+        }
+        Err(TryLockError::Error(error)) if required => Err(describe(path, &error)),
+        Err(TryLockError::Error(error)) => {
+            log::warn!("{} cannot be locked: {error}", path.display());
+            Ok(())
+        }
+    }
 }
 
 fn conflict(id: &NoteId, actual: Option<StorageRevision>) -> StoreError {
@@ -171,9 +188,7 @@ impl MarkdownDirectory {
         // Lock the directory descriptor itself: every host coordinates on the
         // same filesystem object without placing application files in the vault.
         let directory_lock = File::open(&directory).map_err(|e| describe(&directory, &e))?;
-        directory_lock
-            .try_lock()
-            .map_err(|_| StoreError::Locked(Message::new("error.folder-locked")))?;
+        claim(directory_lock.try_lock(), &directory, false)?;
         let lock_path = state.join("lock");
         let lock = OpenOptions::new()
             .read(true)
@@ -182,8 +197,7 @@ impl MarkdownDirectory {
             .truncate(false)
             .open(&lock_path)
             .map_err(|e| describe(&lock_path, &e))?;
-        lock.try_lock()
-            .map_err(|_| StoreError::Locked(Message::new("error.folder-locked")))?;
+        claim(lock.try_lock(), &lock_path, true)?;
         let manifest_path = state.join("manifest.json");
         let (manifest, reset) =
             match read_optional(&manifest_path).map_err(|e| describe(&manifest_path, &e))? {
@@ -316,7 +330,7 @@ impl MarkdownDirectory {
         let created = known.map_or(modified, |identity| identity.created);
         let pinned = known.is_some_and(|identity| identity.pinned);
         let revision = revision(&bytes);
-        let mut read_only = unsafe_file(path)?;
+        let mut read_only = unsafe_metadata(&metadata);
         // A file in another encoding has no Markdown to hand over. It is listed
         // with nothing in it and a reason, and is never written.
         let markdown = String::from_utf8(bytes).unwrap_or_else(|_| {
@@ -1118,9 +1132,13 @@ fn reject_symlink_components(root: &Path, path: &Path) -> Result<(), StoreError>
     Ok(())
 }
 fn unsafe_file(path: &Path) -> Result<Option<Message>, StoreError> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| describe(path, &e))?;
+    Ok(unsafe_metadata(&metadata))
+}
+/// [`unsafe_file`] for a file whose own metadata, not its target's, is in hand.
+fn unsafe_metadata(m: &fs::Metadata) -> Option<Message> {
     use std::os::unix::fs::MetadataExt;
-    let m = fs::symlink_metadata(path).map_err(|e| describe(path, &e))?;
-    Ok(if m.file_type().is_symlink() {
+    if m.file_type().is_symlink() {
         Some(Message::new("error.symlink-read-only"))
     } else if m.nlink() > 1 {
         Some(Message::new("error.hardlink-read-only"))
@@ -1128,7 +1146,7 @@ fn unsafe_file(path: &Path) -> Result<Option<Message>, StoreError> {
         Some(Message::new("error.file-read-only"))
     } else {
         None
-    })
+    }
 }
 /// The name a new note's file takes: the note's title, or when it was made.
 pub(crate) fn file_name(
@@ -1310,6 +1328,34 @@ mod tests {
             Err(BackendError::Conflict { actual, .. }) => actual,
             other => panic!("expected a conflict, got {other:?}"),
         }
+    }
+
+    // Notes, manifests and hosts keep these strings from one session to the next.
+    #[test]
+    fn a_revision_and_an_asset_id_spell_the_sha256_in_lowercase_hex() {
+        const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(revision(b"").0, EMPTY);
+        assert_eq!(revision(b"abc").0, ABC);
+        assert_eq!(crate::AssetId::for_content(b"abc").0, ABC);
+    }
+
+    // Only another holder refuses a folder. A volume that cannot lock a directory is
+    // not in use by anyone, and a state lock that cannot be taken says why.
+    #[test]
+    fn only_a_held_lock_reports_the_folder_as_in_use() {
+        let path = Path::new("/notes");
+        let unsupported = || TryLockError::Error(io::ErrorKind::Unsupported.into());
+        for required in [false, true] {
+            assert!(claim(Ok(()), path, required).is_ok());
+            assert!(matches!(
+                claim(Err(TryLockError::WouldBlock), path, required),
+                Err(StoreError::Locked(_))
+            ));
+        }
+        assert!(claim(Err(unsupported()), path, false).is_ok());
+        let refused = claim(Err(unsupported()), path, true).unwrap_err();
+        assert!(!matches!(refused, StoreError::Locked(_)), "{refused:?}");
     }
 
     // The part of the backend contract that a file can keep: exact text, a revision

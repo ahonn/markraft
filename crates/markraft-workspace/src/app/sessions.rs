@@ -205,7 +205,10 @@ impl MarkraftApp {
         let source = self.notes.persistence.as_ref().map(|persistence| {
             match persistence.source(note.clone()) {
                 Ok(Some(track)) => Ok(track),
-                // A file the store holds no copy of is written whole.
+                // A note the store holds no copy of is written whole: a file it has
+                // not read, or a note not yet saved. It is held to its own Markdown,
+                // which refuses what a whole write could not say rather than taking
+                // those edits and losing them on that save.
                 Ok(None) => persistence.markdown(note.clone()).and_then(|text| {
                     markraft_commonmark::SourceDocument::parse(doc::schema(), &text)
                         .map(|source| Arc::new(SourceTrack::new(source)))
@@ -221,17 +224,6 @@ impl MarkraftApp {
             .zip(note.path.as_ref())
             .map(|(source, path)| assets::image_root(source.origin().source(), path))
             .unwrap_or(Ok(None));
-        // A note not yet saved has no file for its edits to be written back through,
-        // and its first save writes it whole. It is held to an empty source, which
-        // refuses what a whole write could not say — the same edits a saved note's
-        // guard refuses — rather than taking them and losing them on that first save.
-        let source = source.or_else(|| {
-            (note.path.is_none() && self.notes.persistence.is_some()).then(|| {
-                markraft_commonmark::SourceDocument::parse(doc::schema(), "")
-                    .map(|source| Arc::new(SourceTrack::new(source)))
-                    .map_err(|error| Message::from(error.to_string()))
-            })
-        });
         let style = self.editor_style();
         let edit_messages = EditMessages::default();
         let formatting_messages = edit_messages.clone();
