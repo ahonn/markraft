@@ -1,6 +1,6 @@
 //! Standalone process services adapted to the reusable workspace.
 use crate::locale::Message;
-use markraft_workspace::updater::{RelaunchContinuation, UpdateServices};
+use markraft_workspace::standalone::updater::{RelaunchContinuation, UpdateServices};
 pub struct Updates {
     updater: crate::updater::Updater,
 }
@@ -36,14 +36,16 @@ impl UpdateServices for Updates {
         self.updater.postpone(continuation);
     }
 }
-impl markraft_workspace::instance::RequestSource for crate::instance::Instance {
-    fn requests(&self) -> Vec<markraft_workspace::instance::Request> {
+impl markraft_workspace::standalone::instance::RequestSource for crate::instance::Instance {
+    fn requests(&self) -> Vec<markraft_workspace::standalone::instance::Request> {
         self.requests()
             .into_iter()
             .map(|request| match request {
-                crate::instance::Request::Show => markraft_workspace::instance::Request::Show,
+                crate::instance::Request::Show => {
+                    markraft_workspace::standalone::instance::Request::Show
+                }
                 crate::instance::Request::OpenPaths(paths) => {
-                    markraft_workspace::instance::Request::OpenPaths(paths)
+                    markraft_workspace::standalone::instance::Request::OpenPaths(paths)
                 }
             })
             .collect()
@@ -52,7 +54,7 @@ impl markraft_workspace::instance::RequestSource for crate::instance::Instance {
 
 pub fn set_app_menus(i18n: &crate::locale::I18n, cx: &gpui::App) {
     use gpui::{Menu, MenuItem};
-    use markraft_workspace::app::*;
+    use markraft_workspace::standalone::app::*;
     cx.set_menus([
         Menu::new("Markraft").items([
             MenuItem::action(i18n.text("menu.show-notes"), Show),

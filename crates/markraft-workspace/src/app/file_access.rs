@@ -4,7 +4,7 @@ use std::path::Path;
 
 /// Keep authorization separate from opening so canceling any panel leaves the
 /// whole selection unopened. An ancestor directory can cover several files.
-impl MarkraftApp {
+impl WorkspaceView {
     pub(super) fn authorize_open_paths(
         &mut self,
         paths: Vec<PathBuf>,

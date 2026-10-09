@@ -147,14 +147,6 @@ fn same_external_version(left: &Note, right: &Note) -> bool {
         && left.read_only == right.read_only
 }
 
-/// Whether two versions of a note say different things. A pin is where the
-/// note sits in a list, not what it says, and never makes two versions conflict.
-fn differs(left: &Note, right: &Note) -> bool {
-    left.document != right.document
-        || left.title_override != right.title_override
-        || left.logical_key != right.logical_key
-}
-
 fn unsupported(operation: &'static str) -> StoreError {
     StoreError::Backend(BackendError::Unsupported(operation))
 }
@@ -220,6 +212,81 @@ impl Storage {
                 .map_err(StoreError::Backend),
         }
     }
+
+    // What follows is the work that only a folder has beside a note's text: where
+    // its files are, the manifest, the settings file and the recovery drafts. A
+    // host backend keeps none of them, so each is nothing there, and the store's
+    // save and refresh read the same over both.
+
+    /// Where the note's file is. A record has no file.
+    fn path_of(&self, id: &str) -> Option<PathBuf> {
+        self.directory()?.path(id)
+    }
+    /// [`Self::path_of`] into `path`. A record's is left as it is.
+    fn locate(&self, id: &str, path: &mut Option<PathBuf>) {
+        if let Some(directory) = self.directory() {
+            *path = directory.path(id);
+        }
+    }
+    /// Why the note's file cannot be written, if it cannot.
+    fn read_only(&self, id: &str) -> Option<Message> {
+        self.directory()?.read_only(id)
+    }
+    /// Ask for a new note's file to be written at `path`.
+    fn place(&mut self, id: &str, path: &Path) -> Result<(), StoreError> {
+        match self.directory_mut() {
+            Some(directory) => directory.place(id, path),
+            None => Ok(()),
+        }
+    }
+    /// Keep a note's pin and creation time where a file cannot: in the folder's
+    /// manifest. Whether it was kept there.
+    fn identify(&mut self, id: &str, pinned: bool, created: u64) -> bool {
+        match self.directory_mut() {
+            Some(directory) => {
+                directory.identify(id, pinned, created);
+                true
+            }
+            None => false,
+        }
+    }
+    /// Remember that the files at `paths` left while the folder was watched.
+    fn mark_gone(&mut self, paths: &[PathBuf]) {
+        if let Some(directory) = self.directory_mut() {
+            directory.mark_gone(paths);
+        }
+    }
+    fn set_workspace(&mut self, workspace: &WorkspaceSettings) {
+        if let Some(directory) = self.directory_mut() {
+            directory.set_workspace(workspace);
+        }
+    }
+    /// Where deletions landed in the Trash since the last call, for a folder.
+    fn take_trashed(&mut self) -> Option<Vec<PathBuf>> {
+        self.directory_mut().map(MarkdownDirectory::take_trashed)
+    }
+    fn clear_recovery(&self, id: &str) {
+        if let Some(directory) = self.directory() {
+            directory.clear_recovery(id);
+        }
+    }
+    fn drop_recovery_drafts(&self) {
+        if let Some(directory) = self.directory() {
+            directory.drop_recovery_drafts();
+        }
+    }
+    fn save_settings(&mut self, preferences: &Preferences) -> Result<(), StoreError> {
+        match self.directory_mut() {
+            Some(directory) => directory.save_settings(preferences),
+            None => Ok(()),
+        }
+    }
+    fn update_settings(&mut self, update: impl FnOnce(&mut Settings)) -> Result<(), StoreError> {
+        match self.directory_mut() {
+            Some(directory) => directory.update_settings(update),
+            None => Ok(()),
+        }
+    }
 }
 
 pub struct Store {
@@ -251,9 +318,9 @@ pub struct Store {
     copies: HashSet<(String, String)>,
 }
 impl Store {
-    /// The revision each note's editors last saw, for every note that storage holds.
-    /// Bring `revisions` to what storage holds for each note now. A table that is
-    /// already current is left as it is: no ID or revision is copied.
+    /// Bring `revisions` to the revision each note's editors last saw, for every
+    /// note that storage holds. A table that is already current is left as it is:
+    /// no ID or revision is copied.
     pub(crate) fn sync_storage_revisions(&self, revisions: &mut HashMap<String, StorageRevision>) {
         let held = self
             .files
@@ -364,6 +431,11 @@ impl Store {
     pub(crate) fn capabilities(&self) -> BackendCapabilities {
         self.storage.capabilities()
     }
+    /// Whether the notes are files in a Markdown folder. A host backend cannot
+    /// claim this: the operations on a file exist for a folder only.
+    pub(crate) fn file_backed(&self) -> bool {
+        self.storage.directory().is_some()
+    }
     pub(crate) fn set_change_notifier(&mut self, notify: ChangeNotifier) {
         self.notify = Some(notify.clone());
         if let Storage::Host(backend) = &mut self.storage {
@@ -464,10 +536,7 @@ impl Store {
         if id.is_empty() {
             return Err(invalid("Note identity cannot be empty"));
         }
-        let (path, unwritable) = match self.storage.directory() {
-            Some(directory) => (directory.path(&id), directory.read_only(&id)),
-            None => (None, None),
-        };
+        let (path, unwritable) = (self.storage.path_of(&id), self.storage.read_only(&id));
         if let Some(known) = known
             && known.revision == stored.revision
         {
@@ -548,9 +617,7 @@ impl Store {
     }
     pub fn reload(&mut self) -> Result<Library, StoreError> {
         let library = self.scan_library()?;
-        if let Some(directory) = self.storage.directory() {
-            directory.drop_recovery_drafts();
-        }
+        self.storage.drop_recovery_drafts();
         // Nothing after adopting the new baseline can turn this into an error:
         // the UI must receive the library that the store will now save against.
         Ok(library)
@@ -897,10 +964,8 @@ impl Store {
             None => self.files = found,
             Some(_) => self.files.extend(found),
         }
-        if let Some(directory) = self.storage.directory_mut()
-            && !left.is_empty()
-        {
-            directory.mark_gone(&left);
+        if !left.is_empty() {
+            self.storage.mark_gone(&left);
         }
         for change in &changes {
             let (External::Updated { note, .. } | External::Removed(note)) = change;
@@ -1047,9 +1112,7 @@ impl Store {
         if let Err(error) = library.validate().and_then(|()| preferences.validate()) {
             return saved(self, Err(error), Vec::new(), Vec::new());
         }
-        if let Some(directory) = self.storage.directory_mut() {
-            directory.set_workspace(&library.workspace);
-        }
+        self.storage.set_workspace(&library.workspace);
         let mut changes: Vec<(String, u64)> = Vec::new();
         let mut acknowledge = |id: &str| {
             if let Some(generation) = library.changes.get(id) {
@@ -1107,16 +1170,15 @@ impl Store {
                 }
             }
         }
-        if let Some(directory) = self.storage.directory_mut() {
-            self.trashed = directory.take_trashed();
+        if let Some(trashed) = self.storage.take_trashed() {
+            self.trashed = trashed;
         }
         for note in &library.notes {
             let id = &note.id;
             if let Some(saved) = self.files.get_mut(id) {
                 // A pin in a folder is the manifest's to remember, not the file's:
                 // it is kept whether or not the note has anything to write.
-                if let Some(directory) = self.storage.directory_mut() {
-                    directory.identify(id, note.pinned, note.created_at);
+                if self.storage.identify(id, note.pinned, note.created_at) {
                     saved.note.pinned = note.pinned;
                 }
                 if !library.changes.contains_key(id) {
@@ -1127,11 +1189,11 @@ impl Store {
             if self.pending.contains(id) {
                 let adopted = saved
                     .as_ref()
-                    .is_some_and(|saved| !differs(&saved.note, note));
+                    .is_some_and(|saved| saved.note.says_the_same(note));
                 let locally_changed = !adopted
                     && self
                         .baseline_of(id)
-                        .is_none_or(|base| differs(&base.note, note));
+                        .is_none_or(|base| !base.note.says_the_same(note));
                 if !locally_changed {
                     acknowledge(id);
                     if let Some(saved) = &saved {
@@ -1158,8 +1220,7 @@ impl Store {
                 continue;
             }
             if let Some(saved) = &saved
-                && !differs(&saved.note, note)
-                && saved.note.pinned == note.pinned
+                && saved.note.same_record(note)
             {
                 acknowledge(id);
                 outcome(id, Ok(saved.revision.clone()), false);
@@ -1178,9 +1239,7 @@ impl Store {
                 && note.title_override.is_none()
                 && note.logical_key.is_none()
             {
-                if let Some(directory) = self.storage.directory() {
-                    directory.clear_recovery(id);
-                }
+                self.storage.clear_recovery(id);
                 acknowledge(id);
                 continue;
             }
@@ -1199,7 +1258,7 @@ impl Store {
                     // text to keep, so the version in storage is simply read again.
                     if saved
                         .as_ref()
-                        .is_some_and(|saved| !differs(&saved.note, note))
+                        .is_some_and(|saved| saved.note.says_the_same(note))
                     {
                         if let Some(notify) = &self.notify {
                             notify.changed(vec![NoteId::new(id.clone())]);
@@ -1249,9 +1308,7 @@ impl Store {
         {
             errors.push(error);
         }
-        if let Some(directory) = self.storage.directory_mut()
-            && let Err(error) = directory.save_settings(preferences)
-        {
+        if let Err(error) = self.storage.save_settings(preferences) {
             errors.push(error);
         }
         if !conflicts.is_empty() {
@@ -1306,14 +1363,11 @@ impl Store {
         }
         if saved.is_none()
             && let Some(path) = &note.path
-            && let Some(directory) = self.storage.directory_mut()
         {
-            directory.place(&note.id, path)?;
+            self.storage.place(&note.id, path)?;
         }
         let revision = self.put(note, &text, saved.map(|saved| &saved.revision))?;
-        if let Some(directory) = self.storage.directory() {
-            stored.path = directory.path(&note.id);
-        }
+        self.storage.locate(&note.id, &mut stored.path);
         // Keep the track the editor already holds across saves, so undo can still
         // address the source the note began as.
         let track = match saved {
@@ -1384,10 +1438,7 @@ impl Store {
         &mut self,
         update: impl FnOnce(&mut Settings),
     ) -> Result<(), StoreError> {
-        match self.storage.directory_mut() {
-            Some(directory) => directory.update_settings(update),
-            None => Ok(()),
-        }
+        self.storage.update_settings(update)
     }
 }
 

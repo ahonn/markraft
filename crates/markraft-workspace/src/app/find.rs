@@ -16,7 +16,7 @@ pub(super) struct VimFind {
     query: String,
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// `/` borrows the ordinary input without giving it modal key bindings.
     pub(super) fn open_vim_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.notes.persistence.is_none() || self.editor().read(cx).is_composing() {
@@ -205,7 +205,7 @@ impl MarkraftApp {
         self.step_find(true, window, cx);
     }
 
-    /// The previous hit. See [`MarkraftApp::find_next`].
+    /// The previous hit. See [`WorkspaceView::find_next`].
     pub(super) fn find_previous(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.step_find(false, window, cx);
     }

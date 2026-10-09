@@ -150,6 +150,7 @@ pub struct Persistence {
     sources: Arc<crate::vault::Sources>,
     house: markraft_commonmark::HouseStyleHandle,
     capabilities: BackendCapabilities,
+    file_backed: bool,
     persisted: Arc<std::sync::Mutex<HashMap<String, StorageRevision>>>,
 }
 impl Persistence {
@@ -169,6 +170,7 @@ impl Persistence {
         let (pulse, wake) = unbounded();
         let notices = store.notices();
         let capabilities = store.capabilities();
+        let file_backed = store.file_backed();
         let persisted = Arc::new(std::sync::Mutex::new(HashMap::new()));
         sync_versions(&store, &persisted);
         let persisted_worker = persisted.clone();
@@ -240,46 +242,48 @@ impl Persistence {
         }
         let watch_saved = watches.clone();
         let storage_worker = std::thread::spawn(move || {
+            let answers = Answers {
+                versions: &persisted_worker,
+                events: &outgoing,
+            };
             let mut deferred = None;
             while let Some(request) = next_request(&incoming, &mut deferred) {
                 match request {
                     Request::Shutdown => break,
                     Request::CreateRecord(request, response) => {
                         let result = store.create_record(request);
-                        sync_versions(&store, &persisted_worker);
-                        let _ = response.send(result);
+                        answers.reply(&store, response, result);
                     }
                     Request::RenameRecord(id, name, response) => {
                         let result = store.rename_note(&id, &name);
-                        sync_versions(&store, &persisted_worker);
-                        let _ = response.send(result);
+                        answers.reply(&store, response, result);
                     }
                     Request::ReadAsset(id, response) => {
-                        let _ = response.send(store.read_asset(&id));
+                        let result = store.read_asset(&id);
+                        answers.reply(&store, response, result);
                     }
                     Request::WriteAsset(asset, response) => {
-                        let _ = response.send(store.write_asset(asset));
+                        let result = store.write_asset(asset);
+                        answers.reply(&store, response, result);
                     }
                     Request::Snapshot(snapshot, response) => {
-                        let _ = response.send(snapshot.render());
+                        answers.reply(&store, response, snapshot.render());
                     }
                     Request::Recover(note, response) => {
-                        let _ = response.send(store.recover(&note));
+                        let result = store.recover(&note);
+                        answers.reply(&store, response, result);
                     }
                     Request::OpenFile(path, response) => {
                         let result = store.add_file(path);
-                        sync_versions(&store, &persisted_worker);
-                        let _ = response.send(result);
+                        answers.reply(&store, response, result);
                     }
                     Request::CreateNote(new, response) => {
                         let result = new.create(&mut store);
-                        sync_versions(&store, &persisted_worker);
-                        let _ = response.send(result);
+                        answers.reply(&store, response, result);
                     }
                     Request::Rename(id, name, response) => {
                         let result = store.rename(&id, &name);
-                        sync_versions(&store, &persisted_worker);
-                        let _ = response.send(result);
+                        answers.reply(&store, response, result);
                     }
                     Request::Save(revision, library, preferences, queued_at) => {
                         log::debug!(
@@ -287,11 +291,10 @@ impl Persistence {
                             queued_at.elapsed().as_micros()
                         );
                         let saved = store.write(revision, &library, &preferences);
-                        sync_versions(&store, &persisted_worker);
                         for (_, path) in &saved.paths {
                             let _ = watch_saved.send(Some(path.clone()));
                         }
-                        let _ = outgoing.send(Event::Saved(saved));
+                        answers.event(&store, Event::Saved(saved));
                     }
                     Request::Flush(revision, library, preferences, response, queued_at) => {
                         log::debug!(
@@ -299,51 +302,32 @@ impl Persistence {
                             queued_at.elapsed().as_micros()
                         );
                         let saved = store.write(revision, &library, &preferences);
-                        sync_versions(&store, &persisted_worker);
                         for (_, path) in &saved.paths {
                             let _ = watch_saved.send(Some(path.clone()));
                         }
-                        let _ = response.send(saved);
+                        answers.reply(&store, response, saved);
                     }
                     Request::Reload(response) => {
                         let result = store.reload();
-                        sync_versions(&store, &persisted_worker);
-                        let _ = response.send(result);
+                        answers.reply(&store, response, result);
                     }
-                    Request::RefreshPaths(paths) => match store.refresh_paths(&paths) {
-                        Ok(changes) if !changes.is_empty() => {
-                            let _ = outgoing.send(Event::External(changes));
-                        }
-                        Err(error) => {
-                            log::warn!("refreshing changed paths failed: {error}");
-                            store.notices().raise(Message::new(CHECK_FAILED));
-                        }
-                        _ => {}
-                    },
-                    Request::RefreshNotes(ids) => match store.refresh_notes(&ids) {
-                        Ok(changes) if !changes.is_empty() => {
-                            let _ = outgoing.send(Event::External(changes));
-                        }
-                        Err(error) => {
-                            log::warn!("refreshing changed notes failed: {error}");
-                            store.notices().raise(Message::new(CHECK_FAILED));
-                        }
-                        _ => {}
-                    },
-                    Request::Refresh => match store.refresh() {
-                        Ok(changes) if !changes.is_empty() => {
-                            let _ = outgoing.send(Event::External(changes));
-                        }
-                        Err(error) => {
-                            log::warn!("refreshing the folder failed: {error}");
-                            store.notices().raise(Message::new(CHECK_FAILED));
-                        }
-                        _ => {}
-                    },
+                    Request::RefreshPaths(paths) => {
+                        let found = store.refresh_paths(&paths);
+                        answers.refreshed(&store, found, "refreshing changed paths failed");
+                    }
+                    Request::RefreshNotes(ids) => {
+                        let found = store.refresh_notes(&ids);
+                        answers.refreshed(&store, found, "refreshing changed notes failed");
+                    }
+                    Request::Refresh => {
+                        let found = store.refresh();
+                        answers.refreshed(&store, found, "refreshing the folder failed");
+                    }
                     Request::AcknowledgeChanges(changes) => store.acknowledge_changes(&changes),
                     #[cfg(any(test, feature = "test-support"))]
                     Request::Acknowledge(ids) => store.acknowledge(&ids),
                 }
+                // A request that answers no one still moves baselines.
                 sync_versions(&store, &persisted_worker);
                 let _ = pulse.unbounded_send(());
             }
@@ -360,6 +344,7 @@ impl Persistence {
             sources,
             house,
             capabilities,
+            file_backed,
             persisted,
         }
     }
@@ -399,6 +384,11 @@ impl Persistence {
 
     pub fn capabilities(&self) -> BackendCapabilities {
         self.capabilities
+    }
+    /// Whether the notes are files in a Markdown folder, which is what reveal,
+    /// rename on disk and open in place need.
+    pub fn file_backed(&self) -> bool {
+        self.file_backed
     }
     pub fn house(&self) -> markraft_commonmark::HouseStyleHandle {
         self.house.clone()
@@ -710,7 +700,38 @@ fn next_request(incoming: &Receiver<Request>, deferred: &mut Option<Request>) ->
     Some(request)
 }
 
-/// Capture metadata after every attempt, including errors after some notes were written.
+/// How the storage worker answers. The table that a host reads revisions from is
+/// brought up to date before each reply and each event goes out, so whoever hears
+/// of a change never reads a revision from before it.
+struct Answers<'a> {
+    versions: &'a std::sync::Mutex<HashMap<String, StorageRevision>>,
+    events: &'a Sender<Event>,
+}
+impl Answers<'_> {
+    fn reply<T>(&self, store: &Store, response: Reply<T>, value: T) {
+        sync_versions(store, self.versions);
+        let _ = response.send(value);
+    }
+    fn event(&self, store: &Store, event: Event) {
+        sync_versions(store, self.versions);
+        let _ = self.events.send(event);
+    }
+    /// Report what a refresh found. Changes go out as one event. A refresh that
+    /// could not read storage raises a notice and is logged as `failure`.
+    fn refreshed(&self, store: &Store, found: Result<Vec<External>, StoreError>, failure: &str) {
+        match found {
+            Ok(changes) if !changes.is_empty() => self.event(store, Event::External(changes)),
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!("{failure}: {error}");
+                store.notices().raise(Message::new(CHECK_FAILED));
+            }
+        }
+    }
+}
+
+/// Bring the table that a host reads revisions from up to date. It runs after
+/// every request, a failed one included: some notes may have been written.
 fn sync_versions(store: &Store, versions: &std::sync::Mutex<HashMap<String, StorageRevision>>) {
     store.sync_storage_revisions(&mut versions.lock().unwrap_or_else(|e| e.into_inner()));
 }
@@ -1171,6 +1192,7 @@ mod tests {
             sources: Arc::default(),
             house: Default::default(),
             capabilities: Default::default(),
+            file_backed: true,
             persisted: Default::default(),
         };
         assert!(
@@ -1206,6 +1228,7 @@ mod tests {
             sources: Arc::default(),
             house: Default::default(),
             capabilities: Default::default(),
+            file_backed: true,
             persisted: Default::default(),
         };
         let error = persistence

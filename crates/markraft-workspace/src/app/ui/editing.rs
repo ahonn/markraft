@@ -49,7 +49,7 @@ impl CommandState {
     }
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// Only editing intents participate. Other application actions retain their
     /// existing availability and lifecycle rules.
     pub(super) fn editing_state(&self, intent: &Intent, cx: &App) -> Option<CommandState> {

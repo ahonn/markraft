@@ -64,7 +64,7 @@ struct CheckRun {
 impl CheckRun {
     /// The editor being checked, while this is the latest check of the
     /// active note.
-    fn editor(&self, app: &MarkraftApp) -> Option<Entity<EditorView>> {
+    fn editor(&self, app: &WorkspaceView) -> Option<Entity<EditorView>> {
         if app.context_menus.checking.generation != self.generation
             || app.notes.library.active_id != self.note
         {
@@ -76,7 +76,7 @@ impl CheckRun {
     }
 
     /// [`Self::editor`], while it still shows the document the check read.
-    fn unchanged_editor(&self, app: &MarkraftApp, cx: &App) -> Option<Entity<EditorView>> {
+    fn unchanged_editor(&self, app: &WorkspaceView, cx: &App) -> Option<Entity<EditorView>> {
         self.editor(app)
             .filter(|editor| editor.read(cx).context_document_is_current(&self.snapshot))
     }
@@ -85,7 +85,7 @@ impl CheckRun {
     /// its edit schedules the next check, so this run ends there.
     async fn substitute(
         &self,
-        this: &WeakEntity<MarkraftApp>,
+        this: &WeakEntity<WorkspaceView>,
         cx: &mut gpui::AsyncApp,
         request: ContextRequest,
         boundary: TypingBoundary,
@@ -130,7 +130,7 @@ impl CheckRun {
     /// when the run ended before the last chunk.
     async fn scan(
         &self,
-        this: &WeakEntity<MarkraftApp>,
+        this: &WeakEntity<WorkspaceView>,
         cx: &mut gpui::AsyncApp,
     ) -> Option<Vec<Diagnostic>> {
         let projection = this
@@ -253,7 +253,7 @@ impl TypingBoundary {
     }
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     pub(super) fn checking_panel_label(&self, panel: CheckingPanel) -> &'static str {
         // Headless menus must never instantiate AppKit's shared panels.
         let visible = self.platform.is_some()

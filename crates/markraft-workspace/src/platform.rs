@@ -18,7 +18,6 @@ pub(crate) mod translation;
 
 use crate::locale::Message;
 use objc2::{
-    class,
     encode::{Encode, Encoding},
     msg_send,
     runtime::{AnyObject, Bool},
@@ -101,20 +100,6 @@ pub fn debug_info() -> String {
     )
 }
 
-/// Seconds this Mac's clock stands ahead of UTC, including whatever daylight saving is
-/// in force. Timestamps are stored in UTC; a date shown to the user has to be the one
-/// on their calendar, so it is read through this.
-pub fn local_utc_offset() -> i64 {
-    unsafe {
-        let zone: *mut AnyObject = msg_send![class!(NSTimeZone), localTimeZone];
-        if zone.is_null() {
-            return 0;
-        }
-        let seconds: isize = msg_send![zone, secondsFromGMT];
-        seconds as i64
-    }
-}
-
 /// The global shortcuts: one shows and hides the note, one opens a new note, and one
 /// opens today's daily note.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,51 +125,26 @@ pub enum PlatformEvent {
 }
 
 /// Host-owned application services. The embedded workspace never creates these.
+/// No method has a default: a service that an application leaves out must not
+/// compile into one that silently does nothing.
 pub trait PlatformServices {
-    fn set_locale(&mut self, _: &crate::locale::I18n) {}
-    fn configure_window(&mut self, _: &mut gpui::Window) -> Result<(), Message> {
-        Ok(())
-    }
-    fn set_shortcut(&mut self, _: Shortcut, _: &str) -> Result<(), Message> {
-        Ok(())
-    }
-    fn suspend_shortcuts(&mut self) {}
-    fn resume_shortcuts(&mut self) -> Result<(), Message> {
-        Ok(())
-    }
-    fn app_is_active(&self) -> bool {
-        true
-    }
-    fn set_always_on_top(&self, _: &gpui::Window, _: bool) -> Result<(), Message> {
-        Ok(())
-    }
-    fn set_all_spaces(&self, _: &gpui::Window, _: bool) -> Result<(), Message> {
-        Ok(())
-    }
-    fn launch_at_login_enabled(&self) -> bool {
-        false
-    }
-    fn set_launch_at_login(&mut self, _: bool) -> Result<(), Message> {
-        Ok(())
-    }
-    fn pointer_inside(&self, _: &gpui::Window) -> bool {
-        true
-    }
-    fn poll_events(&self) -> Vec<PlatformEvent> {
-        Vec::new()
-    }
-    fn show(&mut self, window: &mut gpui::Window, _: bool) -> Result<(), Message> {
-        window.activate_window();
-        Ok(())
-    }
-    fn hide(&mut self, _: &mut gpui::Window) -> Result<(), Message> {
-        Ok(())
-    }
-    fn is_visible(&self, _: &gpui::Window) -> bool {
-        true
-    }
-    fn return_to_previous_app(&self) {}
-    fn remember_frontmost_app(&mut self) {}
+    fn set_locale(&mut self, i18n: &crate::locale::I18n);
+    fn configure_window(&mut self, window: &mut gpui::Window) -> Result<(), Message>;
+    fn set_shortcut(&mut self, shortcut: Shortcut, keys: &str) -> Result<(), Message>;
+    fn suspend_shortcuts(&mut self);
+    fn resume_shortcuts(&mut self) -> Result<(), Message>;
+    fn app_is_active(&self) -> bool;
+    fn set_always_on_top(&self, window: &gpui::Window, on: bool) -> Result<(), Message>;
+    fn set_all_spaces(&self, window: &gpui::Window, on: bool) -> Result<(), Message>;
+    fn launch_at_login_enabled(&self) -> bool;
+    fn set_launch_at_login(&mut self, enabled: bool) -> Result<(), Message>;
+    fn pointer_inside(&self, window: &gpui::Window) -> bool;
+    fn poll_events(&self) -> Vec<PlatformEvent>;
+    fn show(&mut self, window: &mut gpui::Window, follow_pointer: bool) -> Result<(), Message>;
+    fn hide(&mut self, window: &mut gpui::Window) -> Result<(), Message>;
+    fn is_visible(&self, window: &gpui::Window) -> bool;
+    fn return_to_previous_app(&self);
+    fn remember_frontmost_app(&mut self);
 }
 pub type Platform = Box<dyn PlatformServices>;
 
@@ -267,8 +227,7 @@ fn fitted_window_frame(frame: NSRect, height: f64, visible: Option<NSRect>) -> N
     next
 }
 
-/// Move `native` to the display under the pointer, where it sits as far from that
-/// display's top-left as it did from its own, pulled back inside if it would overhang.
+/// The AppKit window that holds `window`'s view.
 fn native_window(window: &gpui::Window) -> Result<*mut AnyObject, Message> {
     let view = native_view(window)?;
     let native: *mut AnyObject = unsafe { msg_send![view, window] };

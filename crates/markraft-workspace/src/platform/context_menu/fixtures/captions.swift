@@ -1,5 +1,5 @@
 // Run on an English macOS installation:
-// swift crates/markraft-app/src/platform/context_menu/fixtures/captions.swift > crates/markraft-app/src/platform/context_menu/fixtures/captions.json
+// swift crates/markraft-workspace/src/platform/context_menu/fixtures/captions.swift > crates/markraft-workspace/src/platform/context_menu/fixtures/captions.json
 // Synthetic, offscreen NSTextView menus only; no popup, clipboard or preferences.
 import AppKit
 

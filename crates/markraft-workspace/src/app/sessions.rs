@@ -57,7 +57,7 @@ impl EditMessages {
 impl Session {
     pub(super) fn take_edit_error(
         &self,
-        cx: &mut Context<MarkraftApp>,
+        cx: &mut Context<WorkspaceView>,
     ) -> Option<(EditRejection, Option<Message>)> {
         let rejection = self.editor.update(cx, |editor, _| editor.take_edit_error());
         // Drain even when the editor reports no error or a different one. A
@@ -66,7 +66,7 @@ impl Session {
         rejection.map(|rejection| (rejection, message))
     }
 
-    pub(super) fn set_locale(&self, i18n: &crate::locale::I18n, cx: &mut Context<MarkraftApp>) {
+    pub(super) fn set_locale(&self, i18n: &crate::locale::I18n, cx: &mut Context<WorkspaceView>) {
         self.editor.update(cx, |editor, cx| {
             editor.set_messages(i18n.editor_messages(), cx);
             editor.set_placeholder(i18n.text("input.start-writing"), cx);
@@ -156,7 +156,7 @@ impl Sessions {
     }
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     pub(super) fn editor(&self) -> Entity<EditorView> {
         self.sessions
             .get(&self.notes.library.active_id)
@@ -522,14 +522,14 @@ impl MarkraftApp {
     }
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// Whether notes are files in a Markdown folder. File commands, such as
     /// reveal, rename on disk, and open in place, need this.
     pub(in crate::app) fn file_backed(&self) -> bool {
         self.notes
             .persistence
             .as_ref()
-            .is_some_and(|p| p.capabilities().file_operations)
+            .is_some_and(|p| p.file_backed())
     }
 
     /// Whether notes are records in a host backend, with no file behind them.
@@ -537,7 +537,7 @@ impl MarkraftApp {
         self.notes
             .persistence
             .as_ref()
-            .is_some_and(|p| !p.capabilities().file_operations)
+            .is_some_and(|p| !p.file_backed())
     }
 
     pub(in crate::app) fn remote_image_fetcher(&self) -> Option<markraft_gpui::RemoteImageFetcher> {

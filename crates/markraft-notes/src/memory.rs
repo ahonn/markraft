@@ -72,10 +72,7 @@ impl NotesBackend for MemoryBackend {
         self.0.lock().unwrap().notifier = Some(notify);
     }
     fn capabilities(&self) -> crate::BackendCapabilities {
-        crate::BackendCapabilities {
-            file_operations: false,
-            assets: true,
-        }
+        crate::BackendCapabilities { assets: true }
     }
     fn read_asset(&mut self, id: &crate::AssetId) -> Result<crate::Asset, BackendError> {
         let state = self.0.lock().unwrap();

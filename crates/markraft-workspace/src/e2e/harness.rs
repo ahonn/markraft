@@ -2,7 +2,7 @@
 //! are files in a temporary folder, or records in a host backend: a suite that
 //! says nothing about files runs over both, and reads what was stored by name.
 
-use crate::app::{MarkraftApp, bind_app_keys};
+use crate::app::{WorkspaceView, bind_app_keys};
 
 use crate::storage::Preferences;
 
@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub(crate) struct Harness<'a> {
-    pub(crate) app: Entity<MarkraftApp>,
+    pub(crate) app: Entity<WorkspaceView>,
     pub(crate) cx: &'a mut VisualTestContext,
     pub(crate) notes: PathBuf,
     /// The host backend that holds the notes, when they are not files.
@@ -79,16 +79,15 @@ pub(crate) fn open_with<'a>(
     configure(&mut preferences);
     let directory = store.directory().unwrap_or(&notes).to_owned();
     let (app, cx) = cx.add_window_view(|window, cx| {
-        MarkraftApp::new(
-            Some(directory),
-            settings,
-            Some(store),
-            library,
-            preferences,
-            None,
-            None,
-            Box::new(crate::updater::Disabled),
-            Box::new(crate::instance::NoRequests),
+        WorkspaceView::new(
+            crate::app::Parts::over_store(
+                Some(directory),
+                settings,
+                Some(store),
+                library,
+                preferences,
+                crate::app::Services::headless(),
+            ),
             window,
             cx,
         )
@@ -122,7 +121,7 @@ pub(crate) fn open_records<'a>(
     let mut preferences = Preferences::default();
     configure(&mut preferences);
     let options = crate::WorkspaceOptions {
-        preferences,
+        preferences: preferences.editor(),
         ..Default::default()
     };
     let mut harness = open_backend_with(cx, Box::new(backend.clone()), options);
@@ -262,16 +261,54 @@ impl Harness<'_> {
         text
     }
 
-    /// What storage holds now for the note named `name`: nothing when there is none.
-    pub(crate) fn stored(&self, name: &str) -> String {
-        match &self.records {
+    /// Every stored note as its name and its text, in the order of the names.
+    /// This is the one place that reads either kind of storage whole.
+    fn stored_notes(&self) -> Vec<(String, String)> {
+        let mut notes: Vec<(String, String)> = match &self.records {
             Some(backend) => backend
                 .notes()
                 .into_iter()
-                .find(|note| record_name(note) == name)
-                .map(|note| note.markdown)
+                .map(|note| (record_name(&note), note.markdown))
+                .collect(),
+            None => std::fs::read_dir(&self.notes)
+                .map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+                        .map(|path| {
+                            let name = path.file_name().expect("a file name");
+                            let text = std::fs::read_to_string(&path).expect("a note file");
+                            (name.to_string_lossy().into_owned(), text)
+                        })
+                        .collect()
+                })
                 .unwrap_or_default(),
+        };
+        notes.sort();
+        notes
+    }
+
+    /// The record that a host backend holds under `name`.
+    fn record(backend: &MemoryBackend, name: &str) -> markraft_notes::BackendNote {
+        backend
+            .notes()
+            .into_iter()
+            .find(|note| record_name(note) == name)
+            .unwrap_or_else(|| panic!("no stored note is named {name}"))
+    }
+
+    /// What storage holds now for the note named `name`: nothing when there is none.
+    pub(crate) fn stored(&self, name: &str) -> String {
+        match &self.records {
+            // A folder is read by path: the note may be in a folder inside it.
             None => std::fs::read_to_string(self.notes.join(name)).unwrap_or_default(),
+            Some(_) => self
+                .stored_notes()
+                .into_iter()
+                .find(|(stored, _)| stored == name)
+                .map(|(_, text)| text)
+                .unwrap_or_default(),
         }
     }
 
@@ -279,14 +316,7 @@ impl Harness<'_> {
     /// learns of it at its next look at storage.
     pub(crate) fn write_outside(&mut self, name: &str, text: &str) {
         match &self.records {
-            Some(backend) => {
-                let note = backend
-                    .notes()
-                    .into_iter()
-                    .find(|note| record_name(note) == name)
-                    .expect("a stored note to change");
-                backend.rewrite(&note.id, text);
-            }
+            Some(backend) => backend.rewrite(&Self::record(backend, name).id, text),
             None => std::fs::write(self.notes.join(name), text).expect("rewrite the note"),
         }
     }
@@ -298,12 +328,11 @@ impl Harness<'_> {
         let title = name.strip_suffix(".md").unwrap_or(name);
         match &self.records {
             Some(backend) => {
-                let note = backend
-                    .notes()
-                    .into_iter()
-                    .find(|note| record_name(note) == name)
-                    .expect("a stored note to link to");
-                format!("[[note:{}|{title}]]", note.id)
+                let note = Self::record(backend, name);
+                format!(
+                    "[[{}|{title}]]",
+                    crate::storage::Note::record_link(note.id.as_str())
+                )
             }
             None => format!("[[{title}]]"),
         }
@@ -331,22 +360,10 @@ impl Harness<'_> {
 
     /// Every stored note, by name.
     pub(crate) fn files(&self) -> Vec<String> {
-        if let Some(backend) = &self.records {
-            let mut names: Vec<_> = backend.notes().iter().map(record_name).collect();
-            names.sort();
-            return names;
-        }
-        let mut names: Vec<_> = std::fs::read_dir(&self.notes)
-            .map(|entries| {
-                entries
-                    .filter_map(|entry| entry.ok())
-                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                    .filter(|name| name.ends_with(".md"))
-                    .collect()
-            })
-            .unwrap_or_default();
-        names.sort();
-        names
+        self.stored_notes()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
     }
 
     /// Run the app until `ready` holds or five seconds pass: work the vault's
@@ -489,32 +506,9 @@ impl Harness<'_> {
 
     /// The stored notes other than `name`, with their text.
     pub(crate) fn other_files(&self, name: &str) -> Vec<(String, String)> {
-        if let Some(backend) = &self.records {
-            let mut out: Vec<_> = backend
-                .notes()
-                .into_iter()
-                .map(|note| (record_name(&note), note.markdown))
-                .filter(|(stored, _)| stored != name)
-                .collect();
-            out.sort();
-            return out;
-        }
-        let mut out: Vec<(String, String)> = std::fs::read_dir(&self.notes)
-            .expect("the notes folder")
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
-            .filter(|path| path.file_name().is_some_and(|file| file != name))
-            .map(|path| {
-                let text = std::fs::read_to_string(&path).expect("a note file");
-                (
-                    path.file_name().unwrap().to_string_lossy().into_owned(),
-                    text,
-                )
-            })
-            .collect();
-        out.sort();
-        out
+        let mut notes = self.stored_notes();
+        notes.retain(|(stored, _)| stored != name);
+        notes
     }
 }
 
@@ -540,7 +534,7 @@ fn open_backend_with(
         bind_app_keys(cx);
     });
     let (app, cx) = cx.add_window_view(|window, cx| {
-        MarkraftApp::with_backend(backend, options, window, cx).unwrap()
+        WorkspaceView::with_backend(backend, options, window, cx).unwrap()
     });
     cx.update(|window, cx| app.update(cx, |app, cx| app.test_focus_editor(window, cx)));
     cx.run_until_parked();

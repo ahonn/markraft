@@ -4,7 +4,7 @@ const WIDTH: Pixels = px(280.);
 const HEIGHT: Pixels = px(40.);
 const GAP: Pixels = px(6.);
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// The pill floating above the linked or selected text.
     pub(super) fn link_pill(
         &self,

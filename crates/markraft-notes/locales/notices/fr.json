@@ -16,6 +16,7 @@
   "notice.single-folder": "Déposez un seul dossier pour l’ouvrir.",
   "notice.open-note-images": "Ouvrez une note pour y déposer des images.",
   "notice.folder-before-files": "Ouvrez un dossier de notes avant d’ouvrir des fichiers.",
+  "notice.host-storage-folder": "Cet espace de travail conserve ses notes dans le stockage de l’app hôte et ne peut pas passer à un dossier.",
   "notice.folder-new-location": "Ouvrez un dossier pour choisir l’emplacement des nouvelles notes.",
   "notice.choose-inside-folder": "Choisissez un dossier situé dans le dossier de notes.",
   "notice.folder-changed": "Le dossier de notes a changé ; choisissez à nouveau l’emplacement.",

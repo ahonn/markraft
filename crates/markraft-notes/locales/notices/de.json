@@ -16,6 +16,7 @@
   "notice.single-folder": "Ziehe einen einzelnen Ordner hierher, um ihn zu öffnen.",
   "notice.open-note-images": "Öffne eine Notiz, um Bilder hineinzuziehen.",
   "notice.folder-before-files": "Öffne einen Notizenordner, bevor du Dateien öffnest.",
+  "notice.host-storage-folder": "Dieser Arbeitsbereich speichert seine Notizen im Speicher der Host-App und kann nicht zu einem Ordner wechseln.",
   "notice.folder-new-location": "Öffne einen Ordner, um den Ort für neue Notizen zu wählen.",
   "notice.choose-inside-folder": "Wähle einen Ordner innerhalb des Notizenordners.",
   "notice.folder-changed": "Der Notizenordner wurde geändert; wähle den Ort erneut.",

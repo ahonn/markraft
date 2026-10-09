@@ -319,10 +319,7 @@ impl NotesBackend for SqliteNotesBackend {
     }
 
     fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities {
-            file_operations: false,
-            assets: true,
-        }
+        BackendCapabilities { assets: true }
     }
 
     fn save_workspace(

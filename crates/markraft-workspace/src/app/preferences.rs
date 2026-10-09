@@ -1,19 +1,19 @@
 //! How a changed preference reaches what reads it.
 //!
-//! The settings window speaks in [`Pref`]s; [`MarkraftApp::set_preference`]
+//! The settings window speaks in [`Pref`]s; [`WorkspaceView::set_preference`]
 //! writes one into the application's [`Preferences`] and
-//! [`MarkraftApp::apply_preferences`] carries whatever differs from before to
+//! [`WorkspaceView::apply_preferences`] carries whatever differs from before to
 //! the editors, the platform and the Markdown writer — the one place that knows
 //! which field is read where.
 
 use super::ui::CheckTrigger;
-use super::{MarkraftApp, apply_markdown_style};
+use super::{WorkspaceView, apply_markdown_style};
 use crate::EditorLocaleExt;
 use crate::platform::Shortcut;
 use crate::storage::{Pref, Preferences};
 use gpui::{Context, Window};
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// Set one preference and carry it to whatever reads it.
     pub(in crate::app) fn set_preference(
         &mut self,
@@ -140,10 +140,9 @@ impl MarkraftApp {
             apply_markdown_style(&self.house, &now);
             self.refresh_slash_commands();
         }
-        if before != &self.preferences {
-            cx.emit(crate::host::WorkspaceEvent::OptionsChanged(
-                self.preferences.clone(),
-            ));
+        let editor = self.preferences.editor();
+        if before.editor() != editor {
+            cx.emit(crate::host::WorkspaceEvent::OptionsChanged(editor));
         }
     }
 

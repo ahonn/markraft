@@ -267,7 +267,7 @@ impl TypeaheadProvider for SlashProvider {
     }
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     pub(in crate::app) fn refresh_slash_commands(&self) {
         self.slash_commands.replace(SlashProvider::new(
             self.action_items(Caret::default()),

@@ -109,7 +109,7 @@ fn retarget(
     qualified_target(target, path, root?).filter(|spelled| reaches(spelled, from.1, after))
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     fn places(&self) -> Places {
         self.notes
             .library

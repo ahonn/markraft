@@ -231,7 +231,7 @@ const ACTION_ROW_HEIGHT: Pixels = px(36.);
 /// the one on the user's calendar, so both ends of a comparison are shifted before they
 /// are cut into days.
 fn local(milliseconds: u64) -> u64 {
-    milliseconds.saturating_add_signed(crate::platform::local_utc_offset() * 1000)
+    milliseconds.saturating_add_signed(markraft_notes::local_utc_offset() * 1000)
 }
 
 /// When a note was last written, as the user would say it. Past a week it is a date,
@@ -354,7 +354,7 @@ fn intent_icon(intent: &Intent) -> Icon {
     }
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     fn intent(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
         // The reload replaces the note within moments; an action taken meanwhile
         // would land on content about to be discarded.
@@ -913,7 +913,7 @@ impl MarkraftApp {
             .child(self.query_field(cx))
     }
     /// The input editor owned by the current surface. It carries the name
-    /// of the surface it is serving, set with its text in [`MarkraftApp::set_query`], so
+    /// of the surface it is serving, set with its text in [`WorkspaceView::set_query`], so
     /// this is only the box around it.
     fn query_field(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         div()
@@ -2026,7 +2026,7 @@ impl MarkraftApp {
             .child(contents)
     }
 }
-impl Render for MarkraftApp {
+impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.interaction.code_language().is_some() && self.code_language.take_focus() {
             window.focus(&self.query().focus_handle(cx), cx);
@@ -2054,7 +2054,7 @@ impl Render for MarkraftApp {
         // With no folder open there is no note to name, and a stray "Untitled"
         // over the gate reads as a bug rather than as a state.
         let unopened = self.notes.persistence.is_none();
-        if self.platform.is_some() {
+        if !self.embedded {
             window.set_window_title(if unopened { "Markraft" } else { &title });
         }
         let style = notes_style(self.dark);
@@ -2063,7 +2063,7 @@ impl Render for MarkraftApp {
         // The window outlines itself while something droppable is over it.
         let accent = style.marker;
         let root = div()
-            .key_context("MarkraftApp")
+            .key_context("WorkspaceView")
             .track_focus(self.ring.panel())
             .capture_action(cx.listener(|this, _: &markraft_gpui::Up, w, cx| {
                 if this.panel_key("up", w, cx) {

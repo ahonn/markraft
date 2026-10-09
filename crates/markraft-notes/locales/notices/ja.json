@@ -16,6 +16,7 @@
   "notice.single-folder": "開くにはフォルダを1つだけドロップしてください。",
   "notice.open-note-images": "画像をドロップするにはノートを開いてください。",
   "notice.folder-before-files": "ファイルを開く前にノートフォルダを開いてください。",
+  "notice.host-storage-folder": "このワークスペースはホストアプリのストレージにノートを保存しているため、フォルダに切り替えられません。",
   "notice.folder-new-location": "新規ノートの保存先を選ぶにはフォルダを開いてください。",
   "notice.choose-inside-folder": "ノートフォルダ内のフォルダを選択してください。",
   "notice.folder-changed": "ノートフォルダが変更されました。場所を選択し直してください。",

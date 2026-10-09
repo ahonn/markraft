@@ -118,7 +118,7 @@ pub struct WorkspaceView {
     slash_commands: ui::slash::SlashCommands,
     notes: Notes,
     /// This Mac's preferences, kept in the settings file outside the notes folder;
-    /// the settings window changes them and [`MarkraftApp::apply_preferences`]
+    /// the settings window changes them and [`WorkspaceView::apply_preferences`]
     /// carries each change to whatever reads it.
     preferences: Preferences,
     /// The house style every editor's codecs and formatting commands were
@@ -127,7 +127,9 @@ pub struct WorkspaceView {
     /// The notes folder, once one has been chosen.
     path: Option<PathBuf>,
     settings_path: PathBuf,
-    host_settings: bool,
+    /// A host owns the window and the settings. The view then leaves the window's
+    /// title, size and focus alone and keeps no settings file.
+    embedded: bool,
     file_access: crate::file_access::FileAccess,
     platform: Option<Platform>,
     updater: Updater,
@@ -208,61 +210,100 @@ pub struct WorkspaceView {
     remote_fetcher: Option<markraft_gpui::RemoteImageFetcher>,
     closing: bool,
 }
-pub type MarkraftApp = WorkspaceView;
 
-impl MarkraftApp {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+/// Who provides the process services around a workspace view.
+pub(crate) enum Services {
+    /// A host owns the window: its title, its size and where the keyboard goes.
+    Embedded,
+    /// The standalone application owns them. `platform` is `None` in the headless
+    /// tests, which have no menu bar, shortcut or native window, and an error
+    /// when the application could not start them.
+    Standalone {
+        platform: Option<Result<Platform, Message>>,
+        updater: Updater,
+        instance: Instance,
+    },
+}
+impl Services {
+    /// The standalone application as the headless tests run it.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn headless() -> Self {
+        Self::Standalone {
+            platform: None,
+            updater: Box::new(crate::updater::Disabled),
+            instance: Box::new(crate::instance::NoRequests),
+        }
+    }
+}
+
+/// What a workspace view is built from, apart from its window.
+pub(crate) struct Parts {
+    path: Option<PathBuf>,
+    settings_path: PathBuf,
+    notes: Notes,
+    house: markraft_commonmark::HouseStyleHandle,
+    preferences: Preferences,
+    error: Option<Message>,
+    services: Services,
+}
+impl Parts {
+    /// The parts of a view over a Markdown folder. `store` is `None` when the
+    /// folder could not be opened, and the view then says so.
+    pub(crate) fn over_store(
         path: Option<PathBuf>,
         settings_path: PathBuf,
         store: Option<Store>,
         library: Library,
         preferences: Preferences,
-        error: Option<Message>,
-        // None runs without the menu bar, the shortcuts and the native window: the
-        // headless tests, which have none of them.
-        platform: Option<Result<Platform, Message>>,
-        updater: Updater,
-        instance: Instance,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        services: Services,
     ) -> Self {
         let house = markraft_commonmark::HouseStyleHandle::default();
-        let notes = Notes {
-            library,
-            persistence: store.map(|store| Self::start_persistence(store, house.clone())),
-        };
-        Self::new_with_session(
+        let persistence = store.map(|store| WorkspaceView::start_persistence(store, house.clone()));
+        Self {
+            path,
+            settings_path,
+            notes: Notes {
+                library,
+                persistence,
+            },
+            house,
+            preferences,
+            error: None,
+            services,
+        }
+    }
+    /// Show `error`, found on the way to the first window, once the view is up.
+    pub(crate) fn with_error(mut self, error: Option<Message>) -> Self {
+        self.error = error;
+        self
+    }
+}
+
+impl WorkspaceView {
+    pub(crate) fn new(parts: Parts, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let Parts {
             path,
             settings_path,
             notes,
             house,
             preferences,
             error,
-            platform,
-            updater,
-            instance,
-            window,
-            cx,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn new_with_session(
-        path: Option<PathBuf>,
-        settings_path: PathBuf,
-        notes: Notes,
-        house: markraft_commonmark::HouseStyleHandle,
-        preferences: Preferences,
-        error: Option<Message>,
-        // None runs without the menu bar, the shortcuts and the native window: the
-        // headless tests, which have none of them.
-        platform: Option<Result<Platform, Message>>,
-        updater: Updater,
-        instance: Instance,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+            services,
+        } = parts;
+        let (platform, updater, instance, embedded): (_, Updater, Instance, _) = match services {
+            Services::Embedded => (
+                None,
+                Box::new(crate::updater::Disabled),
+                Box::new(crate::instance::NoRequests),
+                true,
+            ),
+            Services::Standalone {
+                platform,
+                updater,
+                instance,
+            } => (platform, updater, instance, false),
+        };
         let path = path.map(|path| path.canonicalize().unwrap_or(path));
         let i18n = crate::locale::I18n::for_preference(&preferences.language);
 
@@ -367,7 +408,7 @@ impl MarkraftApp {
             house,
             path,
             settings_path,
-            host_settings: true,
+            embedded,
             file_access: Default::default(),
             platform,
             updater,
@@ -418,7 +459,7 @@ impl MarkraftApp {
         app.refresh_slash_commands();
         app.ensure_session(window, cx);
         app.watch_persistence(window, cx);
-        if app.platform.is_some() {
+        if !app.embedded {
             if app.notes.persistence.is_some() {
                 app.focus_editor(window, cx);
             } else {
@@ -511,12 +552,12 @@ impl MarkraftApp {
                     Ok(()) => {
                         // Editing stays available while the recovery copy is written.
                         // Recover any newer local content before advancing the baseline.
-                        if this.notes.library.note(&id).is_some_and(|now| {
-                            now.document != local.document
-                                || now.title_override != local.title_override
-                                || now.logical_key != local.logical_key
-                                || now.pinned != local.pinned
-                        }) {
+                        if this
+                            .notes
+                            .library
+                            .note(&id)
+                            .is_some_and(|now| !now.same_record(&local))
+                        {
                             this.apply_external(vec![change], window, cx);
                         } else {
                             this.adopt_external(vec![change], window, cx);
@@ -561,12 +602,9 @@ impl MarkraftApp {
                     // The bytes on disk still say what they said: only the file's
                     // permissions moved. Keep the document the user is looking at
                     // and take the new read-only state.
-                    let permissions_only = previous.as_ref().is_some_and(|previous| {
-                        previous.document == note.document
-                            && previous.title_override == note.title_override
-                            && previous.logical_key == note.logical_key
-                            && previous.pinned == note.pinned
-                    });
+                    let permissions_only = previous
+                        .as_ref()
+                        .is_some_and(|previous| previous.same_record(&note));
                     if permissions_only && local.is_some() {
                         self.notes
                             .library
@@ -917,7 +955,7 @@ impl MarkraftApp {
         if self.feedback.tick() {
             cx.notify();
         }
-        let auto_height = self.platform.is_some()
+        let auto_height = !self.embedded
             && self.interaction.panel() == Panel::Editor
             && self.preferences.auto_height
             && self.notes.persistence.is_some();
@@ -1194,7 +1232,7 @@ impl MarkraftApp {
         }
     }
     /// Open what a clicked wiki link names, exactly as selecting it in Browse
-    /// would — [`MarkraftApp::select_note`] is what `Intent::Select` runs, so the
+    /// would — [`WorkspaceView::select_note`] is what `Intent::Select` runs, so the
     /// session, the focus and the panel all end up where Browse leaves them.
     ///
     /// A target that names nothing is said out loud rather than created: a file
@@ -1215,7 +1253,7 @@ impl MarkraftApp {
         }
         if self.record_backed() {
             let mut matches = self.notes.library.notes.iter().filter(|note| {
-                page.strip_prefix("note:").map_or_else(
+                crate::storage::Note::linked_record(page).map_or_else(
                     || note.title().eq_ignore_ascii_case(page),
                     |id| note.id == id,
                 )
@@ -1754,10 +1792,7 @@ impl MarkraftApp {
     /// and Retry can recover an empty path.
     fn open_folder(&mut self, directory: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.record_backed() {
-            self.inform(
-                "This workspace uses host-owned storage and cannot switch to a folder.",
-                cx,
-            );
+            self.inform(Message::new("notice.host-storage-folder"), cx);
             return;
         }
         if self.is_reloading() {
@@ -1785,10 +1820,10 @@ impl MarkraftApp {
         let opening = self.io.opening;
         let settings_path = self.settings_path.clone();
         let house = self.house.clone();
-        let host_settings = self.host_settings;
+        let embedded = self.embedded;
         let task = cx.background_executor().spawn(async move {
             let directory = crate::storage::ensure_notes_folder(&directory)?;
-            if !host_settings {
+            if embedded {
                 let state = settings_path
                     .parent()
                     .unwrap_or(std::path::Path::new("."))
@@ -1832,6 +1867,13 @@ impl MarkraftApp {
         self.write_copy(true, window, cx);
     }
 
+    /// Save As, which the window offers only beside a failed save.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn test_save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_as(window, cx);
+    }
+
     fn write_copy(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_documents(cx);
         let Some(persistence) = &self.notes.persistence else {
@@ -1841,6 +1883,7 @@ impl MarkraftApp {
         let snapshot = self.notes.library.active_note().clone();
         let original = snapshot.clone();
         let activation = self.io.opening;
+        let epoch = self.io.epoch;
         let filename = snapshot.file_name("md");
         let rendering = persistence.snapshot_async(
             snapshot,
@@ -1851,76 +1894,102 @@ impl MarkraftApp {
         let prompt = cx.prompt_for_new_path(&directory, Some(&filename));
         let prompt = self.file_panel(prompt, window, cx);
         let executor = cx.background_executor().clone();
-        self.run_io(
-            async move {
-                let document = rendering.await?.markdown;
-                let Some(path) = prompt
-                    .await
-                    .map_err(|e| StoreError::from(e.to_string()))?
-                    .map_err(|e| StoreError::from(e.to_string()))?
-                else {
-                    return Ok(None);
-                };
-                executor
-                    .spawn(async move {
-                        use std::io::Write;
-                        let mut file = std::fs::OpenOptions::new()
-                            .write(true)
-                            .create_new(true)
-                            .open(&path)
-                            .map_err(|e| StoreError::from(e.to_string()))?;
-                        file.write_all(document.as_bytes())
-                            .and_then(|_| file.sync_all())
-                            .map_err(|e| StoreError::from(e.to_string()))?;
-                        Ok(Some(path.canonicalize().unwrap_or(path)))
+        // Only capturing the note is workspace I/O. The save panel takes as long as
+        // the person takes, and must not hold up a reload, a rename or a close.
+        self.run_io(rendering, window, cx, move |_, rendered, window, cx| {
+            cx.spawn_in(window, async move |this, cx| {
+                let written: Result<Option<PathBuf>, StoreError> = async {
+                    let document = rendered?.markdown;
+                    let Some(path) = prompt
+                        .await
+                        .map_err(|e| StoreError::from(e.to_string()))?
+                        .map_err(|e| StoreError::from(e.to_string()))?
+                    else {
+                        return Ok(None);
+                    };
+                    executor
+                        .spawn(async move {
+                            use std::io::Write;
+                            let mut file = std::fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .open(&path)
+                                .map_err(|e| StoreError::from(e.to_string()))?;
+                            file.write_all(document.as_bytes())
+                                .and_then(|_| file.sync_all())
+                                .map_err(|e| StoreError::from(e.to_string()))?;
+                            Ok(Some(path.canonicalize().unwrap_or(path)))
+                        })
+                        .await
+                }
+                .await;
+                let _ = cx.update(|window, cx| {
+                    this.update(cx, |this, cx| {
+                        // The folder this copy was asked from has been replaced.
+                        if this.io.epoch != epoch {
+                            return;
+                        }
+                        match written {
+                            Ok(Some(path)) if open => {
+                                this.open_copy(path, original, activation, window, cx)
+                            }
+                            Ok(Some(_) | None) => {}
+                            Err(error) => this.feedback.set_error(error),
+                        }
+                        cx.notify();
                     })
-                    .await
-            },
+                });
+            })
+            .detach();
+        });
+    }
+
+    /// Open the copy just written at `path` in place of `original`, the note it
+    /// was made from, unless the person has moved on to another note since.
+    fn open_copy(
+        &mut self,
+        path: PathBuf,
+        original: crate::storage::Note,
+        activation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(persistence) = &self.notes.persistence else {
+            return;
+        };
+        let future = persistence.open_file_async(path);
+        self.run_io(
+            future,
             window,
             cx,
             move |this, result, window, cx| match result {
-                Ok(Some(path)) if open => {
-                    let Some(persistence) = &this.notes.persistence else {
-                        return;
-                    };
-                    let future = persistence.open_file_async(path);
-                    this.run_io(
-                        future,
-                        window,
-                        cx,
-                        move |this, result, window, cx| match result {
-                            Ok(note) => {
-                                let id = note.id.clone();
-                                if this.notes.library.note(&id).is_none() {
-                                    this.notes.library.adopt(note);
-                                }
-                                if this.io.opening == activation
-                                    && this.notes.library.active_id == original.id
-                                    && this
-                                        .notes
-                                        .library
-                                        .note(&original.id)
-                                        .is_some_and(|now| now.document == original.document)
-                                {
-                                    this.notes.library.select(&id);
-                                }
-                                if original.id != id
-                                    && this.notes.library.note(&original.id).is_some_and(|now| {
-                                        now.path.is_none() && now.document == original.document
-                                    })
-                                {
-                                    this.notes.library.delete(&original.id);
-                                    this.sessions.remove(&original.id);
-                                }
-                                // The title bar names the new file.
-                                this.ensure_session(window, cx);
-                                this.notes_changed(cx);
-                            }
-                            Err(error) => this.feedback.set_error(error),
-                        },
-                    );
+                Ok(note) => {
+                    let id = note.id.clone();
+                    if this.notes.library.note(&id).is_none() {
+                        this.notes.library.adopt(note);
+                    }
+                    if this.io.opening == activation
+                        && this.notes.library.active_id == original.id
+                        && this
+                            .notes
+                            .library
+                            .note(&original.id)
+                            .is_some_and(|now| now.document == original.document)
+                    {
+                        this.notes.library.select(&id);
+                    }
+                    if original.id != id
+                        && this.notes.library.note(&original.id).is_some_and(|now| {
+                            now.path.is_none() && now.document == original.document
+                        })
+                    {
+                        this.notes.library.delete(&original.id);
+                        this.sessions.remove(&original.id);
+                    }
+                    // The title bar names the new file.
+                    this.ensure_session(window, cx);
+                    this.notes_changed(cx);
                 }
-                Ok(Some(_) | None) => {}
                 Err(error) => this.feedback.set_error(error),
             },
         );
@@ -2835,24 +2904,24 @@ fn query_style(dark: bool) -> EditorStyle {
 }
 pub fn bind_app_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("up", markraft_gpui::Up, Some("MarkraftApp")),
-        KeyBinding::new("down", markraft_gpui::Down, Some("MarkraftApp")),
-        KeyBinding::new("enter", markraft_gpui::Enter, Some("MarkraftApp")),
+        KeyBinding::new("up", markraft_gpui::Up, Some("WorkspaceView")),
+        KeyBinding::new("down", markraft_gpui::Down, Some("WorkspaceView")),
+        KeyBinding::new("enter", markraft_gpui::Enter, Some("WorkspaceView")),
         // Tab walks the open panel's controls. The editor binds the same keys in its own,
         // deeper context, so a note still indents; the app intercepts them in the capture
         // phase and only keeps them while a panel or popover is open.
-        KeyBinding::new("tab", markraft_gpui::Indent, Some("MarkraftApp")),
-        KeyBinding::new("shift-tab", markraft_gpui::Outdent, Some("MarkraftApp")),
-        KeyBinding::new("cmd-s", Save, Some("MarkraftApp")),
-        KeyBinding::new("cmd-shift-c", CopyMarkdown, Some("MarkraftApp")),
-        KeyBinding::new("cmd-q", Quit, Some("MarkraftApp")),
-        KeyBinding::new("escape", Hide, Some("MarkraftApp")),
+        KeyBinding::new("tab", markraft_gpui::Indent, Some("WorkspaceView")),
+        KeyBinding::new("shift-tab", markraft_gpui::Outdent, Some("WorkspaceView")),
+        KeyBinding::new("cmd-s", Save, Some("WorkspaceView")),
+        KeyBinding::new("cmd-shift-c", CopyMarkdown, Some("WorkspaceView")),
+        KeyBinding::new("cmd-q", Quit, Some("WorkspaceView")),
+        KeyBinding::new("escape", Hide, Some("WorkspaceView")),
         // ⌘W runs Hide Window, skipping Escape's dismiss cascade,
         // so vim users have a key besides `:q`.
-        KeyBinding::new("cmd-w", HideWindow, Some("MarkraftApp")),
-        KeyBinding::new("cmd-n", NewNote, Some("MarkraftApp")),
-        KeyBinding::new("cmd-p", Browse, Some("MarkraftApp")),
-        KeyBinding::new("cmd-k", Actions, Some("MarkraftApp")),
+        KeyBinding::new("cmd-w", HideWindow, Some("WorkspaceView")),
+        KeyBinding::new("cmd-n", NewNote, Some("WorkspaceView")),
+        KeyBinding::new("cmd-p", Browse, Some("WorkspaceView")),
+        KeyBinding::new("cmd-k", Actions, Some("WorkspaceView")),
         // Only where vim reads keys as commands and has nothing half-typed, so `:` is
         // still text in Insert mode and `d:` is no command line.
         KeyBinding::new(
@@ -2860,11 +2929,11 @@ pub fn bind_app_keys(cx: &mut App) {
             ExCommand,
             Some("Markraft && vim_mode == normal && !vim_pending"),
         ),
-        KeyBinding::new("cmd-,", Settings, Some("MarkraftApp")),
-        KeyBinding::new("cmd-l", Link, Some("MarkraftApp")),
-        KeyBinding::new("cmd-shift-e", Export, Some("MarkraftApp")),
-        KeyBinding::new("cmd-o", OpenMarkdown, Some("MarkraftApp")),
-        KeyBinding::new("cmd-f", Find, Some("MarkraftApp")),
+        KeyBinding::new("cmd-,", Settings, Some("WorkspaceView")),
+        KeyBinding::new("cmd-l", Link, Some("WorkspaceView")),
+        KeyBinding::new("cmd-shift-e", Export, Some("WorkspaceView")),
+        KeyBinding::new("cmd-o", OpenMarkdown, Some("WorkspaceView")),
+        KeyBinding::new("cmd-f", Find, Some("WorkspaceView")),
         KeyBinding::new(
             "/",
             VimFind,
@@ -2880,20 +2949,20 @@ pub fn bind_app_keys(cx: &mut App) {
             VimFindPrevious,
             Some("Markraft && vim_mode == normal && !vim_pending"),
         ),
-        KeyBinding::new("cmd-g", FindNext, Some("MarkraftApp")),
-        KeyBinding::new("cmd-shift-g", FindPrevious, Some("MarkraftApp")),
-        KeyBinding::new("cmd-=", IncreaseTextSize, Some("MarkraftApp")),
-        KeyBinding::new("cmd-shift-=", IncreaseTextSize, Some("MarkraftApp")),
-        KeyBinding::new("cmd--", DecreaseTextSize, Some("MarkraftApp")),
+        KeyBinding::new("cmd-g", FindNext, Some("WorkspaceView")),
+        KeyBinding::new("cmd-shift-g", FindPrevious, Some("WorkspaceView")),
+        KeyBinding::new("cmd-=", IncreaseTextSize, Some("WorkspaceView")),
+        KeyBinding::new("cmd-shift-=", IncreaseTextSize, Some("WorkspaceView")),
+        KeyBinding::new("cmd--", DecreaseTextSize, Some("WorkspaceView")),
         // ⌘0 makes a paragraph. GPUI folds Shift into a digit on
         // macOS, so ⌘⇧0 arrives as ⌘).
-        KeyBinding::new("cmd-)", ResetTextSize, Some("MarkraftApp")),
-        KeyBinding::new("cmd-shift-0", ResetTextSize, Some("MarkraftApp")),
+        KeyBinding::new("cmd-)", ResetTextSize, Some("WorkspaceView")),
+        KeyBinding::new("cmd-shift-0", ResetTextSize, Some("WorkspaceView")),
     ]);
     ui::settings::bind_keys(cx);
 }
 
-impl gpui::EventEmitter<crate::host::WorkspaceEvent> for MarkraftApp {}
+impl gpui::EventEmitter<crate::host::WorkspaceEvent> for WorkspaceView {}
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

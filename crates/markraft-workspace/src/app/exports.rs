@@ -1,7 +1,7 @@
 //! The note on screen, taken somewhere else: a file (Markdown, HTML or PDF),
 //! paper, the clipboard as rich text, or an Obsidian vault.
 //!
-//! Every way out takes one road. [`MarkraftApp::deliver`] captures the
+//! Every way out takes one road. [`WorkspaceView::deliver`] captures the
 //! committed note ([`ExportInput`]), asks for a file where the way out writes
 //! one, produces the result on a background thread, and hands it back on the
 //! UI thread. A way out says only what it produces and what it does with it.
@@ -90,7 +90,7 @@ impl ExportInput {
     }
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// The active note as an export reads it, once the persistence worker has
     /// captured it. Without a folder there is nothing on disk to capture, and
     /// the note is taken as it stands.

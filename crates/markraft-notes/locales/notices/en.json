@@ -16,6 +16,7 @@
   "notice.single-folder": "Drop a single folder to open it.",
   "notice.open-note-images": "Open a note to drop images into.",
   "notice.folder-before-files": "Open a notes folder before opening files.",
+  "notice.host-storage-folder": "This workspace keeps its notes in host-owned storage and cannot switch to a folder.",
   "notice.folder-new-location": "Open a folder to choose where new notes go.",
   "notice.choose-inside-folder": "Choose a folder inside the notes folder.",
   "notice.folder-changed": "The notes folder changed; choose the location again.",

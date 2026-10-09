@@ -35,9 +35,12 @@ mod platform;
 internal!(fs, persistence, storage, vault);
 pub use fs::StoreError;
 pub use library::*;
+#[cfg(feature = "unstable-internals")]
+#[doc(hidden)]
+pub use platform::local_utc_offset;
+// The settings of the standalone application's own window stay in `storage`.
 pub use storage::{
-    AttachmentPolicy, BulletMarker, CodeFence, EditorFont, EmphasisMarker, HardBreakStyle,
-    ImageNaming, LineHeight, LineWidth, NoteNaming, OrderedDelimiter, Preferences,
-    SettingsWindowPlacement, Summon, TabKey, TextCheckingPreferences, TextCheckingSetting,
-    WorkspaceSettings,
+    AttachmentPolicy, BulletMarker, CodeFence, EditorFont, EditorPreferences, EmphasisMarker,
+    HardBreakStyle, ImageNaming, LineHeight, LineWidth, NoteNaming, OrderedDelimiter, TabKey,
+    TextCheckingPreferences, TextCheckingSetting, WorkspaceSettings,
 };

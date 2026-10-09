@@ -98,7 +98,7 @@ fn image_path(folder: &Path, document: &Path, naming: ImageNaming, extension: &s
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "image".to_owned());
             let local = crate::storage::timestamp()
-                .saturating_add_signed(crate::platform::local_utc_offset() * 1000);
+                .saturating_add_signed(markraft_notes::local_utc_offset() * 1000);
             let stamp = time_stamp(local);
             // A note named for the day it was made already says the date.
             let (date, time) = stamp.split_once(' ').unwrap_or((&stamp, ""));
@@ -704,7 +704,7 @@ mod tests {
         );
         // A note named for today keeps the date once: the image adds only the time.
         let local = crate::storage::timestamp()
-            .saturating_add_signed(crate::platform::local_utc_offset() * 1000);
+            .saturating_add_signed(markraft_notes::local_utc_offset() * 1000);
         let today = time_stamp(local)[..10].to_owned();
         let dated = folder.path().join(format!("{today} 09.53.md"));
         let image = image_path(folder.path(), &dated, ImageNaming::NoteAndDate, "png");

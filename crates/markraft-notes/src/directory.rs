@@ -110,7 +110,6 @@ pub(crate) struct MarkdownDirectory {
     state: PathBuf,
     settings_path: PathBuf,
     persist_settings: bool,
-    _directory_lock: File,
     _lock: File,
     manifest: Manifest,
     manifest_bytes: Vec<u8>,
@@ -130,21 +129,15 @@ fn revision(bytes: &[u8]) -> StorageRevision {
     StorageRevision(crate::backend::sha256_hex(bytes))
 }
 
-/// Read a lock attempt on `path`. A lock that another handle holds always refuses
-/// the folder. A lock that could not be attempted refuses it only when `required`:
-/// a volume that cannot lock a directory still opens, guarded by the state lock
-/// alone, and is not reported as in use by another instance.
-fn claim(attempt: Result<(), TryLockError>, path: &Path, required: bool) -> Result<(), StoreError> {
+/// Read an attempt to lock the state at `path`. Only a lock that another handle
+/// holds reports the folder as in use. Any other failure is the lock file's own.
+fn claim(attempt: Result<(), TryLockError>, path: &Path) -> Result<(), StoreError> {
     match attempt {
         Ok(()) => Ok(()),
         Err(TryLockError::WouldBlock) => {
             Err(StoreError::Locked(Message::new("error.folder-locked")))
         }
-        Err(TryLockError::Error(error)) if required => Err(describe(path, &error)),
-        Err(TryLockError::Error(error)) => {
-            log::warn!("{} cannot be locked: {error}", path.display());
-            Ok(())
-        }
+        Err(TryLockError::Error(error)) => Err(describe(path, &error)),
     }
 }
 
@@ -185,10 +178,8 @@ impl MarkdownDirectory {
             return Err(Message::new("error.settings-outside-folder").into());
         }
         fs::create_dir_all(&state).map_err(|e| describe(&state, &e))?;
-        // Lock the directory descriptor itself: every host coordinates on the
-        // same filesystem object without placing application files in the vault.
-        let directory_lock = File::open(&directory).map_err(|e| describe(&directory, &e))?;
-        claim(directory_lock.try_lock(), &directory, false)?;
+        // The lock is on this handle's state, never on the notes folder: a
+        // descriptor held there would keep the folder's volume from being ejected.
         let lock_path = state.join("lock");
         let lock = OpenOptions::new()
             .read(true)
@@ -197,7 +188,7 @@ impl MarkdownDirectory {
             .truncate(false)
             .open(&lock_path)
             .map_err(|e| describe(&lock_path, &e))?;
-        claim(lock.try_lock(), &lock_path, true)?;
+        claim(lock.try_lock(), &lock_path)?;
         let manifest_path = state.join("manifest.json");
         let (manifest, reset) =
             match read_optional(&manifest_path).map_err(|e| describe(&manifest_path, &e))? {
@@ -210,7 +201,6 @@ impl MarkdownDirectory {
             state,
             settings_path,
             persist_settings: true,
-            _directory_lock: directory_lock,
             _lock: lock,
             manifest,
             manifest_bytes: Vec::new(),
@@ -1065,10 +1055,7 @@ impl NotesBackend for MarkdownDirectory {
         self.commit_note(mutation).map_err(backend_error)
     }
     fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities {
-            file_operations: true,
-            assets: false,
-        }
+        BackendCapabilities { assets: false }
     }
     fn save_workspace(
         &mut self,
@@ -1340,22 +1327,39 @@ mod tests {
         assert_eq!(crate::AssetId::for_content(b"abc").0, ABC);
     }
 
-    // Only another holder refuses a folder. A volume that cannot lock a directory is
-    // not in use by anyone, and a state lock that cannot be taken says why.
+    // Only another holder reports a folder as in use. A lock that cannot be taken
+    // for another reason says what that reason is.
     #[test]
     fn only_a_held_lock_reports_the_folder_as_in_use() {
-        let path = Path::new("/notes");
-        let unsupported = || TryLockError::Error(io::ErrorKind::Unsupported.into());
-        for required in [false, true] {
-            assert!(claim(Ok(()), path, required).is_ok());
-            assert!(matches!(
-                claim(Err(TryLockError::WouldBlock), path, required),
-                Err(StoreError::Locked(_))
-            ));
-        }
-        assert!(claim(Err(unsupported()), path, false).is_ok());
-        let refused = claim(Err(unsupported()), path, true).unwrap_err();
+        let path = Path::new("/state/lock");
+        assert!(claim(Ok(()), path).is_ok());
+        assert!(matches!(
+            claim(Err(TryLockError::WouldBlock), path),
+            Err(StoreError::Locked(_))
+        ));
+        let unsupported = TryLockError::Error(io::ErrorKind::Unsupported.into());
+        let refused = claim(Err(unsupported), path).unwrap_err();
         assert!(!matches!(refused, StoreError::Locked(_)), "{refused:?}");
+    }
+
+    // An open descriptor on the notes folder would keep its volume from being
+    // ejected for as long as the application runs.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_open_folder_holds_no_descriptor_on_the_notes_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = open(root.path());
+        let notes = fs::canonicalize(root.path().join("notes")).unwrap();
+        let held = (0..1024).any(|descriptor| {
+            let mut path = [0u8; libc::PATH_MAX as usize];
+            // SAFETY: the buffer is PATH_MAX bytes, which is what F_GETPATH writes at most.
+            let known = unsafe { libc::fcntl(descriptor, libc::F_GETPATH, path.as_mut_ptr()) };
+            known != -1
+                && std::ffi::CStr::from_bytes_until_nul(&path)
+                    .is_ok_and(|path| Path::new(&*path.to_string_lossy()) == notes)
+        });
+        drop(folder);
+        assert!(!held);
     }
 
     // The part of the backend contract that a file can keep: exact text, a revision

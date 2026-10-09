@@ -2,7 +2,7 @@
 use super::*;
 
 pub(super) type SaveContinuation =
-    Box<dyn FnOnce(&mut MarkraftApp, &mut Window, &mut Context<MarkraftApp>)>;
+    Box<dyn FnOnce(&mut WorkspaceView, &mut Window, &mut Context<WorkspaceView>)>;
 
 /// Real workers are outside GPUI's deterministic test scheduler. Tests poll
 /// their replies using the virtual clock, without installing a scheduler waker
@@ -31,7 +31,7 @@ pub(super) async fn receive<T>(
     }
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// Hold `panel`, a system file panel just opened, until it answers, with the
     /// note stepped down from floating meanwhile. macOS opens these panels at
     /// the normal window level, so a note kept above other windows would cover

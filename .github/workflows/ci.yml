@@ -44,6 +44,10 @@ jobs:
       # The workspace build above enables what only the application uses.
       - name: Check the embeddable crates with the features a host gets
         run: cargo clippy -p markraft-workspace -p markraft-notes --all-targets --locked -- -D warnings
+      # The workspace test run unifies features, so the code a host builds without
+      # them is compiled there but never run.
+      - name: Test the embeddable crates with the features a host gets
+        run: cargo test -p markraft-workspace -p markraft-notes --locked
       - name: Check independent integration consumers
         run: sh examples/integration/check.sh
       - uses: taiki-e/install-action@v2

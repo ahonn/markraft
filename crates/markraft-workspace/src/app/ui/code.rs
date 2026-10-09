@@ -21,7 +21,7 @@ fn matching_languages(i18n: &crate::locale::I18n, query: &str) -> Vec<(&'static 
         .collect()
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     pub(in crate::app) fn open_code_language(&mut self, pos: usize, cx: &mut Context<Self>) {
         let editor = self.editor();
         let Some(active) = editor.read(cx).code_language(pos) else {

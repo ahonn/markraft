@@ -124,7 +124,7 @@ impl TableEdit {
     }
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// Whether the ring rests on the table toolbar rather than on the surface below it.
     fn table_ringed(&self) -> bool {
         self.ring.at().is_some_and(|id| id.starts_with(STOP))

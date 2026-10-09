@@ -26,6 +26,8 @@ For a custom backend, pass the backend to the workspace constructor.
 Database notes do not need a Markdown directory or a fabricated file path.
 
 `WorkspaceOptions` holds only the cache directory and the editor preferences.
+The preferences are an `EditorPreferences`: how notes read, how Markdown is written and what the editor does as the person types.
+The settings of the standalone application's own window, such as its shortcuts and its position, are not part of it.
 Start from `WorkspaceOptions::default()` and set the fields that the host needs.
 A later release can add fields to the options and to the preferences.
 
@@ -51,7 +53,8 @@ A backend's `StorageRevision` is a separate durable compare-and-swap token.
 Never use the editor revision as a synchronization token.
 
 Await `flush()` to receive a `SaveReceipt`.
-The receipt distinguishes saved Markdown files from drafts kept in recovery storage.
+The receipt distinguishes saved notes from drafts.
+A draft has no storage identity yet and is held in memory only, so keep the library open until a later receipt lists it as saved.
 An empty scratch note does not require an empty Markdown file.
 Await `close()` before opening the same storage in another service.
 If either operation fails, inspect the error and retain the service for recovery or retry.
@@ -191,7 +194,8 @@ They do not open Markraft application windows.
 Later edits remain dirty.
 The callback receives a result and the workspace's window and context.
 
-`SaveReceipt.notes` contains the outcomes of note commits in that save request.
+The result is a `WorkspaceSaveReceipt`.
+Its `notes` field contains the outcomes of note commits in that save request.
 It is not the total number of stored notes.
 An empty list can mean that autosave already persisted every change.
 `markdown_paths` lists file paths only when the backend uses Markdown files.
@@ -221,6 +225,8 @@ Retain the workspace and retry after that operation completes.
 
 Register the host's application quit hook for system-initiated termination.
 Capture `flush_on_system_quit(cx)` before returning the future that the hook awaits.
+It returns a `PendingSave` future, not a callback, because the hook has no window to call back into.
+Its error is a `WorkspaceError`, as for `flush`.
 Report a failed result through the host's logging mechanism.
 That hook cannot offer the interactive close flow's retry decision.
 While a reload that the user confirmed is in progress, the flush writes nothing and its receipt names no note.

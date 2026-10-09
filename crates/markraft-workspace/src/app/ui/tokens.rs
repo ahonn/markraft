@@ -106,7 +106,7 @@ fn scroll_thumb(handle: &ScrollHandle, dark: bool) -> Option<Div> {
     )
 }
 
-impl MarkraftApp {
+impl WorkspaceView {
     /// Fill the rest of a panel with `contents`, which scrolls `handle`, and show how
     /// much of it is on screen. The thumb sits beside the scroller rather than inside
     /// it, so it does not scroll away with the content it describes.
