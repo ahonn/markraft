@@ -184,9 +184,19 @@ pub fn move_without_replacing(from: &Path, to: &Path) -> Result<(), StoreError> 
 }
 /// Moves a file into the system Trash. Returns the Trash location when the platform
 /// reports one; callers do not restore from it.
-#[cfg(target_os = "macos")]
+///
+/// A test build moves the file to a folder of its own instead. A test run then leaves
+/// nothing in the developer's Trash, and does not wait for the system.
 #[doc(hidden)]
 pub fn move_to_trash(path: &Path) -> Result<Option<PathBuf>, StoreError> {
+    #[cfg(any(test, feature = "test-support"))]
+    return stand_in_trash::receive(path);
+    #[cfg(not(any(test, feature = "test-support")))]
+    system_trash(path)
+}
+#[cfg(target_os = "macos")]
+#[cfg_attr(feature = "test-support", allow(dead_code))]
+fn system_trash(path: &Path) -> Result<Option<PathBuf>, StoreError> {
     use objc2::rc::Retained;
     use objc2_foundation::{NSFileManager, NSURL};
     let url = NSURL::fileURLWithPath(&objc2_foundation::NSString::from_str(
@@ -204,9 +214,39 @@ pub fn move_to_trash(path: &Path) -> Result<Option<PathBuf>, StoreError> {
         .map(|path| PathBuf::from(path.to_string())))
 }
 #[cfg(not(target_os = "macos"))]
-#[doc(hidden)]
-pub fn move_to_trash(_path: &Path) -> Result<Option<PathBuf>, StoreError> {
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
+fn system_trash(_path: &Path) -> Result<Option<PathBuf>, StoreError> {
     Err(Message::new("error.trash-unavailable").into())
+}
+/// The Trash of a test build: one folder for the process, outside every notes folder.
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod stand_in_trash {
+    use super::{StoreError, describe};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::{
+            OnceLock,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    static FOLDER: OnceLock<tempfile::TempDir> = OnceLock::new();
+    static RECEIVED: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn receive(path: &Path) -> Result<Option<PathBuf>, StoreError> {
+        let folder = FOLDER.get_or_init(|| tempfile::tempdir().expect("a stand-in Trash"));
+        // Two files of one name can lie in a Trash, so each gets a name of its own.
+        let name = format!(
+            "{}-{}",
+            RECEIVED.fetch_add(1, Ordering::Relaxed),
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
+        let landed = folder.path().join(name);
+        fs::rename(path, &landed).map_err(|e| describe(path, &e))?;
+        Ok(Some(landed))
+    }
 }
 /// The permissions a new file in `folder` should have: the folder's own, without the
 /// execute bits a Markdown file has no use for.
@@ -474,6 +514,40 @@ mod tests {
         atomic_write_shared(&link, b"new").unwrap();
         assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
         assert_eq!(fs::read(&target).unwrap(), b"new");
+    }
+
+    #[test]
+    fn a_test_build_trashes_into_a_folder_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let (one, two) = (dir.path().join("a/note.md"), dir.path().join("b/note.md"));
+        for (file, text) in [(&one, "one"), (&two, "two")] {
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, text).unwrap();
+        }
+        let first = move_to_trash(&one).unwrap().expect("where it landed");
+        let second = move_to_trash(&two).unwrap().expect("where it landed");
+        assert!(!one.exists() && !two.exists());
+        assert!(!first.starts_with(dir.path()));
+        // Two files of one name both stay.
+        assert_eq!(fs::read_to_string(first).unwrap(), "one");
+        assert_eq!(fs::read_to_string(second).unwrap(), "two");
+        assert!(move_to_trash(&one).is_err(), "a file that is gone");
+    }
+
+    // The one test that reaches the real Trash. It calls the system directly, so
+    // it has no deadline to miss when the system is slow to answer.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_system_trash_takes_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("markraft-trash-probe.md");
+        fs::write(&file, b"probe").unwrap();
+        let landed = system_trash(&file).unwrap();
+        assert!(!file.exists());
+        let landed = landed.expect("macOS says where the file went");
+        assert!(!landed.starts_with(dir.path()));
+        // Tidy up where the system allows it: the Trash is not always readable.
+        let _ = fs::remove_file(landed);
     }
 
     #[cfg(target_os = "macos")]
