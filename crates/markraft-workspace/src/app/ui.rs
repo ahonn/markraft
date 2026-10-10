@@ -27,7 +27,7 @@ use slash::{Command, SlashEffect};
 use table::TableEdit;
 pub(in crate::app) use text_checking::CheckTrigger;
 pub(in crate::app) use tokens::playback;
-use tokens::{POPOVER_RADIUS, ROW_HEIGHT, ROW_RADIUS, keycaps, popover_shadow};
+use tokens::{POPOVER_RADIUS, ROW_HEIGHT, ROW_RADIUS, keycaps, popover_shadow, thumb_lane};
 
 #[derive(Clone)]
 enum Intent {
@@ -1126,6 +1126,7 @@ impl WorkspaceView {
             .track_scroll(self.picker.browse_scroll())
             .overflow_y_scroll()
             .px_2()
+            .pr(thumb_lane(px(8.), self.picker.browse_scroll()))
             .pb_2();
         if notes.is_empty() {
             list = list.child(
@@ -1338,7 +1339,7 @@ impl WorkspaceView {
                         .child(self.i18n.text("notes.title")),
                 )
             })
-            .child(self.scroll_area(list, self.picker.browse_scroll(), cx))
+            .child(self.scroll_area("note-results-scrollbar", list, self.picker.browse_scroll()))
     }
 
     fn panel_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -1878,6 +1879,7 @@ impl WorkspaceView {
             .track_scroll(self.picker.actions_scroll())
             .overflow_y_scroll()
             .px_2()
+            .pr(thumb_lane(px(8.), self.picker.actions_scroll()))
             .pb_2();
         if items.is_empty() {
             list = list.child(
@@ -1952,7 +1954,7 @@ impl WorkspaceView {
             .flex_1()
             .min_h_0()
             .child(self.search_field(cx))
-            .child(self.scroll_area(list, self.picker.actions_scroll(), cx))
+            .child(self.scroll_area("actions-scrollbar", list, self.picker.actions_scroll()))
     }
     fn overlay(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let viewport = window.bounds().size;

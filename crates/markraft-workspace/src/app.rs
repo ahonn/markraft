@@ -43,8 +43,8 @@ use crate::{
 use gpui::{prelude::*, *};
 use markraft_core::Node;
 use markraft_gpui::{
-    ColumnAlignment, EditRejection, EditorEvent, EditorStyle, EditorView, ExtensionHandle, Setup,
-    TableInfo,
+    ColumnAlignment, EditRejection, EditorEvent, EditorStyle, EditorView, ExtensionHandle,
+    Scrollbar, Setup, TableInfo,
 };
 use std::{
     collections::VecDeque,
@@ -186,6 +186,8 @@ pub struct WorkspaceView {
     counted: std::cell::RefCell<doc::Counter>,
     /// The format menu's list.
     format: Cursor,
+    /// Where the file status card is scrolled, when its states outgrow the window.
+    file_status_scroll: ScrollHandle,
     dark: bool,
 
     /// What the `[[` menu offers and what the editor asks about each link it
@@ -446,6 +448,7 @@ impl WorkspaceView {
             _find_watch: find_watch,
             counted: Default::default(),
             format: Cursor::default(),
+            file_status_scroll: ScrollHandle::new(),
             dark,
             presence: Presence::new(pointer_inside, window.is_window_active()),
             window_size: WindowSize::new(window.bounds().size),

@@ -78,54 +78,43 @@ pub(in crate::app) fn playback(reduce_motion: bool) -> SpringPlayback {
     }
 }
 
-/// The thumb beside a scrolling region, from the previous frame's scroll geometry.
-/// None while the content fits. It is an indicator only and takes no pointer input.
-fn scroll_thumb(handle: &ScrollHandle, dark: bool) -> Option<Div> {
-    let inset = px(4.);
-    let viewport = handle.bounds().size.height;
-    let max = handle.max_offset().y;
-    let track = viewport - inset * 2.;
-    if max <= px(1.) || track <= px(32.) {
-        return None;
+/// A scrollbar's thumb, as the editor draws the note's.
+pub(super) fn scrollbar_color(dark: bool) -> Hsla {
+    if dark {
+        rgba(0xffffff4d)
+    } else {
+        rgba(0x00000047)
     }
-    let height = (track * (viewport / (viewport + max))).max(px(24.));
-    let progress = (-handle.offset().y / max).clamp(0., 1.);
-    Some(
-        div()
-            .absolute()
-            .top(inset + (track - height) * progress)
-            .right(px(3.))
-            .w(px(5.))
-            .h(height)
-            .rounded_full()
-            .bg(if dark {
-                rgba(0xffffff4d)
-            } else {
-                rgba(0x00000047)
-            }),
-    )
+    .into()
+}
+
+/// The right padding of a list that scrolls `handle` and pads its rows by `padding`:
+/// room for the thumb while the list overflows, so the thumb covers no row.
+pub(super) fn thumb_lane(padding: Pixels, handle: &ScrollHandle) -> Pixels {
+    padding.max(Scrollbar::lane(handle))
 }
 
 impl WorkspaceView {
     /// Fill the rest of a panel with `contents`, which scrolls `handle`, and show how
-    /// much of it is on screen. The thumb sits beside the scroller rather than inside
-    /// it, so it does not scroll away with the content it describes.
+    /// much of it is on screen.
     pub(super) fn scroll_area(
         &self,
+        id: &'static str,
         contents: Stateful<Div>,
         handle: &ScrollHandle,
-        cx: &mut Context<Self>,
     ) -> Div {
         div()
-            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
             .child(contents.flex_1().min_h_0())
-            // The thumb is drawn from the previous frame's offset, so a wheel that only
-            // moves the scroller still redraws it.
-            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
-            .children(scroll_thumb(handle, self.dark))
+            .child(self.scrollbar(id, handle))
+    }
+
+    /// The scrollbar of a scroller that tracks `handle`. It goes after that scroller,
+    /// in the same parent.
+    pub(super) fn scrollbar(&self, id: &'static str, handle: &ScrollHandle) -> Scrollbar {
+        Scrollbar::new(id, handle, scrollbar_color(self.dark))
     }
 }

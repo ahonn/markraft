@@ -13,7 +13,7 @@
 //! containing it; text, decorations, and objects share that row geometry.
 
 use crate::style::EditorStyle;
-use crate::{CaretShape, EditorView};
+use crate::{CaretShape, EditorView, Scrollbar};
 use gpui::{prelude::*, *};
 use markraft_core::commands::ColumnAlignment;
 use markraft_core::kind::SourceHighlight;
@@ -138,6 +138,9 @@ const CELL_MAX_MIN_CONTENT: Pixels = px(240.);
 const TABLE_LINE: Pixels = px(1.);
 /// How wide the fade at a clipped edge of a scrolling grid is.
 const TABLE_FADE: Pixels = px(14.);
+/// How far under a scrolling grid its scrollbar reaches. The thumb stands in the gap
+/// the grid keeps below itself, clear of the last row's text.
+const TABLE_SCROLLBAR_ROOM: Pixels = px(10.);
 /// A quote bar, drawn beside a line and beside a whole grid alike.
 const QUOTE_BAR: Pixels = px(2.);
 
@@ -271,6 +274,9 @@ pub(crate) struct EditorSurface {
 pub(crate) struct SurfacePrepaint {
     rows: Vec<LayoutLine>,
     task_hitboxes: Vec<Hitbox>,
+    /// The part of each scrolling grid the reader can see.
+    strips: Vec<(usize, Bounds<Pixels>)>,
+    table_scrollbars: Vec<AnyElement>,
 }
 impl IntoElement for EditorSurface {
     type Element = Self;
@@ -409,6 +415,7 @@ impl Element for EditorSurface {
         // Every consumer uses these translated rows: paint, hit testing,
         // selection, input-method rectangles, and accessible text bounds.
         shift_sideways(&mut rows, &scroll, single_line_scroll_x);
+        let strips = visible_strips(&rows, &scroll, bounds);
         if window.is_a11y_active() {
             let mut lines = view.shaping().lines();
             let place = |index: usize| {
@@ -490,9 +497,12 @@ impl Element for EditorSurface {
             .filter_map(|row| row.task_marker())
             .map(|(_, bounds)| window.insert_hitbox(bounds, HitboxBehavior::Normal))
             .collect();
+        let table_scrollbars = table_scrollbars(&self.editor, &strips, window, cx);
         SurfacePrepaint {
             rows,
             task_hitboxes,
+            strips,
+            table_scrollbars,
         }
     }
     fn paint(
@@ -562,7 +572,7 @@ impl Element for EditorSurface {
         // A grid wider than the note is drawn scrolled, so the painting below is
         // held inside the editor's own content box. Nothing else ever draws
         // outside it, and the mask only goes up where a grid needs it.
-        let strips = visible_strips(rows, &scroll, bounds);
+        let strips = std::mem::take(&mut prepaint.strips);
         route_table_wheel(&self.editor, &strips, window);
         let mask = (!strips.is_empty()).then_some(ContentMask { bounds });
         window.with_content_mask(mask, |window| {
@@ -928,6 +938,9 @@ impl Element for EditorSurface {
                 }
             }
         });
+        for scrollbar in &mut prepaint.table_scrollbars {
+            scrollbar.paint(window, cx);
+        }
         // The picture playing has scrolled away or left the document: it
         // stops rather than repaint what no one sees.
         if rehover {
@@ -991,17 +1004,56 @@ fn route_table_wheel(
             return;
         };
         editor.update(cx, |editor, cx| {
-            let Some(grid) = editor.frame.tables_mut().get_mut(table) else {
-                return;
-            };
-            let moved = (grid.offset - delta.x).clamp(px(0.), grid.overflow);
-            if moved != grid.offset {
-                grid.offset = moved;
-                cx.notify();
+            if let Some(grid) = editor.frame.tables().get(table) {
+                editor.scroll_table(*table, grid.offset - delta.x, cx);
             }
         });
         if delta.y == px(0.) {
             cx.stop_propagation();
         }
     });
+}
+
+/// The scrollbar under each scrolling grid, placed where this frame draws the grid.
+///
+/// A grid is not a scroller of its own: the editor moves its cells. So its scrollbar is
+/// made here, once the grid's place is known, and drawn by the surface.
+fn table_scrollbars(
+    editor: &Entity<EditorView>,
+    strips: &[(usize, Bounds<Pixels>)],
+    window: &mut Window,
+    cx: &mut App,
+) -> Vec<AnyElement> {
+    if strips.is_empty() {
+        return Vec::new();
+    }
+    let view = editor.read(cx);
+    let color = view.style().scrollbar;
+    let grids: Vec<_> = strips
+        .iter()
+        .filter_map(|(table, strip)| Some((*table, *strip, *view.frame.tables().get(table)?)))
+        .collect();
+    grids
+        .into_iter()
+        .map(|(table, mut strip, grid)| {
+            strip.size.height += TABLE_SCROLLBAR_ROOM;
+            let (scrolled, held) = (editor.clone(), editor.clone());
+            let mut scrollbar = Scrollbar::sideways(
+                ("table-scrollbar", table),
+                strip,
+                grid.offset,
+                grid.overflow,
+                color,
+                move |offset, _, cx| {
+                    scrolled.update(cx, |editor, cx| editor.scroll_table(table, offset, cx))
+                },
+            )
+            .on_hold(move |is_held, _, cx| {
+                held.update(cx, |editor, cx| editor.hold_scrollbar(*is_held, cx))
+            })
+            .into_any_element();
+            scrollbar.prepaint_as_root(Point::default(), AvailableSpace::min_size(), window, cx);
+            scrollbar
+        })
+        .collect()
 }

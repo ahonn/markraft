@@ -30,6 +30,7 @@ mod math_edit;
 mod math_spans;
 mod maths;
 mod messages;
+mod scrollbar;
 mod shaping;
 mod shown;
 mod single_line;
@@ -56,6 +57,7 @@ pub use markraft_core::commands::ColumnAlignment;
 pub use markraft_core::kind::{CalloutAttrs, DocTypes, DocumentKind, Formatting, PlainKind};
 use markraft_core::kind::{chains, conceal};
 pub use messages::{EditorMessage, EditorMessages};
+pub use scrollbar::Scrollbar;
 pub use style::EditorStyle;
 pub use syntax::{canonical_language, code_languages};
 pub use typeahead::{Typeahead, TypeaheadItem, TypeaheadProvider};
@@ -680,9 +682,6 @@ pub struct EditorView {
     pub(crate) focused: bool,
     caret_focused: bool,
     caret_blink_task: Option<gpui::Task<()>>,
-    // The overlay scrollbar shows while scrolling and fades once scrolling stops.
-    scrollbar_active: bool,
-    scrollbar_task: Option<gpui::Task<()>>,
     /// The animated picture playing under the pointer; see [`animation`].
     pub(crate) player: animation::Player,
     animation_task: Option<gpui::Task<()>>,
@@ -798,8 +797,6 @@ impl EditorView {
             focused: false,
             caret_focused: false,
             caret_blink_task: None,
-            scrollbar_active: false,
-            scrollbar_task: None,
             player: animation::Player::default(),
             animation_task: None,
             animate_images: true,
@@ -1922,37 +1919,25 @@ impl EditorView {
         }
     }
 
-    fn flash_scrollbar(&mut self, cx: &mut Context<Self>) {
-        self.scrollbar_active = true;
-        // Replacing the task cancels the previous hide timer.
-        self.scrollbar_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(1200))
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.scrollbar_active = false;
-                cx.notify();
-            });
-        }));
-        cx.notify();
+    /// The pointer took hold of a scrollbar's thumb, or let go of it.
+    pub(crate) fn hold_scrollbar(&mut self, held: bool, cx: &mut Context<Self>) {
+        if held {
+            // The pointer is on the thumb now, not on the picture it came across.
+            self.pointer = None;
+            self.hover_picture(None, cx);
+        }
     }
 
-    /// Thumb offset and height within the editor, from the previous frame's scroll
-    /// geometry. None while the content fits.
-    fn scrollbar_thumb(&self) -> Option<(Pixels, Pixels)> {
-        let inset = px(4.);
-        let viewport = self.scroll.bounds().size.height;
-        let max = self.scroll.max_offset().y;
-        let track = viewport - inset * 2. - self.style().top_overlay - self.style().bottom_overlay;
-        if self.single_line || max <= px(1.) || track <= px(48.) {
-            return None;
+    /// Scroll the grid `table` sideways to `offset`, as far as it goes.
+    pub(crate) fn scroll_table(&mut self, table: usize, offset: Pixels, cx: &mut Context<Self>) {
+        let Some(grid) = self.frame.tables_mut().get_mut(&table) else {
+            return;
+        };
+        let offset = offset.clamp(px(0.), grid.overflow);
+        if offset != grid.offset {
+            grid.offset = offset;
+            cx.notify();
         }
-        let height = (track * (viewport / (viewport + max))).max(px(28.));
-        let progress = (-self.scroll.offset().y / max).clamp(0., 1.);
-        Some((
-            self.style().top_overlay + inset + (track - height) * progress,
-            height,
-        ))
     }
 
     pub(crate) fn reset_caret_blink(&mut self, cx: &mut Context<Self>) {
@@ -2811,8 +2796,7 @@ impl Render for EditorView {
             })
             .when(!self.single_line, |this| this.overflow_y_scroll())
             .track_scroll(&self.scroll)
-            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
-                this.flash_scrollbar(cx);
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, _| {
                 // Scrolling moves the pictures, not the pointer.
                 this.pointer = Some(event.position);
                 this.rehover.set(true);
@@ -2825,40 +2809,19 @@ impl Render for EditorView {
             .child(EditorSurface {
                 editor: cx.entity(),
             });
-        // The thumb sits beside the scroller rather than inside it, so it does not
-        // scroll with the content. It is an indicator only and takes no pointer input.
-        let active = self.scrollbar_active;
-        let color = self.style().scrollbar;
-        // Reduced motion keeps the fade's two end states and drops the travel
-        // between them.
-        let reduce_motion = cx.reduce_motion();
         let editor = cx.entity();
         div()
             .size_full()
             .relative()
             .child(root)
-            .when_some(self.scrollbar_thumb(), |this, (top, height)| {
-                let thumb = div()
-                    .absolute()
-                    .top(top)
-                    .right(px(3.))
-                    .w(px(6.))
-                    .h(height)
-                    .rounded_full()
-                    .bg(color);
-                this.child(if reduce_motion {
-                    thumb
-                        .opacity(if active { 1. } else { 0. })
-                        .into_any_element()
-                } else {
-                    thumb
-                        .with_spring(
-                            "scrollbar-fade",
-                            SpringAnimation::new(SpringConfig::new(500., 45., 1.)).to(active),
-                            |s, phase| s.opacity(phase.interpolate_clamped(0., 1.)),
-                        )
-                        .into_any_element()
-                })
+            .when(!self.single_line, |this| {
+                this.child(
+                    Scrollbar::new("scrollbar", &self.scroll, self.style().scrollbar)
+                        .inset(self.style().top_overlay, self.style().bottom_overlay)
+                        .on_hold(
+                            cx.listener(|this, held: &bool, _, cx| this.hold_scrollbar(*held, cx)),
+                        ),
+                )
             })
             // Deferred so it draws over the note and is positioned after the surface has
             // published this frame's rows.

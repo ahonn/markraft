@@ -1,7 +1,7 @@
 //! The list an extension shows in its popup, styled from [`EditorStyle`] so it matches
 //! the editor it hangs over.
 
-use crate::{EditorStyle, TypeaheadItem};
+use crate::{EditorStyle, Scrollbar, TypeaheadItem};
 use gpui::{prelude::*, *};
 use std::rc::Rc;
 
@@ -31,7 +31,8 @@ impl CompletionList<'_> {
             .track_scroll(&self.scroll)
             .max_h(self.max_height)
             .overflow_y_scroll()
-            .p(px(6.));
+            .p(px(6.))
+            .pr(px(6.).max(Scrollbar::lane(&self.scroll)));
         for (index, item) in self.items.iter().enumerate() {
             let hover = self.hover.clone();
             let activate = self.activate.clone();
@@ -113,6 +114,11 @@ impl CompletionList<'_> {
             .overflow_hidden()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(list)
+            .child(Scrollbar::new(
+                "typeahead-scrollbar",
+                &self.scroll,
+                style.scrollbar,
+            ))
             .into_any_element()
     }
 }

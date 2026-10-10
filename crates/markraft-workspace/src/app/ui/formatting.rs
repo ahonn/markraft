@@ -722,8 +722,6 @@ impl WorkspaceView {
                 .left(CAPSULES_LEFT)
                 .w(width)
                 .max_h(room)
-                .overflow_y_scroll()
-                .p(px(4.))
                 .flex()
                 .flex_col()
                 .rounded(POPOVER_RADIUS)
@@ -732,6 +730,7 @@ impl WorkspaceView {
                 .border_color(self.border_color())
                 .shadow(popover_shadow())
                 .occlude()
+                .overflow_hidden()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     // The capsules close the card themselves; preserve their click.
@@ -742,55 +741,66 @@ impl WorkspaceView {
                         cx.stop_propagation();
                     }
                 }))
-                .children(states.iter().enumerate().map(|(index, state)| {
-                    let ink = if state.urgent {
-                        self.danger()
-                    } else {
-                        self.muted()
-                    };
+                .child(
                     div()
+                        .id("file-status-states")
+                        .track_scroll(&self.file_status_scroll)
+                        .overflow_y_scroll()
+                        .min_h_0()
+                        .p(px(4.))
                         .flex()
                         .flex_col()
-                        .gap_2()
-                        .px(px(12.))
-                        .py(px(12.))
-                        .when(index < last, |s| {
-                            s.border_b_1().border_color(self.border_color())
-                        })
-                        .child(
+                        .children(states.iter().enumerate().map(|(index, state)| {
+                            let ink = if state.urgent {
+                                self.danger()
+                            } else {
+                                self.muted()
+                            };
                             div()
                                 .flex()
-                                .items_center()
-                                .gap(px(7.))
-                                .child(sized_icon(state.icon, ink, 15.))
+                                .flex_col()
+                                .gap_2()
+                                .px(px(12.))
+                                .py(px(12.))
+                                .when(index < last, |s| {
+                                    s.border_b_1().border_color(self.border_color())
+                                })
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(7.))
+                                        .child(sized_icon(state.icon, ink, 15.))
+                                        .child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(ink)
+                                                .child(state.label.clone()),
+                                        ),
+                                )
                                 .child(
                                     div()
                                         .text_size(px(12.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(ink)
-                                        .child(state.label.clone()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .line_height(px(17.))
-                                .text_color(self.control_text())
-                                .child(state.detail.clone()),
-                        )
-                        .when(!state.actions.is_empty(), |s| {
-                            s.child(div().flex().flex_wrap().gap_2().children(
-                                state.actions.iter().map(|(label, intent)| {
-                                    self.button(
-                                        SharedString::from(format!("{}-{label}", state.id)),
-                                        label.clone(),
-                                        intent.clone(),
-                                        cx,
-                                    )
-                                }),
-                            ))
-                        })
-                })),
+                                        .line_height(px(17.))
+                                        .text_color(self.control_text())
+                                        .child(state.detail.clone()),
+                                )
+                                .when(!state.actions.is_empty(), |s| {
+                                    s.child(div().flex().flex_wrap().gap_2().children(
+                                        state.actions.iter().map(|(label, intent)| {
+                                            self.button(
+                                                SharedString::from(format!("{}-{label}", state.id)),
+                                                label.clone(),
+                                                intent.clone(),
+                                                cx,
+                                            )
+                                        }),
+                                    ))
+                                })
+                        })),
+                )
+                .child(self.scrollbar("file-status-scrollbar", &self.file_status_scroll)),
         )
     }
 
@@ -815,7 +825,8 @@ impl WorkspaceView {
             .track_scroll(self.format.scroll())
             .overflow_y_scroll()
             .size_full()
-            .p(px(4.));
+            .p(px(4.))
+            .pr(thumb_lane(px(4.), self.format.scroll()));
         for (index, (label, hint, intent, checked)) in items.into_iter().enumerate() {
             let stop = SharedString::from(format!("format-choice-{index}"));
             list = list.child(
@@ -887,5 +898,6 @@ impl WorkspaceView {
                 }
             }))
             .child(list)
+            .child(self.scrollbar("format-menu-scrollbar", self.format.scroll()))
     }
 }

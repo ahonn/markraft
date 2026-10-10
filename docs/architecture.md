@@ -175,6 +175,9 @@ The view sends `EditorEvent` values to its host, including `Changed`, `LinkClick
 The host supplies document and transaction guards, wiki targets, a remote image fetcher, and image directories. Extensions such as
 Vim implement `markraft_gpui::Extension`.
 
+The crate also exports `Scrollbar`, the overlay scrollbar with a draggable thumb. The view, its popups and the
+host's own scrolling lists all draw this one element.
+
 **Invariant:** the view never touches the tree directly. Every edit is a
 `TransactionSpec` or a catalogue command, and everything drawn comes from the
 state's projection.

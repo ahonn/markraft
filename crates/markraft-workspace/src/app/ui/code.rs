@@ -116,7 +116,8 @@ impl WorkspaceView {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .p(px(4.));
+            .p(px(4.))
+            .pr(thumb_lane(px(4.), self.code_language.scroll()));
         for (index, (language, label)) in languages.into_iter().enumerate() {
             let checked = canonical_language(language) == canonical_language(&active);
             let stop = SharedString::from(format!("code-language-{index}"));
@@ -209,7 +210,8 @@ impl WorkspaceView {
                         .border_color(self.border_color())
                         .child(self.query_field(cx).h(query_height)),
                 )
-                .child(list),
+                .child(list)
+                .child(self.scrollbar("code-language-scrollbar", self.code_language.scroll())),
         )
     }
 }

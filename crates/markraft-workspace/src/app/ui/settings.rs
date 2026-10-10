@@ -2079,6 +2079,11 @@ impl Render for SettingsView {
                             ),
                     ),
             )
+            .child(Scrollbar::new(
+                "settings-page-scrollbar",
+                &self.scroll,
+                p.scrollbar,
+            ))
     }
 }
 

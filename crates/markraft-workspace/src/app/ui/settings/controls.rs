@@ -115,6 +115,7 @@ pub(super) struct Palette {
     /// A text field's ground and outline: the shortcut recorder.
     pub field: Hsla,
     pub field_border: Hsla,
+    pub scrollbar: Hsla,
 }
 
 impl Palette {
@@ -141,6 +142,7 @@ impl Palette {
                 rgb(0xffffff).into()
             },
             field_border: ink.alpha(if dark { 0.18 } else { 0.16 }),
+            scrollbar: crate::app::ui::tokens::scrollbar_color(dark),
         }
     }
 }
