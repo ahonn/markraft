@@ -1,3 +1,16 @@
+## 0.1.10 (2026-10-10)
+
+### Features
+
+- Drag a scrollbar to scroll the note, a menu or a list.
+- Scroll a table that is wider than the note with the scrollbar under it.
+
+### Fixes
+
+- Show a scrollbar in the slash menu and in the other menus that scroll.
+- Light one row, not two, after a menu scrolls under the pointer.
+- Show scrollbars always or only while scrolling, as the system setting says.
+
 ## 0.1.9 (2026-10-06)
 
 ### Fixes
