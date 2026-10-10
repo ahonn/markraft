@@ -7,6 +7,10 @@
 //!     move || MyBackend::open(directory.path().join("notes.db")).unwrap()
 //! });
 //! ```
+//!
+//! [`check`] is for a store that keeps a note's title, key and times, and that several
+//! handles can open at once. A store that keeps only what a file can keep, the text and
+//! its revision, with one handle open at a time, runs [`check_text`].
 use crate::{
     Asset, AssetId, BackendError, BackendMutation, BackendNote, NoteId, NotesBackend,
     StorageRevision,
@@ -50,13 +54,23 @@ fn conflict(result: Result<StorageRevision, BackendError>, what: &str) -> Option
 /// that opens it. Each call of that function must give an independent handle to
 /// the same store, the way a second connection or a restarted process would.
 pub fn check<B: NotesBackend, O: FnMut() -> B>(mut store: impl FnMut() -> O) {
-    records_round_trip(&mut store());
-    writes_are_compare_and_swap(&mut store());
-    deletion_leaves_an_absent_note(&mut store());
+    check_text(&mut store);
+    metadata_round_trips(&mut store());
+    handles_share_one_store(&mut store());
     assets_keep_their_content(&mut store());
 }
 
-fn records_round_trip<B: NotesBackend>(open: &mut impl FnMut() -> B) {
+/// Run the checks that a store of plain files passes too: the text comes back byte
+/// for byte, a revision survives a restart, a write or a delete that expects an old
+/// revision is refused, and a deleted note is absent. `store` is as for [`check`],
+/// but a handle is dropped before the next one is opened.
+pub fn check_text<B: NotesBackend, O: FnMut() -> B>(mut store: impl FnMut() -> O) {
+    text_round_trips(&mut store());
+    writes_are_compare_and_swap(&mut store());
+    deletion_leaves_an_absent_note(&mut store());
+}
+
+fn text_round_trips<B: NotesBackend>(open: &mut impl FnMut() -> B) {
     let id = NoteId::new("round-trip");
     let other = NoteId::new("other");
     let mut writer = open();
@@ -89,12 +103,6 @@ fn records_round_trip<B: NotesBackend>(open: &mut impl FnMut() -> B) {
             note.revision, revision,
             "a reopened store must return the committed revision"
         );
-        assert_eq!(note.title.as_deref(), Some("A title"));
-        assert_eq!(note.logical_key.as_deref(), Some("daily:2026-10-08"));
-        assert_eq!(
-            (note.created_at, note.updated_at, note.pinned),
-            (11, 22, true)
-        );
     }
     let missing = NoteId::new("missing");
     let found = reader
@@ -109,8 +117,79 @@ fn records_round_trip<B: NotesBackend>(open: &mut impl FnMut() -> B) {
     assert!(one(&mut reader, &missing).is_none());
 }
 
+fn metadata_round_trips<B: NotesBackend>(open: &mut impl FnMut() -> B) {
+    let id = NoteId::new("described");
+    let mut writer = open();
+    writer
+        .commit(put(&id, None, SOURCE))
+        .expect("create a note");
+    drop(writer);
+    let mut reader = open();
+    for note in [
+        reader.load().expect("load").notes.remove(0),
+        one(&mut reader, &id).expect("read returns the note"),
+    ] {
+        assert_eq!(note.title.as_deref(), Some("A title"));
+        assert_eq!(note.logical_key.as_deref(), Some("daily:2026-10-08"));
+        assert_eq!(
+            (note.created_at, note.updated_at, note.pinned),
+            (11, 22, true)
+        );
+    }
+}
+
 fn writes_are_compare_and_swap<B: NotesBackend>(open: &mut impl FnMut() -> B) {
     let id = NoteId::new("contended");
+    let mut backend = open();
+    let created = backend
+        .commit(put(&id, None, "created"))
+        .expect("create a note");
+    let actual = conflict(
+        backend.commit(put(&id, None, "created twice")),
+        "a second create",
+    );
+    assert_eq!(
+        actual.as_ref(),
+        Some(&created),
+        "a conflict must report the live revision"
+    );
+    let edited = backend
+        .commit(put(&id, Some(&created), "edited"))
+        .expect("update with the current revision");
+    assert_ne!(edited, created, "every commit must return a new revision");
+    let actual = conflict(
+        backend.commit(put(&id, Some(&created), "stale")),
+        "a write that expects an old revision",
+    );
+    assert_eq!(actual.as_ref(), Some(&edited));
+    let stored = one(&mut backend, &id).expect("the note survives a refused write");
+    assert_eq!(
+        stored.markdown, "edited",
+        "a refused write must change nothing"
+    );
+    assert_eq!(stored.revision, edited);
+    let absent = NoteId::new("never-created");
+    let unknown = StorageRevision("no-such-revision".into());
+    let actual = conflict(
+        backend.commit(put(&absent, Some(&unknown), "x")),
+        "an update of a note that does not exist",
+    );
+    assert_eq!(actual, None, "an absent note has no live revision");
+    assert!(
+        one(&mut backend, &absent).is_none(),
+        "a refused update must not create the note"
+    );
+    drop(backend);
+    // A restarted process loads the store before it writes to it.
+    let mut restarted = open();
+    restarted.load().expect("load");
+    restarted
+        .commit(put(&id, Some(&edited), "after a restart"))
+        .expect("update after a restart with the revision from before it");
+}
+
+fn handles_share_one_store<B: NotesBackend>(open: &mut impl FnMut() -> B) {
+    let id = NoteId::new("shared");
     let mut first = open();
     let mut second = open();
     let created = first
@@ -118,7 +197,7 @@ fn writes_are_compare_and_swap<B: NotesBackend>(open: &mut impl FnMut() -> B) {
         .expect("create a note");
     let actual = conflict(
         second.commit(put(&id, None, "created twice")),
-        "a second create",
+        "a create of a note that another handle created",
     );
     assert_eq!(
         actual.as_ref(),
@@ -128,10 +207,9 @@ fn writes_are_compare_and_swap<B: NotesBackend>(open: &mut impl FnMut() -> B) {
     let edited = first
         .commit(put(&id, Some(&created), "edited"))
         .expect("update with the current revision");
-    assert_ne!(edited, created, "every commit must return a new revision");
     let actual = conflict(
         second.commit(put(&id, Some(&created), "stale")),
-        "a write that expects an old revision",
+        "a write that expects a revision another handle replaced",
     );
     assert_eq!(actual.as_ref(), Some(&edited));
     let stored = one(&mut second, &id).expect("the note survives a refused write");
@@ -143,17 +221,6 @@ fn writes_are_compare_and_swap<B: NotesBackend>(open: &mut impl FnMut() -> B) {
     second
         .commit(put(&id, Some(&edited), "from the second handle"))
         .expect("update from another handle with the current revision");
-    let absent = NoteId::new("never-created");
-    let unknown = StorageRevision("no-such-revision".into());
-    let actual = conflict(
-        first.commit(put(&absent, Some(&unknown), "x")),
-        "an update of a note that does not exist",
-    );
-    assert_eq!(actual, None, "an absent note has no live revision");
-    assert!(
-        one(&mut first, &absent).is_none(),
-        "a refused update must not create the note"
-    );
 }
 
 fn deletion_leaves_an_absent_note<B: NotesBackend>(open: &mut impl FnMut() -> B) {
@@ -185,6 +252,7 @@ fn deletion_leaves_an_absent_note<B: NotesBackend>(open: &mut impl FnMut() -> B)
         one(&mut backend, &id).is_none(),
         "read must leave out a deleted note"
     );
+    drop(backend);
     let mut reopened = open();
     assert!(
         reopened.load().expect("load").notes.is_empty(),

@@ -156,6 +156,8 @@ Retain conflicting remote and local content until the user or a merge policy res
 To test a backend, enable the `conformance` feature of `markraft-notes` in the host's test dependencies.
 `markraft_notes::conformance::check()` runs the contract checks against the host's real storage.
 The reference backend runs them in its own tests.
+A backend that keeps only the text of a note and its revision, with one handle open at a time, runs `conformance::check_text()`.
+The Markdown folder runs that set.
 
 ## Embed the workspace
 

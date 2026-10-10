@@ -1052,7 +1052,12 @@ impl NotesBackend for MarkdownDirectory {
         self.read_notes(ids).map_err(backend_error)
     }
     fn commit(&mut self, mutation: BackendMutation) -> Result<StorageRevision, BackendError> {
-        self.commit_note(mutation).map_err(backend_error)
+        let revision = self.commit_note(mutation).map_err(backend_error)?;
+        // The store saves the folder's state once, at the end of a save. A commit
+        // through this trait has no such end, so what the folder remembers of the
+        // note is written with the note.
+        self.persist_manifest().map_err(backend_error)?;
+        Ok(revision)
     }
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities { assets: false }
@@ -1366,33 +1371,30 @@ mod tests {
     // that survives a restart, and no write over a version the writer has not seen.
     // A file has no host title, no logical key, and one owner at a time.
     #[test]
-    fn a_folder_is_a_notes_backend() {
+    fn a_folder_keeps_the_text_part_of_the_backend_contract() {
+        crate::conformance::check_text(|| {
+            let root = tempfile::tempdir().unwrap();
+            move || open(root.path())
+        });
+    }
+
+    // What a folder adds to that contract: a note is a file named after its heading,
+    // its pin and the time it was made are remembered beside it, and another program
+    // is a writer like any other.
+    #[test]
+    fn a_folder_keeps_a_note_as_a_file_that_other_programs_write() {
         let root = tempfile::tempdir().unwrap();
         let id = NoteId::new("11111111-1111-4111-8111-111111111111");
         let mut folder = open(root.path());
-        assert!(folder.load().unwrap().notes.is_empty());
         let created = folder.commit(put(&id, None, SOURCE)).unwrap();
-        assert_eq!(
-            refused(folder.commit(put(&id, None, "created twice"))),
-            Some(created.clone())
-        );
         let stored = folder.read(std::slice::from_ref(&id)).unwrap().remove(0);
-        assert_eq!(stored.markdown, SOURCE);
-        assert_eq!(stored.revision, created);
         assert_eq!((stored.created_at, stored.pinned), (11, true));
         let path = folder.path(id.as_str()).unwrap();
         assert_eq!(path.file_name().unwrap(), "Heading.md");
         assert_eq!(fs::read(&path).unwrap(), SOURCE.as_bytes());
 
-        let edited = folder.commit(put(&id, Some(&created), "edited")).unwrap();
-        assert_ne!(edited, created);
-        assert_eq!(
-            refused(folder.commit(put(&id, Some(&created), "stale"))),
-            Some(edited.clone())
-        );
-        // Another program is a writer like any other.
         fs::write(&path, "outside").unwrap();
-        let outside = refused(folder.commit(put(&id, Some(&edited), "mine"))).unwrap();
+        let outside = refused(folder.commit(put(&id, Some(&created), "mine"))).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "outside");
 
         drop(folder);
@@ -1402,25 +1404,12 @@ mod tests {
         assert_eq!(loaded.revision, outside);
         assert!(loaded.pinned);
 
-        let delete = |expected: &StorageRevision| BackendMutation::Delete {
+        let delete = BackendMutation::Delete {
             id: id.clone(),
-            expected: expected.clone(),
+            expected: outside,
             deleted_at: 33,
         };
-        refused(folder.commit(delete(&edited)));
-        assert!(path.exists());
-        folder.commit(delete(&outside)).unwrap();
+        folder.commit(delete).unwrap();
         assert!(!path.exists());
-        assert!(folder.read(std::slice::from_ref(&id)).unwrap().is_empty());
-        assert!(folder.load().unwrap().notes.is_empty());
-        assert_eq!(
-            refused(folder.commit(put(&id, Some(&outside), "stale"))),
-            None
-        );
-        folder.commit(put(&id, None, "created again")).unwrap();
-        assert_eq!(
-            folder.read(std::slice::from_ref(&id)).unwrap()[0].markdown,
-            "created again"
-        );
     }
 }
