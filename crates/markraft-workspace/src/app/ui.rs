@@ -891,7 +891,6 @@ impl WorkspaceView {
             .cursor_pointer()
             .text_size(px(13.))
             .text_color(ink)
-            .hover(|s| s.bg(self.selected_color()))
             .active(|s| s.bg(self.pressed_color()))
             .on_click(
                 cx.listener(move |this, _, window, cx| this.intent(intent.clone(), window, cx)),
@@ -1251,12 +1250,19 @@ impl WorkspaceView {
                     .items_center()
                     .cursor_pointer()
                     .when(selected, |s| s.bg(self.selected_color()))
-                    .hover(|s| s.bg(self.selected_color()))
                     .active(|s| s.bg(self.pressed_color()))
                     // The pointer picks a row without scrolling it: the list must
                     // not move out from under the cursor that is aiming at it.
                     .on_mouse_move(cx.listener(move |this, _, _, cx| {
                         if this.picker.row() != index {
+                            this.picker.point_at(index);
+                            cx.notify();
+                        }
+                    }))
+                    // A row that the wheel brings under a resting pointer is picked
+                    // too, so one row is lit and not two.
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered && this.picker.row() != index {
                             this.picker.point_at(index);
                             cx.notify();
                         }
@@ -1941,6 +1947,14 @@ impl WorkspaceView {
                             .when(index == self.picker.row(), |s| s.bg(self.selected_color()))
                             .on_mouse_move(cx.listener(move |this, _, _, cx| {
                                 if this.picker.row() != index {
+                                    this.picker.point_at(index);
+                                    cx.notify();
+                                }
+                            }))
+                            // A row that the wheel brings under a resting pointer is
+                            // picked too, so one row is lit and not two.
+                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                if *hovered && this.picker.row() != index {
                                     this.picker.point_at(index);
                                     cx.notify();
                                 }

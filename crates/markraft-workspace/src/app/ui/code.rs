@@ -145,10 +145,17 @@ impl WorkspaceView {
                     .when(index == self.code_language.row(), |s| {
                         s.bg(self.selected_color())
                     })
-                    .hover(|s| s.bg(self.selected_color()))
                     .active(|s| s.bg(self.pressed_color()))
                     .on_mouse_move(cx.listener(move |this, _, _, cx| {
                         if this.code_language.row() != index {
+                            this.code_language.point_at(index);
+                            cx.notify();
+                        }
+                    }))
+                    // A row that the wheel brings under a resting pointer is picked
+                    // too, so one row is lit and not two.
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered && this.code_language.row() != index {
                             this.code_language.point_at(index);
                             cx.notify();
                         }

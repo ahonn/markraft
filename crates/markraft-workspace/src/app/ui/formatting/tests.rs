@@ -104,3 +104,46 @@ fn repeated_count_clicks_preserve_the_note_selection(cx: &mut TestAppContext) {
         }
     }
 }
+
+#[gpui::test]
+fn the_wheel_lights_the_row_it_brings_under_a_resting_pointer(cx: &mut TestAppContext) {
+    use gpui::{ScrollDelta, ScrollWheelEvent, point, px};
+
+    let notes: Vec<(String, String)> = (0..20)
+        .map(|n| (format!("{n:02}.md"), format!("Note {n:02}")))
+        .collect();
+    let notes: Vec<(&str, &str)> = notes
+        .iter()
+        .map(|(name, text)| (name.as_str(), text.as_str()))
+        .collect();
+    let mut h = open_with(cx, &notes, |_| {});
+    h.keys("cmd-p");
+    let list = h
+        .app
+        .update(h.cx, |app, _| app.picker.browse_scroll().clone());
+    // The lit row, and where it is on screen: a row's bounds are those of the list at
+    // rest, before its scroll.
+    let lit = |h: &mut crate::e2e::harness::Harness| {
+        let row = h.app.update(h.cx, |app, _| app.picker.row());
+        let mut bounds = list.bounds_for_item(row).expect("the lit row is drawn");
+        bounds.origin += list.offset();
+        (row, bounds)
+    };
+
+    let pointer = point(list.bounds().center().x, list.bounds().top() + px(80.));
+    h.cx.simulate_mouse_move(pointer, None, Default::default());
+    h.cx.run_until_parked();
+    let (before, bounds) = lit(&mut h);
+    assert!(bounds.contains(&pointer));
+
+    // The pointer rests while the list moves three rows under it.
+    h.cx.simulate_event(ScrollWheelEvent {
+        position: pointer,
+        delta: ScrollDelta::Pixels(point(px(0.), px(-174.))),
+        ..Default::default()
+    });
+    h.cx.run_until_parked();
+    let (after, bounds) = lit(&mut h);
+    assert_eq!(after, before + 3);
+    assert!(bounds.contains(&pointer));
+}
