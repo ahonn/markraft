@@ -32,6 +32,7 @@ pub(super) fn shape_table(
         .types
         .quote_depth(&first.source)
         .min(visible_levels(input.style, max_indent(input.style, width)));
+    let tones = quote_tones(input.types, &first.source, quotes, input.style);
 
     let (preferred, minimum) = column_demands(cells, &grid, columns);
     let widths = column_widths(&preferred, &minimum, (width - left).max(CELL_MIN_WIDTH));
@@ -71,6 +72,7 @@ pub(super) fn shape_table(
     for line in cells.iter_mut() {
         if let Some(cell) = &mut line.table {
             cell.quotes = quotes;
+            cell.tones = tones;
         }
     }
 }
@@ -224,6 +226,7 @@ pub(super) fn place_table(
             // Filled in by the caller, which is the pass that knows the grid's
             // ancestors.
             quotes: 0,
+            tones: [None; QUOTE_TONES],
             offset: point(-(CELL_PADDING_X + shift), -CELL_PADDING_Y),
             size: size(widths[column], heights[row]),
         });

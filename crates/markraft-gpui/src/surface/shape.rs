@@ -533,6 +533,37 @@ fn shape_rendered(
     }
 }
 
+/// The callout accent of each of the innermost `levels` quotes `line` sits in,
+/// outermost first: the levels whose bars are drawn. `None` for an ordinary
+/// quote, and for levels past what the array holds.
+pub(super) fn quote_tones(
+    types: &DocTypes,
+    line: &Line,
+    levels: usize,
+    style: &EditorStyle,
+) -> [Option<Hsla>; QUOTE_TONES] {
+    let beside = crate::callout::tones_beside(types, line);
+    let mut tones = [None; QUOTE_TONES];
+    for (slot, tone) in tones
+        .iter_mut()
+        .zip(beside.iter().skip(beside.len().saturating_sub(levels)))
+    {
+        *slot = tone.map(|tone| style.callout_tone(tone));
+    }
+    tones
+}
+
+/// The colour of the bar of quote `level`: its callout's accent, or for an
+/// ordinary quote the colour of the rules and grid lines, which keeps the bar
+/// apart from the caret.
+pub(super) fn quote_bar_color(
+    tones: &[Option<Hsla>; QUOTE_TONES],
+    level: usize,
+    style: &EditorStyle,
+) -> Hsla {
+    tones.get(level).copied().flatten().unwrap_or(style.rule)
+}
+
 /// The decoration drawn behind or beside a line: a code block's panel, the rule
 /// of a thematic break, or one bar per block quote the line sits in. A raw block
 /// has none — its source is shown as source, not fenced off as a panel.
@@ -555,15 +586,7 @@ pub(super) fn decoration_of(
     } = *input;
     let quote_levels = types.quote_depth(line);
     let levels = quote_levels.min(visible_levels(style, max_indent));
-    // The bars drawn are the innermost `levels`, so the tones are too.
-    let beside = crate::callout::tones_beside(types, line);
-    let mut tones = [None; QUOTE_TONES];
-    for (slot, tone) in tones
-        .iter_mut()
-        .zip(beside.iter().skip(beside.len().saturating_sub(levels)))
-    {
-        *slot = tone.map(|tone| style.callout_tone(tone));
-    }
+    let tones = quote_tones(types, line, levels, style);
     let joined = || joined_quote_levels(projection, index, types).min(quote_levels);
     if in_cell {
         None

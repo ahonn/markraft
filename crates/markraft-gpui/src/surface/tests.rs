@@ -1,10 +1,11 @@
 use super::{
     AtomShape, CELL_MIN_WIDTH, CELL_PADDING_X, CELL_PADDING_Y, CODE_FONT, CODE_INSET, Decoration,
-    LayoutLine, LayoutRow, Marker, PREVIEW_GAP, QUOTE_BAR, ROUNDED_FONT, Runs, ShapeInput,
-    TABLE_LINE, TableCell, TableScroll, UI_FONT, Widening, atom_label, caret_cell_frame,
-    cell_under, chrome_marker, column_demands, column_widths, decoration_of, display_text,
-    drawn_image, gap_below, max_indent, merge_row_centers, picture_source, place_table, quote_bars,
-    reveal_offset, shape, table_overflows, text_runs, unbreakable_units, visible_strips,
+    LayoutLine, LayoutRow, Marker, PREVIEW_GAP, QUOTE_BAR, QUOTE_TONES, ROUNDED_FONT, Runs,
+    ShapeInput, TABLE_LINE, TableCell, TableScroll, UI_FONT, Widening, atom_label,
+    caret_cell_frame, cell_under, chrome_marker, column_demands, column_widths, decoration_of,
+    display_text, drawn_image, gap_below, max_indent, merge_row_centers, picture_source,
+    place_table, quote_bar_color, quote_bars, reveal_offset, shape, table_overflows, text_runs,
+    unbreakable_units, visible_strips,
 };
 use super::{OBJECT, char_to_byte};
 use crate::style::EditorStyle;
@@ -1768,6 +1769,58 @@ fn a_host_that_names_no_callout_attributes_draws_plain_quotes() {
     assert_eq!(tones[0], None);
 }
 
+/// An ordinary quote's bar is drawn in the colour of the rules, which is not
+/// the caret's, so a bar beside a short line never reads as a second caret. A
+/// callout's bar keeps its accent.
+#[test]
+fn a_plain_quote_bar_is_a_rule_and_a_callout_bar_its_accent() {
+    let style = EditorStyle::notes();
+    let tones_of = |source: &str| {
+        let lines = shaped(source);
+        let Some(Decoration::Quote { tones, .. }) = lines[0].decoration else {
+            panic!("a quote line is decorated as a quote");
+        };
+        tones
+    };
+    let plain = quote_bar_color(&tones_of("> plain"), 0, &style);
+    assert_eq!(plain, style.rule);
+    assert_ne!(
+        plain, style.marker,
+        "the caret is drawn in the marker colour"
+    );
+    assert_eq!(
+        quote_bar_color(&tones_of("> [!tip] Tip\n> body"), 0, &style),
+        style.callout_tone(crate::callout::Tone::Summary)
+    );
+    // A level past what the array holds is an ordinary bar.
+    assert_eq!(
+        quote_bar_color(&[None; QUOTE_TONES], QUOTE_TONES, &style),
+        style.rule
+    );
+}
+
+/// A grid draws the bars of the quotes it sits in itself, so it carries their
+/// accents: the bar of a callout does not change colour beside a table.
+#[test]
+fn a_table_in_a_callout_carries_the_callout_accent() {
+    let style = EditorStyle::notes();
+    let cell_of = |source: &str| {
+        shaped(source)
+            .iter()
+            .find_map(|line| line.table)
+            .expect("the source holds a table")
+    };
+    let toned = cell_of("> [!tip] Tip\n> | a | b |\n> | - | - |\n> | c | d |");
+    assert_eq!(toned.quotes, 1);
+    assert_eq!(
+        toned.tones[0],
+        Some(style.callout_tone(crate::callout::Tone::Summary))
+    );
+    let plain = cell_of("> | a | b |\n> | - | - |\n> | c | d |");
+    assert_eq!(plain.quotes, 1);
+    assert_eq!(plain.tones[0], None);
+}
+
 /// A table of two rows of two cells, as the measuring pass leaves them:
 /// projection lines with a natural width and nothing placed yet.
 fn table_cells(natural: Pixels) -> Vec<LayoutLine> {
@@ -3137,6 +3190,7 @@ fn the_caret_cell_frame_covers_the_grid_lines_it_borders() {
         columns: 3,
         alignment: ColumnAlignment::None,
         quotes: 0,
+        tones: [None; QUOTE_TONES],
         offset: point(px(0.), px(0.)),
         size: size(px(40.), px(20.)),
     };

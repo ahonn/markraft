@@ -255,6 +255,9 @@ pub(crate) struct TableCell {
     /// How many block quotes the grid sits in. A cell carries no decoration of
     /// its own, so the grid draws those bars for all of its cells at once.
     pub(super) quotes: usize,
+    /// The callout accent of each of those quotes, as a quote line's
+    /// decoration carries them.
+    pub(super) tones: [Option<Hsla>; QUOTE_TONES],
     /// The cell box's top-left corner, relative to the line's origin.
     pub(super) offset: Point<Pixels>,
     /// The cell box, padding included.

@@ -614,7 +614,7 @@ impl Element for EditorSurface {
                             let bar_x = row.quote_bar_x(levels, level, &style);
                             window.paint_quad(fill(
                                 Bounds::new(point(bar_x, top), size(QUOTE_BAR, height)),
-                                tones.get(level).copied().flatten().unwrap_or(style.marker),
+                                quote_bar_color(&tones, level, &style),
                             ));
                         }
                     }
@@ -646,7 +646,7 @@ impl Element for EditorSurface {
                                     point(bar_x, top),
                                     size(QUOTE_BAR, row.top_gap + below),
                                 ),
-                                tones.get(level).copied().flatten().unwrap_or(style.marker),
+                                quote_bar_color(&tones, level, &style),
                             ));
                         }
                         window.paint_quad(

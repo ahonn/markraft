@@ -115,8 +115,9 @@ pub(super) fn paint_table(
     let outer = boxes
         .iter()
         .fold(*first, |all, (_, bounds)| all.union(bounds));
-    for bar in quote_bars(outer, first_cell.quotes, offset, style.quote_indent) {
-        window.paint_quad(fill(bar, style.marker));
+    let bars = quote_bars(outer, first_cell.quotes, offset, style.quote_indent);
+    for (level, bar) in bars.into_iter().enumerate() {
+        window.paint_quad(fill(bar, quote_bar_color(&first_cell.tones, level, style)));
     }
     if let Some(header) = boxes
         .iter()
