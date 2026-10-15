@@ -93,6 +93,7 @@ const section = 'mt-32 sm:mt-40';
 const h2 = 'text-[clamp(1.75rem,3.6vw,2.375rem)] font-semibold leading-[1.12] tracking-[-0.02em]';
 const h2Mark = 'text-[clamp(1.5rem,3.4vw,2.25rem)]';
 const lead = 'text-lg leading-[1.62] text-body';
+const media = 'overflow-hidden rounded-[14px] border border-line bg-backdrop';
 const requirements = 'macOS 13+ · Apple Silicon and Intel';
 ---
 
@@ -179,7 +180,7 @@ const requirements = 'macOS 13+ · Apple Silicon and Intel';
         </p>
       </div>
     </section>
-    <div class:list={[wide, 'mt-12 overflow-hidden rounded-[14px] border border-line bg-backdrop']}>
+    <div class:list={[wide, media, 'mt-12']}>
       <Loop
         name="your-files"
         width={1600}
@@ -205,6 +206,17 @@ const requirements = 'macOS 13+ · Apple Silicon and Intel';
         <li class="hang"><span class="mark" aria-hidden="true">-</span><span>Paste from a web page and the formatting comes along.</span></li>
         <li class="hang"><span class="mark" aria-hidden="true">-</span><span>Drop in an image and it is saved with the note.</span></li>
       </ul>
+      <div class="hang mt-10">
+        <span></span>
+        <div class={media}>
+          <Loop
+            name="format-as-you-type"
+            width={1320}
+            height={920}
+            label="A heading, tasks, bold text and a code block take shape as they are typed."
+          />
+        </div>
+      </div>
     </section>
 
     <section class:list={[column, section]}>
@@ -230,6 +242,16 @@ const requirements = 'macOS 13+ · Apple Silicon and Intel';
         </dl>
       </div>
     </section>
+    <div class:list={[wide, 'mt-12 grid gap-6 md:grid-cols-2']}>
+      <figure class={media}>
+        <Loop name="actions" width={1320} height={920} label="A table inserted from the action list opened with Command-K." />
+        <figcaption class="flex items-center gap-3 bg-white/60 px-5 py-3.5 font-mono text-[13px] text-subtle"><kbd>⌘K</kbd>All actions</figcaption>
+      </figure>
+      <figure class={media}>
+        <Loop name="find-a-note" width={1320} height={920} label="A note found by name and opened with Command-P." />
+        <figcaption class="flex items-center gap-3 bg-white/60 px-5 py-3.5 font-mono text-[13px] text-subtle"><kbd>⌘P</kbd>Find a note</figcaption>
+      </figure>
+    </div>
 
     <section id="vim" class:list={[column, section]}>
       <div class="hang">
@@ -256,6 +278,17 @@ const requirements = 'macOS 13+ · Apple Silicon and Intel';
               <span class="block"><kbd class="inline-block w-[6ch] font-normal">{keys}</kbd><span class="text-subtle">{action}</span></span>
             ))
           }</pre>
+      </div>
+      <div class="hang mt-10">
+        <span></span>
+        <div class={media}>
+          <Loop
+            name="vim"
+            width={1320}
+            height={920}
+            label="In vim mode, a task is moved with dd and p, text is appended with A, and :wq saves and hides the window."
+          />
+        </div>
       </div>
     </section>
 

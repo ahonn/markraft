@@ -53,24 +53,21 @@ const analytics = import.meta.env.PROD && PLAUSIBLE_DOMAIN && PLAUSIBLE_SCRIPT_U
   <body>
     <slot />
     <script>
-      // Clips play only while on screen. With reduced motion they wait for the viewer
-      // to press play instead.
+      // Clips autoplay and loop. They pause while off screen to save power. If the
+      // browser refuses to play, as Safari does in Low Power Mode, the controls appear.
       const clips = document.querySelectorAll<HTMLVideoElement>('video[data-loop]');
-      if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        clips.forEach((clip) => (clip.controls = true));
-      } else {
-        const observer = new IntersectionObserver(
-          (entries) => {
-            for (const { target, isIntersecting } of entries) {
-              const clip = target as HTMLVideoElement;
-              if (isIntersecting) clip.play().catch(() => (clip.controls = true));
-              else clip.pause();
-            }
-          },
-          { threshold: 0.35 },
-        );
-        clips.forEach((clip) => observer.observe(clip));
-      }
+      const observer = new IntersectionObserver(
+        (entries) => {
+          for (const { target, isIntersecting } of entries) {
+            const clip = target as HTMLVideoElement;
+            // A pause that interrupts a pending play also rejects it. Only a refusal shows the controls.
+            if (isIntersecting) clip.play().catch((error) => (clip.controls ||= error.name === 'NotAllowedError'));
+            else clip.pause();
+          }
+        },
+        { threshold: 0.35 },
+      );
+      clips.forEach((clip) => observer.observe(clip));
     </script>
   </body>
 </html>
