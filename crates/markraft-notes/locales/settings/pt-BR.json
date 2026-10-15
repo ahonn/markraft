@@ -29,6 +29,7 @@
     "line-tight": "Compacta",
     "line-normal": "Normal",
     "line-relaxed": "Ampla",
+    "line-loose": "Muito ampla",
     "line-width": "Largura da linha",
     "line-narrow": "Estreita",
     "line-full": "Total",

@@ -29,6 +29,7 @@
     "line-tight": "Tight",
     "line-normal": "Normal",
     "line-relaxed": "Relaxed",
+    "line-loose": "Loose",
     "line-width": "Line width",
     "line-narrow": "Narrow",
     "line-full": "Full",

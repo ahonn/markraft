@@ -29,6 +29,7 @@
     "line-tight": "Eng",
     "line-normal": "Normal",
     "line-relaxed": "Weit",
+    "line-loose": "Sehr weit",
     "line-width": "Zeilenbreite",
     "line-narrow": "Schmal",
     "line-full": "Voll",

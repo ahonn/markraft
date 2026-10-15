@@ -1305,6 +1305,7 @@ impl SettingsView {
                 (s.i18n.text("settings.line-tight"), LineHeight::Tight),
                 (s.i18n.text("settings.line-normal"), LineHeight::Normal),
                 (s.i18n.text("settings.line-relaxed"), LineHeight::Relaxed),
+                (s.i18n.text("settings.line-loose"), LineHeight::Loose),
             ],
             s.preferences.line_height,
             |value| Change::Pref(Pref::LineHeight(value)),

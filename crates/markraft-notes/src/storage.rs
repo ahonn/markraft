@@ -506,6 +506,7 @@ pub enum LineHeight {
     #[default]
     Normal,
     Relaxed,
+    Loose,
 }
 
 impl LineHeight {
@@ -515,6 +516,7 @@ impl LineHeight {
             LineHeight::Tight => 1.35,
             LineHeight::Normal => 1.5,
             LineHeight::Relaxed => 1.7,
+            LineHeight::Loose => 1.9,
         }
     }
 }
@@ -1616,6 +1618,28 @@ mod tests {
         assert!(preferences.settings_window.is_none());
         assert!(preferences.show_word_count);
         assert_eq!(preferences.language, LanguagePreference::System);
+    }
+
+    #[test]
+    fn line_heights_widen_in_the_order_they_are_listed() {
+        let listed = [
+            LineHeight::Tight,
+            LineHeight::Normal,
+            LineHeight::Relaxed,
+            LineHeight::Loose,
+        ];
+        assert!(
+            listed
+                .windows(2)
+                .all(|pair| pair[0].ratio() < pair[1].ratio())
+        );
+        for height in listed {
+            let saved = serde_json::to_string(&height).unwrap();
+            assert_eq!(serde_json::from_str::<LineHeight>(&saved).unwrap(), height);
+        }
+        // A settings file written before the widest option existed still loads.
+        let preferences: Preferences = serde_json::from_str(r#"{"line_height":"Relaxed"}"#).unwrap();
+        assert_eq!(preferences.line_height, LineHeight::Relaxed);
     }
 
     #[test]
