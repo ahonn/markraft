@@ -1087,9 +1087,13 @@ pub(super) fn caret_quad(
     shape: CaretShape,
 ) -> Bounds<Pixels> {
     let origin = row.caret(offset, upstream);
-    let bar = Bounds::new(origin, size(CARET_THICKNESS, row.line_height));
     match shape {
-        CaretShape::Bar => bar,
+        // Centered on the boundary, so it stands between two glyphs rather
+        // than over the left edge of the one after it.
+        CaretShape::Bar => Bounds::new(
+            origin - point(CARET_THICKNESS / 2., px(0.)),
+            size(CARET_THICKNESS, row.line_height),
+        ),
         CaretShape::Block | CaretShape::Underline => {
             // A grapheme that wraps onto the next visual row leaves no width here, so
             // the caret falls back to its nominal one rather than spanning the row.

@@ -2,15 +2,20 @@ use std::time::Duration;
 
 use gpui::Pixels;
 
+mod native;
+
+pub(crate) use native::NativeCaret;
+
 pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(500);
-/// How long a caret keeps blinking without input before it settles visible.
-/// Every blink repaints the window, and the GPU driver keeps ~110 MB of working
-/// pools resident until it has been idle for about ten seconds.
+/// How long GPUI blinks a caret without input before it hands the caret to a
+/// [`NativeCaret`]. Every blink GPUI paints is a frame, and the GPU driver keeps
+/// ~110 MB of working pools resident until it has been idle for about ten
+/// seconds.
 pub(crate) const BLINK_TIMEOUT: Duration = Duration::from_secs(10);
 const BLINK_TICKS: u32 = (BLINK_TIMEOUT.as_millis() / BLINK_INTERVAL.as_millis()) as u32;
 const _: () = assert!(
     BLINK_TICKS.is_multiple_of(2),
-    "blinking must settle on a visible caret"
+    "the hand-off must fall on a tick that hides the caret"
 );
 
 /// The caret as the view shows it, beyond where the selection puts it: which
@@ -107,12 +112,38 @@ impl CaretView {
 /// under it. `steady` also carries the reduced-motion setting, which holds every
 /// caret shape still. Restarting an input session always exposes the caret before
 /// waiting for the first timer tick, and restarts the [`BLINK_TIMEOUT`] after
-/// which an idle caret stops blinking.
+/// which GPUI hands an idle caret to a [`NativeCaret`].
 #[derive(Default)]
 pub(crate) struct CaretBlink {
     pub(crate) visible: bool,
     enabled: bool,
     ticks_left: u32,
+    handoff: Handoff,
+}
+
+/// Where an idle caret is in its hand-off to a [`NativeCaret`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Handoff {
+    /// GPUI paints the caret.
+    #[default]
+    None,
+    /// The last tick hid the caret. The next paint hands it over where it
+    /// stands, or keeps it steady when no native layer can take it.
+    Pending,
+    /// A native layer blinks the caret. Any later paint takes it back: the
+    /// frame may have moved the text or drawn over it.
+    Shown,
+}
+
+/// What the blink timer does after a tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tick {
+    /// The caret toggled: repaint and wait for the next tick.
+    Blink,
+    /// The caret hid for the hand-off: repaint once and stop.
+    HandOff,
+    /// Blinking is paused: stop.
+    Stop,
 }
 
 impl CaretBlink {
@@ -126,40 +157,60 @@ impl CaretBlink {
         self.visible = true;
         self.enabled = focused && !composing && selection_empty && !steady;
         self.ticks_left = BLINK_TICKS;
+        self.handoff = Handoff::None;
         self.enabled
     }
 
-    /// Toggle the caret, or report that the timer should stop: when blinking is
-    /// paused, or once [`BLINK_TIMEOUT`] has passed and the caret is visible again.
-    pub(crate) fn tick(&mut self) -> bool {
+    /// Toggle the caret. Once [`BLINK_TIMEOUT`] has passed, hide it one last
+    /// time for the hand-off instead.
+    pub(crate) fn tick(&mut self) -> Tick {
+        if !self.enabled {
+            return Tick::Stop;
+        }
+        self.visible = !self.visible;
         if self.ticks_left == 0 {
             self.enabled = false;
+            self.handoff = Handoff::Pending;
+            return Tick::HandOff;
         }
-        if self.enabled {
-            self.visible = !self.visible;
-            self.ticks_left -= 1;
-        }
-        self.enabled
+        self.ticks_left -= 1;
+        Tick::Blink
+    }
+
+    pub(crate) fn handoff(&self) -> Handoff {
+        self.handoff
+    }
+
+    /// A native layer took the caret.
+    pub(crate) fn handed_over(&mut self) {
+        debug_assert_eq!(self.handoff, Handoff::Pending);
+        self.handoff = Handoff::Shown;
+    }
+
+    /// No native layer took the caret: GPUI shows it, steady, until the next reset.
+    pub(crate) fn settle(&mut self) {
+        self.visible = true;
+        self.handoff = Handoff::None;
     }
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{BLINK_INTERVAL, BLINK_TIMEOUT, CaretBlink};
+    use super::{BLINK_INTERVAL, BLINK_TIMEOUT, CaretBlink, Handoff, Tick};
 
     #[test]
     fn input_reveals_a_hidden_caret_before_blinking_resumes() {
         let mut caret = CaretBlink::default();
         assert!(caret.reset(true, false, true, false));
         assert!(caret.visible);
-        assert!(caret.tick());
+        assert_eq!(caret.tick(), Tick::Blink);
         assert!(!caret.visible);
         assert!(caret.reset(true, false, true, false));
         assert!(caret.visible);
-        assert!(caret.tick());
+        assert_eq!(caret.tick(), Tick::Blink);
         assert!(!caret.visible);
-        assert!(caret.tick());
+        assert_eq!(caret.tick(), Tick::Blink);
         assert!(caret.visible);
     }
 
@@ -176,34 +227,63 @@ mod tests {
         ] {
             assert!(!caret.reset(focused, composing, empty, steady));
             for _ in 0..3 {
-                assert!(!caret.tick());
+                assert_eq!(caret.tick(), Tick::Stop);
                 assert!(caret.visible);
+                assert_eq!(caret.handoff(), Handoff::None);
             }
         }
         assert!(caret.reset(true, false, true, false));
-        assert!(caret.tick());
+        assert_eq!(caret.tick(), Tick::Blink);
         assert!(!caret.visible);
     }
 
+    /// Blink until the timeout, and return how many blinks there were.
+    fn blink_to_the_handoff(caret: &mut CaretBlink) -> u128 {
+        let mut blinks = 0;
+        loop {
+            match caret.tick() {
+                Tick::Blink => blinks += 1,
+                Tick::HandOff => return blinks,
+                Tick::Stop => panic!("blinking stopped before the hand-off"),
+            }
+            assert!(blinks <= 100, "the hand-off never came");
+        }
+    }
+
     #[test]
-    fn an_idle_caret_settles_visible_until_the_next_reset() {
+    fn an_idle_caret_is_handed_off_while_it_is_hidden() {
         let mut caret = CaretBlink::default();
         assert!(caret.reset(true, false, true, false));
-        let mut ticks = 0;
-        while caret.tick() {
-            ticks += 1;
-            assert!(ticks <= 100, "blinking never settled");
-        }
         assert_eq!(
-            ticks,
+            blink_to_the_handoff(&mut caret),
             BLINK_TIMEOUT.as_millis() / BLINK_INTERVAL.as_millis()
         );
+        assert!(!caret.visible);
+        assert_eq!(caret.handoff(), Handoff::Pending);
+        caret.handed_over();
+        assert_eq!(caret.handoff(), Handoff::Shown);
+        assert_eq!(caret.tick(), Tick::Stop);
+        assert!(!caret.visible);
+
+        assert!(caret.reset(true, false, true, false));
         assert!(caret.visible);
-        assert!(!caret.tick());
+        assert_eq!(caret.handoff(), Handoff::None);
+        assert_eq!(caret.tick(), Tick::Blink);
+    }
+
+    #[test]
+    fn a_caret_no_layer_takes_settles_visible_until_the_next_reset() {
+        let mut caret = CaretBlink::default();
+        assert!(caret.reset(true, false, true, false));
+        blink_to_the_handoff(&mut caret);
+        caret.settle();
+        assert!(caret.visible);
+        assert_eq!(caret.handoff(), Handoff::None);
+        assert_eq!(caret.tick(), Tick::Stop);
         assert!(caret.visible);
 
         assert!(caret.reset(true, false, true, false));
-        assert!(caret.tick());
+        assert_eq!(caret.tick(), Tick::Blink);
         assert!(!caret.visible);
     }
 }

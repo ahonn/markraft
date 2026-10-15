@@ -13,7 +13,7 @@
 //! containing it; text, decorations, and objects share that row geometry.
 
 use crate::style::EditorStyle;
-use crate::{CaretShape, EditorView, Scrollbar};
+use crate::{CaretShape, EditorView, Scrollbar, caret};
 use gpui::{prelude::*, *};
 use markraft_core::commands::ColumnAlignment;
 use markraft_core::kind::SourceHighlight;
@@ -545,6 +545,10 @@ impl Element for EditorSurface {
         let focused = editor.focus.is_focused(window);
         let caret_visible = editor.caret_blink.visible && window.is_window_active();
         let caret_shape = editor.extension_caret();
+        let handoff = editor.caret_blink.handoff();
+        // The bar this frame would draw, whole and unclipped, for a native
+        // layer to blink once the caret is idle.
+        let mut idle_bar = None;
         // The grapheme the caret rests on, for the shapes that cover one.
         // The row that draws the caret keeps this only while it stays inside it.
         let caret_next = (caret_shape != CaretShape::Bar && a == b)
@@ -882,23 +886,28 @@ impl Element for EditorSurface {
                         window.paint_quad(fill(rect, style.marker));
                     }
                 }
-                if focused && caret_visible && a == b && !inert && row.contains(caret_pos) {
+                if focused && a == b && !inert && row.contains(caret_pos) {
                     let mut color = style.marker;
                     if caret_shape == CaretShape::Block {
                         color.a = BLOCK_CARET_ALPHA;
                     }
-                    window.paint_quad(fill(
-                        caret_quad(
-                            row,
-                            row.pos_to_offset(caret_pos),
-                            caret_next
-                                .filter(|next| row.contains(*next))
-                                .map(|next| row.pos_to_offset(next)),
-                            upstream,
-                            caret_shape,
-                        ),
-                        color,
-                    ));
+                    let quad = caret_quad(
+                        row,
+                        row.pos_to_offset(caret_pos),
+                        caret_next
+                            .filter(|next| row.contains(*next))
+                            .map(|next| row.pos_to_offset(next)),
+                        upstream,
+                        caret_shape,
+                    );
+                    if caret_visible {
+                        window.paint_quad(fill(quad, color));
+                    } else if handoff == caret::Handoff::Pending
+                        && caret_shape == CaretShape::Bar
+                        && window.content_mask().bounds.intersect(&quad) == quad
+                    {
+                        idle_bar = Some((quad, color));
+                    }
                 }
             }
             // A focused code block's language tag sits in its panel's corner,
@@ -940,6 +949,15 @@ impl Element for EditorSurface {
         });
         for scrollbar in &mut prepaint.table_scrollbars {
             scrollbar.paint(window, cx);
+        }
+        match handoff {
+            caret::Handoff::None => {}
+            caret::Handoff::Pending => self
+                .editor
+                .update(cx, |editor, cx| editor.hand_off_caret(idle_bar, window, cx)),
+            caret::Handoff::Shown => self
+                .editor
+                .update(cx, |editor, cx| editor.take_back_caret(cx)),
         }
         // The picture playing has scrolled away or left the document: it
         // stops rather than repaint what no one sees.

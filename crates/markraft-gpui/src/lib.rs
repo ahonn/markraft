@@ -682,6 +682,8 @@ pub struct EditorView {
     pub(crate) focused: bool,
     caret_focused: bool,
     caret_blink_task: Option<gpui::Task<()>>,
+    /// The layer that blinks an idle caret; see [`caret::Handoff`].
+    native_caret: caret::NativeCaret,
     /// The animated picture playing under the pointer; see [`animation`].
     pub(crate) player: animation::Player,
     animation_task: Option<gpui::Task<()>>,
@@ -797,6 +799,7 @@ impl EditorView {
             focused: false,
             caret_focused: false,
             caret_blink_task: None,
+            native_caret: caret::NativeCaret::default(),
             player: animation::Player::default(),
             animation_task: None,
             animate_images: true,
@@ -1944,6 +1947,7 @@ impl EditorView {
         // Dropping the previous task cancels its pending timer. Only the focused
         // editor with a collapsed, committed selection owns a ticking task.
         self.caret_blink_task = None;
+        self.native_caret.hide();
         let doc = self.state.doc();
         if !self.caret_blink.reset(
             self.caret_focused,
@@ -1956,19 +1960,43 @@ impl EditorView {
         self.caret_blink_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(caret::BLINK_INTERVAL).await;
-                let keep_blinking = this.update(cx, |this, cx| {
-                    if this.caret_blink.tick() {
+                let tick = this.update(cx, |this, cx| {
+                    let tick = this.caret_blink.tick();
+                    if tick != caret::Tick::Stop {
                         cx.notify();
-                        true
-                    } else {
-                        false
                     }
+                    tick
                 });
-                if !matches!(keep_blinking, Ok(true)) {
+                if !matches!(tick, Ok(caret::Tick::Blink)) {
                     break;
                 }
             }
         }));
+    }
+
+    /// The paint after the hand-off tick: a native layer blinks the bar at
+    /// `bar`, or, when there is no bar to hand over or no layer to take it,
+    /// GPUI shows the caret steady.
+    pub(crate) fn hand_off_caret(
+        &mut self,
+        bar: Option<(Bounds<Pixels>, Hsla)>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if bar.is_some_and(|(bounds, color)| self.native_caret.show(window, bounds, color)) {
+            self.caret_blink.handed_over();
+        } else {
+            self.caret_blink.settle();
+            cx.notify();
+        }
+    }
+
+    /// A frame was painted while a native layer blinks the caret. Something
+    /// changed, so GPUI blinks it again, where the frame puts it and under
+    /// whatever the frame drew over it.
+    pub(crate) fn take_back_caret(&mut self, cx: &mut Context<Self>) {
+        self.reset_caret_blink(cx);
+        cx.notify();
     }
 
     /// Move the selection, as a pointer or an arrow key does.
