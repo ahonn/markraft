@@ -73,6 +73,7 @@
     "math-help": "Apenas fórmulas em bloco. Tags manuais funcionam nos dois modos.",
     "emoji": "Emoji",
     "emoji-characters": "Inserir emoji como caracteres",
+    "emoji-help": "Desativado, grava códigos como :smile:. A nota mostra o emoji nos dois casos.",
     "automatic-updates": "Buscar atualizações automaticamente",
     "check-updates": "Buscar Atualizações…",
     "release-notes": "Novidades",

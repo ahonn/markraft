@@ -73,6 +73,7 @@
     "math-help": "디스플레이 수식에만 적용됩니다. 수동 태그는 두 모드 모두에서 동작합니다.",
     "emoji": "이모티콘",
     "emoji-characters": "이모티콘을 문자로 삽입",
+    "emoji-help": "끄면 :smile: 같은 코드로 저장합니다. 노트에는 항상 이모티콘으로 표시됩니다.",
     "automatic-updates": "자동으로 업데이트 확인",
     "check-updates": "업데이트 확인…",
     "release-notes": "릴리즈 노트",

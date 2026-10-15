@@ -73,6 +73,7 @@
     "math-help": "Display formulas only. Manual tags work in either mode.",
     "emoji": "Emoji",
     "emoji-characters": "Insert emoji as characters",
+    "emoji-help": "Off writes shortcodes such as :smile: to the file. Notes show emoji either way.",
     "automatic-updates": "Check for updates automatically",
     "check-updates": "Check for Updates…",
     "release-notes": "Release Notes",

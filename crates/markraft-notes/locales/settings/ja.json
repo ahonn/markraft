@@ -73,6 +73,7 @@
     "math-help": "ディスプレイ数式のみ。手動のタグはどちらのモードでも使えます。",
     "emoji": "絵文字",
     "emoji-characters": "絵文字を文字として挿入",
+    "emoji-help": "オフでは :smile: などのコードで保存します。表示はどちらも絵文字です。",
     "automatic-updates": "アップデートを自動的に確認",
     "check-updates": "アップデートを確認…",
     "release-notes": "リリースノート",

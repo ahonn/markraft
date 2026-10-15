@@ -73,6 +73,7 @@
     "math-help": "Nur abgesetzte Formeln. Manuelle Tags funktionieren in beiden Modi.",
     "emoji": "Emoji",
     "emoji-characters": "Emoji als Zeichen einfügen",
+    "emoji-help": "Aus: Die Datei enthält Kurzcodes wie :smile:. Notizen zeigen immer das Emoji.",
     "automatic-updates": "Automatisch nach Updates suchen",
     "check-updates": "Nach Updates suchen …",
     "release-notes": "Versionshinweise",

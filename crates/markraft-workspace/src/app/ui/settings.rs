@@ -1867,6 +1867,11 @@ impl SettingsView {
                         self.sender(|value| Change::Pref(Pref::EmojiCharacters(value))),
                     )
                     .into_any_element(),
+                    div()
+                        .text_size(px(HELP_SIZE))
+                        .text_color(p.subtitle)
+                        .child(s.i18n.text("settings.emoji-help"))
+                        .into_any_element(),
                 ],
                 p,
             ),

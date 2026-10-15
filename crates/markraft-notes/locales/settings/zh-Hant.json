@@ -73,6 +73,7 @@
     "math-help": "僅適用於獨立公式。兩種模式皆可手動標記。",
     "emoji": "表情符號",
     "emoji-characters": "將表情符號以字元插入",
+    "emoji-help": "關閉時寫入 :smile: 這類短代碼，筆記中照常顯示表情符號。",
     "automatic-updates": "自動檢查更新",
     "check-updates": "檢查更新…",
     "release-notes": "版本說明",

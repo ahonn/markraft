@@ -73,6 +73,7 @@
     "math-help": "Formules hors texte uniquement. Les tags manuels fonctionnent dans les deux modes.",
     "emoji": "Emoji",
     "emoji-characters": "Insérer les emoji en caractères",
+    "emoji-help": "Désactivé : le fichier garde des codes comme :smile:. La note affiche l’emoji.",
     "automatic-updates": "Rechercher automatiquement les mises à jour",
     "check-updates": "Rechercher les mises à jour…",
     "release-notes": "Nouveautés",
