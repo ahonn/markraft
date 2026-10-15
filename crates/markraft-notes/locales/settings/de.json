@@ -39,7 +39,7 @@
     "four-spaces": "4 Leerzeichen",
     "text-size": "Textgröße",
     "editing": "Bearbeiten",
-    "markdown-shortcuts": "Markdown beim Tippen formatieren",
+    "markdown-shortcuts": "Markdown am Zeilenanfang umwandeln",
     "auto-pair": "Klammern und Anführungszeichen ergänzen",
     "vim-mode": "Vim-Modus",
     "tab-in-code": "Tab in Code",

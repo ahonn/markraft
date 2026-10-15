@@ -39,7 +39,7 @@
     "four-spaces": "4 个空格",
     "text-size": "文字大小",
     "editing": "编辑",
-    "markdown-shortcuts": "输入时自动应用 Markdown 格式",
+    "markdown-shortcuts": "自动转换行首的 Markdown 标记",
     "auto-pair": "自动配对括号与引号",
     "vim-mode": "Vim 模式",
     "tab-in-code": "代码中的 Tab",

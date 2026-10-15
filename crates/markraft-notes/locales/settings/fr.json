@@ -39,7 +39,7 @@
     "four-spaces": "4 espaces",
     "text-size": "Taille du texte",
     "editing": "Édition",
-    "markdown-shortcuts": "Mise en forme Markdown à la saisie",
+    "markdown-shortcuts": "Convertir le Markdown en début de ligne",
     "auto-pair": "Apparier crochets et guillemets",
     "vim-mode": "Mode Vim",
     "tab-in-code": "Tab dans le code",

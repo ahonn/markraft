@@ -39,7 +39,7 @@
     "four-spaces": "공백 4칸",
     "text-size": "텍스트 크기",
     "editing": "편집",
-    "markdown-shortcuts": "입력하는 동안 Markdown 서식 적용",
+    "markdown-shortcuts": "줄 맨 앞의 Markdown 기호를 자동 변환",
     "auto-pair": "괄호와 따옴표 자동으로 짝 맞추기",
     "vim-mode": "Vim 모드",
     "tab-in-code": "코드 내 Tab 키",

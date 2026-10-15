@@ -39,7 +39,7 @@
     "four-spaces": "スペース4つ",
     "text-size": "文字サイズ",
     "editing": "編集",
-    "markdown-shortcuts": "入力中にMarkdownの書式を適用",
+    "markdown-shortcuts": "行頭のMarkdown記法を自動で変換",
     "auto-pair": "括弧と引用符を自動で閉じる",
     "vim-mode": "Vimモード",
     "tab-in-code": "コード内のTab",
