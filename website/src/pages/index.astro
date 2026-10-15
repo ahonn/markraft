@@ -1,22 +1,35 @@
 ---
 import Base from '../layouts/Base.astro';
 import Loop from '../components/Loop.astro';
+import DownloadLinks from '../components/DownloadLinks.astro';
 import Footer from '../components/Footer.astro';
-
-const repo = 'https://github.com/ahonn/markraft';
-// The release workflow also uploads the newest disk image under this fixed name.
-const downloadUrl = `${repo}/releases/latest/download/Markraft.dmg`;
-// Plausible tagged-event classes; they are inert when analytics is not loaded.
-const downloadEvent = (position: string) => `plausible-event-name=Download plausible-event-position=${position}`;
+import { appStoreUrl, downloadUrl, repo } from '../downloads';
 
 const title = 'Markraft — Open Source Floating Markdown Notepad for Mac';
 const description =
-  'Open-source Raycast Notes alternative: press ⌥N to float a Markdown note over any app. Free, native, plain .md files that work with Obsidian.';
+  'A floating Markdown notepad for Mac. Keep notes as plain .md files. Buy on the Mac App Store to support development, or download directly for free.';
 
 const faq = [
   {
     question: 'Is Markraft free?',
-    answer: 'The download on this site is free and open source, and there is no account to create.',
+    answer: 'The direct download is free, and the source code is open on GitHub. The Mac App Store version is a one-time purchase. Neither version requires a Markraft account or subscription.',
+  },
+  {
+    question: 'Why buy from the Mac App Store?',
+    answer: 'Your purchase supports development. The App Store handles installation and updates, and shows the price in your local currency.',
+  },
+  {
+    question: 'What is different between the two versions?',
+    answer: 'Both versions work with plain Markdown files. In the Mac App Store version, choose your existing notes folder through the macOS folder picker to grant access. The App Store handles updates for its version. The direct-download version uses its own updater.',
+  },
+  {
+    question: 'Can I keep my notes when switching versions?',
+    answer: 'Yes. Choose your existing notes folder in the version you install. Your Markdown files need no conversion. Check your preferences after switching versions.',
+    link: { href: '/support/#switching-versions', text: 'How to switch versions' },
+  },
+  {
+    question: 'How do I update Markraft?',
+    answer: 'Update the Mac App Store version through the App Store. The direct-download version has an automatic update check and a Check for Updates command in Settings.',
   },
   {
     question: 'Can I use it with my Obsidian vault?',
@@ -33,7 +46,7 @@ const faq = [
   },
   {
     question: 'Does it connect to the internet?',
-    answer: 'Only to check for updates and to show images linked from the web. Your notes are never uploaded.',
+    answer: 'Both versions can load images linked from the web. You can disable this in Settings. The direct-download version also checks for updates. The App Store delivers updates for its version. Markraft never uploads your notes.',
   },
   {
     question: 'Which Macs does it run on?',
@@ -52,7 +65,16 @@ const structuredData = [
     operatingSystem: 'macOS 13 or later',
     downloadUrl: downloadUrl,
     license: `${repo}/blob/master/LICENSE`,
-    offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+    offers: [
+      { '@type': 'Offer', name: 'Free direct download', url: downloadUrl, price: '0', priceCurrency: 'USD' },
+      {
+        '@type': 'Offer',
+        name: 'Mac App Store purchase',
+        url: appStoreUrl,
+        // Storefront prices vary by region. Do not attach the free download's price to this offer.
+        description: 'One-time purchase to support development. See the Mac App Store for your local price.',
+      },
+    ],
   },
   {
     '@context': 'https://schema.org',
@@ -65,200 +87,234 @@ const structuredData = [
   },
 ];
 
-const container = 'mx-auto w-[min(65rem,100%-2rem)]';
-const primaryButton = 'btn btn-primary';
-const secondaryButton = 'btn btn-secondary';
-const h2 = 'text-[clamp(2rem,4.5vw,2.75rem)] font-semibold leading-[1.1] tracking-[-0.02em]';
-const gapLarge = 'mt-28 sm:mt-40';
-const gapSmall = 'mt-24 sm:mt-32';
-const lead = 'text-[17px] leading-[1.55] text-muted sm:text-[19px]';
-const media = 'overflow-hidden rounded-[20px] bg-backdrop';
+const wide = 'mx-auto w-[min(65rem,100%-2rem)]';
+const column = 'mx-auto w-[min(47.5rem,100%-2rem)]';
+const section = 'mt-32 sm:mt-40';
+const h2 = 'text-[clamp(1.75rem,3.6vw,2.375rem)] font-semibold leading-[1.12] tracking-[-0.02em]';
+const h2Mark = 'text-[clamp(1.5rem,3.4vw,2.25rem)]';
+const lead = 'text-lg leading-[1.62] text-body';
+const requirements = 'macOS 13+ · Apple Silicon and Intel';
 ---
 
 <Base title={title} description={description} structuredData={structuredData}>
-  <header class:list={[container, 'flex items-center justify-between border-b border-line py-4 sm:py-5']}>
+  <header class:list={[wide, 'flex items-center justify-between gap-4 py-4 sm:py-5']}>
     <a href="/" class="flex min-h-11 items-center gap-2.5 text-ink!">
-      <img src="/icon.png" alt="" width="26" height="26" />
-      <span class="text-[17px] font-semibold">Markraft</span>
+      <img src="/icon.png" alt="" width="22" height="22" />
+      <span class="font-mono text-[15px] font-medium">markraft</span>
     </a>
-    <nav class="flex items-center gap-5 text-sm sm:gap-7">
+    <nav class="flex items-center gap-5 font-mono text-sm sm:gap-6">
       <a href="#features" class="hidden py-3 text-muted! hover:text-ink! sm:inline">Features</a>
       <a href="#faq" class="hidden py-3 text-muted! hover:text-ink! sm:inline">FAQ</a>
       <a href={repo} class="py-3 text-muted! hover:text-ink!">GitHub</a>
-      <a href={downloadUrl} class:list={['btn btn-secondary btn-small', downloadEvent('header')]}>Download</a>
+      <a href="#download" class="border-b border-ink py-1 text-ink!">Download</a>
     </nav>
   </header>
 
   <main>
-    <section class:list={[container, 'flex flex-col items-center pt-12 text-center sm:pt-16']}>
-      <img
-        src="/icon.png"
-        alt="Markraft app icon"
-        width="96"
-        height="96"
-        class="size-20 drop-shadow-[0_10px_18px_rgba(20,60,140,0.22)] sm:size-24"
-      />
-      <h1 class="mt-7 max-w-[52rem] text-[clamp(2.375rem,6vw,4rem)] font-semibold leading-[1.05] tracking-[-0.03em]">
-        The floating Markdown notepad for Mac
-      </h1>
-      <p class="mt-5 max-w-[34rem] text-[17px] leading-normal text-muted sm:text-[21px]">
-        Press ⌥N in any app to write, and again to put it away.{' '}<br class="hidden sm:inline" />
-        A free, open-source alternative to Raycast Notes.
-      </p>
-      <div class="mt-8 flex w-full flex-col items-stretch gap-3 sm:w-auto sm:flex-row sm:items-center">
-        <a href={downloadUrl} class:list={[primaryButton, downloadEvent('hero')]}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 4v11" /><path d="M7 10.5l5 5 5-5" /><path d="M5 20h14" />
-          </svg>
-          Download for Mac
-        </a>
-        <a href={repo} class={secondaryButton}>View on GitHub</a>
+    <section class:list={[column, 'pt-20 sm:pt-32']}>
+      <div class="hang">
+        <span class="mark text-[clamp(2.25rem,6vw,3.75rem)]" aria-hidden="true">#</span>
+        <h1 class="text-[clamp(2.5rem,6vw,3.75rem)] font-semibold leading-[1.04] tracking-[-0.028em]">
+          The floating Markdown notepad for Mac
+        </h1>
       </div>
-      <p class="mt-4 text-sm text-subtle">Free · Open source · macOS 13 or later</p>
+      <div class="hang mt-7">
+        <span></span>
+        <p class="max-w-[32em] text-[clamp(1.125rem,2vw,1.3125rem)] leading-[1.55] text-body">
+          An open-source Raycast Notes alternative. Press <kbd class="rounded-[5px] bg-code px-1.5 text-[0.9em] font-normal">⌥N</kbd> in any app to write, and again to put it
+          away.<span class="caret" aria-hidden="true"></span>
+        </p>
+      </div>
+      <div class="hang mt-10">
+        <span></span>
+        <DownloadLinks position="hero" note={`Paid on App Store · Free DMG · ${requirements}`} />
+      </div>
     </section>
 
-    <div class="mx-auto mt-12 w-[min(69rem,100%-2rem)] overflow-hidden rounded-[20px] bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06),0_20px_50px_-24px_rgba(20,40,80,0.28)] ring-1 ring-black/5 sm:mt-14">
-      <Loop
-        name="hero"
-        eager
-        width={1600}
-        height={900}
-        label="A Markraft note formats its Markdown as three points are typed and checked off, then shows the plain .md source underneath."
-      />
-    </div>
+    <section class:list={[column, 'mt-24 sm:mt-28']}>
+      <div class="hang">
+        <span></span>
+        <figure>
+          <div
+            role="img"
+            aria-label="A Markraft note with three tasks. On the line being edited, the marks around the bold words are visible. The other lines show only the formatted text."
+            class="rounded-2xl border border-line bg-white p-[clamp(1.5rem,4vw,2.75rem)] shadow-[0_1px_2px_rgb(20_20_10/0.04),0_24px_48px_-32px_rgb(20_20_10/0.18)]"
+          >
+            <div class="mb-7 flex items-center">
+              <span class="size-3 rounded-full bg-[#ee5f57]"></span>
+              <span class="flex-1 pr-3 text-center text-[13px] text-subtle">Why Markraft</span>
+            </div>
+            <div class="mb-4.5 text-[clamp(1.625rem,3vw,2rem)] font-semibold tracking-[-0.02em]">Why Markraft</div>
+            <div class="flex flex-col gap-3 text-[clamp(1.0625rem,2vw,1.25rem)] leading-[1.4]">
+              <div class="-mx-3 flex items-center gap-3 rounded-lg bg-[#f2f6fe] px-3 py-1.5">
+                <svg class="size-5 flex-none" viewBox="0 0 20 20"><rect x="1" y="1" width="18" height="18" rx="5" fill="var(--color-brand)"></rect><path d="M5.5 10.2l3 3 6-6.4" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                <span>Floats over <span class="font-mono text-[#8c96a8]">**</span><strong class="font-semibold">any app</strong><span class="font-mono text-[#8c96a8]">**</span><span class="caret"></span></span>
+              </div>
+              <div class="flex items-center gap-3">
+                <svg class="size-5 flex-none" viewBox="0 0 20 20"><rect x="1" y="1" width="18" height="18" rx="5" fill="var(--color-brand)"></rect><path d="M5.5 10.2l3 3 6-6.4" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                <span>Formats as <em>you type</em></span>
+              </div>
+              <div class="flex items-center gap-3">
+                <svg class="size-5 flex-none" viewBox="0 0 20 20"><rect x="1.5" y="1.5" width="17" height="17" rx="4.5" fill="none" stroke="var(--color-mark)" stroke-width="1.5"></rect></svg>
+                <span>Saves plain <code>.md</code> files</span>
+              </div>
+            </div>
+          </div>
+          <figcaption class="mt-4 font-mono text-[13px] text-subtle">Marks like ** show only on the line you are editing.</figcaption>
+        </figure>
+      </div>
+    </section>
 
-    <section id="features" class:list={[container, gapLarge, 'flex flex-col gap-10']}>
-      <div class="flex max-w-[40rem] flex-col gap-4">
+    <section id="features" class:list={[column, section]}>
+      <div class="hang">
+        <span class:list={['mark', h2Mark]} aria-hidden="true">##</span>
         <h2 class={h2}>Your notes are yours.</h2>
+      </div>
+      <div class="hang mt-5">
+        <span></span>
         <p class={lead}>
           Every note is a Markdown file in a folder you pick. Open it in Obsidian, VS Code or TextEdit, sync it with
           iCloud Drive, or back it up however you like. Already keep notes in Obsidian? Point Markraft at your vault
           and it fits right in.
         </p>
       </div>
-      <div class={media}>
-        <Loop
-          name="your-files"
-          width={1600}
-          height={580}
-          label="A task added and checked in Markraft appears at once in Obsidian, open on the same folder."
-        />
-      </div>
     </section>
+    <div class:list={[wide, 'mt-12 overflow-hidden rounded-[14px] border border-line bg-backdrop']}>
+      <Loop
+        name="your-files"
+        width={1600}
+        height={580}
+        label="A task added and checked in Markraft appears at once in Obsidian, open on the same folder."
+      />
+    </div>
 
-    <section class:list={[container, gapLarge, 'grid items-center gap-10 md:grid-cols-2 md:gap-20']}>
-      <div class:list={[media, 'md:order-first']}>
-        <Loop
-          name="format-as-you-type"
-          width={1320}
-          height={920}
-          label="A heading, tasks, bold text and a code block take shape as they are typed."
-        />
-      </div>
-      <div class="order-first flex flex-col gap-4 md:order-last">
+    <section class:list={[column, section]}>
+      <div class="hang">
+        <span class:list={['mark', h2Mark]} aria-hidden="true">##</span>
         <h2 class={h2}>Clean notes while you type.</h2>
+      </div>
+      <div class="hang mt-5">
+        <span></span>
         <p class={lead}>
           Headings, lists and checklists take shape the moment you type them. Marks like ** only show where you are
           editing, so the rest of the note stays easy to read.
         </p>
-        <ul class="mt-1 flex list-disc flex-col gap-2.5 pl-5 text-[17px] leading-normal text-muted">
-          <li>Checklists, tables and code blocks when you need more than text.</li>
-          <li>Paste from a web page and the formatting comes along.</li>
-          <li>Drop in an image and it is saved with the note.</li>
-        </ul>
       </div>
+      <ul class="mt-5 flex flex-col gap-2.5 text-lg leading-[1.55] text-body">
+        <li class="hang"><span class="mark" aria-hidden="true">-</span><span>Checklists, tables and code blocks when you need more than text.</span></li>
+        <li class="hang"><span class="mark" aria-hidden="true">-</span><span>Paste from a web page and the formatting comes along.</span></li>
+        <li class="hang"><span class="mark" aria-hidden="true">-</span><span>Drop in an image and it is saved with the note.</span></li>
+      </ul>
     </section>
 
-    <section class:list={[container, gapLarge, 'flex flex-col gap-10']}>
-      <div class="flex max-w-[40rem] flex-col gap-4">
+    <section class:list={[column, section]}>
+      <div class="hang">
+        <span class:list={['mark', h2Mark]} aria-hidden="true">##</span>
         <h2 class={h2}>Find anything without the mouse.</h2>
-        <p class={lead}>
-          Press ⌘K to see everything Markraft can do, or ⌘P to jump to any note by searching what is in it.
-        </p>
       </div>
-      <div class="grid w-full gap-6 md:grid-cols-2">
-        <figure class={media}>
-          <Loop
-            name="actions"
-            width={1320}
-            height={920}
-            label="A table inserted from the action list opened with Command-K."
-          />
-          <figcaption class="flex items-center gap-2.5 bg-white/55 px-5 py-3.5 text-sm text-muted"><kbd>⌘K</kbd>All actions</figcaption>
-        </figure>
-        <figure class={media}>
-          <Loop
-            name="find-a-note"
-            width={1320}
-            height={920}
-            label="A note found by name and opened with Command-P."
-          />
-          <figcaption class="flex items-center gap-2.5 bg-white/55 px-5 py-3.5 text-sm text-muted"><kbd>⌘P</kbd>Find a note</figcaption>
-        </figure>
+      <div class="hang mt-7">
+        <span></span>
+        <dl class="border-t border-line">
+          {
+            [
+              ['⌘K', 'See everything Markraft can do, and run it from the keyboard.'],
+              ['⌘P', 'Jump to any note by searching what is in it.'],
+              ['⌥N', 'Show or hide the note over whatever you are doing.'],
+            ].map(([key, action]) => (
+              <div class="grid grid-cols-[4.5rem_minmax(0,1fr)] items-baseline gap-4 border-b border-line py-4.5 sm:grid-cols-[6rem_minmax(0,1fr)]">
+                <dt><kbd class="text-[22px]">{key}</kbd></dt>
+                <dd class="text-lg leading-[1.55] text-body">{action}</dd>
+              </div>
+            ))
+          }
+        </dl>
       </div>
     </section>
 
-    <section id="vim" class:list={[container, gapLarge, 'grid items-center gap-10 md:grid-cols-2 md:gap-20']}>
-      <div class="flex flex-col gap-4">
+    <section id="vim" class:list={[column, section]}>
+      <div class="hang">
+        <span class:list={['mark', h2Mark]} aria-hidden="true">##</span>
         <h2 class={h2}>Prefer vim? It is built in.</h2>
+      </div>
+      <div class="hang mt-5">
+        <span></span>
         <p class={lead}>
           Switch on vim mode in Settings and edit with the keys you already know. It treats lists, tables and code
           blocks as whole pieces, so moving them around just works.
         </p>
-        <p class="mt-1 flex flex-wrap gap-1.5" aria-label="Examples: dd, p, ciw, :wq">
-          <kbd>dd</kbd><kbd>p</kbd><kbd>ciw</kbd><kbd>:wq</kbd>
-        </p>
       </div>
-      <div class={media}>
-        <Loop
-          name="vim"
-          width={1320}
-          height={920}
-          label="In vim mode, a task is moved with dd and p, text is appended with A, and :wq saves and hides the window."
-        />
-      </div>
-    </section>
-
-    <section class:list={[container, gapSmall, 'grid gap-10 border-t border-line pt-12 md:grid-cols-3 md:gap-14']}>
-      <div class="flex flex-col gap-2.5">
-        <h3 class="text-[21px] font-semibold">Stays out of the way</h3>
-        <p class="text-[17px] leading-[1.55] text-muted">It sits quietly in the menu bar and appears right over whatever you are doing.</p>
-      </div>
-      <div class="flex flex-col gap-2.5">
-        <h3 class="text-[21px] font-semibold">Private by default</h3>
-        <p class="text-[17px] leading-[1.55] text-muted">No account and no cloud. Your notes never leave your Mac unless you move them.</p>
-      </div>
-      <div class="flex flex-col gap-2.5">
-        <h3 class="text-[21px] font-semibold">Open source</h3>
-        <p class="text-[17px] leading-[1.55] text-muted">
-          No subscription and no limit on how many notes you keep. The code is <a href={repo}>open on GitHub</a> for anyone to read.
-        </p>
+      <div class="hang mt-6">
+        <span class="mark text-sm" aria-hidden="true">```</span>
+        <pre
+          class="overflow-x-auto rounded-[10px] bg-well px-5.5 py-4.5 font-mono text-[15px] leading-[1.8] text-ink">{
+            [
+              ['dd', 'cut the task under the cursor'],
+              ['p', 'put it below'],
+              ['ciw', 'change the word'],
+              [':wq', 'save and hide the window'],
+            ].map(([keys, action]) => (
+              <span class="block"><kbd class="inline-block w-[6ch] font-normal">{keys}</kbd><span class="text-subtle">{action}</span></span>
+            ))
+          }</pre>
       </div>
     </section>
 
-    <section id="faq" class:list={[container, gapSmall]}>
-      <h2 class:list={[h2, 'mb-6']}>Questions</h2>
-      <div class="grid md:grid-cols-2 md:gap-x-16">
+    <section class:list={[column, section, 'grid gap-8 border-t border-line pt-9 sm:grid-cols-3']}>
+      <div class="flex flex-col gap-2">
+        <h3 class="text-lg font-semibold">Stays out of the way</h3>
+        <p class="leading-[1.6] text-muted">It sits quietly in the menu bar and appears right over whatever you are doing.</p>
+      </div>
+      <div class="flex flex-col gap-2">
+        <h3 class="text-lg font-semibold">Private by default</h3>
+        <p class="leading-[1.6] text-muted">No account. No app telemetry. Your notes stay in a folder you control.</p>
+      </div>
+      <div class="flex flex-col gap-2">
+        <h3 class="text-lg font-semibold">Open source</h3>
+        <p class="leading-[1.6] text-muted">
+          No subscription and no limit on how many notes you keep. The code is <a href={repo}>open on GitHub</a>.
+        </p>
+      </div>
+    </section>
+
+    <section id="faq" class:list={[column, section]}>
+      <div class="hang">
+        <span class:list={['mark', h2Mark]} aria-hidden="true">##</span>
+        <h2 class={h2}>Questions</h2>
+      </div>
+      <div class="mt-7 flex flex-col gap-7">
         {
-          faq.map(({ question, answer }) => (
-            <div class="flex flex-col gap-2 border-t border-line py-6">
-              <h3 class="text-lg font-semibold">{question}</h3>
-              <p class="leading-[1.55] text-muted">{answer}</p>
+          faq.map(({ question, answer, link }) => (
+            <div>
+              <div class="hang">
+                <span class="mark text-[15px]" aria-hidden="true">###</span>
+                <h3 class="text-[19px] font-semibold">{question}</h3>
+              </div>
+              <div class="hang mt-1.5">
+                <span></span>
+                <div class="flex flex-col gap-2 text-[17px] leading-[1.6] text-muted">
+                  <p>{answer}</p>
+                  {link && <p><a href={link.href}>{link.text}</a></p>}
+                </div>
+              </div>
             </div>
           ))
         }
       </div>
     </section>
 
-    <section id="download" class:list={[container, gapLarge, 'flex flex-col items-center pb-4 text-center']}>
-      <img src="/icon.png" alt="" width="72" height="72" class="size-18" />
-      <h2 class="mt-5 text-[clamp(1.75rem,4vw,2.5rem)] font-semibold tracking-[-0.02em]">Press ⌥N and start writing.</h2>
-      <a href={downloadUrl} class:list={[primaryButton, 'mt-7 w-full sm:w-auto', downloadEvent('footer')]}>Download for Mac</a>
-      <p class="mt-4 text-sm text-subtle">
-        Free · macOS 13 or later · Apple Silicon and Intel
-      </p>
+    <section id="download" class:list={[column, 'mt-36 sm:mt-44']}>
+      <div class="hang">
+        <span class="mark text-[clamp(1.875rem,4.6vw,3rem)]" aria-hidden="true">#</span>
+        <h2 class="text-[clamp(2rem,4.6vw,3rem)] font-semibold leading-[1.08] tracking-[-0.025em]">
+          Press ⌥N and start writing.<span class="caret" aria-hidden="true"></span>
+        </h2>
+      </div>
+      <div class="hang mt-8">
+        <span></span>
+        <DownloadLinks position="footer" note={`Paid on App Store · Free DMG · ${requirements}`} />
+      </div>
     </section>
   </main>
 
-  <Footer class={`${container} mt-24`} />
+  <Footer class={`${wide} mt-32 sm:mt-36`} />
 </Base>

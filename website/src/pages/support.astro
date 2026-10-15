@@ -1,7 +1,6 @@
 ---
 import Prose from '../layouts/Prose.astro';
-
-const repo = 'https://github.com/ahonn/markraft';
+import { appStoreUrl, repo } from '../downloads';
 ---
 
 <Prose
@@ -19,6 +18,7 @@ const repo = 'https://github.com/ahonn/markraft';
   <ul>
     <li>The Markraft version, shown in Settings under About.</li>
     <li>Your macOS version.</li>
+    <li>Whether you installed the Mac App Store version or the direct-download version.</li>
     <li>
       The crash report, if Markraft quit unexpectedly. Reports are saved on your Mac in{' '}
       <code>~/Library/Logs/Markraft</code> and are sent only when you attach one yourself.
@@ -36,8 +36,8 @@ const repo = 'https://github.com/ahonn/markraft';
       different folder in Settings, or move the files with Finder.
     </li>
     <li>
-      <strong>Folder access.</strong> The Mac App Store version asks you to choose your notes folder once, because
-      macOS only lets it read the folders you pick.
+      <strong>Folder access.</strong> To use an existing notes folder in the Mac App Store version, choose it in Settings.
+      The macOS folder picker gives Markraft permission to access that folder.
     </li>
     <li>
       <strong>Syncing.</strong> Keep the notes folder in iCloud Drive or another sync service. That service does the
@@ -45,6 +45,36 @@ const repo = 'https://github.com/ahonn/markraft';
     </li>
   </ul>
   <p>More answers are in the <a href="/#faq">questions on the home page</a>.</p>
+
+  <h2>Installing and updating</h2>
+  <p>
+    The <a href={appStoreUrl}>Mac App Store version</a> is a one-time purchase that supports development.
+    The App Store shows your local price and handles installation and updates.
+  </p>
+  <p>
+    The <a href="/#download">direct-download version</a> is free. Open the downloaded <code>.dmg</code> file and drag
+    Markraft to Applications. This version checks for updates through its own updater. To check manually, open
+    Settings, select About, and choose Check for Updates.
+  </p>
+
+  <h2 id="switching-versions">Switching versions with existing notes</h2>
+  <p>
+    Both versions use plain Markdown files. Your notes need no conversion. Use the steps below to select your existing
+    notes folder in the version you install.
+  </p>
+  <ol>
+    <li>In your current version, open Settings and select Files.</li>
+    <li>Open the Notes folder menu and choose Show in Finder to locate your existing folder.</li>
+    <li>Quit Markraft with ⌘Q.</li>
+    <li>Install and open the version you want to use.</li>
+    <li>In Settings, select Files.</li>
+    <li>Open the Notes folder menu and choose Choose Folder.</li>
+    <li>Select your existing notes folder in the macOS folder picker.</li>
+  </ol>
+  <p>
+    Your existing notes appear in Markraft. The folder picker also grants the Mac App Store version access to the folder.
+    Check your shortcuts and other preferences after switching. These steps select your notes folder and do not transfer settings.
+  </p>
 
   <h2>Mac App Store purchases</h2>
   <p>

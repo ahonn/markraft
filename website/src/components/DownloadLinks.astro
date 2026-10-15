@@ -1,0 +1,22 @@
+---
+import { appStoreUrl, downloadEvent, downloadUrl } from '../downloads';
+
+interface Props {
+  position: 'hero' | 'footer';
+  /** The line under the links, such as the system requirements. */
+  note: string;
+}
+
+const { position, note } = Astro.props;
+---
+
+<div class="flex flex-col gap-3.5">
+  <div class="flex flex-wrap items-center gap-3.5">
+    <a href={appStoreUrl} class:list={['inline-flex shrink-0', downloadEvent(position, 'app-store')]}>
+      <!-- Unmodified Apple artwork: https://tools.applemediaservices.com/api/badges/download-on-the-mac-app-store/black/en-us -->
+      <img src="/mac-app-store.svg" alt="Download on the Mac App Store" width="187" height="48" class="h-[46px] w-auto" />
+    </a>
+    <a href={downloadUrl} class:list={['btn', downloadEvent(position, 'direct')]}>Download free .dmg</a>
+  </div>
+  <p class="font-mono text-[13px] text-subtle">{note}</p>
+</div>

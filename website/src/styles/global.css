@@ -1,26 +1,38 @@
 @import "tailwindcss";
 
-@theme {
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+/* Self-hosted, Latin subset only, so the site makes no font requests to a third party. */
+@import "@fontsource/ibm-plex-sans/latin-400.css";
+@import "@fontsource/ibm-plex-sans/latin-400-italic.css";
+@import "@fontsource/ibm-plex-sans/latin-600.css";
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
 
-  --color-ink: #1d1d1f;
-  --color-muted: #515154;
-  --color-subtle: #6e6e73;
-  --color-line: #e8e8ed;
-  --color-edge: #d2d2d7;
-  --color-surface: #f5f5f7;
-  /* The blue of the app icon. White text on it needs the large, bold button type. */
+@theme {
+  /* Plex has no ⌘ or ⌥, so those fall through to the system font. */
+  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --color-paper: #fafaf8;
+  --color-ink: #1b1b1a;
+  --color-body: #45453f;
+  --color-muted: #5e5e58;
+  --color-subtle: #6a6a64;
+  /* Markdown marks that hang in the margin. Decorative, so they sit below text contrast on purpose. */
+  --color-mark: #b4b4ac;
+  --color-line: #e4e4de;
+  --color-edge: #cfcfc8;
+  --color-code: #eeeee9;
+  --color-well: #f1f1ec;
+  /* The blue of the app icon. On the page it marks only the caret. */
   --color-brand: #2f7cf6;
-  --color-brand-strong: #1f66dd;
-  --color-link: #1d6fe0;
+  --color-link: #1d63d6;
   /* The desktop behind the app in the recorded clips, so a clip meets its frame without a seam. */
   --color-backdrop: #dee6e9;
 }
 
 @layer base {
   html {
-    @apply bg-white font-sans text-ink antialiased;
+    @apply bg-paper font-sans text-ink antialiased;
   }
 
   @media (prefers-reduced-motion: no-preference) {
@@ -61,20 +73,65 @@
     @apply rounded-md outline-2 outline-offset-2 outline-brand;
   }
 
+  code {
+    @apply rounded-[5px] bg-code px-1.5 py-px font-mono text-[0.9em];
+  }
+
   kbd {
-    @apply inline-flex min-w-6 items-center justify-center rounded-md border border-edge bg-white px-1.5 font-sans text-[0.8125rem] leading-5 text-ink shadow-[0_1px_0_var(--color-edge)];
+    @apply font-mono font-medium text-ink;
   }
 }
 
-/* Buttons. Press feedback starts on pointer-down; hover only where a pointer can hover. */
 @layer components {
+  /* Markdown marks hang in the left margin, outside the text column, as they would in a note. */
+  .hang {
+    display: grid;
+    grid-template-columns: 1.875rem minmax(0, 1fr);
+    align-items: baseline;
+  }
+
+  .mark {
+    @apply pr-2 text-right font-mono font-normal text-mark select-none;
+  }
+
+  @media (width >= 48rem) {
+    .hang {
+      grid-template-columns: 4.5rem minmax(0, 1fr);
+    }
+
+    .mark {
+      @apply pr-5;
+    }
+  }
+
+  .caret {
+    display: inline-block;
+    width: 2px;
+    height: 0.95em;
+    margin-left: 2px;
+    vertical-align: -0.12em;
+    background: var(--color-brand);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .caret {
+      animation: caret-blink 1.1s steps(1) infinite;
+    }
+  }
+
+  @keyframes caret-blink {
+    56% {
+      opacity: 0;
+    }
+  }
+
+  /* Press feedback starts on pointer-down; hover only where a pointer can hover. */
   .btn {
-    @apply inline-flex min-h-12 items-center justify-center gap-2 rounded-xl px-6 text-[17px] font-semibold select-none;
+    @apply inline-flex min-h-[46px] items-center justify-center rounded-[10px] border border-edge bg-white px-[18px] font-mono text-[15px] text-ink select-none;
     -webkit-tap-highlight-color: transparent;
     transition:
       background-color 150ms ease-out,
       border-color 150ms ease-out,
-      box-shadow 150ms ease-out,
       transform 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
   }
 
@@ -86,65 +143,18 @@
     @apply outline-2 outline-offset-3 outline-brand;
   }
 
-  .btn-primary {
-    @apply bg-brand text-[19px] font-bold text-white;
-    box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.18),
-      0 1px 2px rgb(31 102 221 / 0.3),
-      0 4px 10px -6px rgb(31 102 221 / 0.4);
-  }
-
-  .btn-primary svg {
-    transition: transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
-  }
-
-  .btn-secondary {
-    @apply border border-edge bg-white text-ink;
-    box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
-  }
-
-  .btn-small {
-    @apply min-h-9 rounded-[10px] px-3.5 text-sm font-medium;
-  }
-
-  @media (pointer: coarse) {
-    .btn-small {
-      @apply min-h-11;
-    }
-  }
-
   @media (hover: hover) {
-    .btn-primary:hover {
-      @apply bg-brand-strong text-white;
-      box-shadow:
-        inset 0 1px 0 rgb(255 255 255 / 0.18),
-        0 1px 2px rgb(31 102 221 / 0.35),
-        0 6px 14px -6px rgb(31 102 221 / 0.45);
+    .btn:hover {
+      @apply border-[#b9b9b2] bg-well text-ink;
     }
-
-    .btn-primary:hover svg {
-      transform: translateY(1.5px);
-    }
-
-    .btn-secondary:hover {
-      @apply border-[#c7c7cc] bg-surface text-ink;
-    }
-  }
-
-  .btn-primary:active {
-    box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.12),
-      0 1px 2px rgb(31 102 221 / 0.3);
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .btn,
-    .btn-primary svg {
+    .btn {
       transition: background-color 150ms ease-out, border-color 150ms ease-out;
     }
 
-    .btn:active,
-    .btn-primary:hover svg {
+    .btn:active {
       transform: none;
     }
   }
