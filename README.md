@@ -22,7 +22,11 @@
 Press <kbd>⌥N</kbd> in any app to write, and again to put it away. Markraft keeps your notes as plain Markdown files in a folder you choose, so Obsidian or any other editor can open them too.
 
 <p align="center">
-  <a href="https://github.com/ahonn/markraft/releases/latest/download/Markraft.dmg"><b>Download for macOS</b></a>
+  <a href="https://apps.apple.com/app/id6819551024"><img src="website/public/mac-app-store.svg" alt="Download on the Mac App Store" height="40"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/ahonn/markraft/releases/latest/download/Markraft.dmg"><b>Download the free .dmg</b></a>
   · <a href="#installation">Installation</a>
 </p>
 
@@ -44,7 +48,10 @@ Press <kbd>⌥N</kbd> in any app to write, and again to put it away. Markraft ke
 
 ## Installation
 
-Download [Markraft.dmg](https://github.com/ahonn/markraft/releases/latest/download/Markraft.dmg) from the [latest release](https://github.com/ahonn/markraft/releases/latest), open it, and drag Markraft to Applications. Markraft is signed and notarized, and updates itself through Sparkle. It needs macOS 13 or later.
+Markraft needs macOS 13 or later. There are two versions. Both keep your notes as plain Markdown files, and neither needs an account.
+
+- **Mac App Store.** Get Markraft from the [Mac App Store](https://apps.apple.com/app/id6819551024). It is a one-time purchase that supports development. The App Store installs and updates it. To use an existing notes folder, choose it in the macOS folder picker so that Markraft can access it.
+- **Direct download.** Download [Markraft.dmg](https://github.com/ahonn/markraft/releases/latest/download/Markraft.dmg) from the [latest release](https://github.com/ahonn/markraft/releases/latest), open it, and drag Markraft to Applications. This version is free. It is signed and notarized, and updates itself through Sparkle.
 
 Markraft runs from the menu bar and has no Dock icon.
 
