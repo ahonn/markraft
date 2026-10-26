@@ -1,12 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">
   <title>Markraft parallel-cut M, menu bar template at 1x</title>
-  <!-- One unit is one pixel on a non-Retina display. The glyph is 15 x 12 with
-       4-unit stems, every straight edge on the grid; an odd width cannot be
-       centered on it, so the glyph sits one unit from the left edge and two from
-       the right. Slit edges keep slope 1, y=x-4 and y=x-7: three units across, so
-       two whole pixels stay clear in each row. A plain reduction of
-       markraft-m.svg leaves 1.4 and fills in.
+  <!-- One unit is one pixel on a non-Retina display. The glyph is 18 x 14 with
+       5-unit stems, every straight edge on the grid, and fills the canvas from
+       side to side. It is 14 high so that it stands within a pixel or two of the
+       system's status icons; an even height centers it on the 18-unit canvas.
+       Slit edges keep slope 1, y=x-5 and y=x-8: three units across, so two whole
+       pixels stay clear in each row. A plain reduction of markraft-m.svg leaves
+       1.7 and fills in.
        Only alpha is used: macOS tints a template image itself. -->
-  <path fill="#000" transform="translate(1 3)" d="M .5 0 H 4 L 10 6 L 7.75 8.25 Q 7.5 8.5 7.25 8.25 L 4 5 V 11.5 Q 4 12 3.5 12 H .5 Q 0 12 0 11.5 V .5 Q 0 0 .5 0 Z
-M 10 0 H 14.5 Q 15 0 15 .5 V 11.5 Q 15 12 14.5 12 H 11.5 Q 11 12 11 11.5 V 4 L 8.5 1.5 Z"/>
+  <path fill="#000" transform="translate(0 2)" d="M .5 0 H 5 L 12 7 L 9.25 9.75 Q 9 10 8.75 9.75 L 5 6 V 13.5 Q 5 14 4.5 14 H .5 Q 0 14 0 13.5 V .5 Q 0 0 .5 0 Z
+M 12 0 H 17.5 Q 18 0 18 .5 V 13.5 Q 18 14 17.5 14 H 13.5 Q 13 14 13 13.5 V 5 L 10 2 Z"/>
 </svg>
