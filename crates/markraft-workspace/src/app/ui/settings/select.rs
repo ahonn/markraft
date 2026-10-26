@@ -17,7 +17,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 /// Every pop-up button the pages hold. Each has its own place in the focus order.
-const IDS: [&str; 18] = [
+const IDS: [&str; 19] = [
     "summon",
     "language",
     "line-width",
@@ -31,6 +31,7 @@ const IDS: [&str; 18] = [
     "daily-template",
     "font",
     "line-height",
+    "paragraph-spacing",
     "tab-key",
     "new-note-name",
     "bullet-marker",

@@ -1674,14 +1674,20 @@ impl WorkspaceView {
     pub(crate) fn active_document(&self, cx: &App) -> markraft_core::Node {
         self.editor().read(cx).committed_document().clone()
     }
-    /// The note editors' style: the theme's, in the typeface, size and line height the
-    /// preferences ask for.
+    /// The note editors' style: the theme's, in the typeface, size, line height and
+    /// paragraph spacing the preferences ask for.
     fn editor_style(&self) -> EditorStyle {
         let preferences = &self.preferences;
         let mut style = scaled(notes_style(self.dark), preferences.text_size);
         style.table_toolbar_room = ui::table::TABLE_TOOLBAR_ROOM;
         style.font_family = preferences.font.family().into();
         style.line_height_ratio = preferences.line_height.ratio();
+        style.paragraph_gap =
+            px((f32::from(style.paragraph_gap) * preferences.paragraph_spacing.factor()).round());
+        // The lines of one list never stand further apart than the blocks around it.
+        if style.list_gap > style.paragraph_gap {
+            style.list_gap = style.paragraph_gap;
+        }
         style.max_line_width = preferences
             .line_width
             .ems()

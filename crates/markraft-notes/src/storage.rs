@@ -205,6 +205,9 @@ pub struct Preferences {
     /// The typeface of the note's prose; code keeps its monospaced one.
     pub font: EditorFont,
     pub line_height: LineHeight,
+    /// The space between blocks. Settings files written before it existed
+    /// deserialize to the default, Normal.
+    pub paragraph_spacing: ParagraphSpacing,
     /// The marker a list made from the toolbar or the `/` menu is written with. One
     /// typed at the start of a line keeps the marker typed.
     pub bullet_marker: BulletMarker,
@@ -255,6 +258,7 @@ pub struct EditorPreferences {
     pub auto_number_equations: bool,
     pub font: EditorFont,
     pub line_height: LineHeight,
+    pub paragraph_spacing: ParagraphSpacing,
     pub bullet_marker: BulletMarker,
     pub code_fence: CodeFence,
     pub emphasis_marker: EmphasisMarker,
@@ -296,6 +300,7 @@ impl Preferences {
             auto_number_equations,
             font,
             line_height,
+            paragraph_spacing,
             bullet_marker,
             code_fence,
             emphasis_marker,
@@ -324,6 +329,7 @@ impl Preferences {
             auto_number_equations,
             font,
             line_height,
+            paragraph_spacing,
             bullet_marker,
             code_fence,
             emphasis_marker,
@@ -354,6 +360,7 @@ impl Preferences {
             auto_number_equations,
             font,
             line_height,
+            paragraph_spacing,
             bullet_marker,
             code_fence,
             emphasis_marker,
@@ -386,6 +393,7 @@ impl Preferences {
             auto_number_equations,
             font,
             line_height,
+            paragraph_spacing,
             bullet_marker,
             code_fence,
             emphasis_marker,
@@ -538,6 +546,33 @@ impl LineHeight {
     }
 }
 
+/// How far apart the note's blocks stand: paragraphs, code blocks, tables, quotes,
+/// and a list from what comes before and after it. The space under a heading keeps
+/// its size, and the space above a heading is added to this one. The lines of one
+/// list keep theirs, closed up only so far as never to stand further apart than
+/// the blocks around them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum ParagraphSpacing {
+    Tight,
+    #[default]
+    Normal,
+    Relaxed,
+    Loose,
+}
+
+impl ParagraphSpacing {
+    /// The space between blocks as a multiple of the theme's, at the same text size.
+    pub fn factor(self) -> f32 {
+        match self {
+            ParagraphSpacing::Tight => 0.5,
+            ParagraphSpacing::Normal => 1.,
+            ParagraphSpacing::Relaxed => 1.6,
+            ParagraphSpacing::Loose => 2.2,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum BulletMarker {
@@ -649,6 +684,7 @@ impl Default for Preferences {
             auto_number_equations: false,
             font: EditorFont::default(),
             line_height: LineHeight::default(),
+            paragraph_spacing: ParagraphSpacing::default(),
             bullet_marker: BulletMarker::default(),
             code_fence: CodeFence::default(),
             emphasis_marker: EmphasisMarker::default(),
@@ -695,6 +731,7 @@ pub enum Pref {
     AutoNumberEquations(bool),
     Font(EditorFont),
     LineHeight(LineHeight),
+    ParagraphSpacing(ParagraphSpacing),
     Bullet(BulletMarker),
     Fence(CodeFence),
     Emphasis(EmphasisMarker),
@@ -737,6 +774,7 @@ impl Pref {
             Pref::AutoNumberEquations(on) => preferences.auto_number_equations = on,
             Pref::Font(font) => preferences.font = font,
             Pref::LineHeight(height) => preferences.line_height = height,
+            Pref::ParagraphSpacing(spacing) => preferences.paragraph_spacing = spacing,
             Pref::Bullet(marker) => preferences.bullet_marker = marker,
             Pref::Fence(fence) => preferences.code_fence = fence,
             Pref::Emphasis(marker) => preferences.emphasis_marker = marker,
@@ -1627,6 +1665,7 @@ mod tests {
             auto_number_equations: true,
             font: EditorFont::Serif,
             line_height: LineHeight::Relaxed,
+            paragraph_spacing: ParagraphSpacing::Loose,
             bullet_marker: BulletMarker::Plus,
             code_fence: CodeFence::Tildes,
             emphasis_marker: EmphasisMarker::Underscore,
@@ -1674,6 +1713,32 @@ mod tests {
         // A settings file written before the widest option existed still loads.
         let preferences: Preferences = serde_json::from_str(r#"{"line_height":"Relaxed"}"#).unwrap();
         assert_eq!(preferences.line_height, LineHeight::Relaxed);
+    }
+
+    #[test]
+    fn paragraph_spacings_widen_in_the_order_they_are_listed() {
+        let listed = [
+            ParagraphSpacing::Tight,
+            ParagraphSpacing::Normal,
+            ParagraphSpacing::Relaxed,
+            ParagraphSpacing::Loose,
+        ];
+        assert!(
+            listed
+                .windows(2)
+                .all(|pair| pair[0].factor() < pair[1].factor())
+        );
+        assert_eq!(ParagraphSpacing::default().factor(), 1.);
+        for spacing in listed {
+            let saved = serde_json::to_string(&spacing).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ParagraphSpacing>(&saved).unwrap(),
+                spacing
+            );
+        }
+        // A settings file written before the setting existed keeps the theme's spacing.
+        let preferences: Preferences = serde_json::from_str(r#"{"line_height":"Loose"}"#).unwrap();
+        assert_eq!(preferences.paragraph_spacing, ParagraphSpacing::Normal);
     }
 
     #[test]
@@ -1738,6 +1803,7 @@ mod tests {
             Pref::AutoNumberEquations(changed.auto_number_equations),
             Pref::Font(changed.font),
             Pref::LineHeight(changed.line_height),
+            Pref::ParagraphSpacing(changed.paragraph_spacing),
             Pref::Bullet(changed.bullet_marker),
             Pref::Fence(changed.code_fence),
             Pref::Emphasis(changed.emphasis_marker),

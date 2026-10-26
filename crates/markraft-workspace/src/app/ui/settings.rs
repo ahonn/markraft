@@ -25,8 +25,8 @@ use crate::locale::{I18n, LanguagePreference, available_languages};
 use crate::platform::Shortcut;
 use crate::storage::{
     BulletMarker, CodeFence, EditorFont, EmphasisMarker, HardBreakStyle, ImageNaming, LineHeight,
-    LineWidth, NoteNaming, OrderedDelimiter, Pref, Preferences, SettingsWindowPlacement, Summon,
-    TabKey,
+    LineWidth, NoteNaming, OrderedDelimiter, ParagraphSpacing, Pref, Preferences,
+    SettingsWindowPlacement, Summon, TabKey,
 };
 use controls::{
     ChordFace, Palette, button, checkbox, chord_face, error, group_gap, line, metrics::*, row,
@@ -1308,6 +1308,32 @@ impl SettingsView {
             p,
             cx,
         );
+        let paragraph_spacing = self.select(
+            "paragraph-spacing",
+            s.i18n.text("settings.paragraph-spacing"),
+            &[
+                (
+                    s.i18n.text("settings.paragraph-tight"),
+                    ParagraphSpacing::Tight,
+                ),
+                (
+                    s.i18n.text("settings.paragraph-normal"),
+                    ParagraphSpacing::Normal,
+                ),
+                (
+                    s.i18n.text("settings.paragraph-relaxed"),
+                    ParagraphSpacing::Relaxed,
+                ),
+                (
+                    s.i18n.text("settings.paragraph-loose"),
+                    ParagraphSpacing::Loose,
+                ),
+            ],
+            s.preferences.paragraph_spacing,
+            |value| Change::Pref(Pref::ParagraphSpacing(value)),
+            p,
+            cx,
+        );
         let line_width = self.select(
             "line-width",
             s.i18n.text("settings.line-width"),
@@ -1348,6 +1374,11 @@ impl SettingsView {
             row(
                 Some(s.i18n.text("settings.line-height")),
                 vec![line(vec![line_height])],
+                p,
+            ),
+            row(
+                Some(s.i18n.text("settings.paragraph-spacing")),
+                vec![line(vec![paragraph_spacing])],
                 p,
             ),
             row(

@@ -84,6 +84,7 @@ impl WorkspaceView {
         if before.text_size != now.text_size
             || before.font != now.font
             || before.line_height != now.line_height
+            || before.paragraph_spacing != now.paragraph_spacing
             || before.line_width != now.line_width
         {
             self.restyle_editors(cx);

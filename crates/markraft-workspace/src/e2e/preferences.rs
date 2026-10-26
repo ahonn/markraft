@@ -187,6 +187,7 @@ fn theme_and_typography_restyle_every_open_note(cx: &mut TestAppContext) {
     assert!(h.app.update(h.cx, |app, _| app.test_dark()));
     h.set_preference(Pref::Font(EditorFont::Serif));
     h.set_preference(Pref::LineHeight(LineHeight::Relaxed));
+    h.set_preference(Pref::ParagraphSpacing(ParagraphSpacing::Loose));
     h.set_preference(Pref::TextSize(18.));
     h.set_preference(Pref::LineWidth(LineWidth::Full));
 
@@ -197,7 +198,20 @@ fn theme_and_typography_restyle_every_open_note(cx: &mut TestAppContext) {
             let style = editor.style();
             assert_eq!(style.font_family.as_ref(), EditorFont::Serif.family());
             assert_eq!(style.line_height_ratio, LineHeight::Relaxed.ratio());
+            // The theme's 10 at 14 pt, scaled to 18 pt (13), then by Loose.
+            assert_eq!(style.paragraph_gap, gpui::px(29.));
+            // The theme's list gap, scaled to 18 pt.
+            assert_eq!(style.list_gap, gpui::px(8.));
             assert_eq!(style.max_line_width, None);
+        });
+    }
+    // Tight halves the blocks' 13 to 7, below the list's 8: the list closes up with them.
+    h.set_preference(Pref::ParagraphSpacing(ParagraphSpacing::Tight));
+    for editor in h.app.update(h.cx, |app, _| app.test_editors()) {
+        editor.update(h.cx, |editor, _| {
+            let style = editor.style();
+            assert_eq!(style.paragraph_gap, gpui::px(7.));
+            assert_eq!(style.list_gap, gpui::px(7.));
         });
     }
     h.set_preference(Pref::Theme(Some(false)));

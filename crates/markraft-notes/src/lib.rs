@@ -41,6 +41,6 @@ pub use platform::local_utc_offset;
 // The settings of the standalone application's own window stay in `storage`.
 pub use storage::{
     AttachmentPolicy, BulletMarker, CodeFence, EditorFont, EditorPreferences, EmphasisMarker,
-    HardBreakStyle, ImageNaming, LineHeight, LineWidth, NoteNaming, OrderedDelimiter, TabKey,
-    TextCheckingPreferences, TextCheckingSetting, WorkspaceSettings,
+    HardBreakStyle, ImageNaming, LineHeight, LineWidth, NoteNaming, OrderedDelimiter,
+    ParagraphSpacing, TabKey, TextCheckingPreferences, TextCheckingSetting, WorkspaceSettings,
 };
