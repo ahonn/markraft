@@ -50,6 +50,7 @@ impl Default for TextCheckingPreferences {
 /// One switch of [`TextCheckingPreferences`], as a menu item or a native
 /// panel names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TextCheckingSetting {
     SmartInsertDelete,
     Spelling,
@@ -415,6 +416,7 @@ pub enum Summon {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum LineWidth {
     Narrow,
     #[default]
@@ -436,6 +438,7 @@ impl LineWidth {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum OrderedDelimiter {
     #[default]
     Period,
@@ -452,6 +455,7 @@ impl OrderedDelimiter {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum HardBreakStyle {
     /// `\` at the end of the line, which shows.
     #[default]
@@ -460,7 +464,18 @@ pub enum HardBreakStyle {
     Spaces,
 }
 
+impl HardBreakStyle {
+    /// The break the Markdown writer spells for this style.
+    pub fn markdown(self) -> markraft_commonmark::HardBreak {
+        match self {
+            HardBreakStyle::Backslash => markraft_commonmark::HardBreak::Backslash,
+            HardBreakStyle::Spaces => markraft_commonmark::HardBreak::Spaces,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum TabKey {
     #[default]
     Tab,
@@ -479,6 +494,7 @@ impl TabKey {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum EditorFont {
     #[default]
     System,
@@ -501,6 +517,7 @@ impl EditorFont {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum LineHeight {
     Tight,
     #[default]
@@ -522,6 +539,7 @@ impl LineHeight {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum BulletMarker {
     #[default]
     Dash,
@@ -540,6 +558,7 @@ impl BulletMarker {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum CodeFence {
     #[default]
     Backticks,
@@ -556,6 +575,7 @@ impl CodeFence {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum EmphasisMarker {
     #[default]
     Star,
@@ -1130,10 +1150,22 @@ pub fn timestamp() -> u64 {
 
 /// The default is assets beside the note, created only on insertion.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum AttachmentPolicy {
     #[default]
     Default,
     WorkspaceFolder(PathBuf),
+}
+
+impl AttachmentPolicy {
+    /// The folder, relative to the workspace, that holds every note's images; none
+    /// when each note keeps its own `assets` folder beside it.
+    pub fn folder(&self) -> Option<&Path> {
+        match self {
+            AttachmentPolicy::Default => None,
+            AttachmentPolicy::WorkspaceFolder(relative) => Some(relative),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1151,6 +1183,7 @@ pub struct WorkspaceSettings {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ImageNaming {
     /// `image-<uuid>`: never the same twice, and saying nothing.
     #[default]
@@ -1162,6 +1195,7 @@ pub enum ImageNaming {
 /// How a new note's file is named. Either way the name is given once, when the note
 /// is first written, and never follows later edits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum NoteNaming {
     /// Its first line, as a title.
     #[default]

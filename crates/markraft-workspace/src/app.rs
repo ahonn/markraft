@@ -2853,10 +2853,7 @@ fn apply_markdown_style(
     house.set(markraft_commonmark::HouseStyle {
         emphasis: preferences.emphasis_marker.char(),
         ordered_delimiter: preferences.ordered_delimiter.char(),
-        hard_break: match preferences.hard_break {
-            crate::storage::HardBreakStyle::Backslash => markraft_commonmark::HardBreak::Backslash,
-            crate::storage::HardBreakStyle::Spaces => markraft_commonmark::HardBreak::Spaces,
-        },
+        hard_break: preferences.hard_break.markdown(),
     });
 }
 

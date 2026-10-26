@@ -111,6 +111,7 @@ mod fixtures {
 /// Persist the request rather than its current resolution: a language missing
 /// from this version can become available in a later update without losing it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum LanguagePreference {
     #[default]
     System,

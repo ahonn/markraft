@@ -64,9 +64,9 @@ fn destination(
     policy: &AttachmentPolicy,
 ) -> Result<PathBuf, Message> {
     let parent = document.parent().ok_or(Message::new("asset.save-first"))?;
-    match policy {
-        AttachmentPolicy::Default => subdirectory(parent, Path::new("assets")),
-        AttachmentPolicy::WorkspaceFolder(relative) => subdirectory(root, relative),
+    match policy.folder() {
+        None => subdirectory(parent, Path::new("assets")),
+        Some(relative) => subdirectory(root, relative),
     }
 }
 
@@ -89,9 +89,6 @@ pub(super) struct Inserted {
 /// Where a copied image goes in `folder`, under a name no file there has yet.
 fn image_path(folder: &Path, document: &Path, naming: ImageNaming, extension: &str) -> PathBuf {
     let stem = match naming {
-        ImageNaming::RandomId => {
-            return folder.join(format!("image-{}.{extension}", uuid::Uuid::new_v4()));
-        }
         ImageNaming::NoteAndDate => {
             let note = document
                 .file_stem()
@@ -108,6 +105,8 @@ fn image_path(folder: &Path, document: &Path, naming: ImageNaming, extension: &s
                 format!("{note} {stamp}")
             }
         }
+        // `RandomId`, and any naming added to the enum later until this learns it.
+        _ => return folder.join(format!("image-{}.{extension}", uuid::Uuid::new_v4())),
     };
     // Two images pasted within a second take the same stamp; the later one is numbered.
     (1..)

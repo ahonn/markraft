@@ -228,13 +228,9 @@ impl WorkspaceView {
                 folder_label(root, &workspace.new_note_directory),
                 !workspace.new_note_directory.as_os_str().is_empty(),
             );
-            let images = match &workspace.attachments {
-                crate::storage::AttachmentPolicy::Default => {
-                    (self.i18n.text("settings.assets-beside-note"), false)
-                }
-                crate::storage::AttachmentPolicy::WorkspaceFolder(path) => {
-                    (folder_label(root, path), true)
-                }
+            let images = match workspace.attachments.folder() {
+                None => (self.i18n.text("settings.assets-beside-note"), false),
+                Some(path) => (folder_label(root, path), true),
             };
             (new_notes, images)
         };
