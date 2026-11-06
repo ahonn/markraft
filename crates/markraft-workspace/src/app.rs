@@ -2834,8 +2834,9 @@ const LIVE_META_CHARS: usize = 38;
 /// this the chrome has nowhere to sit, so a window with less room than this keeps the
 /// height and lets the editor scroll instead.
 const MINIMUM_HEIGHT: Pixels = px(220.);
-/// What the preferences ask of the platform: the global shortcuts, and whether the
-/// note floats above other apps. A shortcut that cannot be had does not stop the rest.
+/// What the preferences ask of the platform: the global shortcuts, whether the note
+/// floats above other apps, and whether the menu bar shows the icon. A shortcut that
+/// cannot be had does not stop the rest.
 fn apply_platform_preferences(
     platform: &mut Platform,
     preferences: &crate::storage::Preferences,
@@ -2843,10 +2844,16 @@ fn apply_platform_preferences(
 ) -> Result<(), Message> {
     let on_top = platform.set_always_on_top(window, preferences.always_on_top);
     let spaces = platform.set_all_spaces(window, preferences.all_spaces);
+    let icon = platform.set_menu_bar_icon(preferences.menu_bar_icon);
     let toggle = platform.set_shortcut(Shortcut::Toggle, &preferences.hotkey);
     let new_note = platform.set_shortcut(Shortcut::NewNote, &preferences.new_note_hotkey);
     let daily_note = platform.set_shortcut(Shortcut::DailyNote, &preferences.daily_note_hotkey);
-    on_top.and(spaces).and(toggle).and(new_note).and(daily_note)
+    on_top
+        .and(spaces)
+        .and(icon)
+        .and(toggle)
+        .and(new_note)
+        .and(daily_note)
 }
 
 /// Tell the Markdown writer which markers the preferences ask new syntax to be spelled

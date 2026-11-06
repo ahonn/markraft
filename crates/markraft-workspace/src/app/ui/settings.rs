@@ -1159,6 +1159,26 @@ impl SettingsView {
         vec![
             row(Some(s.i18n.text("settings.startup")), startup, p),
             row(
+                Some(s.i18n.text("settings.menu-bar")),
+                vec![
+                    checkbox(
+                        "menu-bar-icon",
+                        s.i18n.text("settings.menu-bar-icon"),
+                        s.preferences.menu_bar_icon,
+                        false,
+                        p,
+                        self.sender(|value| Change::Pref(Pref::MenuBarIcon(value))),
+                    )
+                    .into_any_element(),
+                    div()
+                        .text_size(px(HELP_SIZE))
+                        .text_color(p.subtitle)
+                        .child(s.i18n.text("settings.menu-bar-icon-help"))
+                        .into_any_element(),
+                ],
+                p,
+            ),
+            row(
                 Some(s.i18n.text("settings.language")),
                 vec![line(vec![language])],
                 p,

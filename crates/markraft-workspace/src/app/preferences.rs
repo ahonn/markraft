@@ -101,6 +101,12 @@ impl WorkspaceView {
         {
             self.feedback.set_platform_error(Some(error));
         }
+        if before.menu_bar_icon != now.menu_bar_icon
+            && let Some(platform) = &self.platform
+            && let Err(error) = platform.set_menu_bar_icon(now.menu_bar_icon)
+        {
+            self.feedback.set_platform_error(Some(error));
+        }
         if before.tab_key != now.tab_key {
             for editor in self.editors() {
                 editor.update(cx, |editor, cx| {

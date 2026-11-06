@@ -136,6 +136,7 @@ pub trait PlatformServices {
     fn app_is_active(&self) -> bool;
     fn set_always_on_top(&self, window: &gpui::Window, on: bool) -> Result<(), Message>;
     fn set_all_spaces(&self, window: &gpui::Window, on: bool) -> Result<(), Message>;
+    fn set_menu_bar_icon(&self, visible: bool) -> Result<(), Message>;
     fn launch_at_login_enabled(&self) -> bool;
     fn set_launch_at_login(&mut self, enabled: bool) -> Result<(), Message>;
     fn pointer_inside(&self, window: &gpui::Window) -> bool;

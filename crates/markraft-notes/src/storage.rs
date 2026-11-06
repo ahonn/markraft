@@ -229,6 +229,10 @@ pub struct Preferences {
     pub all_spaces: bool,
     /// The note comes up on the display the pointer is on.
     pub follow_pointer: bool,
+    /// Whether the application shows its icon in the menu bar. Hidden, opening the
+    /// application again shows the note. Settings files written before it existed
+    /// deserialize to the default, shown.
+    pub menu_bar_icon: bool,
     /// The delimiter a numbered list made from the toolbar or the `/` menu takes.
     pub ordered_delimiter: OrderedDelimiter,
     /// How a line break inside a paragraph is written.
@@ -311,6 +315,7 @@ impl Preferences {
             confirm_delete,
             all_spaces: _,
             follow_pointer: _,
+            menu_bar_icon: _,
             ordered_delimiter,
             hard_break,
         } = self.clone();
@@ -404,6 +409,7 @@ impl Preferences {
             confirm_delete,
             all_spaces: false,
             follow_pointer: false,
+            menu_bar_icon: true,
             ordered_delimiter,
             hard_break,
         }
@@ -695,6 +701,7 @@ impl Default for Preferences {
             confirm_delete: true,
             all_spaces: false,
             follow_pointer: false,
+            menu_bar_icon: true,
             ordered_delimiter: OrderedDelimiter::default(),
             hard_break: HardBreakStyle::default(),
         }
@@ -741,6 +748,7 @@ pub enum Pref {
     ConfirmDelete(bool),
     AllSpaces(bool),
     FollowPointer(bool),
+    MenuBarIcon(bool),
     OrderedDelimiter(OrderedDelimiter),
     HardBreak(HardBreakStyle),
     /// The settings page on screen, remembered for the next time the window opens.
@@ -784,6 +792,7 @@ impl Pref {
             Pref::ConfirmDelete(on) => preferences.confirm_delete = on,
             Pref::AllSpaces(on) => preferences.all_spaces = on,
             Pref::FollowPointer(on) => preferences.follow_pointer = on,
+            Pref::MenuBarIcon(on) => preferences.menu_bar_icon = on,
             Pref::OrderedDelimiter(delimiter) => preferences.ordered_delimiter = delimiter,
             Pref::HardBreak(style) => preferences.hard_break = style,
             Pref::SettingsPage(page) => preferences.settings_page = page,
@@ -1676,6 +1685,7 @@ mod tests {
             confirm_delete: false,
             all_spaces: true,
             follow_pointer: true,
+            menu_bar_icon: false,
             ordered_delimiter: OrderedDelimiter::Parenthesis,
             hard_break: HardBreakStyle::Spaces,
         };
@@ -1690,6 +1700,7 @@ mod tests {
         assert!(!preferences.auto_number_equations);
         assert!(preferences.settings_window.is_none());
         assert!(preferences.show_word_count);
+        assert!(preferences.menu_bar_icon);
         assert_eq!(preferences.language, LanguagePreference::System);
     }
 
@@ -1813,6 +1824,7 @@ mod tests {
             Pref::ConfirmDelete(changed.confirm_delete),
             Pref::AllSpaces(changed.all_spaces),
             Pref::FollowPointer(changed.follow_pointer),
+            Pref::MenuBarIcon(changed.menu_bar_icon),
             Pref::OrderedDelimiter(changed.ordered_delimiter),
             Pref::HardBreak(changed.hard_break),
             Pref::SettingsPage(changed.settings_page.clone()),

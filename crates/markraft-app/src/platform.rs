@@ -49,7 +49,7 @@ unsafe impl Encode for NSRect {
 
 pub use markraft_workspace::standalone::platform::{PlatformEvent, Shortcut};
 pub struct Platform {
-    _tray: TrayIcon,
+    tray: TrayIcon,
     hotkeys: GlobalHotKeyManager,
     /// The registered chord of each [`Shortcut`], by its index.
     shortcuts: [Option<HotKey>; 3],
@@ -105,7 +105,7 @@ impl Platform {
             .map_err(menu_bar_failure)?;
         show_menu_bar_image(&tray)?;
         let mut platform = Self {
-            _tray: tray,
+            tray,
             hotkeys,
             shortcuts: [None; 3],
             suspended: false,
@@ -253,6 +253,17 @@ impl Platform {
             };
             let _: () = msg_send![native, setCollectionBehavior: behavior];
         }
+        Ok(())
+    }
+
+    /// Show or hide the icon in the menu bar. A hidden status item keeps its image
+    /// and menu, so showing it again rebuilds nothing.
+    pub fn set_menu_bar_icon(&self, visible: bool) -> Result<(), Message> {
+        let item = self
+            .tray
+            .ns_status_item()
+            .ok_or_else(|| menu_bar_failure("the status item is missing"))?;
+        item.setVisible(visible);
         Ok(())
     }
 
@@ -679,6 +690,9 @@ impl markraft_workspace::standalone::platform::PlatformServices for Platform {
     }
     fn set_all_spaces(&self, window: &gpui::Window, value: bool) -> Result<(), Message> {
         Platform::set_all_spaces(self, window, value)
+    }
+    fn set_menu_bar_icon(&self, visible: bool) -> Result<(), Message> {
+        Platform::set_menu_bar_icon(self, visible)
     }
     fn launch_at_login_enabled(&self) -> bool {
         Platform::launch_at_login_enabled(self)
