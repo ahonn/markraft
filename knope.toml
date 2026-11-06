@@ -8,6 +8,10 @@
 #     What changed, written for people who use Markraft.
 #
 # Below 1.0, `major` bumps the minor version and `minor` bumps the patch.
+# The changelog is release notes for people who use Markraft, so it has no
+# entry for a change that only the embeddable crates see. A release that breaks
+# their public interface marks one of its own entries `major` instead, which
+# scripts/check-public-api.sh requires. Such an entry is listed with Features.
 # The Release PR workflow runs `prepare-release`; merging that PR tags and
 # ships the release.
 
@@ -36,6 +40,10 @@ versioned_files = [
     { path = "examples/integration/Cargo.lock", dependency = "markraft-workspace" },
 ]
 changelog = "CHANGELOG.md"
+extra_changelog_sections = [
+    { name = "Features", types = ["major", "minor"] },
+    { name = "Fixes", types = ["patch"] },
+]
 
 [changes]
 ignore_conventional_commits = true
