@@ -1,3 +1,19 @@
+## 0.2.0 (2026-11-06)
+
+### Features
+
+- Add a setting to hide the menu bar icon. Open Markraft from Finder or Spotlight to show the note.
+- Add a Loose line height, wider than Relaxed.
+- Add a Paragraph spacing setting beside Line height.
+
+### Fixes
+
+- Keep the text cursor blinking while the note is idle, and center it between two letters.
+- Explain under the emoji setting what it changes in the file.
+- Rename the “Format Markdown as you type” setting to say that it converts Markdown at the start of a line.
+- Draw the menu bar icon taller, closer to the size of the icons beside it.
+- Draw the bar of a quote in gray, so it does not look like the text cursor.
+
 ## 0.1.10 (2026-10-10)
 
 ### Features
