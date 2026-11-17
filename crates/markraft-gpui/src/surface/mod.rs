@@ -559,7 +559,10 @@ impl Element for EditorSurface {
         let style = editor.style().clone();
         let scroll = editor.frame.tables().clone();
         let placeholder = (projection.line_count() == 1 && projection.plain_text().is_empty())
-            .then(|| editor.placeholder.clone());
+            .then(|| {
+                let heading = editor.types.heading_level(&projection.lines()[0]);
+                (editor.placeholder.clone(), heading)
+            });
         let shown = editor.player.shown();
         let rehover = editor.rehover.take();
         for frame in editor.player.take_retired() {
@@ -843,12 +846,17 @@ impl Element for EditorSurface {
                 }
                 if row.index == 0
                     && !inert
-                    && let Some(text) = placeholder.as_ref().filter(|text| !text.is_empty())
+                    && let Some((text, heading)) = placeholder
+                        .as_ref()
+                        .filter(|(text, _)| !text.is_empty())
                 {
                     // Presentation only: the empty block still owns hit testing and IME coordinates.
+                    // Match the block the placeholder sits in — a heading's size and weight —
+                    // so the hint tracks the caret rather than staying body-sized.
+                    let (font_size, face) = placeholder_face(*heading, &style);
                     let run = TextRun {
                         len: text.len(),
-                        font: font(style.font_family.clone()),
+                        font: face,
                         color: style.muted_text,
                         background_color: None,
                         underline: None,
@@ -856,7 +864,7 @@ impl Element for EditorSurface {
                     };
                     if let Ok(lines) = window.text_system().shape_text(
                         text.clone(),
-                        style.body_size,
+                        font_size,
                         &[run],
                         Some(row.width),
                         Some(1),
@@ -972,6 +980,15 @@ impl Element for EditorSurface {
                 .update(cx, |editor, cx| editor.hover_picture(None, cx));
         }
     }
+}
+
+/// Face and size for the empty-document placeholder, matching the block it sits in.
+pub(super) fn placeholder_face(heading: Option<u8>, style: &EditorStyle) -> (Pixels, Font) {
+    let mut face = font(style.font_family.clone());
+    if heading.is_some() {
+        face.weight = FontWeight::BOLD;
+    }
+    (style.font_size(heading, false), face)
 }
 
 /// Move each row by how far its sideways scroll has taken it: the single-line

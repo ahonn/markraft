@@ -4,8 +4,8 @@ use super::{
     ShapeInput, TABLE_LINE, TableCell, TableScroll, UI_FONT, Widening, atom_label,
     caret_cell_frame, cell_under, chrome_marker, column_demands, column_widths, decoration_of,
     display_text, drawn_image, gap_below, max_indent, merge_row_centers, picture_source,
-    place_table, quote_bar_color, quote_bars, reveal_offset, shape, table_overflows, text_runs,
-    unbreakable_units, visible_strips,
+    place_table, placeholder_face, quote_bar_color, quote_bars, reveal_offset, shape,
+    table_overflows, text_runs, unbreakable_units, visible_strips,
 };
 use super::{OBJECT, char_to_byte};
 use crate::style::EditorStyle;
@@ -298,6 +298,46 @@ fn a_heading_keeps_its_own_gap_above_any_block() {
         let gaps = gaps_of(&format!("# Head\n\n{following}"), &style);
         assert_eq!(gaps[0], style.heading_bottom_gap, "above {following:?}");
     }
+}
+
+/// The empty-note placeholder tracks the block it sits in: body size when the
+/// line is a paragraph, and each heading's size and weight after `# ` turns the
+/// empty line into one.
+#[test]
+fn an_empty_placeholder_matches_the_block_it_sits_in() {
+    let style = EditorStyle::notes();
+    let (body_size, body_face) = placeholder_face(None, &style);
+    assert_eq!(body_size, style.body_size);
+    assert_eq!(body_face.weight, gpui::FontWeight::NORMAL);
+
+    for level in 1u8..=6 {
+        let (size, face) = placeholder_face(Some(level), &style);
+        assert_eq!(
+            size,
+            style.heading_sizes[usize::from(level) - 1],
+            "H{level} placeholder size"
+        );
+        assert_eq!(
+            face.weight,
+            gpui::FontWeight::BOLD,
+            "H{level} placeholder weight"
+        );
+    }
+
+    // An empty heading line is still a heading: the placeholder paint reads
+    // that level off the shaped row's source.
+    let lines = shaped("# ");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].char_len, 0, "the heading holds no visible text");
+    assert_eq!(
+        callout_types().heading_level(&lines[0].source),
+        Some(1)
+    );
+    assert_eq!(
+        lines[0].line_height,
+        style.heading_sizes[0] * style.line_height_ratio,
+        "the caret already matches H1; the placeholder must too"
+    );
 }
 
 /// The code fill is drawn past the last row, and the line's height holds it,
