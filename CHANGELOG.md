@@ -1,3 +1,9 @@
+## 0.2.1 (2026-11-17)
+
+### Fixes
+
+- Match the empty-note placeholder to a heading's size after typing `# `.
+
 ## 0.2.0 (2026-11-06)
 
 ### Features
