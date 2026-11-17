@@ -329,10 +329,7 @@ fn an_empty_placeholder_matches_the_block_it_sits_in() {
     let lines = shaped("# ");
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0].char_len, 0, "the heading holds no visible text");
-    assert_eq!(
-        callout_types().heading_level(&lines[0].source),
-        Some(1)
-    );
+    assert_eq!(callout_types().heading_level(&lines[0].source), Some(1));
     assert_eq!(
         lines[0].line_height,
         style.heading_sizes[0] * style.line_height_ratio,

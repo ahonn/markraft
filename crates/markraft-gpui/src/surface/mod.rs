@@ -846,9 +846,8 @@ impl Element for EditorSurface {
                 }
                 if row.index == 0
                     && !inert
-                    && let Some((text, heading)) = placeholder
-                        .as_ref()
-                        .filter(|(text, _)| !text.is_empty())
+                    && let Some((text, heading)) =
+                        placeholder.as_ref().filter(|(text, _)| !text.is_empty())
                 {
                     // Presentation only: the empty block still owns hit testing and IME coordinates.
                     // Match the block the placeholder sits in — a heading's size and weight —
