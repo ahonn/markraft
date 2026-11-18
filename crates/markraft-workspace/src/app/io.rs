@@ -213,6 +213,17 @@ impl WorkspaceView {
         }
     }
 
+    /// Hold the storage worker until the returned value is dropped.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn test_hold_storage(&self) -> std::sync::mpsc::Sender<()> {
+        self.notes
+            .persistence
+            .as_ref()
+            .expect("a notes folder")
+            .hold()
+    }
+
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn test_io_pending(&self) -> bool {

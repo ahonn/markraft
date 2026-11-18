@@ -242,6 +242,9 @@ fn consecutive_deletions_are_both_saved_before_the_first_flush_returns(cx: &mut 
         |preferences| preferences.confirm_delete = false,
     );
     h.save();
+    // Hold the worker so that the first deletion's save is still in flight when
+    // the second deletion starts, however fast the disk is.
+    let hold = h.app.update(h.cx, |app, _| app.test_hold_storage());
     let first = h.active_note().id;
     h.keys("cmd-k");
     h.type_text("Move to Trash");
@@ -259,6 +262,7 @@ fn consecutive_deletions_are_both_saved_before_the_first_flush_returns(cx: &mut 
             .update(h.cx, |app, _| app.test_note(&second))
             .is_none()
     );
+    drop(hold);
     h.wait_for_io();
 
     assert_eq!(h.error(), None);

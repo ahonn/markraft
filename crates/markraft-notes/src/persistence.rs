@@ -101,6 +101,9 @@ enum Request {
     AcknowledgeChanges(Vec<External>),
     #[cfg(any(test, feature = "test-support"))]
     Acknowledge(Vec<String>),
+    /// Stop the worker until the sender of this channel is dropped.
+    #[cfg(any(test, feature = "test-support"))]
+    Hold(Receiver<()>),
 }
 /// A note to make at a path in the notes folder, starting from a template when
 /// there is one: `fill` turns the template's text — `None` when there is none, or it
@@ -326,6 +329,10 @@ impl Persistence {
                     Request::AcknowledgeChanges(changes) => store.acknowledge_changes(&changes),
                     #[cfg(any(test, feature = "test-support"))]
                     Request::Acknowledge(ids) => store.acknowledge(&ids),
+                    #[cfg(any(test, feature = "test-support"))]
+                    Request::Hold(release) => {
+                        let _ = release.recv();
+                    }
                 }
                 // A request that answers no one still moves baselines.
                 sync_versions(&store, &persisted_worker);
@@ -613,6 +620,16 @@ impl Persistence {
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn acknowledge(&self, ids: Vec<String>) {
         let _ = self.requests.send(Request::Acknowledge(ids));
+    }
+    /// Keep the worker from taking later requests until the returned value is
+    /// dropped, so a test can act while a request is certainly still in flight.
+    #[cfg(any(test, feature = "test-support"))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[must_use]
+    pub fn hold(&self) -> Sender<()> {
+        let (release, held) = mpsc::channel();
+        let _ = self.requests.send(Request::Hold(held));
+        release
     }
     /// Reload after all earlier save requests finish. The caller must confirm discarding
     /// local changes and invalidate their revision acknowledgments before adopting the result.
