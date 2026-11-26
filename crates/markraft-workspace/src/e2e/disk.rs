@@ -283,19 +283,38 @@ fn a_new_note_saves_what_it_holds_on_its_first_save(cx: &mut TestAppContext) {
     h.assert_round_trip("text after it");
 }
 
-// A line break at the end of a line in a note already on disk.
+// A line break at the end of a line in a note already on disk, in either
+// spelling, whether the line was there or was just typed. A rejected break
+// would leave a note that still round-trips, so the text is checked too.
 #[gpui::test]
 fn a_line_break_at_the_end_of_a_saved_line(cx: &mut TestAppContext) {
-    for spaces in [false, true] {
-        let mut h = open_with(cx, &[("a.md", "a\n")], |p| {
-            if spaces {
-                p.hard_break = crate::storage::HardBreakStyle::Spaces;
-            }
-        });
-        h.keys("cmd-down cmd-right shift-enter");
-        h.assert_round_trip("shift-return at the end");
-        h.type_text("b");
-        h.assert_round_trip("typing after the break");
+    for (spaces, marker) in [(false, "\\"), (true, "  ")] {
+        for typed in ["", "cd"] {
+            let mut h = open_with(cx, &[("a.md", "a\n")], |p| {
+                if spaces {
+                    p.hard_break = crate::storage::HardBreakStyle::Spaces;
+                }
+            });
+            h.keys("cmd-down cmd-right");
+            h.type_text(typed);
+            h.keys("shift-enter");
+            assert_eq!(
+                h.markdown(),
+                format!("a{typed}{marker}"),
+                "the break is taken"
+            );
+            // Two spaces with nothing after them yet read back as nothing,
+            // as spaces at a block's end do, so this save only has to take.
+            h.save();
+            assert_eq!(h.error(), None, "saving the break");
+            h.type_text("b");
+            assert_eq!(
+                h.markdown(),
+                format!("a{typed}{marker}\nb"),
+                "typing after it"
+            );
+            h.assert_round_trip("typing after the break");
+        }
     }
 }
 
