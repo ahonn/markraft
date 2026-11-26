@@ -1,3 +1,9 @@
+## 0.2.2 (2026-11-26)
+
+### Fixes
+
+- Shift-Return keeps the new line inside the paragraph, including with two-space line breaks.
+
 ## 0.2.1 (2026-11-17)
 
 ### Fixes
