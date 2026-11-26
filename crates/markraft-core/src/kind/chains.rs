@@ -216,12 +216,30 @@ pub fn enter_with(types: &DocTypes, kind: &dyn DocumentKind) -> Command {
 /// soft break a reader sees as a space. The kind is asked each time the
 /// command is built, which a view does per key press, so a host preference
 /// takes effect at once. A GFM table row is one line, so a cell takes none.
+///
+/// A line of nothing but spaces is a blank line, which ends the paragraph, so
+/// a break that would end a line holding nothing else is spelled with `\`
+/// whatever the kind answers. And at the end of a line a break already ends
+/// — the caret before that break, past nothing but its spaces — the new
+/// break opens an empty line after the line rather than coming between the
+/// line and its own break, which would leave that break on a blank line.
 pub fn line_break(types: &DocTypes, kind: &dyn DocumentKind) -> Command {
     let hard_break = types.hard_break.map(|node| {
         let types = types.clone();
         let insert = if types.syntax.is_some() {
             let marker = kind.break_spelling().unwrap_or("\\");
             command(move |state| {
+                let range = state.selection().replacement_range(state.doc());
+                let line = break_line(state, range.from, range.to, node);
+                if let Some(at) = line.as_ref().and_then(|line| line.next_break)
+                    && state.selection().is_cursor()
+                {
+                    return empty_line_before_break(node, at)(state);
+                }
+                let marker = match line {
+                    Some(line) if marker.trim().is_empty() && line.before.trim().is_empty() => "\\",
+                    _ => marker,
+                };
                 composed(vec![
                     crate::commands::insert_text(marker),
                     insert_hard_break(node),
@@ -237,6 +255,91 @@ pub fn line_break(types: &DocTypes, kind: &dyn DocumentKind) -> Command {
         cell_break(types),
         hard_break,
     ])
+}
+
+/// The line of a textblock a break typed over `from..to` would end.
+struct BreakLine {
+    /// The line's text before `from`, from the break before it or the start
+    /// of the block. Anything but text counts as a character.
+    before: String,
+    /// Where the break that already ends the line stands, when only
+    /// whitespace lies between `to` and it.
+    next_break: Option<usize>,
+}
+
+/// [`BreakLine`] for `from..to`, or `None` when they are not in one textblock.
+fn break_line(
+    state: &EditorState,
+    from: usize,
+    to: usize,
+    hard_break: NodeTypeId,
+) -> Option<BreakLine> {
+    let doc = state.doc();
+    let resolved = doc.resolve(from).ok()?;
+    let block = resolved.parent();
+    if !block.is_textblock(state.schema()) {
+        return None;
+    }
+    let start = resolved.start(resolved.depth());
+    if to > start + block.content_size() {
+        return None;
+    }
+    let mut before = String::new();
+    let mut blank_after = true;
+    let mut next_break = None;
+    let mut at = start;
+    for child in block.children() {
+        let end = at + child.node_size();
+        if child.type_id() == hard_break {
+            if end <= from {
+                before.clear();
+            } else if at >= to {
+                next_break = blank_after.then_some(at);
+                break;
+            }
+        } else if let Some(text) = child.text() {
+            let head = from.clamp(at, end) - at;
+            before.extend(text.chars().take(head));
+            let tail = to.clamp(at, end) - at;
+            blank_after &= text.chars().skip(tail).all(char::is_whitespace);
+        } else if end <= from {
+            before.push('\u{FFFC}');
+        } else if at >= to {
+            blank_after = false;
+        }
+        at = end;
+    }
+    Some(BreakLine { before, next_break })
+}
+
+/// A new, empty line right after the line the break at `at` ends, its own
+/// break spelled with `\`, and the caret on it.
+fn empty_line_before_break(node: NodeTypeId, at: usize) -> Command {
+    command(move |state| {
+        let schema = state.schema();
+        let resolved = state.doc().resolve(at).ok()?;
+        let block = schema.node_type(resolved.parent().type_id());
+        let marks = resolved
+            .marks(schema)
+            .filter(|mark| block.allows_mark_in_content(mark.ty));
+        let node_type = schema.node_type(node);
+        let line_break = schema
+            .create(
+                node,
+                node_type.default_attrs().clone(),
+                marks.clone(),
+                crate::Fragment::empty(),
+            )
+            .ok()?;
+        let marker = schema.text_marked("\\", marks);
+        let slice = Slice::from_fragment(crate::Fragment::from_nodes(vec![line_break, marker]));
+        let spec = changes_spec(
+            state,
+            vec![Change::replace(at, at, slice)],
+            event::INPUT_TYPE,
+        )?;
+        Some(spec.selection(Selection::cursor(at + 1)))
+    })
 }
 
 /// Shift-Return in a table cell: a GFM row is one line, so the cell's line

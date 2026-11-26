@@ -318,6 +318,46 @@ fn a_line_break_at_the_end_of_a_saved_line(cx: &mut TestAppContext) {
     }
 }
 
+// Shift-Return where the break would end a line holding nothing else — at
+// the start of a block, twice in a row — or at the end of a line a break
+// already ends, in a note on disk, in either spelling. Each is taken, keeps
+// the paragraph one paragraph, and writes back as the editor has it.
+#[gpui::test]
+fn a_line_break_on_an_empty_line_of_a_saved_note(cx: &mut TestAppContext) {
+    let cases: &[(&str, usize, &str, [&str; 2])] = &[
+        ("ab\n", 1, "shift-enter", ["\\\ncab", "\\\ncab"]),
+        (
+            "abcd\n",
+            3,
+            "shift-enter shift-enter",
+            ["ab\\\n\\\nccd", "ab  \n\\\nccd"],
+        ),
+        (
+            "ab\n",
+            3,
+            "shift-enter shift-enter",
+            ["ab\\\n\\\nc", "ab  \n\\\nc"],
+        ),
+        ("a\\\nb\n", 3, "shift-enter", ["a\\\nc\\\nb", "a\\\nc\\\nb"]),
+        ("a  \nb\n", 4, "shift-enter", ["a  \nc\\\nb", "a  \nc\\\nb"]),
+        ("a  \nb\n", 2, "shift-enter", ["a  \nc\\\nb", "a  \nc\\\nb"]),
+    ];
+    for &(file, at, keys, expected) in cases {
+        for (spaces, expected) in [false, true].into_iter().zip(expected) {
+            let mut h = open_with(cx, &[("a.md", file)], |p| {
+                if spaces {
+                    p.hard_break = crate::storage::HardBreakStyle::Spaces;
+                }
+            });
+            h.select(at, at);
+            h.keys(keys);
+            h.type_text("c");
+            assert_eq!(h.markdown(), expected, "{file:?} at {at}, spaces: {spaces}");
+            h.assert_round_trip("typing on the new line");
+        }
+    }
+}
+
 // Bold asked for on an empty line of a saved note, then typed into.
 #[gpui::test]
 fn bold_on_an_empty_line_of_a_saved_note(cx: &mut TestAppContext) {
