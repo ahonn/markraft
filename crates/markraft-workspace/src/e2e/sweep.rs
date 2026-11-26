@@ -21,6 +21,7 @@ const CORPUS: &[&str] = &[
     "$$\nx^2\n$$\n\ninline $y$ math\n",
     "<div>html</div>\n\nafter\n",
     "line one\\\nline two\n",
+    "line one  \nline two\n",
     "a [link](https://e.com) and [[wiki]]\n",
 ];
 
@@ -77,6 +78,20 @@ const CLIPBOARD: &str = "**p** one\n\n- item\n\n```\ncode\n```";
 /// judge, not failed.
 #[gpui::test]
 fn every_edit_in_the_corpus_leaves_a_note_a_file_can_hold(cx: &mut TestAppContext) {
+    sweep(cx, |_| {});
+}
+
+/// [`every_edit_in_the_corpus_leaves_a_note_a_file_can_hold`] with breaks
+/// written as two spaces, which a reader drops at a line's end and reads as a
+/// blank line on a line of their own.
+#[gpui::test]
+fn every_edit_with_breaks_spelled_as_spaces(cx: &mut TestAppContext) {
+    sweep(cx, |p| {
+        p.hard_break = crate::storage::HardBreakStyle::Spaces
+    });
+}
+
+fn sweep(cx: &mut TestAppContext, configure: fn(&mut crate::storage::Preferences)) {
     let mut failures = Vec::new();
     let mut refused = Vec::new();
     let mut applied = 0;
@@ -84,9 +99,9 @@ fn every_edit_in_the_corpus_leaves_a_note_a_file_can_hold(cx: &mut TestAppContex
         for on_disk in [true, false] {
             let name = format!("c{index}.md");
             let mut h = if on_disk {
-                open_with(cx, &[(name.as_str(), document)], |_| {})
+                open_with(cx, &[(name.as_str(), document)], configure)
             } else {
-                let h = open(cx, |_| {});
+                let h = open(cx, configure);
                 let app = h.app.clone();
                 h.cx.update(|window, cx| {
                     app.update(cx, |app, cx| app.test_new_note(document, window, cx))

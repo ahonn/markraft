@@ -1249,6 +1249,67 @@ fn shift_return_spells_the_break_as_the_kind_says() {
     assert_eq!(to_markdown(left.schema(), left.doc()), "a\n\nz");
 }
 
+/// Shift-Return at the end of a line that a break already ends opens an
+/// empty line after it, spelled with `\` — a line of nothing but spaces is a
+/// blank line, which would end the paragraph — rather than putting the new
+/// break between the line and its own break.
+#[test]
+fn shift_return_before_a_break_opens_an_empty_line_after_it() {
+    struct Spaces;
+    impl DocumentKind for Spaces {
+        fn break_spelling(&self) -> Option<&'static str> {
+            Some("  ")
+        }
+    }
+    let typed = markraft_core::commands::insert_text("c");
+    for (source, offsets) in [("a\\\nb", &[2][..]), ("a  \nb", &[1, 2, 3][..])] {
+        let state = state_of(source);
+        let types = types_of(&state);
+        let start = caret_in(&state, source);
+        for kind in [&PlainKind as &dyn DocumentKind, &Spaces] {
+            for &offset in offsets {
+                let broken = applied(&at(&state, start + offset), &line_break(&types, kind))
+                    .expect("Shift-Return applies");
+                let line = source.split('\n').next().expect("a first line");
+                assert_eq!(
+                    after(&broken, &typed),
+                    Some(format!("{line}\nc\\\nb")),
+                    "{source:?} at {offset}"
+                );
+            }
+        }
+    }
+}
+
+/// With breaks spelled as two spaces, a break that would end a line holding
+/// nothing else — at the start of a block, or right after another break — is
+/// spelled with `\`, since a line of nothing but spaces is a blank line.
+#[test]
+fn shift_return_spells_an_empty_line_with_a_backslash() {
+    struct Spaces;
+    impl DocumentKind for Spaces {
+        fn break_spelling(&self) -> Option<&'static str> {
+            Some("  ")
+        }
+    }
+    let typed = markraft_core::commands::insert_text("c");
+    let state = state_of("ab");
+    let types = types_of(&state);
+    let command = line_break(&types, &Spaces);
+    let start = caret_in(&state, "ab");
+    let first = applied(&at(&state, start), &command).expect("Shift-Return applies");
+    assert_eq!(after(&first, &typed).as_deref(), Some("\\\ncab"));
+    for (offset, expected) in [(2, "ab  \n\\\nc"), (1, "a  \n\\\ncb")] {
+        let once = applied(&at(&state, start + offset), &command).expect("Shift-Return applies");
+        let twice = applied(&once, &command).expect("Shift-Return applies again");
+        assert_eq!(
+            after(&twice, &typed).as_deref(),
+            Some(expected),
+            "at {offset}"
+        );
+    }
+}
+
 /// Letting the caret into a picture's source is not an edit of its own:
 /// one undo takes back what was typed before it, and gives the picture
 /// back as the atom it was.
