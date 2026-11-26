@@ -2427,10 +2427,18 @@ fn block_lines<'a>(
 /// them once it leaves, so a save in between writes them and reads back
 /// without them. Nothing styled can end in one: a style's span ends with its
 /// closing delimiter.
+///
+/// A line break that ends a paragraph goes with them: Shift-Return at the end
+/// of one, with the break spelled as two spaces, leaves the spaces and the
+/// break with nothing after them yet, and a reader drops both. A heading's is
+/// not let go: the writer spells a heading with a break as a setext one,
+/// which does not read back as the ATX heading the file holds.
 fn without_trailing_spaces(schema: &Schema, node: &Node) -> Node {
     if node.is_text() || node.child_count() == 0 {
         return node.clone();
     }
+    let paragraph = schema.node_id(crate::schema::PARAGRAPH) == Some(node.type_id());
+    let line_break = schema.node_id(crate::schema::LINE_BREAK);
     let mut children: Vec<_> = node
         .children()
         .map(|child| without_trailing_spaces(schema, child))
@@ -2444,6 +2452,10 @@ fn without_trailing_spaces(schema: &Schema, node: &Node) -> Node {
     .any(|name| schema.node_id(name) == Some(node.type_id()))
     {
         while let Some(last) = children.last() {
+            if paragraph && Some(last.type_id()) == line_break {
+                children.pop();
+                continue;
+            }
             let Some(text) = last.text() else { break };
             let trimmed = text.trim_end_matches([' ', '\t']);
             if trimmed.len() == text.len() {
